@@ -1,4 +1,7 @@
-use crate::tool_output;
+use crate::{
+    pointer_input::{Press, pointer_input},
+    tool_output,
+};
 use iced::futures::SinkExt;
 use iced::{
     Color, Element, Fill, Subscription, Task, Theme, keyboard, mouse,
@@ -80,8 +83,6 @@ pub struct App {
     login_url: Option<String>,
     tick: u64,
     window_width: f32,
-    cursor_x: f32,
-    cursor_y: f32,
     window_height: f32,
     drag: Option<(bool, f32, f32)>,
     auto_scroll: bool,
@@ -116,7 +117,8 @@ pub enum Message {
     GitTick,
     SaveDraft,
     AgeTick,
-    SessionMenu(String),
+    Press(Press),
+    SessionMenu(String, iced::Point),
     CloseMenu,
     ToolOutput(String, tool_output::Event),
     CopyOutput(String),
@@ -166,7 +168,7 @@ pub enum Message {
     Git(String, String, Duration),
     External(Result<(), String>),
     ErrorDismiss,
-    ResizeStart(bool),
+    ResizeStart(bool, iced::Point),
     Event(iced::Event),
     WindowOpened(window::Id),
     Screenshot(window::Screenshot),
@@ -247,8 +249,6 @@ impl App {
             login_url: None,
             tick: 0,
             window_width: 1200.,
-            cursor_x: 0.,
-            cursor_y: 0.,
             window_height: 800.,
             drag: None,
             auto_scroll: true,
@@ -613,6 +613,7 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::Press(_) => unreachable!("press requests are resolved by the root widget"),
             Message::Selected(result) => {
                 self.io_busy = false;
                 match result {
@@ -731,8 +732,8 @@ impl App {
                     );
                 }
             }
-            Message::SessionMenu(id) => {
-                self.context_menu = Some((id, iced::Point::new(self.cursor_x, self.cursor_y)));
+            Message::SessionMenu(id, position) => {
+                self.context_menu = Some((id, position));
             }
             Message::CloseMenu => self.context_menu = None,
             Message::ToolOutput(id, event) => {
@@ -1120,10 +1121,10 @@ impl App {
             }
             Message::External(result) => self.fail(result),
             Message::ErrorDismiss => self.error = None,
-            Message::ResizeStart(right) => {
+            Message::ResizeStart(right, position) => {
                 self.drag = Some((
                     right,
-                    self.cursor_x,
+                    position.x,
                     if right {
                         self.catalog.settings.settings_width
                     } else {
@@ -1133,8 +1134,6 @@ impl App {
             }
             Message::Event(event) => match event {
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    self.cursor_x = position.x;
-                    self.cursor_y = position.y;
                     if let Some((right, start, width)) = self.drag {
                         self.view_epoch = self.view_epoch.wrapping_add(1);
                         self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
@@ -1319,17 +1318,7 @@ impl App {
     }
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
-            iced::event::listen_raw(|event, _, _| match event {
-                iced::Event::Mouse(
-                    mouse::Event::CursorMoved { .. }
-                    | mouse::Event::ButtonReleased(mouse::Button::Left),
-                )
-                | iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
-                | iced::Event::Window(window::Event::Resized(_) | window::Event::CloseRequested) => {
-                    Some(Message::Event(event))
-                }
-                _ => None, // In particular, never feed RedrawRequested back into update.
-            }),
+            window_events(),
             window::open_events().map(Message::WindowOpened),
             iced::time::every(Duration::from_secs(60)).map(|_| Message::AgeTick),
         ];
@@ -1358,6 +1347,9 @@ impl App {
         Subscription::batch(subscriptions)
     }
     pub fn view(&self) -> Element<'_, Message> {
+        pointer_input(self.content())
+    }
+    fn content(&self) -> Element<'_, Message> {
         let mut body = row![self.sidebar(), self.divider(false), self.center()].height(Fill);
         if self.settings_open {
             body = body.push(self.divider(true)).push(self.settings_panel());
@@ -1453,10 +1445,11 @@ impl App {
                 ..Default::default()
             }),
         )
-        .on_press(Message::ResizeStart(right))
+        .on_press(Message::Press(Press::Resize(right)))
         .interaction(mouse::Interaction::ResizingHorizontally)
         .into()
     }
+
     fn sidebar(&self) -> Element<'_, Message> {
         let mut list = column![
             row![
@@ -1569,7 +1562,7 @@ impl App {
                             button::text
                         }),
                     )
-                    .on_right_press(Message::SessionMenu(session.id.clone()));
+                    .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
                     content.into()
                 }
             };
@@ -2598,6 +2591,17 @@ fn updates(data: &Updates) -> iced::futures::stream::BoxStream<'static, Message>
     ))
 }
 
+// Filter before producing application messages: even a no-op update rebuilds the UI.
+fn window_events() -> Subscription<Message> {
+    iced::event::listen_with(|event, _, _| match event {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
+        | iced::Event::Window(window::Event::Resized(_) | window::Event::CloseRequested) => {
+            Some(Message::Event(event))
+        }
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2621,6 +2625,75 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn window_subscription_ignores_motion_and_redraws() {
+        use iced::futures::{StreamExt, stream};
+        use iced_runtime::futures::subscription;
+        let events = [
+            iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(125., 77.),
+            }),
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            iced::Event::Window(window::Event::RedrawRequested(std::time::Instant::now())),
+            iced::Event::Window(window::Event::CloseRequested),
+        ];
+        let mut messages = Vec::new();
+        for recipe in subscription::into_recipes(window_events()) {
+            let input =
+                stream::iter(
+                    events
+                        .clone()
+                        .map(|event| subscription::Event::Interaction {
+                            window: window::Id::unique(),
+                            event,
+                            status: iced::event::Status::Ignored,
+                        }),
+                )
+                .boxed();
+            messages.extend(recipe.stream(input).collect::<Vec<_>>().await);
+        }
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::Event(iced::Event::Window(
+                window::Event::CloseRequested
+            ))]
+        ));
+    }
+
+    #[tokio::test]
+    async fn resizing_uses_press_position_and_saves_both_panel_widths() {
+        let mut app = app();
+        app.catalog.settings.sidebar_width = 260.;
+        app.catalog.settings.settings_width = 340.;
+        for (right, start, end) in [(false, 262., 315.), (true, 808., 777.)] {
+            dispatch(
+                &mut app,
+                Message::ResizeStart(right, iced::Point::new(start, 50.)),
+            )
+            .await;
+            dispatch(
+                &mut app,
+                Message::Event(iced::Event::Mouse(mouse::Event::CursorMoved {
+                    position: iced::Point::new(end, 70.),
+                })),
+            )
+            .await;
+            dispatch(
+                &mut app,
+                Message::Event(iced::Event::Mouse(mouse::Event::ButtonReleased(
+                    mouse::Button::Left,
+                ))),
+            )
+            .await;
+            assert!(app.drag.is_none());
+        }
+        assert_eq!(app.catalog.settings.sidebar_width, 313.);
+        assert_eq!(app.catalog.settings.settings_width, 371.);
+        let (saved, _, _) = app.harness.as_ref().unwrap().store.load().unwrap();
+        assert_eq!(saved.settings.sidebar_width, 313.);
+        assert_eq!(saved.settings.settings_width, 371.);
+    }
+
     #[tokio::test]
     async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
         let mut app = app();
@@ -2781,7 +2854,11 @@ mod tests {
         dispatch(&mut app, Message::ToggleEntry("long-tool".into())).await;
         dispatch(&mut app, Message::Select(second.clone())).await;
         assert!(app.outputs.is_empty());
-        dispatch(&mut app, Message::SessionMenu(first.clone())).await;
+        dispatch(
+            &mut app,
+            Message::SessionMenu(first.clone(), iced::Point::new(120., 230.)),
+        )
+        .await;
         dispatch(
             &mut app,
             Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
@@ -2800,10 +2877,18 @@ mod tests {
             h.load(&first).unwrap().snapshot().title,
             "Renamed other session"
         );
-        dispatch(&mut app, Message::SessionMenu(first.clone())).await;
+        dispatch(
+            &mut app,
+            Message::SessionMenu(first.clone(), iced::Point::new(120., 230.)),
+        )
+        .await;
         dispatch(&mut app, Message::CloseMenu).await;
         assert!(app.context_menu.is_none());
-        dispatch(&mut app, Message::SessionMenu(first.clone())).await;
+        dispatch(
+            &mut app,
+            Message::SessionMenu(first.clone(), iced::Point::new(120., 230.)),
+        )
+        .await;
         dispatch(&mut app, Message::Delete(first.clone())).await;
         dispatch(&mut app, Message::Confirm).await;
         assert!(h.get(&first).is_none());

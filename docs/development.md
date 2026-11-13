@@ -178,7 +178,12 @@ The UI uses coalesced core change notifications and per-conversation revisions,
 not a permanent 50 ms session-snapshot timer. Only changed conversations are
 cloned. Activity animation runs while a foreground turn is active; draft saving,
 Git refresh and session age labels have independent low-frequency timers.
-Redraw events are not fed back into the update loop. Large tool details use a
+Redraw events are not fed back into the update loop. Idle pointer motion is not
+published as application messages either: a root widget resolves click positions
+in window coordinates and forwards motion only during an active panel resize.
+This preserves context-menu placement in scrolled sidebars and avoids view/layout
+rebuilds just to remember the cursor. Normal widget hover handling remains intact.
+Large tool details use a
 fixed-row virtual viewport, including long single-line output and Unicode; only
 about 22 rows are passed to text shaping. Collapsing a tool or leaving its session
 releases its detail cache. The complete output remains available through Copy.
