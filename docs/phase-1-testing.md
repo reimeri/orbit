@@ -120,7 +120,8 @@ lose details; the original transcript remains the source of truth.
   a line. Esc dismisses an open menu, dialog or Settings first; with those closed,
   it stops only the selected session's running agent, including while the composer
   is focused. Check that a running agent in another session is unaffected. New
-  session is available from the top plus controls and Ctrl+N.
+  session is available from the left-sidebar top plus and Ctrl+N. The right
+  sidebar has no plus button.
 - The footer stays one row at narrow widths. The project path replaces the project
   name; hover a shortened path for the full value. Hover the info indicator for
   usage details omitted due to limited width. The right-rail gear is centered.

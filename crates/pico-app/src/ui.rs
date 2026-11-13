@@ -1347,11 +1347,6 @@ impl App {
         }
         let rail = container(
             column![
-                button(container(text("+").size(22)).center_x(Fill).center_y(34))
-                    .width(Fill)
-                    .padding(0)
-                    .on_press(Message::New)
-                    .style(button::text),
                 space().height(Fill),
                 button(container(text("⚙").size(24)).center_x(Fill).center_y(34))
                     .width(Fill)
