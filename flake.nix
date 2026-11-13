@@ -21,7 +21,7 @@
       desktopItem = pkgs.makeDesktopItem {
         name = "pico-evo";
         desktopName = "Pico V2";
-        comment = "Native Wayland AI harness (Phase 0 scaffold)";
+        comment = "Native Wayland AI coding harness";
         exec = "pico-evo";
         terminal = false;
         categories = [ "Development" ];
@@ -45,6 +45,7 @@
         postFixup = ''
           wrapProgram "$out/bin/pico-evo" \
             --prefix LD_LIBRARY_PATH : ${runtimePath} \
+            --prefix PATH : ${lib.makeBinPath [ pkgs.git pkgs.xdg-utils ]} \
             --set-default FONTCONFIG_FILE ${fontConfig}
         '';
         installCheckPhase = ''
@@ -53,7 +54,7 @@
           runHook postInstallCheck
         '';
         meta = {
-          description = "Pico V2 native Wayland harness scaffold";
+          description = "Pico V2 native Wayland coding harness";
           mainProgram = "pico-evo";
           platforms = [ system ];
         };
@@ -76,7 +77,7 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           rustc cargo rustfmt clippy rust-analyzer
-          pkg-config mold git just time
+          pkg-config mold git just time xdg-utils
           weston wayland-utils
         ];
         buildInputs = runtimeLibraries;

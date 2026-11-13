@@ -1,5 +1,13 @@
 //! UI-independent Pico V2 foundations. Never depend on iced in this crate.
 
+pub use tokio_util::sync::CancellationToken;
+pub mod agent;
+pub mod auth;
+pub mod code_mode;
+pub mod provider;
+pub mod shell;
+pub mod store;
+
 use std::path::{Path, PathBuf};
 
 /// V2 must not read or overwrite the previous harness's configuration.
@@ -50,3 +58,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod test_support;

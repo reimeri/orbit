@@ -41,21 +41,24 @@ See [README.md](README.md) for quick start and [docs/development.md](docs/develo
 
 ### Phase 1
 
-- Main UI
-  - We should generally keep the look and feel of the UI
-  - Left bar: session picker, search, new session button, workspace badge favorites, animations, resizing
-  - Footer: include all the info that it currently shows
-  - Right bar: settings button
-  - New session view with add project button
-  - Settings panel
-  - Chat with markdown rendering and clickable tool groups and tool rows
-  - Modals
-- Shell tools exec_command and write_stdin
-- Agent loop
-- OpenAI provider
-  - Oauth login so that you can use chatgpt subscription in the harness
-  - Login details persisted over restarts
-- code mode: exec and wait tools in the top-level
+Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase-1-testing.md).
+
+- [x] Main UI
+  - [x] We should generally keep the look and feel of the UI
+  - [x] Left bar: session picker, search, new session button, workspace badge favorites, animations, resizing
+  - [x] Footer: include all the info that it currently shows
+  - [x] Right bar: settings button
+  - [x] New session view with add project button
+  - [x] Settings panel
+  - [x] Chat with markdown rendering and clickable tool groups and tool rows
+  - [x] Modals
+- [x] Shell tools exec_command and write_stdin
+- [x] Agent loop
+- [x] OpenAI provider
+  - [x] Oauth login so that you can use chatgpt subscription in the harness
+  - [x] Login details persisted over restarts
+- [x] code mode: exec and wait tools in the top-level
+
 
 ### Phase 2
 

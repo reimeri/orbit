@@ -7,8 +7,13 @@ rust-version.workspace = true
 [dependencies]
 pico-core = { path = "../pico-core" }
 iced = { version = "0.14.0", default-features = false, features = [
-    "wgpu", "tiny-skia", "wayland", "thread-pool", "crisp",
+    "wgpu", "tiny-skia", "wayland", "tokio", "crisp", "markdown",
 ] }
+
+unicode-width = "0.2"
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [lints]
 workspace = true

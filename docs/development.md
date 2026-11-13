@@ -13,9 +13,9 @@ pin, not every compiler above that lower bound.
 
 Wayland, libxkbcommon, Vulkan loader, GL/EGL, fontconfig and DejaVu fonts are
 supplied by Nix. Iced defaults are disabled: explicitly enabled features are
-wgpu, tiny-skia, Wayland, the thread-pool executor, and crisp rendering. Neither
+wgpu, tiny-skia, Wayland, the Tokio executor, and crisp rendering. Neither
 winit nor softbuffer enables X11. Do not reintroduce default features accidentally.
-A later phase can replace the executor with Tokio if its actual runtime needs it.
+Phase 1 uses Tokio for provider streams, OAuth and UI tasks.
 
 New files used by a Git-backed flake must be known to Git (`git add <files>`);
 otherwise Nix cannot see them. A dirty-worktree warning is normal during edits.
@@ -38,8 +38,7 @@ Run these from the repository root inside `nix develop`:
 | Actual performance measurements | `cargo run --locked --release` |
 
 `cargo check` skips code generation and linking. It does not replace tests or
-actually opening the UI. The core crate has no third-party dependencies, so
-core-only tests do not compile iced. `just verify` runs format checking, Clippy
+actually opening the UI. Core-only tests compile networking, storage and QuickJS dependencies but do not compile iced. `just verify` runs format checking, Clippy
 with warnings denied, all workspace tests, and the software window check.
 
 ## What keeps builds fast
@@ -122,10 +121,12 @@ manual: sandbox/CI machines do not necessarily have a GPU.
 
 The initial checks passed for both renderers, and the desktop window was
 visually inspected. GUI state transitions have a unit test, but the smoke check
-is **not** an automated click/keyboard/layout test. For manual verification,
-run `just run`, type in the field, increment/reset the counter, resize the
-window and close it normally. No application config/session files should be
-created. Inspect feature selection after dependency changes with:
+is **not** an automated click/keyboard/layout test. For manual verification, run `just run` and follow
+[the Phase 1 acceptance checklist](phase-1-testing.md). Smoke mode uses private
+temporary application state, no credentials and no provider calls. Its rendered views exercise the project picker, Markdown/tool details, settings,
+modal and session popover, plus scrolling a ~1 MiB tool result to the middle/end
+and reflowing it with Settings open. Normal mode persists configuration and sessions under `pico-evo`.
+Inspect feature selection after dependency changes with:
 
 ```sh
 cargo tree --locked -e features -i winit
@@ -155,11 +156,34 @@ cargo tree --locked -e features -i softbuffer
   Test `just smoke-gpu` separately to distinguish software/window plumbing from
   the host GPU stack. A software check passing does not certify the host GPU.
 
-## Phase 1 boundary
+## Phase 1 architecture
 
-The executable is intentionally only a smoke window. `pico-core` currently
-contains the tested XDG configuration-path policy using `pico-evo`, not a full
-session format or persistence implementation. Introduce core domain modules as
-Phase 1 needs them and keep tests independent of the GUI. When adding state,
-cache or data directories, apply the same V2 isolation policy. No V1 migration,
-extension loading, agent loop, shell execution or network access is implemented.
+`pico-core` now owns isolated atomic storage, subscription OAuth/refresh, Responses
+streaming, the agent state machine, command sessions and embedded QuickJS cells.
+`pico-app` owns iced widgets, Markdown presentation, the folder chooser, clipboard
+and browser-launch actions. There is no iced dependency in the core and no V1
+state migration or extension support. See [README](../README.md) for runtime state
+paths and [code mode](code-mode.md) for the tool contract.
+
+Tests use temporary storage and local HTTP fixtures. They cover token rotation,
+state validation, storage failures, fragmented/truncated streams, provider/tool
+roundtrips, bounded compaction, shell/PTYS, cancelled cells and UI modal/draft
+regressions. Live ChatGPT access remains a user-run acceptance test. Packaged
+runtime PATH includes Git and xdg-open; the desktop supplies its portal backend
+for the optional folder chooser (manual path entry always works).
+
+## UI performance follow-up
+
+The UI uses coalesced core change notifications and per-conversation revisions,
+not a permanent 50 ms session-snapshot timer. Only changed conversations are
+cloned. Activity animation runs while a foreground turn is active; draft saving,
+Git refresh and session age labels have independent low-frequency timers.
+Redraw events are not fed back into the update loop. Large tool details use a
+fixed-row virtual viewport, including long single-line output and Unicode; only
+about 22 rows are passed to text shaping. Collapsing a tool or leaving its session
+releases its detail cache. The complete output remains available through Copy.
+
+A local before/after check using the same debug build profile, wgpu on the Wayland
+desktop, isolated state and a two-message idle session measured **2.00% → 0.13% of
+one CPU** over 15 seconds after a three-second warm-up. This is one local sample,
+not a cross-machine performance guarantee; it includes periodic Git refreshes.
