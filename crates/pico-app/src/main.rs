@@ -1,5 +1,7 @@
+mod io_worker;
 mod tool_output;
 mod ui;
+mod virtual_list;
 use iced::{Theme, window};
 use pico_core::APP_ID;
 use std::{

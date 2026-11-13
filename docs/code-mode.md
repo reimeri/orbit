@@ -54,7 +54,7 @@ control characters such as `\u0003`. Non-TTY commands have closed stdin.
 Pico resource policy: 64 MiB JS heap and 1 MiB stack per cell, 16 MiB serializable
 session store, 32 open cells, 64 concurrent nested calls and 64 shell sessions per
 conversation. Waits are bounded to 300 seconds. Command output keeps a bounded
-1 MiB tail with an explicit dropped-byte notice; returned output is further limited
+1 MiB ring-buffer tail with an explicit dropped-byte notice; returned output is further limited
 by the requested approximate token budget. The app cancels process groups on Stop
 and exit. Deliberately daemonized/re-parented processes can escape process-group
 cleanup; this is not a sandbox or a process supervisor.
@@ -72,3 +72,10 @@ public OpenAI Codex source (Apache-2.0), retrieved during implementation:
 Repository: <https://github.com/openai/codex>. Pico has its own Rust/QuickJS runtime;
 it does not embed Codex/V8, Codex's remote execution service, approval/sandbox
 machinery, or Phase 2 multimedia tools. No backwards-compatibility adapters exist.
+
+Cell text buffers retain at most 4 MiB of UTF-8 (including inserted separators)
+and emit an explicit discard notice on overflow. Empty emissions do not allocate
+fragments. Waiting cells are event-driven; timer callbacks scheduled during a tick
+run on a subsequent tick so resolved modules can finish. Tool-start persistence
+must succeed before commands launch. Session switching can release transcript
+bodies without discarding process/cell IDs, unread results or shared `store` values.

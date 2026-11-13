@@ -1,7 +1,10 @@
 //! Durable V2 state. Provider context and the complete visible transcript are separate.
+use crate::history::{History, Record};
 use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -92,7 +95,7 @@ pub struct Catalog {
     pub selected: Option<String>,
     pub settings: Settings,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EntryKind {
     User,
     Assistant,
@@ -106,11 +109,16 @@ pub enum EntryKind {
         parent: Option<String>,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
     pub text: String,
     pub kind: EntryKind,
+}
+impl Record for Entry {
+    fn id(&self) -> Option<&str> {
+        Some(&self.id)
+    }
 }
 impl Entry {
     pub fn new(kind: EntryKind, text: impl Into<String>) -> Self {
@@ -136,13 +144,19 @@ pub struct Session {
     pub updated: u64,
     pub model: String,
     pub effort: String,
-    pub entries: Vec<Entry>,
-    pub input: Vec<Value>,
+    #[serde(skip)]
+    pub entries: History<Entry>,
+    #[serde(skip)]
+    pub input: History<Value>,
+    pub summary: String,
+    pub summarized_entries: usize,
     pub usage: Usage,
     pub draft: String,
     pub pending: Vec<String>,
+    pub pending_submissions: Vec<String>,
     pub pending_tool_outputs: Vec<Value>,
     pub interrupted: bool,
+    pub needs_attention: bool,
     pub context_account: Option<String>,
 }
 impl Session {
@@ -154,17 +168,24 @@ impl Session {
             updated: now(),
             model: settings.model.clone(),
             effort: settings.effort.clone(),
-            entries: vec![],
-            input: vec![],
+            entries: History::default(),
+            input: History::default(),
+            summary: String::new(),
+            summarized_entries: 0,
             usage: Usage::default(),
             draft: String::new(),
             pending: vec![],
+            pending_submissions: vec![],
             pending_tool_outputs: vec![],
             interrupted: false,
+            needs_attention: false,
             context_account: None,
         }
     }
     pub fn accept(&mut self, message: String) {
+        self.accept_submission(id(), message);
+    }
+    pub fn accept_submission(&mut self, submission: String, message: String) {
         if self.title == "New session" {
             self.title = message
                 .lines()
@@ -175,11 +196,17 @@ impl Session {
                 .collect();
         }
         self.updated = now();
-        self.entries.push(Entry::new(EntryKind::User, &message));
+        self.pending_submissions.push(submission.clone());
+        self.entries.push(Entry {
+            id: submission,
+            kind: EntryKind::User,
+            text: message.clone(),
+        });
         self.pending.push(message);
         self.draft.clear();
     }
     pub fn consume_pending(&mut self) {
+        self.pending_submissions.clear();
         for output in self.pending_tool_outputs.drain(..) {
             if self.input.iter().any(|item| {
                 matches!(item["type"].as_str(), Some("custom_tool_call"))
@@ -197,14 +224,37 @@ impl Session {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub needs_attention: bool,
+    pub id: String,
+    pub project: PathBuf,
+    pub title: String,
+    pub updated: u64,
+    pub interrupted: bool,
+}
+impl From<&Session> for SessionSummary {
+    fn from(s: &Session) -> Self {
+        Self {
+            needs_attention: s.needs_attention,
+            id: s.id.clone(),
+            project: s.project.clone(),
+            title: s.title.clone(),
+            updated: s.updated,
+            interrupted: s.interrupted,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
-    _lock: std::sync::Arc<nix::fcntl::Flock<File>>,
+    db: Arc<Mutex<Connection>>,
+    _lock: Arc<nix::fcntl::Flock<File>>,
 }
 impl Store {
     pub fn open(root: PathBuf) -> Result<Self> {
-        fs::create_dir_all(root.join("sessions")).context("Create pico-evo storage")?;
+        fs::create_dir_all(&root).context("Create pico-evo storage")?;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
         let file = OpenOptions::new()
             .read(true)
@@ -215,9 +265,18 @@ impl Store {
             .open(root.join("instance.lock"))?;
         let lock = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
             .map_err(|(_, error)| anyhow::anyhow!("Another Pico V2 instance is using {} ({error}). Close it before starting another instance.", root.display()))?;
+        let path = root.join("sessions.sqlite3");
+        let db = Connection::open(&path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
+            CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, updated INTEGER NOT NULL, summary TEXT NOT NULL, metadata TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS session_order ON sessions(updated DESC, id);
+            CREATE TABLE IF NOT EXISTS entries (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));
+            CREATE TABLE IF NOT EXISTS context (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));")?;
         Ok(Self {
             root,
-            _lock: std::sync::Arc::new(lock),
+            db: Arc::new(Mutex::new(db)),
+            _lock: Arc::new(lock),
         })
     }
     pub fn from_env() -> Result<Self> {
@@ -234,43 +293,43 @@ impl Store {
     pub fn root(&self) -> &Path {
         &self.root
     }
-    pub fn load(&self) -> Result<(Catalog, Vec<Session>, Vec<String>)> {
+    pub fn load(&self) -> Result<(Catalog, Vec<SessionSummary>, Vec<String>)> {
         let catalog: Catalog = self.read_optional("settings.json")?.unwrap_or_default();
         catalog.settings.validate()?;
-        let mut sessions = vec![];
+        let db = self.db.lock().expect("database lock");
+        let mut query = db.prepare("SELECT id,summary FROM sessions ORDER BY updated DESC,id")?;
+        let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut summaries = vec![];
         let mut warnings = vec![];
-        for file in fs::read_dir(self.root.join("sessions"))? {
-            let path = file?.path();
-            if path.extension().is_none_or(|s| s != "json") {
-                continue;
-            }
-            match fs::read(&path)
-                .context("Read session")
-                .and_then(|bytes| Ok(serde_json::from_slice::<Session>(&bytes)?))
-            {
-                Ok(mut session) => {
-                    if Uuid::parse_str(&session.id).is_err()
-                        || path.file_stem().and_then(|s| s.to_str()) != Some(&session.id)
-                    {
-                        warnings.push(format!(
-                            "Invalid session identity in {}. File preserved.",
-                            path.display()
-                        ));
-                        continue;
-                    }
-                    if session.interrupted {
-                        session.entries.push(Entry::new(EntryKind::Notice, "Previous turn was interrupted. Send a new message to continue; commands already executed are not undone."));
-                    }
-                    sessions.push(session);
+        for row in rows {
+            let (id, json) = row?;
+            let parsed = (|| {
+                let summary: SessionSummary = serde_json::from_str(&json)?;
+                Uuid::parse_str(&id)?;
+                if summary.id != id {
+                    bail!("Session identity mismatch");
                 }
-                Err(error) => warnings.push(format!(
-                    "Could not load {}: {error}. Original file preserved.",
-                    path.display()
-                )),
-            }
+                Ok::<_, anyhow::Error>(summary)
+            })();
+            match parsed {Ok(summary)=>summaries.push(summary),Err(error)=>warnings.push(format!("Could not load session {id}: {error:#}. Database row preserved; restore it from a backup or repair it before retrying."))}
         }
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated));
-        Ok((catalog, sessions, warnings))
+        Ok((catalog, summaries, warnings))
+    }
+    pub fn load_session(&self, id: &str) -> Result<Session> {
+        let db = self.db.lock().expect("database lock");
+        let metadata: String = db
+            .query_row("SELECT metadata FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .context("Session no longer exists")?;
+        let mut session: Session = serde_json::from_str(&metadata)?;
+        if session.id != id {
+            bail!("Session metadata identity mismatch; database preserved");
+        }
+        session.entries = read_history(&db, "entries", id)?;
+        session.input = read_history(&db, "context", id)?;
+        Ok(session)
     }
     pub fn read_optional<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
         match fs::read(self.root.join(name)) {
@@ -286,17 +345,85 @@ impl Store {
         self.write("settings.json", catalog)
     }
     pub fn save_session(&self, session: &Session) -> Result<()> {
+        self.save_changes(None, session)
+    }
+    pub fn save_changes(&self, before: Option<&Session>, session: &Session) -> Result<()> {
         Uuid::parse_str(&session.id)?;
-        self.write(&format!("sessions/{}.json", session.id), session)
+        let mut db = self.db.lock().expect("database lock");
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO sessions VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated,summary=excluded.summary,metadata=excluded.metadata",
+            params![session.id,session.updated as i64,serde_json::to_string(&SessionSummary::from(session))?,serde_json::to_string(session)?])?;
+        write_history(
+            &tx,
+            "entries",
+            &session.id,
+            before.map(|s| &s.entries),
+            &session.entries,
+        )?;
+        write_history(
+            &tx,
+            "context",
+            &session.id,
+            before.map(|s| &s.input),
+            &session.input,
+        )?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        Uuid::parse_str(id)?;
-        fs::remove_file(self.root.join(format!("sessions/{id}.json")))?;
+        self.db
+            .lock()
+            .expect("database lock")
+            .execute("DELETE FROM sessions WHERE id=?1", [id])?;
         Ok(())
     }
     pub fn write(&self, name: &str, value: &impl Serialize) -> Result<()> {
-        atomic_write(&self.root.join(name), &serde_json::to_vec_pretty(value)?)
+        atomic_write(&self.root.join(name), &serde_json::to_vec(value)?)
     }
+}
+fn read_history<T: Record + serde::de::DeserializeOwned>(
+    db: &Connection,
+    table: &str,
+    id: &str,
+) -> Result<History<T>> {
+    let mut query = db.prepare(&format!(
+        "SELECT position,data FROM {table} WHERE session=?1 ORDER BY position"
+    ))?;
+    let rows = query.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    rows.enumerate()
+        .map(|(expected, row)| {
+            let (position, json) = row?;
+            if position != expected as i64 {
+                bail!("Invalid {table} position in session {id}; database preserved");
+            }
+            Ok(serde_json::from_str(&json)?)
+        })
+        .collect()
+}
+
+fn write_history<T: Record + Serialize>(
+    db: &Connection,
+    table: &str,
+    id: &str,
+    before: Option<&History<T>>,
+    next: &History<T>,
+) -> Result<()> {
+    let empty = History::default();
+    let mut upsert = db.prepare_cached(&format!("INSERT INTO {table} VALUES (?1,?2,?3) ON CONFLICT(session,position) DO UPDATE SET data=excluded.data"))?;
+    let mut delete = db.prepare_cached(&format!(
+        "DELETE FROM {table} WHERE session=?1 AND position=?2"
+    ))?;
+    if before.is_none() {
+        db.execute(&format!("DELETE FROM {table} WHERE session=?1"), [id])?;
+    }
+    for (index, value) in before.unwrap_or(&empty).changes(next) {
+        if let Some(value) = value {
+            upsert.execute(params![id, index as i64, serde_json::to_string(value)?])?;
+        } else {
+            delete.execute(params![id, index as i64])?;
+        }
+    }
+    Ok(())
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("Missing storage parent")?;
@@ -323,9 +450,42 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn incremental_save_only_changes_touched_rows_and_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut session = Session::new(dir.path().into(), &Settings::default());
+        for text in ["first", "middle", "last"] {
+            session.entries.push(Entry::new(EntryKind::Assistant, text));
+        }
+        session.input = vec![serde_json::json!({"role":"user","content":"context"})].into();
+        store.save_session(&session).unwrap();
+        let before = session.clone();
+        let db = Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER protect_history BEFORE UPDATE ON entries WHEN OLD.position != 1 BEGIN SELECT RAISE(FAIL,'unchanged entry rewritten'); END; CREATE TRIGGER protect_context BEFORE UPDATE ON context BEGIN SELECT RAISE(FAIL,'unchanged context rewritten'); END;").unwrap();
+        session.entries[1].text = "edited middle".into();
+        session.draft = "draft only metadata".into();
+        store.save_changes(Some(&before), &session).unwrap();
+        assert_eq!(
+            store.load_session(&session.id).unwrap().entries[1].text,
+            "edited middle"
+        );
+        let before = session.clone();
+        session.entries[0].text = "must roll back".into();
+        session.title = "must also roll back".into();
+        assert!(store.save_changes(Some(&before), &session).is_err());
+        let restored = store.load_session(&session.id).unwrap();
+        assert_eq!(restored.entries[0].text, "first");
+        assert_eq!(restored.title, before.title);
+        assert_eq!(
+            before.entries[0].text, "first",
+            "snapshots must remain immutable"
+        );
+    }
+    #[test]
     fn late_notification_remains_valid_after_originating_call_is_compacted() {
         let mut session = Session::new(std::env::temp_dir(), &Settings::default());
-        session.input = vec![serde_json::json!({"type":"compaction","encrypted_content":"opaque"})];
+        session.input =
+            vec![serde_json::json!({"type":"compaction","encrypted_content":"opaque"})].into();
         session.pending_tool_outputs.push(serde_json::json!({"type":"custom_tool_call_output","call_id":"old-cell","output":"build finished"}));
         session.consume_pending();
         assert_eq!(session.input[1]["role"], "user");
@@ -355,12 +515,19 @@ mod tests {
         let mut s = Session::new(dir.path().into(), &Settings::default());
         s.accept("Fix the odd-sized buffer".into());
         s.consume_pending();
-        s.input = vec![serde_json::json!({"type":"compaction","encrypted_content":"opaque"})];
+        s.input =
+            vec![serde_json::json!({"type":"compaction","encrypted_content":"opaque"})].into();
         store.save_session(&s).unwrap();
         store.save_catalog(&Catalog::default()).unwrap();
         let (_, restored, _) = store.load().unwrap();
-        assert_eq!(restored[0].entries[0].text, "Fix the odd-sized buffer");
-        assert_eq!(restored[0].input[0]["encrypted_content"], "opaque");
+        assert_eq!(
+            store.load_session(&restored[0].id).unwrap().entries[0].text,
+            "Fix the odd-sized buffer"
+        );
+        assert_eq!(
+            store.load_session(&restored[0].id).unwrap().input[0]["encrypted_content"],
+            "opaque"
+        );
         assert_eq!(
             fs::metadata(store.root().join("settings.json"))
                 .unwrap()
@@ -371,15 +538,16 @@ mod tests {
         );
     }
     #[test]
-    fn corrupt_session_is_preserved_without_hiding_other_sessions() {
+    fn legacy_files_are_untouched_and_not_loaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
+        fs::create_dir(dir.path().join("sessions")).unwrap();
         fs::write(dir.path().join("sessions/broken.json"), b"{").unwrap();
         let s = Session::new(dir.path().into(), &Settings::default());
         store.save_session(&s).unwrap();
         let (_, sessions, warnings) = store.load().unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(warnings.len(), 1);
+        assert!(warnings.is_empty());
         assert_eq!(
             fs::read(dir.path().join("sessions/broken.json")).unwrap(),
             b"{"

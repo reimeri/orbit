@@ -33,7 +33,7 @@
         cargoLock.lockFile = ./Cargo.lock;
         strictDeps = true;
         nativeBuildInputs = with pkgs; [ pkg-config mold makeWrapper ];
-        buildInputs = runtimeLibraries;
+        buildInputs = runtimeLibraries ++ [ pkgs.sqlite ];
         doCheck = true;
         cargoTestFlags = [ "--workspace" ];
         doInstallCheck = true;
@@ -80,7 +80,7 @@
           pkg-config mold git just time xdg-utils
           weston wayland-utils
         ];
-        buildInputs = runtimeLibraries;
+        buildInputs = runtimeLibraries ++ [ pkgs.sqlite ];
         LD_LIBRARY_PATH = runtimePath;
         FONTCONFIG_FILE = fontConfig;
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";

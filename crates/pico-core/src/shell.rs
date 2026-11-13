@@ -7,13 +7,12 @@ use nix::{
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{Read, Write},
-    os::unix::process::CommandExt,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicI32, Ordering},
     },
     thread,
@@ -54,14 +53,15 @@ pub struct StdinArgs {
 }
 #[derive(Default)]
 struct Output {
-    bytes: Vec<u8>,
+    bytes: VecDeque<u8>,
     dropped: usize,
     exit: Option<String>,
     readers: usize,
 }
 struct Process {
-    output: Arc<(Mutex<Output>, Condvar)>,
-    stdin: Mutex<Option<Box<dyn Write + Send>>>,
+    output: Arc<(Mutex<Output>, tokio::sync::Notify)>,
+    stdin: Mutex<Option<tokio::io::unix::AsyncFd<filedescriptor::FileDescriptor>>>,
+    runtime: tokio::runtime::Handle,
     pid: u32,
     started: Instant,
 }
@@ -80,26 +80,27 @@ impl Process {
         tokens: usize,
         cancel: &CancellationToken,
     ) -> Result<(String, bool)> {
-        let deadline = Instant::now() + Duration::from_millis(wait.min(300_000));
-        let (lock, signal) = &*self.output;
-        let mut output = lock.lock().expect("process output lock");
-        loop {
-            if cancel.is_cancelled() {
-                drop(output);
-                self.stop();
-                bail!("Command cancelled. Side effects already performed are not undone.");
+        self.runtime.block_on(async {
+            let deadline=tokio::time::Instant::now()+Duration::from_millis(wait.min(300_000));
+            loop {
+                let notified=self.output.1.notified();tokio::pin!(notified);notified.as_mut().enable();
+                {let output=self.output.0.lock().expect("output lock");if output.exit.is_some()&&output.readers==0 {break;}}
+                tokio::select! {
+                    biased;
+                    _=cancel.cancelled()=>{self.stop();bail!("Command cancelled. Side effects already performed are not undone.");}
+                    _=tokio::time::sleep_until(deadline)=>break,
+                    _=notified=>{}
+                }
             }
-            if output.exit.is_some() && output.readers == 0 || Instant::now() >= deadline {
-                break;
-            }
-            output = signal
-                .wait_timeout(output, Duration::from_millis(20))
-                .expect("process output wait")
-                .0;
-        }
+            Ok::<_,anyhow::Error>(())
+        })?;
+        let mut output = self.output.0.lock().expect("process output lock");
         let complete = output.exit.is_some() && output.readers == 0;
-        let mut body = String::from_utf8_lossy(&std::mem::take(&mut output.bytes)).into_owned();
+        let exit = output.exit.clone();
         let dropped = std::mem::take(&mut output.dropped);
+        let bytes: Vec<_> = std::mem::take(&mut output.bytes).into();
+        drop(output);
+        let mut body = String::from_utf8_lossy(&bytes).into_owned();
         if dropped > 0 {
             body.insert_str(0, &format!("[Dropped {dropped} earlier output bytes]\n"));
         }
@@ -107,7 +108,7 @@ impl Process {
         let status = if complete {
             format!(
                 "Process exited with code {}",
-                output.exit.as_ref().expect("complete process")
+                exit.as_ref().expect("complete process")
             )
         } else {
             format!("Process running with session ID {id}")
@@ -121,62 +122,108 @@ impl Process {
         ))
     }
 }
-fn reader(mut source: impl Read + Send + 'static, output: Arc<(Mutex<Output>, Condvar)>) {
-    thread::spawn(move || {
-        let mut buffer = [0; 8192];
-        loop {
-            match source.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let mut state = output.0.lock().expect("output lock");
-                    state.bytes.extend_from_slice(&buffer[..n]);
-                    if state.bytes.len() > BUFFER_LIMIT {
-                        let excess = state.bytes.len() - BUFFER_LIMIT;
-                        state.bytes.drain(..excess);
-                        state.dropped += excess;
-                    }
-                    output.1.notify_all();
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                // PTYs return EIO when their slave closes.
-                Err(e) => {
-                    if e.raw_os_error() != Some(5) {
-                        let mut state = output.0.lock().expect("output lock");
-                        state
-                            .bytes
-                            .extend_from_slice(format!("\n[Output read failed: {e}]").as_bytes());
-                    }
-                    break;
-                }
-            }
+// The pinned Tokio only provides deprecated safe constructors. This private
+// wrapper owns a FileDescriptor whose number cannot change during registration.
+#[allow(deprecated)]
+fn register_pty(
+    fd: filedescriptor::FileDescriptor,
+) -> std::io::Result<tokio::io::unix::AsyncFd<filedescriptor::FileDescriptor>> {
+    tokio::io::unix::AsyncFd::new(fd)
+}
+type SharedOutput = Arc<(Mutex<Output>, tokio::sync::Notify)>;
+fn append(output: &SharedOutput, bytes: &[u8]) {
+    let mut state = output.0.lock().expect("output lock");
+    let excess = (state.bytes.len() + bytes.len()).saturating_sub(BUFFER_LIMIT);
+    let old = excess.min(state.bytes.len());
+    state.bytes.drain(..old);
+    state.dropped += excess;
+    state.bytes.extend(&bytes[excess - old..]);
+    // Readers do not need to wake consumers until exit: reads yield on their deadline.
+}
+fn finish_reader(output: &SharedOutput, error: Option<std::io::Error>) {
+    if let Some(e) = error
+        && e.raw_os_error() != Some(5)
+    {
+        append(output, format!("\n[Output read failed: {e}]").as_bytes());
+    }
+    output.0.lock().expect("output lock").readers -= 1;
+    output.1.notify_waiters();
+}
+async fn pipe_reader(mut source: impl tokio::io::AsyncRead + Unpin, output: SharedOutput) {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0; 8192];
+    let error = loop {
+        match source.read(&mut buffer).await {
+            Ok(0) => break None,
+            Ok(n) => append(&output, &buffer[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => break Some(e),
         }
-        output.0.lock().expect("output lock").readers -= 1;
-        output.1.notify_all();
-    });
+    };
+    finish_reader(&output, error);
+}
+async fn pty_reader(
+    mut source: tokio::io::unix::AsyncFd<filedescriptor::FileDescriptor>,
+    output: SharedOutput,
+) {
+    let mut buffer = [0; 8192];
+    let error = loop {
+        let mut ready = match source.readable_mut().await {
+            Ok(ready) => ready,
+            Err(e) => break Some(e),
+        };
+        match ready.try_io(|fd| fd.get_mut().read(&mut buffer)) {
+            Ok(Ok(0)) => break None,
+            Ok(Ok(n)) => append(&output, &buffer[..n]),
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Ok(Err(e)) => break Some(e),
+            Err(_) => {}
+        }
+    };
+    finish_reader(&output, error);
+}
+fn shared_runtime() -> tokio::runtime::Handle {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("execution runtime")
+        })
+        .handle()
+        .clone()
 }
 
 pub struct Shell {
     cwd: PathBuf,
     processes: Mutex<HashMap<i32, Arc<Process>>>,
     next: AtomicI32,
+    runtime: tokio::runtime::Handle,
 }
 impl Shell {
     pub fn new(cwd: PathBuf) -> Self {
+        Self::with_runtime(cwd, shared_runtime())
+    }
+    pub fn with_runtime(cwd: PathBuf, runtime: tokio::runtime::Handle) -> Self {
         Self {
+            runtime,
             cwd,
             processes: Mutex::new(HashMap::new()),
             next: AtomicI32::new(rand::random_range(1_000..i32::MAX / 2)),
         }
+    }
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
     }
     pub fn exec(&self, args: ExecArgs, cancel: &CancellationToken) -> Result<String> {
         if cancel.is_cancelled() {
             bail!("Execution cancelled");
         }
         let mut processes = self.processes.lock().expect("process lock");
+        if cancel.is_cancelled() {
+            bail!("Execution cancelled");
+        }
         if processes.len() >= 64 {
             bail!(
                 "64 command sessions are open. Poll or stop existing sessions before starting more."
@@ -199,7 +246,7 @@ impl Shell {
                 readers: if args.tty { 1 } else { 2 },
                 ..Output::default()
             }),
-            Condvar::new(),
+            tokio::sync::Notify::new(),
         ));
         let process = if args.tty {
             let pair = native_pty_system().openpty(PtySize {
@@ -212,8 +259,6 @@ impl Shell {
             cmd.args([flag, &args.cmd]);
             cmd.cwd(cwd);
             cmd.env("TERM", "xterm-256color");
-            let mut child = pair.slave.spawn_command(cmd).context("Start PTY command")?;
-            let pid = child.process_id().context("Missing PTY process id")?;
             struct Descriptor(i32);
             impl std::os::fd::AsRawFd for Descriptor {
                 fn as_raw_fd(&self) -> i32 {
@@ -226,7 +271,21 @@ impl Shell {
                     .context("PTY has no Unix descriptor")?,
             ))?;
             stdin.set_non_blocking(true)?;
-            reader(pair.master.try_clone_reader()?, output.clone());
+            let reader = filedescriptor::FileDescriptor::dup(&stdin)?;
+            let (stdin, reader) = {
+                let _runtime = self.runtime.enter();
+                (register_pty(stdin)?, register_pty(reader)?)
+            };
+            let mut child = pair.slave.spawn_command(cmd).context("Start PTY command")?;
+            let pid = match child.process_id() {
+                Some(pid) => pid,
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("Missing PTY process id");
+                }
+            };
+            self.runtime.spawn(pty_reader(reader, output.clone()));
             drop(pair.slave);
             let state = output.clone();
             thread::spawn(move || {
@@ -235,17 +294,19 @@ impl Shell {
                     .map(|s| s.exit_code().to_string())
                     .unwrap_or_else(|e| format!("unknown ({e})"));
                 state.0.lock().expect("output lock").exit = Some(status);
-                state.1.notify_all();
+                state.1.notify_waiters();
                 drop(pair.master);
             });
             Arc::new(Process {
                 output,
-                stdin: Mutex::new(Some(Box::new(stdin))),
+                stdin: Mutex::new(Some(stdin)),
+                runtime: self.runtime.clone(),
                 pid,
                 started: Instant::now(),
             })
         } else {
-            let mut child = Command::new(shell)
+            let _runtime = self.runtime.enter();
+            let mut child = tokio::process::Command::new(shell)
                 .args([flag, &args.cmd])
                 .current_dir(cwd)
                 .process_group(0)
@@ -254,13 +315,20 @@ impl Shell {
                 .stderr(Stdio::piped())
                 .spawn()
                 .context("Start shell command")?;
-            let pid = child.id();
-            reader(child.stdout.take().expect("piped stdout"), output.clone());
-            reader(child.stderr.take().expect("piped stderr"), output.clone());
+            let pid = child.id().expect("spawned child");
+            self.runtime.spawn(pipe_reader(
+                child.stdout.take().expect("piped stdout"),
+                output.clone(),
+            ));
+            self.runtime.spawn(pipe_reader(
+                child.stderr.take().expect("piped stderr"),
+                output.clone(),
+            ));
             let state = output.clone();
-            thread::spawn(move || {
+            self.runtime.spawn(async move {
                 let status = child
                     .wait()
+                    .await
                     .map(|s| {
                         s.code()
                             .map(|c| c.to_string())
@@ -268,48 +336,44 @@ impl Shell {
                     })
                     .unwrap_or_else(|e| format!("unknown ({e})"));
                 state.0.lock().expect("output lock").exit = Some(status);
-                state.1.notify_all();
+                state.1.notify_waiters();
             });
             Arc::new(Process {
                 output,
                 stdin: Mutex::new(None),
+                runtime: self.runtime.clone(),
                 pid,
                 started: Instant::now(),
             })
         };
         if let Some(timeout) = args.timeout_ms {
             let process = process.clone();
-            thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_millis(timeout.min(86_400_000));
-                let mut state = process.output.0.lock().expect("output lock");
-                while !(state.exit.is_some() && state.readers == 0) {
-                    if Instant::now() >= deadline {
-                        drop(state);
-                        process.stop();
-                        return;
-                    }
-                    state = process
-                        .output
-                        .1
-                        .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
-                        .expect("timeout wait")
-                        .0;
+            self.runtime.spawn(async move {
+                let deadline=tokio::time::Instant::now()+Duration::from_millis(timeout.min(86_400_000));
+                loop {
+                    let notified=process.output.1.notified();tokio::pin!(notified);notified.as_mut().enable();
+                    {let state=process.output.0.lock().expect("output lock");if state.exit.is_some()&&state.readers==0 {return;}}
+                    tokio::select! {_=tokio::time::sleep_until(deadline)=>{process.stop();return;},_=notified=>{}}
                 }
             });
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         processes.insert(id, process.clone());
         drop(processes);
-        let (result, complete) = process.read(
+        let result = process.read(
             id,
             args.yield_time_ms,
             args.max_output_tokens.unwrap_or(10_000),
             cancel,
-        )?;
-        if complete {
+        );
+        let cancelled = cancel.is_cancelled();
+        if cancelled {
+            process.stop();
+        }
+        if result.as_ref().is_ok_and(|(_, complete)| *complete) || cancelled {
             self.processes.lock().expect("process lock").remove(&id);
         }
-        Ok(result)
+        result.map(|(text, _)| text)
     }
     pub fn write(&self, args: StdinArgs, cancel: &CancellationToken) -> Result<String> {
         let process = self
@@ -322,43 +386,45 @@ impl Shell {
         if !args.chars.is_empty() {
             let mut stdin = process.stdin.lock().expect("stdin lock");
             let stdin = stdin.as_mut().context("stdin is closed for this session; rerun exec_command with tty=true for interactive input")?;
-            let mut remaining = args.chars.as_bytes();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !remaining.is_empty() {
-                if cancel.is_cancelled() {
-                    process.stop();
-                    bail!("Input cancelled; some bytes may already have been sent");
-                }
-                if Instant::now() >= deadline {
-                    bail!(
-                        "PTY input stalled; {} bytes were not sent. Poll the session before sending more.",
-                        remaining.len()
-                    );
-                }
-                match stdin.write(remaining) {
-                    Ok(0) => bail!("PTY stdin closed"),
-                    Ok(n) => remaining = &remaining[n..],
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5))
+            self.runtime.block_on(async {
+                let deadline=tokio::time::Instant::now()+Duration::from_secs(10);
+                let mut remaining=args.chars.as_bytes();
+                while !remaining.is_empty() {
+                    let mut ready=tokio::select! {
+                        biased;
+                        _=cancel.cancelled()=>{process.stop();self.processes.lock().expect("process lock").remove(&args.session_id);bail!("Input cancelled; some bytes may already have been sent");}
+                        _=tokio::time::sleep_until(deadline)=>bail!("PTY input stalled; {} bytes were not sent. Poll the session before sending more.",remaining.len()),
+                        ready=stdin.writable_mut()=>ready?,
+                    };
+                    match ready.try_io(|fd|fd.get_mut().write(remaining)) {
+                        Ok(Ok(0))=>bail!("PTY stdin closed"),Ok(Ok(n))=>remaining=&remaining[n..],
+                        Ok(Err(e)) if e.kind()==std::io::ErrorKind::Interrupted=>{},
+                        Ok(Err(e))=>return Err(e.into()),Err(_)=>{}
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(e) => return Err(e.into()),
                 }
-            }
+                Ok(())
+            })?;
         }
-        let (result, complete) = process.read(
+        let result = process.read(
             args.session_id,
             args.yield_time_ms,
             args.max_output_tokens.unwrap_or(10_000),
             cancel,
-        )?;
-        if complete {
+        );
+        let cancelled = cancel.is_cancelled();
+        if cancelled {
+            process.stop();
+        }
+        if result.as_ref().is_ok_and(|(_, complete)| *complete) || cancelled {
             self.processes
                 .lock()
                 .expect("process lock")
                 .remove(&args.session_id);
         }
-        Ok(result)
+        result.map(|(text, _)| text)
+    }
+    pub fn has_work(&self) -> bool {
+        !self.processes.lock().expect("process lock").is_empty()
     }
     pub fn stop_all(&self) {
         for (_, process) in self.processes.lock().expect("process lock").drain() {
@@ -402,6 +468,62 @@ mod tests {
             .expect("running command")
             .parse()
             .unwrap()
+    }
+    #[test]
+    fn ring_retains_exact_asymmetric_tail_and_counts_discarded_bytes() {
+        let output = Arc::new((Mutex::new(Output::default()), tokio::sync::Notify::new()));
+        let bytes: Vec<_> = (0..BUFFER_LIMIT + 17777)
+            .map(|i| ((i * 17 + i / 29) % 251) as u8)
+            .collect();
+        for chunk in bytes.chunks(8191) {
+            append(&output, chunk);
+        }
+        let state = output.0.lock().unwrap();
+        assert_eq!(state.dropped, 17777);
+        assert_eq!(state.bytes.len(), BUFFER_LIMIT);
+        assert!(
+            state
+                .bytes
+                .iter()
+                .copied()
+                .eq(bytes[17777..].iter().copied())
+        );
+    }
+    #[test]
+    fn cancelled_commands_release_slots_without_stop_all() {
+        let shell = Arc::new(Shell::new(std::env::temp_dir()));
+        for _ in 0..66 {
+            let cancel = CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let worker = shell.clone();
+            let job = thread::spawn(move || {
+                worker.exec(
+                    serde_json::from_value(serde_json::json!({"cmd":"sleep 30","login":false}))
+                        .unwrap(),
+                    &worker_cancel,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while shell.processes.lock().unwrap().is_empty() {
+                assert!(Instant::now() < deadline);
+                thread::yield_now();
+            }
+            cancel.cancel();
+            assert!(job.join().unwrap().is_err());
+            assert!(shell.processes.lock().unwrap().is_empty());
+        }
+        assert!(
+            shell
+                .exec(
+                    serde_json::from_value(
+                        serde_json::json!({"cmd":"printf usable","login":false})
+                    )
+                    .unwrap(),
+                    &CancellationToken::new()
+                )
+                .unwrap()
+                .contains("usable")
+        );
     }
     #[test]
     fn timeout_terminates_descendants_after_shell_leader_exits() {

@@ -187,3 +187,13 @@ A local before/after check using the same debug build profile, wgpu on the Wayla
 desktop, isolated state and a two-message idle session measured **2.00% → 0.13% of
 one CPU** over 15 seconds after a three-second warm-up. This is one local sample,
 not a cross-machine performance guarantee; it includes periodic Git refreshes.
+
+## Long sessions and large libraries
+
+Session persistence now uses indexed SQLite transactions and structurally shared
+histories. UI storage jobs are serialized off-thread; sidebar summaries load
+without transcript bodies. Both transcript and sidebar use variable-height
+viewport indexes, and visible streaming Markdown is parsed incrementally.
+See [performance](performance.md) for architecture, format-change implications,
+regression coverage, measurement limitations and the isolated release benchmark.
+The window smoke check also exercises 20,000-entry and 10,000-session views.

@@ -12,7 +12,7 @@ use pico_core::CancellationToken;
 use pico_core::{
     agent::Harness,
     auth::Login,
-    store::{Catalog, Entry, EntryKind, Project, Session, Settings, Store},
+    store::{Catalog, Entry, EntryKind, Project, Session, SessionSummary, Settings, Store},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -23,6 +23,12 @@ use std::{
     },
     time::Duration,
 };
+
+#[derive(Clone)]
+enum SidebarRow {
+    Heading(&'static str, usize),
+    Session(usize, usize),
+}
 
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
@@ -35,7 +41,23 @@ const EFFORTS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"]
 pub struct App {
     harness: Option<Arc<Harness>>,
     catalog: Catalog,
-    sessions: Vec<Session>,
+    sessions: Vec<SessionSummary>,
+    current_session: Option<Session>,
+    transcript: crate::virtual_list::List,
+    transcript_count: usize,
+    child_counts: HashMap<String, usize>,
+    sidebar_rows: Vec<SidebarRow>,
+    sidebar_list: crate::virtual_list::List,
+    catalog_revision: u64,
+    view_epoch: u64,
+    sidebar_epoch: u64,
+    sidebar_keys: HashMap<String, usize>,
+    io: crate::io_worker::Worker<Message>,
+    tasks: Vec<Task<Message>>,
+    io_busy: bool,
+    closing: bool,
+    close_requested: bool,
+    submissions: HashMap<String, (String, String)>,
     revisions: HashMap<String, u64>,
     outputs: HashMap<String, tool_output::Output>,
     context_menu: Option<(String, iced::Point)>,
@@ -43,7 +65,7 @@ pub struct App {
     search: String,
     project_filter: Option<PathBuf>,
     editor: text_editor::Content,
-    markdown: HashMap<String, (String, Vec<markdown::Item>)>,
+    markdown: HashMap<String, (Arc<Entry>, markdown::Content)>,
     expanded: HashSet<String>,
     groups: HashSet<String>,
     settings_open: bool,
@@ -65,6 +87,7 @@ pub struct App {
     auto_scroll: bool,
     git: String,
     git_pending: bool,
+    git_cost: Duration,
     draft_dirty: bool,
     smoke: bool,
     smoke_stage: usize,
@@ -83,6 +106,11 @@ enum Modal {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    Selected(Result<Option<String>, String>),
+    Sent(String, String, Result<(), String>),
+    DraftSaved(String, String, Result<(), String>),
+    Deleted(String, Result<(), String>),
+    Edited(Result<(), String>),
     Tick,
     Changed,
     GitTick,
@@ -122,7 +150,10 @@ pub enum Message {
     Delete(String),
     ToggleEntry(String),
     ToggleGroup(String),
-    Scroll(bool),
+    Scroll(u64, f32, f32, bool),
+    RowSize(u64, usize, f32),
+    SidebarScroll(u64, f32, f32),
+    SidebarSize(u64, usize, f32),
     Bottom,
     Link(String),
     Copy(String),
@@ -132,7 +163,7 @@ pub enum Message {
     Account(Option<String>),
     CancelLogin,
     Logout,
-    Git(String, String),
+    Git(String, String, Duration),
     External(Result<(), String>),
     ErrorDismiss,
     ResizeStart(bool),
@@ -178,6 +209,22 @@ impl App {
             harness,
             catalog,
             sessions: vec![],
+            current_session: None,
+            transcript: crate::virtual_list::List::default(),
+            transcript_count: 0,
+            child_counts: HashMap::new(),
+            sidebar_rows: vec![],
+            sidebar_list: crate::virtual_list::List::default(),
+            catalog_revision: u64::MAX,
+            view_epoch: 0,
+            sidebar_epoch: 0,
+            sidebar_keys: HashMap::new(),
+            io: crate::io_worker::Worker::new(),
+            tasks: vec![],
+            io_busy: false,
+            closing: false,
+            close_requested: false,
+            submissions: HashMap::new(),
             revisions: HashMap::new(),
             outputs: HashMap::new(),
             context_menu: None,
@@ -207,6 +254,7 @@ impl App {
             auto_scroll: true,
             git: String::new(),
             git_pending: false,
+            git_cost: Duration::ZERO,
             draft_dirty: false,
             smoke,
             smoke_stage: 0,
@@ -215,128 +263,284 @@ impl App {
             window_id: None,
         };
         app.refresh();
-        app.restore_draft();
+        let initial = app.selected.take();
+        if initial.is_some() {
+            app.select(initial);
+        }
         let task = if let Some(h) = &app.harness {
             let auth = h.auth.clone();
             Task::perform(async move { auth.status().await }, Message::Account)
         } else {
             Task::none()
         };
+        let task = Task::batch(std::iter::once(task).chain(app.tasks.drain(..)));
         (app, task)
     }
     fn current(&self) -> Option<&Session> {
-        self.sessions
-            .iter()
-            .find(|s| Some(&s.id) == self.selected.as_ref())
+        self.current_session.as_ref()
     }
     fn running(&self) -> bool {
         self.selected
             .as_ref()
             .and_then(|id| self.harness.as_ref()?.get(id))
-            .is_some_and(|s| s.is_running())
+            .is_some_and(|c| c.is_running())
     }
     fn refresh(&mut self) -> bool {
-        let mut selected_changed = false;
-        if let Some(h) = &self.harness {
-            let conversations = h.all();
-            self.sessions
-                .retain(|s| conversations.iter().any(|c| c.id == s.id));
-            self.revisions
-                .retain(|id, _| conversations.iter().any(|c| &c.id == id));
-            for conversation in conversations {
-                let revision = conversation.revision();
-                if self.revisions.get(&conversation.id) == Some(&revision) {
-                    continue;
-                }
-                let snapshot = conversation.snapshot();
-                selected_changed |= self.selected.as_ref() == Some(&snapshot.id);
-                self.revisions.insert(snapshot.id.clone(), revision);
-                if let Some(session) = self.sessions.iter_mut().find(|s| s.id == snapshot.id) {
-                    *session = snapshot;
-                } else {
-                    self.sessions.push(snapshot);
-                }
-            }
+        let Some(h) = &self.harness else {
+            return false;
+        };
+        let catalog_revision = h.catalog_revision();
+        if catalog_revision != self.catalog_revision {
+            self.sessions = h.summaries();
             self.sessions
                 .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+            self.catalog_revision = catalog_revision;
+            self.prepare_sidebar();
         }
-        if self
-            .selected
+        let h = self.harness.as_ref().expect("harness");
+        let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
+            self.current_session = None;
+            self.outputs.clear();
+            self.markdown.clear();
+            return false;
+        };
+        let revision = conversation.revision();
+        if self.revisions.get(&conversation.id) == Some(&revision)
+            && self
+                .current_session
+                .as_ref()
+                .is_some_and(|s| s.id == conversation.id)
+        {
+            return false;
+        }
+        self.revisions.insert(conversation.id.clone(), revision);
+        let snapshot = conversation.snapshot();
+        let same = self
+            .current_session
             .as_ref()
-            .is_some_and(|id| !self.sessions.iter().any(|s| &s.id == id))
-        {
-            self.selected = None;
+            .is_some_and(|s| s.id == snapshot.id);
+        if !same {
+            self.outputs.clear();
+            self.markdown.clear();
+            self.view_epoch = self.view_epoch.wrapping_add(1);
+            self.transcript = crate::virtual_list::List::default();
+            self.transcript_count = 0;
+            self.child_counts.clear();
         }
-        self.outputs.retain(|id, _| {
-            self.expanded.contains(id)
-                && self
-                    .sessions
-                    .iter()
-                    .find(|s| Some(&s.id) == self.selected.as_ref())
-                    .is_some_and(|s| s.entries.iter().any(|e| &e.id == id))
-        });
-        self.markdown.retain(|id, _| {
-            self.sessions
+        // Persistent-tree diffs only visit changed leaves, not the full transcript.
+        let empty = pico_core::history::History::default();
+        let old = if same {
+            &self.current_session.as_ref().expect("same session").entries
+        } else {
+            &empty
+        };
+        for (index, entry) in old.changes(&snapshot.entries) {
+            let Some(entry) = entry else {
+                continue;
+            };
+            if let EntryKind::Tool { input, output, .. } = &entry.kind
+                && let Some(view) = self.outputs.get_mut(&entry.id)
+            {
+                view.set(input, output);
+            }
+            if let Some((source, content)) = self.markdown.get_mut(&entry.id) {
+                if entry.text.starts_with(&source.text) {
+                    content.push_str(&entry.text[source.text.len()..]);
+                } else {
+                    *content = markdown::Content::parse(&entry.text);
+                }
+                *source = snapshot.entries.shared(index);
+            }
+        }
+        self.current_session = Some(snapshot);
+        self.append_transcript();
+        if self.auto_scroll {
+            self.transcript.end();
+        }
+        self.prepare_visible();
+        true
+    }
+    fn append_transcript(&mut self) {
+        let Some(session) = &self.current_session else {
+            return;
+        };
+        for (offset, entry) in session.entries.range(self.transcript_count).enumerate() {
+            if let EntryKind::Tool {
+                parent: Some(parent),
+                ..
+            } = &entry.kind
+            {
+                *self.child_counts.entry(parent.clone()).or_default() += 1;
+                if !self.groups.contains(parent) {
+                    continue;
+                }
+            }
+            let height = match &entry.kind {
+                EntryKind::Tool { .. } => 70.,
+                EntryKind::Reasoning if !self.expanded.contains(&entry.id) => 40.,
+                _ => 120.,
+            };
+            self.transcript.push(self.transcript_count + offset, height);
+        }
+        self.transcript_count = session.entries.len();
+    }
+    fn rebuild_transcript(&mut self) {
+        let Some(session) = &self.current_session else {
+            return;
+        };
+        self.transcript_count = session.entries.len();
+        self.child_counts.clear();
+        for entry in session.entries.iter() {
+            if let EntryKind::Tool {
+                parent: Some(parent),
+                ..
+            } = &entry.kind
+            {
+                *self.child_counts.entry(parent.clone()).or_default() += 1;
+            }
+        }
+        self.transcript.reset(session.entries.iter().enumerate().filter(|(_,e)|!matches!(&e.kind,EntryKind::Tool {parent:Some(p),..} if !self.groups.contains(p))).map(|(i,e)| {
+            let height=match &e.kind {EntryKind::Tool {..}=>70.,EntryKind::Reasoning if !self.expanded.contains(&e.id)=>40.,_=>120.};
+            (i,height)
+        }));
+    }
+    fn prepare_visible(&mut self) {
+        if let Some(session) = &self.current_session {
+            let visible = &self.transcript.order[self.transcript.visible()];
+            let ids: HashSet<_> = visible
                 .iter()
-                .find(|s| Some(&s.id) == self.selected.as_ref())
-                .is_some_and(|s| s.entries.iter().any(|e| &e.id == id))
-        });
-        // Borrow the selected transcript, rather than cloning it a second time.
-        if let Some(session) = self
-            .sessions
-            .iter()
-            .find(|s| Some(&s.id) == self.selected.as_ref())
-        {
-            for entry in &session.entries {
-                if matches!(
-                    entry.kind,
-                    EntryKind::User | EntryKind::Assistant | EntryKind::Reasoning
-                ) && self
-                    .markdown
-                    .get(&entry.id)
-                    .is_none_or(|(source, _)| source != &entry.text)
+                .map(|&i| session.entries[i].id.as_str())
+                .collect();
+            self.markdown.retain(|id, _| ids.contains(id.as_str()));
+            self.outputs
+                .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
+            for &index in visible {
+                let entry = &session.entries[index];
+                if matches!(entry.kind, EntryKind::User | EntryKind::Assistant)
+                    || matches!(entry.kind, EntryKind::Reasoning)
+                        && self.expanded.contains(&entry.id)
                 {
-                    self.markdown.insert(
-                        entry.id.clone(),
-                        (entry.text.clone(), markdown::parse(&entry.text).collect()),
-                    );
+                    self.markdown.entry(entry.id.clone()).or_insert_with(|| {
+                        (
+                            session.entries.shared(index),
+                            markdown::Content::parse(&entry.text),
+                        )
+                    });
                 }
                 if let EntryKind::Tool { input, output, .. } = &entry.kind
                     && self.expanded.contains(&entry.id)
                 {
                     self.outputs
                         .entry(entry.id.clone())
-                        .or_insert_with(|| tool_output::Output::new(input, output))
-                        .set(input, output);
+                        .or_insert_with(|| tool_output::Output::new(input, output));
                 }
             }
         }
-        selected_changed
+    }
+    fn prepare_sidebar(&mut self) {
+        let needle = self.search.to_lowercase();
+        let mut sections = [vec![], vec![], vec![]];
+        for (index, s) in self.sessions.iter().enumerate() {
+            if self
+                .project_filter
+                .as_ref()
+                .is_some_and(|p| p != &s.project)
+                || !needle.is_empty()
+                    && !s.title.to_lowercase().contains(&needle)
+                    && !s.project.to_string_lossy().to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            let c = self.harness.as_ref().and_then(|h| h.get(&s.id));
+            let category = if c.as_ref().is_some_and(|c| c.is_running()) {
+                0
+            } else if s.interrupted
+                || s.needs_attention
+                || c.as_ref()
+                    .is_some_and(|c| *c.status.lock().expect("status lock") == "Needs attention")
+            {
+                1
+            } else {
+                2
+            };
+            sections[category].push(SidebarRow::Session(index, category));
+        }
+        self.sidebar_rows.clear();
+        for (name, section) in ["WORKING", "NEEDS ATTENTION", "SESSIONS"]
+            .into_iter()
+            .zip(sections)
+        {
+            if !section.is_empty() {
+                self.sidebar_rows
+                    .push(SidebarRow::Heading(name, section.len()));
+                self.sidebar_rows.extend(section);
+            }
+        }
+        self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
+        self.sidebar_list
+            .reset(self.sidebar_rows.iter().map(|row| match row {
+                SidebarRow::Heading(name, _) => (
+                    match *name {
+                        "WORKING" => 0,
+                        "NEEDS ATTENTION" => 1,
+                        _ => 2,
+                    },
+                    36.,
+                ),
+                SidebarRow::Session(index, _) => {
+                    let next = self.sidebar_keys.len() + 3;
+                    (
+                        *self
+                            .sidebar_keys
+                            .entry(self.sessions[*index].id.clone())
+                            .or_insert(next),
+                        72.,
+                    )
+                }
+            }));
+        self.tasks.push(widget::operation::scroll_to(
+            "sessions",
+            scrollable::AbsoluteOffset {
+                x: 0.,
+                y: self.sidebar_list.offset,
+            },
+        ));
     }
     fn save_catalog(&mut self) -> bool {
         self.catalog.selected = self.selected.clone();
-        if let Some(h) = &self.harness
-            && let Err(e) = h.store.save_catalog(&self.catalog)
-        {
-            self.error = Some(format!(
-                "Could not save settings: {e:#}. Fix disk space/permissions and try again."
-            ));
-            return false;
+        if let Some(h) = &self.harness {
+            let h = h.clone();
+            let catalog = self.catalog.clone();
+            self.tasks.push(self.io.run(move || {
+                Message::External(h.store.save_catalog(&catalog).map_err(|e| {
+                    format!(
+                        "Could not save settings: {e:#}. Fix storage and retry before quitting."
+                    )
+                }))
+            }));
         }
         true
     }
+    fn take_draft(&mut self) -> Option<(String, String)> {
+        if !self.draft_dirty {
+            return None;
+        }
+        let id = self.selected.clone()?;
+        self.draft_dirty = false;
+        Some((id, self.editor.text()))
+    }
     fn save_draft(&mut self) -> bool {
-        if self.draft_dirty {
-            if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
-                let draft = self.editor.text();
-                if let Err(e) = h.edit(id, |s| s.draft = draft) {
-                    self.error = Some(format!(
-                        "Could not save draft: {e:#}. Keep this window open, copy your draft, or fix storage and retry."
-                    ));
-                    return false;
-                }
-            }
-            self.draft_dirty = false;
+        if self.io_busy || self.closing {
+            return true;
+        }
+        if let Some((id, draft)) = self.take_draft()
+            && let Some(h) = &self.harness
+        {
+            let h = h.clone();
+            self.tasks.push(self.io.run(move || {
+                let result=h.edit(&id,|s|s.draft=draft.clone()).map_err(|e|format!("Could not save draft: {e:#}. Keep Pico open and retry after fixing storage."));
+                Message::DraftSaved(id,draft,result)
+            }));
         }
         true
     }
@@ -345,16 +549,31 @@ impl App {
             text_editor::Content::with_text(self.current().map(|s| s.draft.as_str()).unwrap_or(""));
     }
     fn select(&mut self, id: Option<String>) {
-        if !self.save_draft() {
+        if self.io_busy {
             return;
         }
-        self.context_menu = None;
-        self.selected = id;
-        self.auto_scroll = true;
-        self.refresh();
-        self.restore_draft();
-        self.git.clear();
-        self.save_catalog();
+        let draft = self.take_draft();
+        if let Some(h) = &self.harness {
+            let h = h.clone();
+            self.io_busy = true;
+            self.tasks.push(self.io.run(move || {
+                Message::Selected(
+                    (|| {
+                        if let Some((old, draft)) = draft {
+                            h.edit(&old, |s| s.draft = draft)?;
+                        }
+                        if let Some(id) = &id {
+                            h.load(id)?;
+                        }
+                        h.evict_inactive(id.as_deref())?;
+                        Ok::<_, pico_core::Error>(id)
+                    })()
+                    .map_err(|e| {
+                        format!("Could not switch sessions: {e:#}. Fix storage and retry.")
+                    }),
+                )
+            }));
+        }
     }
     fn fail(&mut self, result: Result<(), impl std::fmt::Display>) {
         if let Err(e) = result {
@@ -362,10 +581,109 @@ impl App {
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        let close = if self.close_requested && !self.io_busy && !self.closing {
+            self.close_requested = false;
+            self.quit()
+        } else {
+            Task::none()
+        };
+        Task::batch([task, close].into_iter().chain(self.tasks.drain(..)))
+    }
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
+        if (self.closing || self.close_requested)
+            && matches!(
+                message,
+                Message::Editor(_)
+                    | Message::Send
+                    | Message::Select(_)
+                    | Message::New
+                    | Message::Create(_)
+                    | Message::Confirm
+                    | Message::SaveDraft
+                    | Message::SessionModel(_)
+                    | Message::SessionEffort(_)
+                    | Message::Favorite(_)
+                    | Message::ApplySettings
+                    | Message::Font(_)
+                    | Message::ChatWidth(_)
+                    | Message::Resume(_)
+            )
+        {
+            return Task::none();
+        }
         match message {
+            Message::Selected(result) => {
+                self.io_busy = false;
+                match result {
+                    Ok(id) => {
+                        self.selected = id;
+                        self.context_menu = None;
+                        self.auto_scroll = true;
+                        self.refresh();
+                        self.restore_draft();
+                        self.git.clear();
+                        self.save_catalog();
+                        return bottom();
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        self.draft_dirty = true;
+                    }
+                }
+            }
+            Message::DraftSaved(id, _draft, result) => {
+                if let Err(error) = result {
+                    self.error = Some(error);
+                    if self.selected.as_ref() == Some(&id) {
+                        self.draft_dirty = true;
+                    }
+                }
+            }
+            Message::Sent(id, text, result) => {
+                self.io_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.submissions.remove(&id);
+                        if self.selected.as_ref() == Some(&id) && self.editor.text() == text {
+                            self.editor = text_editor::Content::new();
+                            self.draft_dirty = false;
+                        }
+                        self.auto_scroll = true;
+                        self.refresh();
+                        return bottom();
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        self.draft_dirty = true;
+                    }
+                }
+            }
+            Message::Deleted(id, result) => {
+                self.io_busy = false;
+                match result {
+                    Ok(()) => {
+                        if self.selected.as_ref() == Some(&id) {
+                            self.draft_dirty = false;
+                            self.selected = None;
+                            self.current_session = None;
+                            self.restore_draft();
+                        }
+                        self.refresh();
+                        self.modal = None;
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Message::Edited(result) => {
+                self.fail(result);
+                self.refresh();
+            }
             Message::Exit(result) => match result {
                 Ok(()) => return iced::exit(),
                 Err(error) => {
+                    self.closing = false;
+                    self.draft_dirty = true;
                     self.modal = None;
                     self.error = Some(error);
                 }
@@ -376,7 +694,23 @@ impl App {
                 self.save_draft();
             }
             Message::Changed => {
-                if self.refresh() && self.auto_scroll {
+                let before = self.catalog_revision;
+                let changed = self.refresh();
+                if before != self.catalog_revision
+                    && !self.io_busy
+                    && !self.closing
+                    && let Some(h) = &self.harness
+                {
+                    let h = h.clone();
+                    let selected = self.selected.clone();
+                    self.tasks.push(self.io.run(move || {
+                        Message::External(
+                            h.evict_inactive(selected.as_deref())
+                                .map_err(|e| format!("Could not release inactive session: {e:#}")),
+                        )
+                    }));
+                }
+                if changed && self.auto_scroll {
                     return bottom();
                 }
             }
@@ -389,12 +723,11 @@ impl App {
                     self.git_pending = true;
                     return Task::perform(
                         async move {
-                            let result = tokio::task::spawn_blocking(move || git_info(path))
-                                .await
-                                .unwrap_or_else(|e| format!("Git status unavailable: {e}"));
-                            (id, result)
+                            let start = std::time::Instant::now();
+                            let result = git_info(path).await;
+                            (id, result, start.elapsed())
                         },
-                        |(id, info)| Message::Git(id, info),
+                        |(id, info, cost)| Message::Git(id, info, cost),
                     );
                 }
             }
@@ -411,9 +744,7 @@ impl App {
                 if let Some(Entry {
                     kind: EntryKind::Tool { output, .. },
                     ..
-                }) = self
-                    .current()
-                    .and_then(|s| s.entries.iter().find(|e| e.id == id))
+                }) = self.current().and_then(|s| s.entries.by_id(&id))
                 {
                     return iced::clipboard::write(output.clone());
                 }
@@ -424,25 +755,45 @@ impl App {
                 return bottom();
             }
             Message::Create(path) => {
-                if let Some(h) = &self.harness {
-                    let session = Session::new(path, &self.catalog.settings);
-                    let id = session.id.clone();
-                    match h.store.save_session(&session) {
-                        Ok(()) => {
-                            h.insert(session);
-                            self.select(Some(id));
-                        }
-                        Err(e) => self.error = Some(format!("Could not create session: {e:#}")),
-                    }
+                if !self.io_busy
+                    && let Some(h) = &self.harness
+                {
+                    let h = h.clone();
+                    let settings = self.catalog.settings.clone();
+                    let draft = self.take_draft();
+                    self.io_busy = true;
+                    self.tasks.push(self.io.run(move || {
+                        Message::Selected(
+                            (|| {
+                                if let Some((id, draft)) = draft {
+                                    h.edit(&id, |s| s.draft = draft)?;
+                                }
+                                let session = Session::new(path, &settings);
+                                let id = session.id.clone();
+                                h.store.save_session(&session)?;
+                                h.insert(session);
+                                h.evict_inactive(Some(&id))?;
+                                Ok::<_, pico_core::Error>(Some(id))
+                            })()
+                            .map_err(|e| format!("Could not create session: {e:#}")),
+                        )
+                    }));
                 }
             }
-            Message::Search(search) => self.search = search,
+            Message::Search(search) => {
+                self.search = search;
+                self.sidebar_list.offset = 0.;
+                self.prepare_sidebar();
+                return widget::operation::snap_to("sessions", scrollable::RelativeOffset::START);
+            }
             Message::Filter(path) => {
                 self.project_filter = if self.project_filter.as_ref() == Some(&path) {
                     None
                 } else {
                     Some(path)
                 };
+                self.sidebar_list.offset = 0.;
+                self.prepare_sidebar();
             }
             Message::Favorite(path) => {
                 if let Some(p) = self.catalog.projects.iter_mut().find(|p| p.path == path) {
@@ -451,7 +802,12 @@ impl App {
                 self.save_catalog();
             }
             Message::Editor(action) => {
-                if self.modal.is_some() || self.context_menu.is_some() {
+                if self.io_busy
+                    || self.closing
+                    || self.close_requested
+                    || self.modal.is_some()
+                    || self.context_menu.is_some()
+                {
                     return Task::none();
                 }
                 let edit = action.is_edit();
@@ -467,16 +823,27 @@ impl App {
                     if message.trim().is_empty() {
                         return Task::none();
                     }
-                    match h.send(id, message, self.catalog.settings.clone()) {
-                        Ok(()) => {
-                            self.editor = text_editor::Content::new();
-                            self.draft_dirty = false;
-                            self.auto_scroll = true;
-                            self.refresh();
-                            return bottom();
-                        }
-                        Err(e) => self.error = Some(format!("{e:#}")),
+                    if self.io_busy {
+                        return Task::none();
                     }
+                    let h = h.clone();
+                    let id = id.clone();
+                    let settings = self.catalog.settings.clone();
+                    self.io_busy = true;
+                    let submission = self
+                        .submissions
+                        .entry(id.clone())
+                        .or_insert_with(|| (message.clone(), pico_core::store::id()));
+                    if submission.0 != message {
+                        *submission = (message.clone(), pico_core::store::id());
+                    }
+                    let submission = submission.1.clone();
+                    self.tasks.push(self.io.run(move || {
+                        let result = h
+                            .send(&id, &submission, message.clone(), settings)
+                            .map_err(|e| format!("{e:#}"));
+                        Message::Sent(id, message, result)
+                    }));
                 }
             }
             Message::Stop => {
@@ -487,6 +854,7 @@ impl App {
                 }
             }
             Message::ToggleSettings => {
+                self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings_open = !self.settings_open;
             }
             Message::ApplySettings => {
@@ -513,11 +881,13 @@ impl App {
             Message::Context(value) => self.context_text = value,
             Message::Threshold(value) => self.threshold_text = value,
             Message::Font(value) => {
+                self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings.font_size = value;
                 self.catalog.settings.font_size = value;
                 self.save_catalog();
             }
             Message::ChatWidth(value) => {
+                self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings.chat_width = value;
                 self.catalog.settings.chat_width = value;
                 self.save_catalog();
@@ -531,18 +901,28 @@ impl App {
                 if !self.running()
                     && let (Some(h), Some(id)) = (&self.harness, &self.selected)
                 {
-                    let result = h.edit(id, |s| s.model = value);
-                    self.fail(result);
-                    self.refresh();
+                    let h = h.clone();
+                    let id = id.clone();
+                    self.tasks.push(self.io.run(move || {
+                        Message::Edited(
+                            h.edit(&id, |s| s.model = value)
+                                .map_err(|e| format!("{e:#}")),
+                        )
+                    }));
                 }
             }
             Message::SessionEffort(value) => {
                 if !self.running()
                     && let (Some(h), Some(id)) = (&self.harness, &self.selected)
                 {
-                    let result = h.edit(id, |s| s.effort = value);
-                    self.fail(result);
-                    self.refresh();
+                    let h = h.clone();
+                    let id = id.clone();
+                    self.tasks.push(self.io.run(move || {
+                        Message::Edited(
+                            h.edit(&id, |s| s.effort = value)
+                                .map_err(|e| format!("{e:#}")),
+                        )
+                    }));
                 }
             }
             Message::AddProject => {
@@ -580,36 +960,96 @@ impl App {
                 self.modal = Some(Modal::Delete(id));
             }
             Message::ToggleEntry(id) => {
+                self.view_epoch = self.view_epoch.wrapping_add(1);
                 if self.expanded.remove(&id) {
                     self.outputs.remove(&id);
                 } else {
                     if let Some(Entry {
                         kind: EntryKind::Tool { input, output, .. },
                         ..
-                    }) = self
-                        .current()
-                        .and_then(|s| s.entries.iter().find(|e| e.id == id))
+                    }) = self.current().and_then(|s| s.entries.by_id(&id))
                     {
                         self.outputs
                             .insert(id.clone(), tool_output::Output::new(input, output));
                     }
                     self.expanded.insert(id);
                 }
+                self.prepare_visible();
             }
             Message::ToggleGroup(id) => {
+                self.view_epoch = self.view_epoch.wrapping_add(1);
                 if !self.groups.remove(&id) {
                     self.groups.insert(id);
                 }
+                self.rebuild_transcript();
+                self.prepare_visible();
             }
-            Message::Scroll(at_bottom) => self.auto_scroll = at_bottom,
+            Message::Scroll(epoch, offset, height, at_bottom) => {
+                if epoch != self.view_epoch {
+                    return Task::none();
+                }
+                self.auto_scroll = at_bottom;
+                self.transcript.offset = (offset - 20.).max(0.);
+                self.transcript.viewport = height;
+                self.prepare_visible();
+            }
+            Message::RowSize(epoch, index, height) => {
+                if epoch != self.view_epoch {
+                    return Task::none();
+                }
+                let corrected = self.transcript.measure(index, height + 18.);
+                if self.auto_scroll {
+                    self.transcript.end();
+                    self.prepare_visible();
+                    return bottom();
+                }
+                if corrected {
+                    self.prepare_visible();
+                    return widget::operation::scroll_to(
+                        "chat",
+                        scrollable::AbsoluteOffset {
+                            x: 0.,
+                            y: self.transcript.offset + 20.,
+                        },
+                    );
+                }
+            }
+            Message::SidebarScroll(epoch, offset, height) => {
+                if epoch != self.sidebar_epoch {
+                    return Task::none();
+                }
+                self.sidebar_list.offset = offset;
+                self.sidebar_list.viewport = height;
+            }
+            Message::SidebarSize(epoch, index, height) => {
+                if epoch != self.sidebar_epoch {
+                    return Task::none();
+                }
+                if self.sidebar_list.measure(index, height + 5.) {
+                    return widget::operation::scroll_to(
+                        "sessions",
+                        scrollable::AbsoluteOffset {
+                            x: 0.,
+                            y: self.sidebar_list.offset,
+                        },
+                    );
+                }
+            }
+
             Message::Bottom => {
                 self.auto_scroll = true;
+                self.transcript.end();
+                self.prepare_visible();
                 return bottom();
             }
             Message::Link(url) => {
                 self.modal = Some(Modal::Link(url));
             }
-            Message::Copy(value) => return iced::clipboard::write(value),
+            Message::Copy(id) => {
+                if let Some(entry) = self.current().and_then(|s| s.entries.by_id(&id)) {
+                    return iced::clipboard::write(entry.text.clone());
+                }
+            }
             Message::Login => {
                 if self.login_cancel.is_none()
                     && let Some(h) = &self.harness
@@ -671,7 +1111,8 @@ impl App {
                 self.login_url = None;
             }
             Message::Logout => self.modal = Some(Modal::Logout),
-            Message::Git(id, info) => {
+            Message::Git(id, info, cost) => {
+                self.git_cost = cost;
                 self.git_pending = false;
                 if self.selected.as_deref() == Some(&id) {
                     self.git = info;
@@ -695,6 +1136,8 @@ impl App {
                     self.cursor_x = position.x;
                     self.cursor_y = position.y;
                     if let Some((right, start, width)) = self.drag {
+                        self.view_epoch = self.view_epoch.wrapping_add(1);
+                        self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
                         let delta = position.x - start;
                         let limit = (self.window_width * 0.4).min(if right { 700. } else { 600. });
                         let value = (width + if right { -delta } else { delta })
@@ -714,6 +1157,8 @@ impl App {
                     }
                 }
                 iced::Event::Window(window::Event::Resized(size)) => {
+                    self.view_epoch = self.view_epoch.wrapping_add(1);
+                    self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
                     self.window_width = size.width;
                     self.window_height = size.height;
                 }
@@ -762,6 +1207,9 @@ impl App {
         Task::none()
     }
     fn confirm(&mut self) -> Task<Message> {
+        if self.io_busy || self.closing {
+            return Task::none();
+        }
         match self.modal.clone() {
             Some(Modal::AddProject) => match std::fs::canonicalize(self.modal_input.trim()) {
                 Ok(path) if path.is_dir() => {
@@ -786,27 +1234,24 @@ impl App {
                 if !title.is_empty()
                     && let Some(h) = &self.harness
                 {
-                    let result = h.edit(&id, |s| s.title = title);
-                    self.fail(result);
-                    self.refresh();
+                    let h = h.clone();
+                    self.tasks.push(self.io.run(move || {
+                        Message::Edited(
+                            h.edit(&id, |s| s.title = title)
+                                .map_err(|e| format!("{e:#}")),
+                        )
+                    }));
                     self.modal = None;
                 }
             }
             Some(Modal::Delete(id)) => {
                 if let Some(h) = &self.harness {
-                    match h.remove(&id) {
-                        Ok(()) => {
-                            if self.selected.as_deref() == Some(&id) {
-                                // Confirmed deletion also discards this session's draft.
-                                self.draft_dirty = false;
-                                self.select(None);
-                            } else {
-                                self.refresh();
-                            }
-                            self.modal = None;
-                        }
-                        Err(e) => self.error = Some(e.to_string()),
-                    }
+                    let h = h.clone();
+                    self.io_busy = true;
+                    self.tasks.push(self.io.run(move || {
+                        let result = h.remove(&id).map_err(|e| format!("{e:#}"));
+                        Message::Deleted(id, result)
+                    }));
                 }
             }
             Some(Modal::Logout) => {
@@ -841,30 +1286,34 @@ impl App {
         Task::none()
     }
     fn quit(&mut self) -> Task<Message> {
-        if !self.save_draft() {
-            self.modal = None;
+        if self.closing {
             return Task::none();
         }
-        if !self.save_catalog() {
-            self.modal = None;
+        if self.io_busy {
+            self.close_requested = true;
             return Task::none();
+        }
+        self.closing = true;
+        let draft = self.take_draft();
+        let mut catalog = self.catalog.clone();
+        catalog.selected = self.selected.clone();
+        if let Some(cancel) = &self.login_cancel {
+            cancel.cancel();
         }
         if let Some(h) = &self.harness {
-            h.stop_all();
-            let harness = h.clone();
-            if let Some(cancel) = &self.login_cancel {
-                cancel.cancel();
-            }
-            return Task::perform(
-                async move {
-                    while harness.all().iter().any(|s| s.is_running()) {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                    // Wait for any refresh-token rotation to be committed before process exit.
-                    harness.auth.flush().await.map_err(|e| format!("{e:#}"))
-                },
-                Message::Exit,
-            );
+            let h = h.clone();
+            return self.io.run(move || {
+                // Ordered after earlier jobs: no queued Send can start behind this barrier.
+                h.stop_all();
+                let result=(|| {
+                    while h.all().iter().any(|s|s.is_running()) {std::thread::sleep(Duration::from_millis(20));}
+                    if let Some((id,draft))=draft {h.edit(&id,|s|s.draft=draft)?;}
+                    h.store.save_catalog(&catalog)?;
+                    h.flush()?;
+                    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(h.auth.flush())
+                })();
+                Message::Exit(result.map_err(|e|format!("Could not finish saving: {e:#}. Keep Pico open, fix storage, then retry closing.")))
+            });
         }
         iced::exit()
     }
@@ -892,7 +1341,15 @@ impl App {
             }
         }
         if self.selected.is_some() {
-            subscriptions.push(iced::time::every(Duration::from_secs(5)).map(|_| Message::GitTick));
+            subscriptions.push(
+                iced::time::every(
+                    self.git_cost
+                        .saturating_mul(10)
+                        .max(Duration::from_secs(if self.running() { 5 } else { 60 }))
+                        .min(Duration::from_secs(300)),
+                )
+                .map(|_| Message::GitTick),
+            );
         }
         if self.draft_dirty {
             subscriptions
@@ -1050,58 +1507,37 @@ impl App {
                 .style(button::text),
             );
         }
-        let needle = self.search.to_lowercase();
-        let mut rows = column![].spacing(5);
-        for (section, title) in [(0, "WORKING"), (1, "NEEDS ATTENTION"), (2, "SESSIONS")] {
-            let matching: Vec<_> = self
-                .sessions
-                .iter()
-                .filter(|s| {
-                    let conv = self.harness.as_ref().and_then(|h| h.get(&s.id));
-                    let category = if conv.as_ref().is_some_and(|c| c.is_running()) {
-                        0
-                    } else if conv.as_ref().is_some_and(|c| {
-                        *c.status.lock().expect("status lock") == "Needs attention"
-                    }) || s.interrupted
-                    {
-                        1
+        let epoch = self.sidebar_epoch;
+        let range = self.sidebar_list.visible();
+        let mut rows: Vec<((u64, usize), Element<'_, Message>)> = vec![(
+            (epoch, usize::MAX),
+            space().height(self.sidebar_list.prefix(range.start)).into(),
+        )];
+        for index in range.clone() {
+            let content: Element<'_, Message> = match &self.sidebar_rows[index] {
+                SidebarRow::Heading(title, count) => {
+                    container(text(format!("{title}  {count}")).size(10).color(MUTED))
+                        .padding([10, 0])
+                        .into()
+                }
+                SidebarRow::Session(session_index, section) => {
+                    let session = &self.sessions[*session_index];
+                    let section = *section;
+                    let active = self.selected.as_ref() == Some(&session.id);
+                    let project = session
+                        .project
+                        .file_name()
+                        .unwrap_or(session.project.as_os_str())
+                        .to_string_lossy();
+                    let marker = if section == 0 {
+                        ["·", "•", "●", "•"][(self.tick as usize / 5) % 4]
+                    } else if section == 1 {
+                        "!"
                     } else {
-                        2
+                        "·"
                     };
-                    category == section
-                        && self.project_filter.as_ref().is_none_or(|p| p == &s.project)
-                        && (s.title.to_lowercase().contains(&needle)
-                            || s.project.to_string_lossy().to_lowercase().contains(&needle))
-                })
-                .collect();
-            if matching.is_empty() {
-                continue;
-            }
-            rows = rows.push(
-                container(
-                    text(format!("{title}  {}", matching.len()))
-                        .size(10)
-                        .color(MUTED),
-                )
-                .padding([10, 0]),
-            );
-            for session in matching {
-                let active = self.selected.as_ref() == Some(&session.id);
-                let project = session
-                    .project
-                    .file_name()
-                    .unwrap_or(session.project.as_os_str())
-                    .to_string_lossy();
-                let marker = if section == 0 {
-                    ["·", "•", "●", "•"][(self.tick as usize / 5) % 4]
-                } else if section == 1 {
-                    "!"
-                } else {
-                    "·"
-                };
-                let age = age(session.updated);
-                rows = rows.push(
-                    mouse_area(
+                    let age = age(session.updated);
+                    let content = mouse_area(
                         button(
                             column![
                                 row![
@@ -1133,18 +1569,41 @@ impl App {
                             button::text
                         }),
                     )
-                    .on_right_press(Message::SessionMenu(session.id.clone())),
-                );
-            }
+                    .on_right_press(Message::SessionMenu(session.id.clone()));
+                    content.into()
+                }
+            };
+            let key = self.sidebar_list.order[index];
+            let sensor = widget::sensor(content)
+                .key((epoch, key))
+                .on_show(move |size| Message::SidebarSize(epoch, key, size.height))
+                .on_resize(move |size| Message::SidebarSize(epoch, key, size.height));
+            rows.push(((epoch, key), column![sensor, space().height(5.)].into()));
         }
+        rows.push((
+            (epoch, usize::MAX - 1),
+            space()
+                .height((self.sidebar_list.total() - self.sidebar_list.prefix(range.end)).max(0.))
+                .into(),
+        ));
         if self.sessions.is_empty() {
-            rows = rows.push(
+            rows.push((
+                (epoch, usize::MAX - 2),
                 text("Your sessions will appear here.")
                     .size(13)
-                    .color(MUTED),
-            );
+                    .color(MUTED)
+                    .into(),
+            ));
         }
-        list = list.push(scrollable(rows).height(Fill));
+        let rows = widget::keyed_column(rows);
+        list = list.push(
+            scrollable(rows)
+                .id("sessions")
+                .height(Fill)
+                .on_scroll(move |v| {
+                    Message::SidebarScroll(epoch, v.absolute_offset().y, v.bounds().height)
+                }),
+        );
         container(list)
             .padding(14)
             .width(
@@ -1161,9 +1620,15 @@ impl App {
         let Some(session) = self.current() else {
             return self.new_session();
         };
-        let mut transcript = column![].spacing(18);
+        let epoch = self.view_epoch;
+        let range = self.transcript.visible();
+        let mut children: Vec<((u64, usize), Element<'_, Message>)> = vec![(
+            (epoch, usize::MAX),
+            space().height(self.transcript.prefix(range.start)).into(),
+        )];
         if session.entries.is_empty() {
-            transcript = transcript.push(
+            children.push((
+                (epoch, 0),
                 container(
                     column![
                         text("What are we building?").size(28),
@@ -1171,24 +1636,28 @@ impl App {
                             .color(MUTED),
                         text("Commands run with your user permissions, without approval prompts.")
                             .size(12)
-                            .color(MUTED)
                     ]
                     .spacing(14),
                 )
-                .padding([40, 0]),
-            );
+                .padding([40, 0])
+                .into(),
+            ));
         }
-        for entry in &session.entries {
-            if let EntryKind::Tool {
-                parent: Some(parent),
-                ..
-            } = &entry.kind
-                && !self.groups.contains(parent)
-            {
-                continue;
-            }
-            transcript = transcript.push(self.entry_view(entry, session));
+        for &index in &self.transcript.order[range.clone()] {
+            let entry = &session.entries[index];
+            let row = widget::sensor(self.entry_view(entry, session))
+                .key((epoch, index))
+                .on_show(move |size| Message::RowSize(epoch, index, size.height))
+                .on_resize(move |size| Message::RowSize(epoch, index, size.height));
+            children.push(((epoch, index), column![row, space().height(18.)].into()));
         }
+        children.push((
+            (epoch, usize::MAX - 1),
+            space()
+                .height((self.transcript.total() - self.transcript.prefix(range.end)).max(0.))
+                .into(),
+        ));
+        let transcript = widget::keyed_column(children);
         let transcript = container(transcript)
             .max_width(self.catalog.settings.chat_width)
             .width(Fill)
@@ -1196,15 +1665,22 @@ impl App {
         let chat = scrollable(container(transcript).center_x(Fill))
             .id("chat")
             .height(Fill)
-            .on_scroll(|v| {
+            .on_scroll(move |v| {
                 let offset = v.absolute_offset();
                 let bounds = v.bounds();
                 let content = v.content_bounds();
-                Message::Scroll(offset.y + bounds.height >= content.height - 40.)
+                Message::Scroll(
+                    epoch,
+                    offset.y,
+                    bounds.height,
+                    offset.y + bounds.height >= content.height - 40.,
+                )
             });
         let running = self.running();
         let editor = text_editor(&self.editor)
-            .placeholder(if running {
+            .placeholder(if self.io_busy || self.closing {
+                "Saving…"
+            } else if running {
                 "Steer the agent after its current tool batch…"
             } else {
                 "Message Pico…"
@@ -1266,7 +1742,7 @@ impl App {
         .height(Fill)
         .into()
     }
-    fn entry_view<'a>(&'a self, entry: &'a Entry, session: &'a Session) -> Element<'a, Message> {
+    fn entry_view<'a>(&'a self, entry: &'a Entry, _session: &'a Session) -> Element<'a, Message> {
         match &entry.kind {
             EntryKind::Tool {
                 name,
@@ -1276,11 +1752,7 @@ impl App {
                 ..
             } => {
                 let open = self.expanded.contains(&entry.id);
-                let children = session
-                    .entries
-                    .iter()
-                    .filter(|e| matches!(&e.kind,EntryKind::Tool{parent:Some(p),..}if p==&entry.id))
-                    .count();
+                let children = self.child_counts.get(&entry.id).copied().unwrap_or(0);
                 let preview = input
                     .lines()
                     .find(|l| !l.trim().is_empty())
@@ -1372,7 +1844,7 @@ impl App {
                             }),
                         space().width(Fill),
                         button(text("Copy").size(10))
-                            .on_press(Message::Copy(entry.text.clone()))
+                            .on_press(Message::Copy(entry.id.clone()))
                             .style(button::text)
                     ]
                     .align_y(iced::Center)
@@ -1381,7 +1853,7 @@ impl App {
                 if let Some((_, items)) = self.markdown.get(&entry.id) {
                     content = content.push(
                         markdown::view(
-                            items,
+                            items.items(),
                             markdown::Settings::with_text_size(
                                 self.catalog.settings.font_size,
                                 markdown::Style::from_palette(Theme::Dark.palette()),
@@ -1779,7 +2251,7 @@ impl App {
                         EntryKind::Assistant,
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Pico V2\"); }\n```\n\n[Documentation](https://openai.com)",
                     ),
-                ];
+                ].into();
                 let tool = Entry {
                     id: "smoke-tool".into(),
                     text: String::new(),
@@ -1795,7 +2267,7 @@ impl App {
                 let id = s.id.clone();
                 h.insert(s);
                 self.select(Some(id));
-                let _ = self.update(Message::ToggleEntry("smoke-tool".into()));
+                let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
             }
             2 => self.settings_open = true,
             3 => {
@@ -1862,10 +2334,79 @@ impl App {
                     delayed_capture(),
                 ]);
             }
+            10 => {
+                let h = self.harness.as_ref().expect("smoke harness");
+                h.edit(self.selected.as_ref().expect("smoke session"),|s| {
+                    for i in 0..20000 {s.entries.push(Entry::new(EntryKind::Assistant,format!("### Historical message {i}\n\nAsymmetric **Markdown** content with λ and 界.")));}
+                }).expect("large smoke transcript");
+                self.refresh();
+                for i in 0..10000 {
+                    self.sessions.push(SessionSummary {
+                        id: format!("smoke-sidebar-{i}"),
+                        title: format!("Historical session {i} with wrapping title"),
+                        project: self.smoke_dir.clone().expect("smoke path"),
+                        updated: 0,
+                        interrupted: false,
+                        needs_attention: false,
+                    });
+                }
+                self.prepare_sidebar();
+                self.auto_scroll = false;
+                self.transcript.offset = self.transcript.prefix(10000);
+                self.prepare_visible();
+                return Task::batch([
+                    widget::operation::scroll_to(
+                        "chat",
+                        scrollable::AbsoluteOffset {
+                            x: 0.,
+                            y: self.transcript.offset + 20.,
+                        },
+                    ),
+                    widget::operation::scroll_to(
+                        "sessions",
+                        scrollable::AbsoluteOffset {
+                            x: 0.,
+                            y: self.sidebar_list.prefix(5000),
+                        },
+                    ),
+                    delayed_capture(),
+                ]);
+            }
+            11 => {
+                assert!(self.markdown.len() < 100, "bounded visible Markdown cache");
+                assert!(
+                    self.transcript.visible().start > 1000,
+                    "middle of long transcript is reachable"
+                );
+                self.auto_scroll = true;
+                self.transcript.end();
+                self.prepare_visible();
+                return Task::batch([bottom(), delayed_capture()]);
+            }
+            12 => {
+                assert_eq!(
+                    self.transcript.visible().end,
+                    self.transcript.order.len(),
+                    "Latest reaches history tail"
+                );
+                self.settings_open = false;
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+                return Task::batch([bottom(), delayed_capture()]);
+            }
+            13 => {
+                // Force fresh equal-height measurements for a new list identity.
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+                self.transcript = crate::virtual_list::List::default();
+                self.transcript_count = 0;
+                self.append_transcript();
+                self.transcript.end();
+                self.prepare_visible();
+                return Task::batch([bottom(), delayed_capture()]);
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered picker, chat, settings, modal, session menu and virtualized large output (middle/end/reflow)"
+                    "SMOKE_OK: native Wayland rendered picker, chat, settings, modal, session menu, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -1953,17 +2494,27 @@ fn external(url: String) -> Task<Message> {
         Message::External,
     )
 }
-fn git_info(path: PathBuf) -> String {
-    let result = std::process::Command::new("git")
-        .args([
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v1",
-            "--branch",
-            "--untracked-files=normal",
-        ])
-        .current_dir(path)
-        .output();
+async fn git_info(path: PathBuf) -> String {
+    let mut command = tokio::process::Command::new("git");
+    command.kill_on_drop(true);
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        command
+            .args([
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--branch",
+                "--untracked-files=normal",
+            ])
+            .current_dir(path)
+            .output(),
+    )
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => return "Git status timed out; will retry automatically".into(),
+    };
     match result {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
@@ -2053,6 +2604,145 @@ mod tests {
     fn app() -> App {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
+    async fn dispatch(app: &mut App, message: Message) {
+        let task = app.update(message);
+        drain(app, task).await;
+    }
+    async fn drain(app: &mut App, task: Task<Message>) {
+        use iced::futures::StreamExt;
+        let mut pending = std::collections::VecDeque::from([task]);
+        while let Some(task) = pending.pop_front() {
+            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        pending.push_back(app.update(message));
+                    }
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(path.clone())).await;
+        let first = app.selected.clone().unwrap();
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('a'))),
+        )
+        .await;
+        let task = app.update(Message::Create(path));
+        assert!(app.io_busy);
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('b'))),
+        )
+        .await;
+        assert_eq!(app.editor.text(), "a");
+        let old_epoch = app.view_epoch;
+        drain(&mut app, task).await;
+        let offset = app.transcript.offset;
+        dispatch(&mut app, Message::Scroll(old_epoch, 200000., 300., false)).await;
+        dispatch(&mut app, Message::RowSize(old_epoch, 0, 100000.)).await;
+        assert_eq!(app.transcript.offset, offset);
+        dispatch(&mut app, Message::Select(first.clone())).await;
+        assert_eq!(app.editor.text(), "a");
+        let send = app.update(Message::Send);
+        dispatch(&mut app, Message::SaveDraft).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('c'))),
+        )
+        .await;
+        assert_eq!(app.editor.text(), "a");
+        drain(&mut app, send).await;
+        assert!(app.editor.text().is_empty());
+        assert!(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .store
+                .load_session(&first)
+                .unwrap()
+                .draft
+                .is_empty()
+        );
+    }
+    #[tokio::test]
+    async fn shutdown_waits_for_submission_and_reports_catalog_failure() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(path)).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
+        )
+        .await;
+        let send = app.update(Message::Send);
+        let _ = app.quit();
+        assert!(app.close_requested);
+        let settings = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .store
+            .root()
+            .join("settings.json");
+        std::fs::remove_file(&settings).unwrap();
+        std::fs::create_dir(&settings).unwrap();
+        drain(&mut app, send).await;
+        assert!(!app.closing);
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("Could not finish saving")
+        );
+        assert!(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .all()
+                .iter()
+                .all(|c| !c.is_running())
+        );
+        std::fs::remove_dir(settings).unwrap();
+        let quit = app.quit();
+        drain(&mut app, quit).await;
+        assert!(app.closing);
+    }
+    #[tokio::test]
+    async fn long_transcript_only_caches_viewport_and_appends_preserve_heights() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(path)).await;
+        let h = app.harness.as_ref().unwrap().clone();
+        let id = app.selected.clone().unwrap();
+        h.edit(&id, |s| {
+            for i in 0..20000 {
+                s.entries.push(Entry::new(
+                    EntryKind::Assistant,
+                    format!("## Message {i}\n\nDistinct body"),
+                ));
+            }
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert_eq!(app.transcript.order.len(), 20000);
+        assert!(app.markdown.len() < 100);
+        app.transcript.measure(19999, 333.);
+        let before = app.transcript.total();
+        h.edit(&id, |s| {
+            s.entries
+                .push(Entry::new(EntryKind::Assistant, "new entry"))
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert_eq!(app.transcript.total(), before + 120.);
+        assert!(app.markdown.len() < 100);
+        let _ = app.view();
+    }
     #[test]
     fn model_order_is_stable_unique_and_includes_custom_selection() {
         let expected = vec!["gpt-5.3-codex", "gpt-5.4", "gpt-5.6-sol", "my-model"];
@@ -2060,13 +2750,13 @@ mod tests {
             assert_eq!(model_options("my-model", "gpt-5.4"), expected);
         }
     }
-    #[test]
-    fn session_menu_targets_the_clicked_session_and_releases_deleted_output() {
+    #[tokio::test]
+    async fn session_menu_targets_the_clicked_session_and_releases_deleted_output() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        let _ = app.update(Message::Create(path.clone()));
+        dispatch(&mut app, Message::Create(path.clone())).await;
         let first = app.selected.clone().unwrap();
-        let _ = app.update(Message::Create(path));
+        dispatch(&mut app, Message::Create(path)).await;
         let second = app.selected.clone().unwrap();
         let h = app.harness.as_ref().unwrap().clone();
         h.edit(&first, |s| {
@@ -2083,41 +2773,49 @@ mod tests {
             })
         })
         .unwrap();
-        let _ = app.update(Message::Select(first.clone()));
-        let _ = app.update(Message::ToggleEntry("long-tool".into()));
+        dispatch(&mut app, Message::Select(first.clone())).await;
+        dispatch(&mut app, Message::ToggleEntry("long-tool".into())).await;
         assert!(app.outputs.contains_key("long-tool"));
-        let _ = app.update(Message::ToggleEntry("long-tool".into()));
+        dispatch(&mut app, Message::ToggleEntry("long-tool".into())).await;
         assert!(!app.outputs.contains_key("long-tool"));
-        let _ = app.update(Message::ToggleEntry("long-tool".into()));
-        let _ = app.update(Message::Select(second.clone()));
+        dispatch(&mut app, Message::ToggleEntry("long-tool".into())).await;
+        dispatch(&mut app, Message::Select(second.clone())).await;
         assert!(app.outputs.is_empty());
-        let _ = app.update(Message::SessionMenu(first.clone()));
-        let _ = app.update(Message::Editor(text_editor::Action::Edit(
-            text_editor::Edit::Insert('x'),
-        )));
+        dispatch(&mut app, Message::SessionMenu(first.clone())).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
+        )
+        .await;
         assert!(app.editor.text().is_empty());
-        let _ = app.update(Message::Rename(first.clone()));
-        let _ = app.update(Message::ModalInput("Renamed other session".into()));
-        let _ = app.update(Message::Confirm);
+        dispatch(&mut app, Message::Rename(first.clone())).await;
+        dispatch(
+            &mut app,
+            Message::ModalInput("Renamed other session".into()),
+        )
+        .await;
+        dispatch(&mut app, Message::Confirm).await;
         assert_eq!(app.selected.as_deref(), Some(second.as_str()));
         assert_eq!(
-            h.get(&first).unwrap().snapshot().title,
+            h.load(&first).unwrap().snapshot().title,
             "Renamed other session"
         );
-        let _ = app.update(Message::SessionMenu(first.clone()));
-        let _ = app.update(Message::CloseMenu);
+        dispatch(&mut app, Message::SessionMenu(first.clone())).await;
+        dispatch(&mut app, Message::CloseMenu).await;
         assert!(app.context_menu.is_none());
-        let _ = app.update(Message::SessionMenu(first.clone()));
-        let _ = app.update(Message::Delete(first.clone()));
-        let _ = app.update(Message::Confirm);
+        dispatch(&mut app, Message::SessionMenu(first.clone())).await;
+        dispatch(&mut app, Message::Delete(first.clone())).await;
+        dispatch(&mut app, Message::Confirm).await;
         assert!(h.get(&first).is_none());
         assert_eq!(app.selected.as_deref(), Some(second.as_str()));
         assert!(app.outputs.is_empty());
-        let _ = app.update(Message::Editor(text_editor::Action::Edit(
-            text_editor::Edit::Insert('d'),
-        )));
-        let _ = app.update(Message::Delete(second));
-        let _ = app.update(Message::Confirm);
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('d'))),
+        )
+        .await;
+        dispatch(&mut app, Message::Delete(second)).await;
+        dispatch(&mut app, Message::Confirm).await;
         assert!(app.selected.is_none());
         assert!(app.editor.text().is_empty());
         assert!(app.error.is_none());
@@ -2127,7 +2825,7 @@ mod tests {
         use iced::futures::StreamExt;
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        let _ = app.update(Message::Create(path));
+        dispatch(&mut app, Message::Create(path)).await;
         let id = app.selected.clone().unwrap();
         let h = app.harness.as_ref().unwrap().clone();
         h.edit(&id, |s| s.title = "before subscription".into())
@@ -2137,7 +2835,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let _ = app.update(event);
+        dispatch(&mut app, event).await;
         assert_eq!(app.current().unwrap().title, "before subscription");
         h.edit(&id, |s| s.title = "first change".into()).unwrap();
         let event = tokio::time::timeout(Duration::from_secs(1), stream.next())
@@ -2146,7 +2844,7 @@ mod tests {
             .unwrap();
         h.edit(&id, |s| s.title = "latest change while event queued".into())
             .unwrap();
-        let _ = app.update(event);
+        dispatch(&mut app, event).await;
         assert_eq!(
             app.current().unwrap().title,
             "latest change while event queued"
@@ -2155,7 +2853,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let _ = app.update(event);
+        dispatch(&mut app, event).await;
         assert!(
             !app.refresh(),
             "unchanged sessions should not be resnapshotted"
@@ -2167,35 +2865,43 @@ mod tests {
             "idle subscription must stay asleep"
         );
     }
-    #[test]
-    fn modal_blocks_composer_edits_and_failed_draft_save_keeps_text() {
+    #[tokio::test]
+    async fn modal_blocks_composer_edits_and_failed_draft_save_keeps_text() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        let _ = app.update(Message::Create(path));
-        let _ = app.update(Message::Editor(text_editor::Action::Edit(
-            text_editor::Edit::Insert('a'),
-        )));
-        let _ = app.update(Message::Rename(app.selected.clone().unwrap()));
-        let _ = app.update(Message::Editor(text_editor::Action::Edit(
-            text_editor::Edit::Insert('x'),
-        )));
+        dispatch(&mut app, Message::Create(path)).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('a'))),
+        )
+        .await;
+        let selected = app.selected.clone().unwrap();
+        dispatch(&mut app, Message::Rename(selected)).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
+        )
+        .await;
         assert_eq!(app.editor.text(), "a");
-        let _ = app.update(Message::Dismiss);
+        dispatch(&mut app, Message::Dismiss).await;
         let session = app.current().unwrap().id.clone();
-        let file = app
-            .harness
-            .as_ref()
-            .unwrap()
-            .store
-            .root()
-            .join(format!("sessions/{session}.json"));
-        std::fs::remove_file(&file).unwrap();
-        std::fs::create_dir(&file).unwrap();
-        assert!(!app.save_draft());
+        let db = rusqlite::Connection::open(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .store
+                .root()
+                .join("sessions.sqlite3"),
+        )
+        .unwrap();
+        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture disk failure'); END;").unwrap();
+        dispatch(&mut app, Message::SaveDraft).await;
         assert_eq!(app.editor.text(), "a");
         assert!(app.draft_dirty);
-        std::fs::remove_dir(file).unwrap();
-        assert!(app.save_draft());
+        assert!(app.error.as_ref().unwrap().contains("fixture disk failure"));
+        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        dispatch(&mut app, Message::SaveDraft).await;
+        assert!(!app.draft_dirty);
         assert_eq!(
             app.harness
                 .as_ref()
@@ -2207,10 +2913,10 @@ mod tests {
             "a"
         );
     }
-    #[test]
-    fn invalid_project_stays_in_modal_without_creating_state() {
+    #[tokio::test]
+    async fn invalid_project_stays_in_modal_without_creating_state() {
         let mut app = app();
-        let _ = app.update(Message::AddProject);
+        dispatch(&mut app, Message::AddProject).await;
         app.modal_input = app
             .smoke_dir
             .as_ref()
@@ -2218,7 +2924,7 @@ mod tests {
             .join("does-not-exist")
             .display()
             .to_string();
-        let _ = app.update(Message::Confirm);
+        dispatch(&mut app, Message::Confirm).await;
         assert!(matches!(app.modal, Some(Modal::AddProject)));
         assert!(app.error.as_ref().unwrap().contains("Cannot open"));
         assert!(app.catalog.projects.is_empty());

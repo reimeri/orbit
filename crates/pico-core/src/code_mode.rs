@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     collections::HashMap,
-    sync::{Arc, Condvar, Mutex, mpsc},
+    sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -46,16 +46,17 @@ pub enum Event {
     Tool(ToolEvent),
     Notification { parent: String, text: String },
 }
-pub type Observer = Arc<dyn Fn(Event) + Send + Sync>;
+pub type Observer = Arc<dyn Fn(Event) -> Result<()> + Send + Sync>;
 #[derive(Default)]
 struct State {
-    output: Vec<String>,
+    output: String,
+    truncated: bool,
     done: bool,
     error: Option<String>,
     yielded: bool,
 }
 struct Cell {
-    state: Arc<(Mutex<State>, Condvar)>,
+    state: Arc<(Mutex<State>, tokio::sync::Notify)>,
     cancel: CancellationToken,
 }
 #[derive(Deserialize, Default)]
@@ -72,21 +73,28 @@ struct Wait {
     max_tokens: Option<usize>,
     terminate: Option<bool>,
 }
+#[derive(Default)]
+struct Stored {
+    values: HashMap<String, String>,
+    bytes: usize,
+}
 pub struct CodeMode {
     shell: Arc<Shell>,
     cells: Mutex<HashMap<String, Arc<Cell>>>,
-    stored: Arc<Mutex<HashMap<String, String>>>,
+    stored: Arc<Mutex<Stored>>,
     observer: Observer,
     workers: Arc<AtomicUsize>,
+    active_cells: Arc<AtomicUsize>,
 }
 impl CodeMode {
     pub fn new(shell: Arc<Shell>, observer: Observer) -> Self {
         Self {
             shell,
             cells: Mutex::new(HashMap::new()),
-            stored: Arc::new(Mutex::new(HashMap::new())),
+            stored: Arc::new(Mutex::new(Stored::default())),
             observer,
             workers: Arc::new(AtomicUsize::new(0)),
+            active_cells: Arc::new(AtomicUsize::new(0)),
         }
     }
     pub fn exec(&self, source: &str, parent: &str, cancel: &CancellationToken) -> Result<String> {
@@ -94,25 +102,30 @@ impl CodeMode {
             bail!("Execution cancelled");
         }
         let (pragma, code) = parse(source)?;
-        if self.cells.lock().expect("cell lock").len() >= 32 {
+        let mut cells = self.cells.lock().expect("cell lock");
+        if cancel.is_cancelled() {
+            bail!("Execution cancelled");
+        }
+        if cells.len() >= 32 {
             bail!("Too many open cells. Wait for or terminate existing cells.");
         }
         let cell_id = id();
         let cell = Arc::new(Cell {
-            state: Arc::new((Mutex::new(State::default()), Condvar::new())),
+            state: Arc::new((Mutex::new(State::default()), tokio::sync::Notify::new())),
             cancel: cancel.child_token(),
         });
-        self.cells
-            .lock()
-            .expect("cell lock")
-            .insert(cell_id.clone(), cell.clone());
+        cells.insert(cell_id.clone(), cell.clone());
+        drop(cells);
         let shell = self.shell.clone();
         let stored = self.stored.clone();
         let observer = self.observer.clone();
         let parent = parent.to_owned();
         let worker = cell.clone();
         let workers = self.workers.clone();
+        self.active_cells.fetch_add(1, Ordering::AcqRel);
+        let active = WorkerPermit(self.active_cells.clone());
         thread::spawn(move || {
+            let _active = active;
             let result = run_cell(code, shell, stored, observer, parent, workers, &worker);
             worker.cancel.cancel();
             let mut state = worker.state.0.lock().expect("cell state");
@@ -120,7 +133,7 @@ impl CodeMode {
                 state.error = Some(format!("{error:#}"));
             }
             state.done = true;
-            worker.state.1.notify_all();
+            worker.state.1.notify_one();
         });
         self.observe(
             &cell_id,
@@ -160,23 +173,26 @@ impl CodeMode {
             .get(id)
             .cloned()
             .context("Unknown or already closed cell")?;
-        let deadline = Instant::now() + Duration::from_millis(ms.min(300_000));
-        let mut state = cell.state.0.lock().expect("cell state");
-        while !state.done && !state.yielded && Instant::now() < deadline {
-            if cancel.is_cancelled() {
-                cell.cancel.cancel();
-                self.cells.lock().expect("cell lock").remove(id);
-                bail!("Execution cancelled");
+        self.shell.runtime().block_on(async {
+            let deadline=tokio::time::Instant::now()+Duration::from_millis(ms.min(300_000));
+            loop {
+                let notified=cell.state.1.notified();
+                { let state=cell.state.0.lock().expect("cell state");if state.done || state.yielded {break;} }
+                tokio::select! {
+                    biased;
+                    _=cancel.cancelled()=>{cell.cancel.cancel();self.cells.lock().expect("cell lock").remove(id);bail!("Execution cancelled");}
+                    _=tokio::time::sleep_until(deadline)=>break,
+                    _=notified=>{}
+                }
             }
-            state = cell
-                .state
-                .1
-                .wait_timeout(state, Duration::from_millis(10))
-                .expect("cell wait")
-                .0;
-        }
+            Ok::<_,anyhow::Error>(())
+        })?;
+        let mut state = cell.state.0.lock().expect("cell state");
         state.yielded = false;
-        let output = truncate(&std::mem::take(&mut state.output).join("\n"), tokens);
+        let mut output = truncate(&std::mem::take(&mut state.output), tokens);
+        if std::mem::take(&mut state.truncated) {
+            output.push_str("\n[Cell output limit reached; additional text discarded]");
+        }
         let status = if state.done {
             self.cells.lock().expect("cell lock").remove(id);
             match &state.error {
@@ -187,6 +203,14 @@ impl CodeMode {
             format!("Script running with cell ID {id}")
         };
         Ok(format!("{status}\nOutput:\n{output}"))
+    }
+    pub fn is_executing(&self) -> bool {
+        self.active_cells.load(Ordering::Acquire) > 0 || self.workers.load(Ordering::Acquire) > 0
+    }
+    pub fn has_work(&self) -> bool {
+        !self.cells.lock().expect("cell lock").is_empty()
+            || self.shell.has_work()
+            || !self.stored.lock().expect("store lock").values.is_empty()
     }
     pub fn stop_all(&self) {
         for (_, cell) in self.cells.lock().expect("cell lock").drain() {
@@ -217,12 +241,13 @@ fn parse(source: &str) -> Result<(Pragma, String)> {
 fn run_cell(
     code: String,
     shell: Arc<Shell>,
-    stored: Arc<Mutex<HashMap<String, String>>>,
+    stored: Arc<Mutex<Stored>>,
     observer: Observer,
     parent: String,
     workers: Arc<AtomicUsize>,
     cell: &Cell,
 ) -> Result<()> {
+    let executor = shell.runtime().clone();
     let runtime = Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?;
     runtime.set_memory_limit(64 * 1024 * 1024);
     runtime.set_max_stack_size(1024 * 1024);
@@ -243,17 +268,17 @@ fn run_cell(
                 }),
             )
             .map_err(js_error)?;
-        let (tx, rx) = mpsc::channel::<(String, String, bool)>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, bool)>();
         let notify_observer = observer.clone();
         let notify_parent = parent.clone();
         ctx.globals()
             .set(
                 "__notify",
-                Function::new(ctx.clone(), move |text: String| {
+                Function::new(ctx.clone(), move |text: String| -> rquickjs::Result<()> {
                     notify_observer(Event::Notification {
                         parent: notify_parent.clone(),
                         text,
-                    });
+                    }).map_err(|e| rquickjs::Error::new_from_js_message("notify","storage",e.to_string()))
                 }),
             )
             .map_err(js_error)?;
@@ -263,13 +288,18 @@ fn run_cell(
                 "__text",
                 Function::new(ctx.clone(), move |value: String, immediate: bool| {
                     let mut s = state.0.lock().expect("cell state");
-                    if s.output.iter().map(String::len).sum::<usize>() < 4 * 1024 * 1024 {
-                        s.output.push(value);
+                    const LIMIT:usize=4*1024*1024;
+                    if !value.is_empty() {
+                        if !s.output.is_empty() && s.output.len()<LIMIT {s.output.push('\n');}
+                        let mut bytes=value.len().min(LIMIT-s.output.len());
+                        while !value.is_char_boundary(bytes) {bytes-=1;}
+                        s.output.push_str(&value[..bytes]);
+                        s.truncated |= bytes<value.len();
                     }
                     if immediate {
                         s.yielded = true;
                     }
-                    state.1.notify_all();
+                    state.1.notify_one();
                 }),
             )
             .map_err(js_error)?;
@@ -281,19 +311,17 @@ fn run_cell(
                     ctx.clone(),
                     move |key: String, value: String| -> rquickjs::Result<()> {
                         let mut stored = save.lock().expect("store lock");
-                        let existing = stored.get(&key).map_or(0, String::len);
-                        let size = stored
-                            .iter()
-                            .map(|(key, value)| key.len() + value.len())
-                            .sum::<usize>();
-                        if size - existing + key.len() + value.len() > 16 * 1024 * 1024 {
+                        let existing = stored.values.get(&key).map_or(0, |value| key.len()+value.len());
+                        let size=stored.bytes-existing+key.len()+value.len();
+                        if size > 16 * 1024 * 1024 {
                             return Err(rquickjs::Error::new_from_js_message(
                                 "value",
                                 "store",
                                 "Session store exceeds 16 MiB; store smaller values",
                             ));
                         }
-                        stored.insert(key, value);
+                        stored.bytes=size;
+                        stored.values.insert(key, value);
                         Ok(())
                     },
                 ),
@@ -303,7 +331,7 @@ fn run_cell(
             .set(
                 "__load",
                 Function::new(ctx.clone(), move |key: String| -> Option<String> {
-                    stored.lock().expect("store lock").get(&key).cloned()
+                    stored.lock().expect("store lock").values.get(&key).cloned()
                 }),
             )
             .map_err(js_error)?;
@@ -340,14 +368,14 @@ fn run_cell(
                         thread::Builder::new()
                             .spawn(move || {
                                 let _permit = permit;
-                                observer(Event::Tool(ToolEvent {
+                                let started = observer(Event::Tool(ToolEvent {
                                     id: request.clone(),
                                     parent: parent.clone(),
                                     name: name.clone(),
                                     input: args.clone(),
                                     output: None,
                                 }));
-                                let result = match name.as_str() {
+                                let result = started.and_then(|()| match name.as_str() {
                                     "exec_command" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|a| shell.exec(a, &cancellation)),
@@ -355,16 +383,17 @@ fn run_cell(
                                         .map_err(anyhow::Error::from)
                                         .and_then(|a| shell.write(a, &cancellation)),
                                     _ => unreachable!("fixed tool names"),
-                                };
+                                });
                                 let failed = result.is_err();
                                 let output = result.unwrap_or_else(|e| format!("{e:#}"));
-                                observer(Event::Tool(ToolEvent {
+                                let saved = observer(Event::Tool(ToolEvent {
                                     id: request.clone(),
                                     parent,
                                     name,
                                     input: args,
                                     output: Some(output.clone()),
                                 }));
+                                let (output, failed) = match saved { Ok(()) => (output,failed), Err(e) => (format!("{output}\nCould not save tool result: {e:#}. Side effects may have occurred; do not blindly repeat the command."),true) };
                                 let _ = tx.send((request, output, failed));
                             })
                             .map_err(|e| {
@@ -399,15 +428,19 @@ fn run_cell(
             if let Some(result) = promise.result::<JsValue>() {
                 return result.map(|_| ()).map_err(|e| exception(&ctx, e));
             }
-            for (id, output, failed) in rx.try_iter() {
-                let deliver: Function = ctx.globals().get("__deliver").map_err(js_error)?;
-                deliver
-                    .call::<_, ()>((id, output, failed))
-                    .map_err(|e| exception(&ctx, e))?;
+            let delay: Option<f64>=ctx.globals().get::<_,Function>("__nextTimer").map_err(js_error)?.call(()).map_err(js_error)?;
+            let completion=executor.block_on(async {
+                tokio::select! {
+                    biased;
+                    _=cell.cancel.cancelled()=>None,
+                    result=rx.recv()=>result,
+                    _=async {match delay {Some(ms)=>tokio::time::sleep(Duration::from_secs_f64((ms/1000.).clamp(0.,86400.))).await,None=>std::future::pending().await}}=>None,
+                }
+            });
+            if let Some((id,output,failed))=completion {
+                ctx.globals().get::<_,Function>("__deliver").map_err(js_error)?.call::<_,()>((id,output,failed)).map_err(|e|exception(&ctx,e))?;
             }
-            ctx.eval::<(), _>("__tick()")
-                .map_err(|e| exception(&ctx, e))?;
-            thread::sleep(Duration::from_millis(2));
+            ctx.globals().get::<_,Function>("__tick").map_err(js_error)?.call::<_,()>(()).map_err(|e|exception(&ctx,e))?;
         }
     })
 }
@@ -439,7 +472,88 @@ fn exception(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> anyhow::Error {
 mod tests {
     use super::*;
     fn mode() -> CodeMode {
-        CodeMode::new(Arc::new(Shell::new(std::env::temp_dir())), Arc::new(|_| {}))
+        CodeMode::new(
+            Arc::new(Shell::new(std::env::temp_dir())),
+            Arc::new(|_| Ok(())),
+        )
+    }
+    #[test]
+    fn cancelled_cell_remains_active_until_native_callback_exits() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let waiter = release.clone();
+        let mode = CodeMode::new(
+            Arc::new(Shell::new(std::env::temp_dir())),
+            Arc::new(move |_| {
+                entered_tx.send(()).unwrap();
+                let (lock, cv) = &*waiter;
+                let mut done = lock.lock().unwrap();
+                while !*done {
+                    done = cv.wait(done).unwrap();
+                }
+                Ok(())
+            }),
+        );
+        let result = mode
+            .exec(
+                "// @exec: {\"yield_time_ms\": 1}\nnotify('blocked');",
+                "parent",
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(result.contains("Script running"));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        mode.stop_all();
+        assert!(
+            mode.is_executing(),
+            "draining IDs must not hide live callbacks"
+        );
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while mode.is_executing() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+    }
+    #[test]
+    fn timer_callbacks_yield_to_resolved_module_and_storage_failure_blocks_commands() {
+        let mode = mode();
+        let result=mode.exec("function again(){setTimeout(again,0);} await new Promise(resolve=>setTimeout(()=>{resolve();again();},0));text('finished');","timer",&CancellationToken::new()).unwrap();
+        assert!(result.contains("Script completed"));
+        assert!(result.contains("finished"));
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = CodeMode::new(
+            Arc::new(Shell::new(dir.path().into())),
+            Arc::new(|_| bail!("fixture persistence failure")),
+        );
+        let result = blocked
+            .exec(
+                "text(await tools.exec_command({cmd:'touch marker',login:false}));",
+                "blocked",
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(result.contains("fixture persistence failure"));
+        assert!(!dir.path().join("marker").exists());
+    }
+    #[test]
+    fn cell_output_cap_handles_unicode_and_releases_capacity_after_reading() {
+        let mode = mode();
+        let result = mode
+            .exec(
+                "text('λ'.repeat(2097151));text('界界');for(let i=0;i<10000;i++)text('');",
+                "output",
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(result.contains("Cell output limit reached"));
+        assert!(result.len() < 200000);
+        let result = mode
+            .exec("text('small output');", "next", &CancellationToken::new())
+            .unwrap();
+        assert!(result.contains("small output"));
+        assert!(!result.contains("limit reached"));
     }
     #[test]
     fn notifications_are_separate_from_direct_cell_output() {
@@ -447,7 +561,10 @@ mod tests {
         let recorded = events.clone();
         let mode = CodeMode::new(
             Arc::new(Shell::new(std::env::temp_dir())),
-            Arc::new(move |event| recorded.lock().unwrap().push(event)),
+            Arc::new(move |event| {
+                recorded.lock().unwrap().push(event);
+                Ok(())
+            }),
         );
         let out = mode
             .exec(

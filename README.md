@@ -61,15 +61,19 @@ image, subagent, questionnaire, diff and statistics features are not placeholder
 All app state is in `$XDG_CONFIG_HOME/pico-evo`, or `~/.config/pico-evo`:
 
 - `settings.json`: projects, favorites, layout and defaults.
-- `sessions/<uuid>.json`: full transcript, separate provider context, pending
-  steering, draft, model and usage. Compaction does **not** delete transcript text.
+- `sessions.sqlite3` (and its live WAL): indexed session metadata, full transcript,
+  separate provider context, pending steering, drafts and usage. Compaction does
+  **not** delete transcript text. Historical `sessions/*.json` files are left
+  untouched but are not migrated or loaded by this format.
 - `auth.json`: OAuth credentials, mode `0600`, inside a mode `0700` directory.
 - `instance.lock`: prevents two processes from overwriting the same state.
 
 Credentials are permission-protected local files, **not encrypted at rest**.
 Never share `auth.json`; transcripts/tool output can also contain sensitive data.
-Writes use private temporary files, fsync and atomic replacement. Unreadable
-sessions are preserved and reported, not reset. Interrupted calls are closed with
+Session changes use incremental SQLite transactions with WAL and full synchronous
+durability. Settings/credentials use private temporary files, fsync and atomic
+replacement. Unreadable state is preserved and reported, not reset. Close Pico
+before copying its database files for a backup; a live WAL must not be omitted. Interrupted calls are closed with
 an explicit uncertainty notice: the agent must inspect effects before retrying.
 JS variables, `store` values, cell IDs and shell sessions are process-local; they
 are not resurrected after restart. User instructions, transcript and model context
@@ -77,6 +81,9 @@ are durable. Switching ChatGPT accounts rebuilds incompatible encrypted context
 from the transcript.
 
 No old `pico` directories or workspace `.pico/media` assets are migrated or modified.
+
+See [performance](docs/performance.md) for lazy loading, rendering, durability
+boundaries and reproducible large-session measurements.
 
 ## Verify and test your account
 
