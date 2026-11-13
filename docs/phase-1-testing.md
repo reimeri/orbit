@@ -116,9 +116,11 @@ lose details; the original transcript remains the source of truth.
 - Open the footer model picker and leave it open: ordering must stay fixed across
   redraws and status updates; the selected/default custom models appear once.
 - There is no chat header, bottom-sidebar New session/shortcut label, composer
-  hint, Send button or Continue button. Enter still sends; Shift+Enter adds a line.
-  The Stop button remains available during a turn. New session is available from
-  the top plus controls and Ctrl+N.
+  hint, Send, Continue, Latest or Stop buttons. Enter still sends; Shift+Enter adds
+  a line. Esc dismisses an open menu, dialog or Settings first; with those closed,
+  it stops only the selected session's running agent, including while the composer
+  is focused. Check that a running agent in another session is unaffected. New
+  session is available from the top plus controls and Ctrl+N.
 - The footer stays one row at narrow widths. The project path replaces the project
   name; hover a shortened path for the full value. Hover the info indicator for
   usage details omitted due to limited width. The right-rail gear is centered.

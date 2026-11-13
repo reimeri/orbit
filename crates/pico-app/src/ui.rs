@@ -130,7 +130,6 @@ pub enum Message {
     Favorite(PathBuf),
     Editor(text_editor::Action),
     Send,
-    Stop,
     ToggleSettings,
     ApplySettings,
     Model(String),
@@ -156,7 +155,6 @@ pub enum Message {
     RowSize(u64, usize, f32),
     SidebarScroll(u64, f32, f32),
     SidebarSize(u64, usize, f32),
-    Bottom,
     Link(String),
     Copy(String),
     Login,
@@ -847,13 +845,6 @@ impl App {
                     }));
                 }
             }
-            Message::Stop => {
-                if let (Some(h), Some(id)) = (&self.harness, &self.selected)
-                    && let Some(s) = h.get(id)
-                {
-                    s.cancel();
-                }
-            }
             Message::ToggleSettings => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings_open = !self.settings_open;
@@ -1037,12 +1028,6 @@ impl App {
                 }
             }
 
-            Message::Bottom => {
-                self.auto_scroll = true;
-                self.transcript.end();
-                self.prepare_visible();
-                return bottom();
-            }
             Message::Link(url) => {
                 self.modal = Some(Modal::Link(url));
             }
@@ -1177,8 +1162,14 @@ impl App {
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
                             self.modal = None;
-                        } else {
+                        } else if self.settings_open {
+                            self.view_epoch = self.view_epoch.wrapping_add(1);
                             self.settings_open = false;
+                        } else if let (Some(h), Some(id)) = (&self.harness, &self.selected)
+                            && let Some(session) = h.get(id)
+                            && session.is_running()
+                        {
+                            session.cancel();
                         }
                     } else if self.modal.is_none()
                         && self.context_menu.is_none()
@@ -1693,24 +1684,6 @@ impl App {
             .padding(12)
             .size(self.catalog.settings.font_size);
         let mut compose = column![editor].spacing(10);
-        if running || !self.auto_scroll {
-            let mut actions = row![space().width(Fill)].spacing(8).align_y(iced::Center);
-            if !self.auto_scroll {
-                actions = actions.push(
-                    button("↓ Latest")
-                        .on_press(Message::Bottom)
-                        .style(button::text),
-                );
-            }
-            if running {
-                actions = actions.push(
-                    button("■ Stop")
-                        .on_press(Message::Stop)
-                        .style(button::danger),
-                );
-            }
-            compose = compose.push(actions);
-        }
         if !session.pending.is_empty() && running {
             compose = compose.push(
                 text(format!(
@@ -2380,7 +2353,7 @@ impl App {
                 assert_eq!(
                     self.transcript.visible().end,
                     self.transcript.order.len(),
-                    "Latest reaches history tail"
+                    "auto-scroll reaches history tail"
                 );
                 self.settings_open = false;
                 self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -2658,6 +2631,62 @@ mod tests {
                 window::Event::CloseRequested
             ))]
         ));
+    }
+
+    #[tokio::test]
+    async fn escape_dismisses_ui_before_stopping_only_the_selected_running_agent() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(path.clone())).await;
+        let other = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .get(app.selected.as_ref().unwrap())
+            .unwrap();
+        dispatch(&mut app, Message::Create(path)).await;
+        let selected = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .get(app.selected.as_ref().unwrap())
+            .unwrap();
+        let escape = Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        }));
+        let idle_status = selected.status.lock().unwrap().clone();
+        dispatch(&mut app, escape.clone()).await;
+        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+
+        selected.running.store(true, Ordering::Release);
+        other.running.store(true, Ordering::Release);
+        app.settings_open = true;
+        app.modal = Some(Modal::AddProject);
+        app.context_menu = Some((other.id.clone(), iced::Point::ORIGIN));
+        dispatch(&mut app, escape.clone()).await;
+        assert!(app.context_menu.is_none());
+        assert!(app.modal.is_some());
+        assert!(app.settings_open);
+        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        dispatch(&mut app, escape.clone()).await;
+        assert!(app.modal.is_none());
+        assert!(app.settings_open);
+        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        dispatch(&mut app, escape.clone()).await;
+        assert!(!app.settings_open);
+        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        let other_status = other.status.lock().unwrap().clone();
+        dispatch(&mut app, escape).await;
+        assert_eq!(*selected.status.lock().unwrap(), "Stopping…");
+        assert_eq!(*other.status.lock().unwrap(), other_status);
+        selected.running.store(false, Ordering::Release);
+        other.running.store(false, Ordering::Release);
     }
 
     #[tokio::test]
