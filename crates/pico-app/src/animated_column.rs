@@ -1,0 +1,582 @@
+//! Keyed, viewport-sized layout transitions. Animation lives in the widget tree,
+//! so frames do not rebuild application views or install an idle timer.
+use iced::{
+    Element, Event, Length, Rectangle, Size, Vector,
+    advanced::{
+        Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
+        widget::{Operation, Tree, tree},
+    },
+    mouse,
+    time::{Duration, Instant},
+    window,
+};
+use std::collections::HashMap;
+
+const DURATION: Duration = Duration::from_millis(180);
+
+/// Only rows marked `true` move. Headings and virtualization spacers snap.
+pub fn animated_column<'a, Message: 'a>(
+    rows: Vec<(usize, bool, Element<'a, Message>)>,
+) -> Element<'a, Message> {
+    let keys = rows
+        .iter()
+        .map(|(key, animate, _)| (*key, *animate))
+        .collect();
+    let children = rows.into_iter().map(|(_, _, row)| row).collect();
+    Element::new(AnimatedColumn { keys, children })
+}
+
+struct AnimatedColumn<'a, Message> {
+    keys: Vec<(usize, bool)>,
+    children: Vec<Element<'a, Message>>,
+}
+
+struct Motion {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+impl Motion {
+    fn y(&self, now: Instant) -> f32 {
+        let t = ((now - self.started).as_secs_f32() / DURATION.as_secs_f32()).min(1.);
+        self.to + (self.from - self.to) * (1. - t).powi(3)
+    }
+
+    fn active(&self, now: Instant) -> bool {
+        self.from != self.to && now - self.started < DURATION
+    }
+}
+
+struct State {
+    now: Instant,
+    rows: HashMap<usize, Motion>,
+    keys: Vec<usize>,
+    animating: bool,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            now: Instant::now(),
+            rows: HashMap::new(),
+            keys: Vec::new(),
+            animating: false,
+        }
+    }
+}
+
+impl State {
+    fn layout(&mut self, keys: &[(usize, bool)], node: layout::Node) -> layout::Node {
+        // Keep only mounted rows: scrolling a large library must not accumulate
+        // widget state, nor make a newly appearing row fly in from a stale position.
+        let mut previous = std::mem::take(&mut self.rows);
+        self.animating = false;
+        let children = keys
+            .iter()
+            .zip(node.children())
+            .map(|(&(key, animate), child)| {
+                if !animate {
+                    return child.clone();
+                }
+                let target = child.bounds().y;
+                let mut motion = previous.remove(&key).unwrap_or(Motion {
+                    from: target,
+                    to: target,
+                    started: self.now,
+                });
+                if motion.to != target {
+                    // Typing again mid-transition starts at the current interpolated
+                    // position, not the previous destination.
+                    motion = Motion {
+                        from: motion.y(self.now),
+                        to: target,
+                        started: self.now,
+                    };
+                }
+                let y = motion.y(self.now);
+                self.animating |= motion.active(self.now);
+                self.rows.insert(key, motion);
+                child.clone().translate(Vector::new(0., y - target))
+            })
+            .collect();
+        // Natural extent stays at the final layout; only row positions move.
+        // Drawing, hit testing, sensors and operations all share this layout.
+        layout::Node::with_children(node.size(), children)
+    }
+}
+
+impl<Message> Widget<Message, iced::Theme, iced::Renderer> for AnimatedColumn<'_, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State>()
+    }
+    fn state(&self) -> tree::State {
+        tree::State::new(State {
+            keys: self.keys.iter().map(|&(key, _)| key).collect(),
+            ..State::default()
+        })
+    }
+    fn children(&self) -> Vec<Tree> {
+        self.children.iter().map(Tree::new).collect()
+    }
+    fn diff(&self, tree: &mut Tree) {
+        let state = tree.state.downcast_mut::<State>();
+        state.now = Instant::now();
+        let mut previous: HashMap<_, _> = state
+            .keys
+            .drain(..)
+            .zip(std::mem::take(&mut tree.children))
+            .collect();
+        tree.children = self
+            .keys
+            .iter()
+            .zip(&self.children)
+            .map(|(&(key, _), child)| {
+                let mut tree = previous.remove(&key).unwrap_or_else(|| Tree::new(child));
+                tree.diff(child);
+                tree
+            })
+            .collect();
+        state.keys.extend(self.keys.iter().map(|&(key, _)| key));
+    }
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Shrink)
+    }
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let node = layout::flex::resolve(
+            layout::flex::Axis::Vertical,
+            renderer,
+            limits,
+            Length::Fill,
+            Length::Shrink,
+            iced::Padding::ZERO,
+            0.,
+            iced::Alignment::Start,
+            &mut self.children,
+            &mut tree.children,
+        );
+        tree.state.downcast_mut::<State>().layout(&self.keys, node)
+    }
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            for ((child, tree), layout) in self
+                .children
+                .iter_mut()
+                .zip(&mut tree.children)
+                .zip(layout.children())
+            {
+                child
+                    .as_widget_mut()
+                    .operate(tree, layout, renderer, operation);
+            }
+        });
+    }
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        let state = tree.state.downcast_mut::<State>();
+        if let Event::Window(window::Event::RedrawRequested(now)) = event {
+            if state.animating {
+                // iced may repeat this event after relayout. Advance only once
+                // per timestamp so its layout-stabilization loop converges.
+                if *now > state.now {
+                    shell.invalidate_layout();
+                }
+                if state.rows.values().any(|motion| motion.active(*now)) {
+                    shell.request_redraw();
+                }
+            }
+            state.now = state.now.max(*now);
+        }
+        // Rows can cross during reordering. Last drawn is topmost, so it must
+        // receive pointer input first (children respect event capture).
+        for ((child, tree), layout) in self
+            .children
+            .iter_mut()
+            .zip(&mut tree.children)
+            .zip(layout.children())
+            .rev()
+        {
+            child.as_widget_mut().update(
+                tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+            );
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        self.children
+            .iter()
+            .zip(&tree.children)
+            .zip(layout.children())
+            .rev()
+            .map(|((child, tree), layout)| {
+                child
+                    .as_widget()
+                    .mouse_interaction(tree, layout, cursor, viewport, renderer)
+            })
+            .find(|interaction| *interaction != mouse::Interaction::None)
+            .unwrap_or_default()
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        for ((child, tree), layout) in self
+            .children
+            .iter()
+            .zip(&tree.children)
+            .zip(layout.children())
+        {
+            child
+                .as_widget()
+                .draw(tree, renderer, theme, style, layout, cursor, viewport);
+        }
+    }
+
+    fn overlay<'a>(
+        &'a mut self,
+        tree: &'a mut Tree,
+        layout: Layout<'a>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'a, Message, iced::Theme, iced::Renderer>> {
+        overlay::from_children(
+            &mut self.children,
+            tree,
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::{
+        Point,
+        advanced::clipboard,
+        widget::{button, mouse_area},
+    };
+
+    fn targets(rows: &[(usize, bool, f32)]) -> (Vec<(usize, bool)>, layout::Node) {
+        let keys = rows.iter().map(|&(id, animate, _)| (id, animate)).collect();
+        let children = rows
+            .iter()
+            .map(|&(_, _, y)| layout::Node::new(Size::new(200., 40.)).move_to(Point::new(0., y)))
+            .collect();
+        (
+            keys,
+            layout::Node::with_children(Size::new(200., 300.), children),
+        )
+    }
+
+    fn positions(state: &mut State, rows: &[(usize, bool, f32)]) -> Vec<f32> {
+        let (keys, node) = targets(rows);
+        state
+            .layout(&keys, node)
+            .children()
+            .iter()
+            .map(|node| node.bounds().y)
+            .collect()
+    }
+
+    #[test]
+    fn filtering_retargeting_and_reordering_follow_session_identity() {
+        let mut state = State::default();
+        let start = state.now;
+        assert_eq!(
+            positions(
+                &mut state,
+                &[
+                    (0, false, 0.),
+                    (11, true, 36.),
+                    (22, true, 100.),
+                    (33, true, 180.)
+                ]
+            ),
+            [0., 36., 100., 180.]
+        );
+        assert!(!state.animating);
+
+        // Filter out 11. The heading snaps; surviving sessions keep their positions.
+        assert_eq!(
+            positions(
+                &mut state,
+                &[(0, false, 8.), (22, true, 44.), (33, true, 124.)]
+            ),
+            [8., 100., 180.]
+        );
+        state.now = start + Duration::from_millis(90);
+        // Cubic ease-out has completed 7/8 of the movement at half duration.
+        assert_eq!(
+            positions(
+                &mut state,
+                &[(0, false, 8.), (22, true, 44.), (33, true, 124.)]
+            ),
+            [8., 51., 131.]
+        );
+
+        // A second query/reorder interrupts without jumping to the old targets.
+        // Returning 11 is a new row, not an exit/entry animation from stale state.
+        assert_eq!(
+            positions(
+                &mut state,
+                &[(33, true, 36.), (11, true, 100.), (22, true, 180.)]
+            ),
+            [131., 100., 51.]
+        );
+        state.now = start + Duration::from_millis(180);
+        assert_eq!(
+            positions(
+                &mut state,
+                &[(33, true, 36.), (11, true, 100.), (22, true, 180.)]
+            ),
+            [47.875, 100., 163.875]
+        );
+        state.now = start + Duration::from_millis(270);
+        assert_eq!(
+            positions(
+                &mut state,
+                &[(33, true, 36.), (11, true, 100.), (22, true, 180.)]
+            ),
+            [36., 100., 180.]
+        );
+        assert!(!state.animating);
+    }
+
+    #[test]
+    fn virtual_viewport_changes_do_not_animate_scrolling_or_retain_old_rows() {
+        let mut state = State::default();
+        // The top spacer changes but surviving rows' content coordinates do not.
+        positions(
+            &mut state,
+            &[(0, false, 0.), (50, true, 500.), (51, true, 560.)],
+        );
+        assert_eq!(
+            positions(
+                &mut state,
+                &[(0, false, 0.), (51, true, 560.), (52, true, 620.)]
+            ),
+            [0., 560., 620.]
+        );
+        assert!(!state.animating);
+        assert_eq!(state.rows.len(), 2);
+        assert!(!state.rows.contains_key(&50));
+        positions(&mut state, &[]);
+        assert!(state.rows.is_empty());
+        assert!(!state.animating);
+    }
+
+    fn buttons(rows: &[(usize, f32)]) -> Element<'static, usize> {
+        animated_column(
+            rows.iter()
+                .map(|&(id, height)| {
+                    (
+                        id,
+                        true,
+                        mouse_area(button("session").width(200).height(height).on_press(id))
+                            .on_right_press(id + 100)
+                            .into(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn animation_frames_move_hit_targets_and_stop_requesting_redraws() {
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let limits = layout::Limits::new(Size::ZERO, Size::new(200., 400.));
+        let viewport = Rectangle::with_size(Size::new(200., 400.));
+        let mut content = buttons(&[(1, 80.), (2, 80.), (3, 40.)]);
+        let mut tree = Tree::new(&content);
+        let start = tree.state.downcast_ref::<State>().now;
+        content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        content = buttons(&[(3, 40.)]);
+        content.as_widget().diff(&mut tree);
+        tree.state.downcast_mut::<State>().now = start;
+        let mut node = content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(node.children()[0].bounds().y, 160.);
+        assert_eq!(
+            node.size().height,
+            40.,
+            "scroll extent uses the final layout"
+        );
+
+        for (elapsed, expected_y, redraw) in [(90, 20., true), (180, 0., false), (250, 0., false)] {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            content.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(window::Event::RedrawRequested(
+                    start + Duration::from_millis(elapsed),
+                )),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut clipboard::Null,
+                &mut shell,
+                &viewport,
+            );
+            assert_eq!(
+                shell.redraw_request() == window::RedrawRequest::NextFrame,
+                redraw
+            );
+            assert_eq!(shell.is_layout_invalid(), elapsed <= 180);
+            if shell.is_layout_invalid() {
+                node = content
+                    .as_widget_mut()
+                    .layout(&mut tree, &renderer, &limits);
+            }
+            let mut shell = Shell::new(&mut messages);
+            content.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(window::Event::RedrawRequested(
+                    start + Duration::from_millis(elapsed),
+                )),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut clipboard::Null,
+                &mut shell,
+                &viewport,
+            );
+            assert!(
+                !shell.is_layout_invalid(),
+                "repeated redraw must converge after relayout"
+            );
+            assert_eq!(node.children()[0].bounds().y, expected_y);
+            assert!(
+                messages.is_empty(),
+                "animation frames must not publish app messages"
+            );
+
+            if elapsed == 90 {
+                // Inside the animated row, but outside both its original and final bounds.
+                let cursor = mouse::Cursor::Available(Point::new(50., 55.));
+                for event in [
+                    mouse::Event::ButtonPressed(mouse::Button::Left),
+                    mouse::Event::ButtonReleased(mouse::Button::Left),
+                ] {
+                    content.as_widget_mut().update(
+                        &mut tree,
+                        &Event::Mouse(event),
+                        Layout::new(&node),
+                        cursor,
+                        &renderer,
+                        &mut clipboard::Null,
+                        &mut Shell::new(&mut messages),
+                        &viewport,
+                    );
+                }
+                assert_eq!(messages, [3]);
+                // Exercise the same transformed layout through the drawing path.
+                content.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &iced::Theme::Dark,
+                    &renderer::Style {
+                        text_color: iced::Color::WHITE,
+                    },
+                    Layout::new(&node),
+                    cursor,
+                    &viewport,
+                );
+            }
+        }
+    }
+    #[test]
+    fn crossing_rows_select_and_open_the_menu_of_the_topmost_session() {
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let limits = layout::Limits::new(Size::ZERO, Size::new(200., 400.));
+        let viewport = Rectangle::with_size(Size::new(200., 400.));
+        let mut content = buttons(&[(1, 40.), (2, 40.)]);
+        let mut tree = Tree::new(&content);
+        let start = tree.state.downcast_ref::<State>().now;
+        content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        content = buttons(&[(2, 40.), (1, 40.)]);
+        content.as_widget().diff(&mut tree);
+        tree.state.downcast_mut::<State>().now = start;
+        content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        tree.state.downcast_mut::<State>().now = start + Duration::from_millis(90);
+        let node = content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(node.children()[0].bounds().y, 5.);
+        assert_eq!(node.children()[1].bounds().y, 35.);
+        let cursor = mouse::Cursor::Available(Point::new(50., 40.));
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+            mouse::Event::ButtonPressed(mouse::Button::Right),
+        ] {
+            content.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(event),
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &viewport,
+            );
+        }
+        assert_eq!(
+            messages,
+            [1, 101],
+            "last drawn session must win overlapping input"
+        );
+    }
+}

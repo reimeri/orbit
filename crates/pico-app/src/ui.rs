@@ -1533,8 +1533,9 @@ impl App {
                 .spacing(8);
         let epoch = self.sidebar_epoch;
         let range = self.sidebar_list.visible();
-        let mut rows: Vec<((u64, usize), Element<'_, Message>)> = vec![(
-            (epoch, usize::MAX),
+        let mut rows: Vec<(usize, bool, Element<'_, Message>)> = vec![(
+            usize::MAX,
+            false,
             space().height(self.sidebar_list.prefix(range.start)).into(),
         )];
         for index in range.clone() {
@@ -1583,21 +1584,29 @@ impl App {
                 }
             };
             let key = self.sidebar_list.order[index];
+            // Measurements need a fresh epoch; animation/widget identity must
+            // follow the session across filtering and section changes instead.
             let sensor = widget::sensor(content)
                 .key((epoch, key))
                 .on_show(move |size| Message::SidebarSize(epoch, key, size.height))
                 .on_resize(move |size| Message::SidebarSize(epoch, key, size.height));
-            rows.push(((epoch, key), column![sensor, space().height(5.)].into()));
+            rows.push((
+                key,
+                matches!(self.sidebar_rows[index], SidebarRow::Session(_)),
+                column![sensor, space().height(5.)].into(),
+            ));
         }
         rows.push((
-            (epoch, usize::MAX - 1),
+            usize::MAX - 1,
+            false,
             space()
                 .height((self.sidebar_list.total() - self.sidebar_list.prefix(range.end)).max(0.))
                 .into(),
         ));
         if self.sessions.is_empty() {
             rows.push((
-                (epoch, usize::MAX - 2),
+                usize::MAX - 2,
+                false,
                 container(
                     text("Your sessions will appear here.")
                         .size(13)
@@ -1607,7 +1616,7 @@ impl App {
                 .into(),
             ));
         }
-        let rows = widget::keyed_column(rows);
+        let rows = crate::animated_column::animated_column(rows);
         list = list.push(
             scrollable(rows)
                 .id("sessions")
@@ -2410,10 +2419,30 @@ impl App {
                 self.prepare_visible();
                 return Task::batch([bottom(), delayed_capture()]);
             }
+            14 => {
+                // Return the virtual sidebar to the top before moving surviving
+                // visible rows with a search, then restore the full large list.
+                return Task::batch([
+                    self.update_inner(Message::Search(String::new())),
+                    delayed_capture(),
+                ]);
+            }
+            15 => {
+                return Task::batch([
+                    self.update_inner(Message::Search("Historical session 1".into())),
+                    delayed_capture(),
+                ]);
+            }
+            16 => {
+                return Task::batch([
+                    self.update_inner(Message::Search(String::new())),
+                    delayed_capture(),
+                ]);
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search, chat, settings, modal, session menu, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session menu, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }

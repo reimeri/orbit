@@ -183,6 +183,12 @@ published as application messages either: a root widget resolves click positions
 in window coordinates and forwards motion only during an active panel resize.
 This preserves context-menu placement in scrolled sidebars and avoids view/layout
 rebuilds just to remember the cursor. Normal widget hover handling remains intact.
+Sidebar session rows use widget-local 180 ms cubic ease-out Y transitions when
+filtering or reordering changes their layout. Identity survives catalog/search
+updates; measurement epochs remain separate. Only rows mounted before and after
+the change animate, so newly visible/removed rows snap and virtualization stays
+bounded. Redraws advance the layout (including hit targets) only while a transition
+is active, without application messages or an idle animation timer.
 Large tool details use a
 fixed-row virtual viewport, including long single-line output and Unicode; only
 about 22 rows are passed to text shaping. Collapsing a tool or leaving its session

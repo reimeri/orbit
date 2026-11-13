@@ -1,3 +1,4 @@
+mod animated_column;
 mod ellipsized_text;
 mod io_worker;
 mod pointer_input;
