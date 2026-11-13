@@ -1,3 +1,4 @@
+mod ellipsized_text;
 mod io_worker;
 mod pointer_input;
 mod tool_output;

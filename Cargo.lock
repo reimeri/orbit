@@ -2547,6 +2547,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

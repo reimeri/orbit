@@ -1,4 +1,5 @@
 use crate::{
+    ellipsized_text::ellipsized_text,
     pointer_input::{Press, pointer_input},
     tool_output,
 };
@@ -19,7 +20,7 @@ use pico_core::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -27,10 +28,12 @@ use std::{
     time::Duration,
 };
 
+use unicode_segmentation::UnicodeSegmentation;
+
 #[derive(Clone)]
 enum SidebarRow {
     Heading(&'static str, usize),
-    Session(usize, usize),
+    Session(usize),
 }
 
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
@@ -461,7 +464,7 @@ impl App {
             } else {
                 2
             };
-            sections[category].push(SidebarRow::Session(index, category));
+            sections[category].push(SidebarRow::Session(index));
         }
         self.sidebar_rows.clear();
         for (name, section) in ["WORKING", "NEEDS ATTENTION", "SESSIONS"]
@@ -485,14 +488,14 @@ impl App {
                     },
                     36.,
                 ),
-                SidebarRow::Session(index, _) => {
+                SidebarRow::Session(index) => {
                     let next = self.sidebar_keys.len() + 3;
                     (
                         *self
                             .sidebar_keys
                             .entry(self.sessions[*index].id.clone())
                             .or_insert(next),
-                        72.,
+                        53.,
                     )
                 }
             }));
@@ -1499,47 +1502,54 @@ impl App {
                         .padding([10, 0])
                         .into()
                 }
-                SidebarRow::Session(session_index, section) => {
+                SidebarRow::Session(session_index) => {
                     let session = &self.sessions[*session_index];
-                    let section = *section;
                     let active = self.selected.as_ref() == Some(&session.id);
                     let project = session
                         .project
                         .file_name()
                         .unwrap_or(session.project.as_os_str())
                         .to_string_lossy();
-                    let marker = if section == 0 {
-                        ["·", "•", "●", "•"][(self.tick as usize / 5) % 4]
-                    } else if section == 1 {
-                        "!"
-                    } else {
-                        "·"
-                    };
+                    let color = project_color(&session.project);
+                    let badge = container(
+                        text(project_initials(&project))
+                            .size(8)
+                            .line_height(text::LineHeight::Absolute(10.into()))
+                            .color(color),
+                    )
+                    .center_x(16)
+                    .center_y(16)
+                    // Asymmetric padding lowers the centered initials by 1 px,
+                    // aligning their baseline with the neighboring project name.
+                    .padding(iced::Padding {
+                        top: 2.,
+                        ..Default::default()
+                    })
+                    .style(move |_| container::Style {
+                        background: Some(Color { a: 0.18, ..color }.into()),
+                        border: iced::Border {
+                            radius: 3.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                    // `updated` changes on accepted user submissions, not agent activity.
                     let age = age(session.updated);
                     let content = mouse_area(
                         button(
                             column![
+                                ellipsized_text(&session.title, 13., None),
                                 row![
-                                    text(marker).color(if section == 0 { ACCENT } else { MUTED }),
-                                    text(session.title.clone())
-                                        .size(13)
-                                        .width(Fill)
-                                        .wrapping(text::Wrapping::WordOrGlyph)
-                                ]
-                                .spacing(7),
-                                row![
-                                    text(project.to_string())
-                                        .size(11)
-                                        .color(MUTED)
-                                        .width(Fill)
-                                        .wrapping(text::Wrapping::WordOrGlyph),
+                                    badge,
+                                    ellipsized_text(&project, 11., Some(MUTED)),
                                     text(age).size(10).color(MUTED)
                                 ]
-                                .spacing(4)
+                                .spacing(6)
+                                .align_y(iced::Center)
                             ]
-                            .spacing(5),
+                            .spacing(3),
                         )
-                        .padding(10)
+                        .padding([6, 8])
                         .width(Fill)
                         .on_press(Message::Select(session.id.clone()))
                         .style(if active {
@@ -2435,6 +2445,47 @@ fn delayed_capture() -> Task<Message> {
         |_| Message::Capture,
     )
 }
+fn project_initials(name: &str) -> String {
+    let mut words = name
+        .split(|ch: char| ch.is_whitespace() || ch == '-' || ch == '_')
+        .filter(|word| !word.is_empty());
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+    let mut letters = first.graphemes(true);
+    let start = letters.next().expect("nonempty word");
+    let end = words
+        .next()
+        .map(|word| word.graphemes(true).next().expect("nonempty word"))
+        .or_else(|| letters.next_back());
+    std::iter::once(start)
+        .chain(end)
+        .map(str::to_uppercase)
+        .collect()
+}
+
+fn project_color(path: &Path) -> Color {
+    const COLORS: [Color; 8] = [
+        Color::from_rgb8(197, 193, 112),
+        Color::from_rgb8(137, 190, 146),
+        Color::from_rgb8(118, 188, 194),
+        Color::from_rgb8(139, 170, 221),
+        Color::from_rgb8(184, 151, 217),
+        Color::from_rgb8(216, 145, 177),
+        Color::from_rgb8(221, 158, 122),
+        Color::from_rgb8(199, 181, 137),
+    ];
+    // Fixed FNV-1a keeps the same path's color stable across runs.
+    let hash = path
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    COLORS[(hash % COLORS.len() as u64) as usize]
+}
+
 fn age(updated: u64) -> String {
     let seconds = pico_core::store::now().saturating_sub(updated);
     if seconds < 60 {
@@ -2593,6 +2644,23 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn project_badge_initials_follow_name_words() {
+        for (name, expected) in [
+            ("pico-evo", "PE"),
+            ("Pico", "PO"),
+            ("a", "A"),
+            ("  rust__language-server ", "RL"),
+            ("my project tools", "MP"),
+            ("éclair", "ÉR"),
+            ("界", "界"),
+            ("a\u{301}", "A\u{301}"),
+            ("", ""),
+        ] {
+            assert_eq!(project_initials(name), expected, "{name:?}");
+        }
+    }
+
     #[tokio::test]
     async fn window_subscription_ignores_motion_and_redraws() {
         use iced::futures::{StreamExt, stream};
