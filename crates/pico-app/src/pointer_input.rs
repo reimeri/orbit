@@ -17,12 +17,19 @@ pub enum Press {
     SessionMenu(String),
 }
 
-pub fn pointer_input(content: Element<'_, Message>) -> Element<'_, Message> {
-    Element::new(PointerInput { content })
+pub fn pointer_input(
+    content: Element<'_, Message>,
+    capture_keyboard: bool,
+) -> Element<'_, Message> {
+    Element::new(PointerInput {
+        content,
+        capture_keyboard,
+    })
 }
 
 struct PointerInput<'a> {
     content: Element<'a, Message>,
+    capture_keyboard: bool,
 }
 
 #[derive(Default)]
@@ -89,6 +96,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        // Footer menus own keyboard input, not the editor that may still have focus.
+        // The window subscription handles navigation after we stop child delivery.
+        if self.capture_keyboard && matches!(event, Event::Keyboard(_) | Event::InputMethod(_)) {
+            shell.capture_event();
+            return;
+        }
         let state = tree.state.downcast_mut::<State>();
         let mut messages = Vec::new();
         let mut child_shell = Shell::new(&mut messages);
@@ -215,7 +228,64 @@ mod tests {
             mouse_area(space().width(5).height(200))
                 .on_press(Message::Press(Press::Resize(false)))
                 .into(),
+            false,
         )
+    }
+
+    #[test]
+    fn menu_capture_blocks_keyboard_and_ime_from_focused_input() {
+        for capture in [false, true] {
+            let mut renderer = renderer();
+            let view = pointer_input(
+                iced::widget::text_input("", "")
+                    .id("composer")
+                    .on_input(Message::Search)
+                    .on_submit(Message::Send)
+                    .into(),
+                capture,
+            );
+            let mut ui = UserInterface::build(
+                view,
+                Size::new(300., 40.),
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            ui.operate(
+                &renderer,
+                &mut operation::focusable::focus("composer".into()),
+            );
+            let mut messages = Vec::new();
+            ui.update(
+                &[
+                    Event::InputMethod(iced::advanced::input_method::Event::Commit("界".into())),
+                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter),
+                        modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter),
+                        physical_key: iced::keyboard::key::Physical::Code(
+                            iced::keyboard::key::Code::Enter,
+                        ),
+                        location: iced::keyboard::Location::Standard,
+                        modifiers: iced::keyboard::Modifiers::empty(),
+                        text: None,
+                        repeat: false,
+                    }),
+                ],
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+            if capture {
+                assert!(messages.is_empty());
+            } else {
+                assert!(
+                    messages
+                        .iter()
+                        .any(|m| matches!(m, Message::Search(value) if value == "界"))
+                );
+                assert!(messages.iter().any(|m| matches!(m, Message::Send)));
+            }
+        }
     }
 
     #[test]
@@ -309,6 +379,7 @@ mod tests {
                 .width(200)
                 .height(100)
                 .into(),
+            false,
         );
         let mut ui = UserInterface::build(
             view,

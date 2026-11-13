@@ -68,6 +68,7 @@ pub struct App {
     revisions: HashMap<String, u64>,
     outputs: HashMap<String, tool_output::Output>,
     context_menu: Option<(String, iced::Point)>,
+    footer_menu: Option<FooterMenu>,
     selected: Option<String>,
     search: String,
     search_active: bool,
@@ -100,6 +101,16 @@ pub struct App {
     smoke_dir: Option<PathBuf>,
     window_id: Option<window::Id>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FooterControl {
+    Model,
+    Effort,
+}
+struct FooterMenu {
+    control: FooterControl,
+    options: Vec<String>,
+    focused: usize,
+}
 #[derive(Clone, Debug)]
 enum Modal {
     AddProject,
@@ -124,6 +135,8 @@ pub enum Message {
     Press(Press),
     SessionMenu(String, iced::Point),
     CloseMenu,
+    FooterMenu(FooterControl),
+    CloseFooterMenu,
     ToolOutput(String, tool_output::Event),
     CopyOutput(String),
     New,
@@ -232,6 +245,7 @@ impl App {
             revisions: HashMap::new(),
             outputs: HashMap::new(),
             context_menu: None,
+            footer_menu: None,
             selected,
             search: String::new(),
             search_active: false,
@@ -547,6 +561,7 @@ impl App {
             text_editor::Content::with_text(self.current().map(|s| s.draft.as_str()).unwrap_or(""));
     }
     fn select(&mut self, id: Option<String>) {
+        self.footer_menu = None;
         if self.io_busy {
             return;
         }
@@ -580,6 +595,9 @@ impl App {
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
+        if self.modal.is_some() || self.context_menu.is_some() {
+            self.footer_menu = None;
+        }
         let close = if self.close_requested && !self.io_busy && !self.closing {
             self.close_requested = false;
             self.quit()
@@ -734,6 +752,37 @@ impl App {
                 self.context_menu = Some((id, position));
             }
             Message::CloseMenu => self.context_menu = None,
+            Message::CloseFooterMenu => self.footer_menu = None,
+            Message::FooterMenu(control) => {
+                if self
+                    .footer_menu
+                    .as_ref()
+                    .is_some_and(|menu| menu.control == control)
+                {
+                    self.footer_menu = None;
+                } else if !self.running()
+                    && let Some(session) = self.current()
+                {
+                    let (options, selected) = match control {
+                        FooterControl::Model => (
+                            model_options(&session.model, &self.catalog.settings.model),
+                            &session.model,
+                        ),
+                        FooterControl::Effort => {
+                            (EFFORTS.map(str::to_owned).to_vec(), &session.effort)
+                        }
+                    };
+                    let focused = options
+                        .iter()
+                        .position(|option| option == selected)
+                        .unwrap_or(0);
+                    self.footer_menu = Some(FooterMenu {
+                        control,
+                        options,
+                        focused,
+                    });
+                }
+            }
             Message::ToolOutput(id, event) => {
                 if let Some(view) = self.outputs.get_mut(&id) {
                     view.update(event);
@@ -888,6 +937,7 @@ impl App {
                 self.save_catalog();
             }
             Message::SessionModel(value) => {
+                self.footer_menu = None;
                 if !self.running()
                     && let (Some(h), Some(id)) = (&self.harness, &self.selected)
                 {
@@ -902,6 +952,7 @@ impl App {
                 }
             }
             Message::SessionEffort(value) => {
+                self.footer_menu = None;
                 if !self.running()
                     && let (Some(h), Some(id)) = (&self.harness, &self.selected)
                 {
@@ -1156,6 +1207,29 @@ impl App {
                     }
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    if let Some(menu) = &mut self.footer_menu {
+                        use keyboard::key::Named;
+                        match key.as_ref() {
+                            keyboard::Key::Named(Named::Escape) => self.footer_menu = None,
+                            keyboard::Key::Named(Named::ArrowUp) => {
+                                menu.focused =
+                                    (menu.focused + menu.options.len() - 1) % menu.options.len();
+                            }
+                            keyboard::Key::Named(Named::ArrowDown) => {
+                                menu.focused = (menu.focused + 1) % menu.options.len();
+                            }
+                            keyboard::Key::Named(Named::Enter | Named::Tab) => {
+                                let value = menu.options[menu.focused].clone();
+                                let message = match menu.control {
+                                    FooterControl::Model => Message::SessionModel(value),
+                                    FooterControl::Effort => Message::SessionEffort(value),
+                                };
+                                return self.update_inner(message);
+                            }
+                            _ => {}
+                        }
+                        return Task::none();
+                    }
                     if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
@@ -1338,10 +1412,32 @@ impl App {
         Subscription::batch(subscriptions)
     }
     pub fn view(&self) -> Element<'_, Message> {
-        pointer_input(self.content())
+        pointer_input(self.content(), self.footer_menu.is_some())
     }
     fn content(&self) -> Element<'_, Message> {
-        let mut body = row![self.sidebar(), self.divider(false), self.center()].height(Fill);
+        let mut center = column![self.center()].width(Fill).height(Fill);
+        if let Some(error) = &self.error {
+            center = center.push(
+                container(
+                    row![
+                        text(error).size(13).width(Fill),
+                        button("Dismiss").on_press(Message::ErrorDismiss)
+                    ]
+                    .spacing(12),
+                )
+                .padding(12)
+                .style(|_| container::Style {
+                    background: Some(Color::from_rgb8(66, 39, 43).into()),
+                    ..Default::default()
+                }),
+            );
+        }
+        let mut body = row![
+            self.sidebar(),
+            self.divider(false),
+            center.push(self.footer())
+        ]
+        .height(Fill);
         if self.settings_open {
             body = body.push(self.divider(true)).push(self.settings_panel());
         }
@@ -1361,24 +1457,7 @@ impl App {
         .height(Fill)
         .width(50)
         .style(panel);
-        let mut root = column![body.push(rail), self.footer()].height(Fill);
-        if let Some(error) = &self.error {
-            root = root.push(
-                container(
-                    row![
-                        text(error).size(13).width(Fill),
-                        button("Dismiss").on_press(Message::ErrorDismiss)
-                    ]
-                    .spacing(12),
-                )
-                .padding(12)
-                .style(|_| container::Style {
-                    background: Some(Color::from_rgb8(66, 39, 43).into()),
-                    ..Default::default()
-                }),
-            );
-        }
-        let base: Element<_> = root.into();
+        let base: Element<_> = body.push(rail).into();
         if let Some(modal) = &self.modal {
             let shade = mouse_area(container(space().width(Fill).height(Fill)).style(|_| {
                 container::Style {
@@ -1419,6 +1498,36 @@ impl App {
             let x = position.x.min(self.window_width - 180.).max(0.);
             let y = position.y.min(self.window_height - 100.).max(0.);
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
+            stack![base, dismiss, positioned].into()
+        } else if let Some(menu) = &self.footer_menu {
+            let dismiss = mouse_area(space().width(Fill).height(Fill))
+                .on_press(Message::CloseFooterMenu)
+                .on_right_press(Message::CloseFooterMenu)
+                .on_scroll(|_| Message::CloseFooterMenu);
+            let right = 50.
+                + if self.settings_open {
+                    self.catalog
+                        .settings
+                        .settings_width
+                        .min(self.window_width * 0.4)
+                        + 5.
+                } else {
+                    0.
+                };
+            // Anchor at the chat's right edge, but let a popup extend over the
+            // left sidebar when the center is too narrow to read its choices.
+            let positioned = row![
+                container(column![space().height(Fill), self.footer_popup(menu)])
+                    .align_right(Fill)
+                    .padding(iced::Padding {
+                        top: 0.,
+                        right: 14.,
+                        bottom: 42.,
+                        left: 14.
+                    }),
+                space().width(right),
+            ]
+            .height(Fill);
             stack![base, dismiss, positioned].into()
         } else {
             base
@@ -2007,134 +2116,17 @@ impl App {
             .into()
     }
     fn footer(&self) -> Element<'_, Message> {
-        let mut info = row![].spacing(10).align_y(iced::Center);
-        if let Some(session) = self.current() {
-            let conversation = self.harness.as_ref().and_then(|h| h.get(&session.id));
-            let status = conversation
-                .as_ref()
-                .map(|c| c.status.lock().expect("status lock").clone())
-                .unwrap_or_else(|| "Ready".into());
-            let seconds = conversation
-                .as_ref()
-                .map_or(0., |c| c.duration().as_secs_f64());
-            let dot = if conversation.as_ref().is_some_and(|c| c.is_running()) {
-                ["◦", "○", "●", "○"][(self.tick as usize / 2) % 4]
-            } else {
-                "·"
-            };
-            info = info.push(
-                tooltip(
-                    text(format!("{dot} {}", shorten(&status, 22)))
-                        .size(11)
-                        .color(ACCENT),
-                    text(status),
-                    tooltip::Position::Top,
-                )
-                .style(card),
-            );
-            let used = session.usage.input;
-            let cache = (session.usage.cached * 100).checked_div(used).unwrap_or(0);
-            let rate = conversation.as_ref().map_or(0., |c| {
-                if seconds > 0. {
-                    session
-                        .usage
-                        .total_output
-                        .saturating_sub(c.output_baseline.load(Ordering::Relaxed))
-                        as f64
-                        / seconds
-                } else {
-                    0.
-                }
-            });
-            let details = format!(
-                "{seconds:.0}s · {used} / {}k ctx · {} out · {cache}% cache · {rate:.1} tok/s",
-                self.catalog.settings.context_limit / 1000,
-                session.usage.total_output
-            );
-            let usage = if self.window_width >= 1450. {
-                details.clone()
-            } else if self.window_width >= 1200. {
-                format!(
-                    "{seconds:.0}s · {used} ctx · {} out",
-                    session.usage.total_output
-                )
-            } else if self.window_width >= 1050. {
-                format!("{used} ctx")
-            } else {
-                String::new()
-            };
-            let show_git = self.window_width >= 1150.;
-            let reserved =
-                430. + usage.chars().count() as f32 * 6. + if show_git { 150. } else { 0. };
-            let path = session.project.display().to_string();
-            let path_chars = ((self.window_width - reserved).max(100.) / 6.) as usize;
-            info = info.push(
-                tooltip(
-                    container(
-                        text(shorten(&path, path_chars))
-                            .size(11)
-                            .color(MUTED)
-                            .wrapping(text::Wrapping::None),
-                    )
-                    .clip(true)
-                    .width(Fill),
-                    text(path),
-                    tooltip::Position::Top,
-                )
-                .style(card),
-            );
-            if show_git {
-                info = info.push(
-                    tooltip(
-                        text(shorten(&self.git, 24)).size(11).color(MUTED),
-                        text(&self.git),
-                        tooltip::Position::Top,
-                    )
-                    .style(card),
-                );
-            }
-            // All usage information stays inspectable on hover, even in a narrow window.
-            info = info.push(
-                tooltip(
-                    text(if usage.is_empty() {
-                        "ⓘ".into()
-                    } else {
-                        usage
-                    })
-                    .size(10)
-                    .color(MUTED),
-                    text(details),
-                    tooltip::Position::Top,
-                )
-                .style(card),
-            );
-            info = info
-                .push(
-                    pick_list(
-                        model_options(&session.model, &self.catalog.settings.model),
-                        Some(session.model.clone()),
-                        Message::SessionModel,
-                    )
-                    .text_size(11)
-                    .padding(5),
-                )
-                .push(
-                    pick_list(EFFORTS, Some(session.effort.as_str()), |v| {
-                        Message::SessionEffort(v.into())
-                    })
-                    .text_size(11)
-                    .padding(5),
-                );
-        } else {
-            info = info
-                .push(text("Pico V2").size(11).color(MUTED))
-                .push(
-                    text("Native Wayland · OpenAI · Code mode")
-                        .size(11)
-                        .color(MUTED),
-                )
-                .push(space().width(Fill))
-                .push(
+        widget::responsive(|size| self.footer_content(size.width))
+            .height(36)
+            .into()
+    }
+
+    fn footer_content(&self, width: f32) -> Element<'_, Message> {
+        let Some(session) = self.current() else {
+            return container(
+                row![
+                    text("Pico V2").size(11).color(MUTED),
+                    space().width(Fill),
                     text(if self.account.is_some() {
                         "ChatGPT connected"
                     } else {
@@ -2142,13 +2134,273 @@ impl App {
                     })
                     .size(11)
                     .color(MUTED),
-                );
-        }
-        container(info)
+                ]
+                .align_y(iced::Center),
+            )
             .padding([8, 14])
+            .height(36)
+            .into();
+        };
+        let conversation = self.harness.as_ref().and_then(|h| h.get(&session.id));
+        let running = conversation.as_ref().is_some_and(|c| c.is_running());
+        let status = conversation
+            .as_ref()
+            .map(|c| c.status.lock().expect("status lock").clone())
+            .unwrap_or_else(|| "Ready".into());
+        let seconds = conversation
+            .as_ref()
+            .map_or(0., |c| c.duration().as_secs_f64());
+        let output = conversation.as_ref().map_or(0, |c| {
+            session
+                .usage
+                .total_output
+                .saturating_sub(c.output_baseline.load(Ordering::Relaxed))
+        });
+        let rate = if seconds > 0. {
+            output as f64 / seconds
+        } else {
+            0.
+        };
+        let used = session.usage.input;
+        let cache = (session.usage.cached as f64 * 100. / used.max(1) as f64).round();
+        let tokens = format!(
+            "{} / {} tokens",
+            compact_tokens(used),
+            compact_tokens(self.catalog.settings.context_limit)
+        );
+        let token_details = format!(
+            "Context input: {used} tokens\nContext limit: {} tokens\nSession output: {} tokens",
+            self.catalog.settings.context_limit, session.usage.total_output,
+        );
+        let rate_details = format!(
+            "Latest turn: {output} output tokens\nElapsed: {seconds:.1}s\nAverage over the whole turn, including tool time"
+        );
+        let cache_details = format!(
+            "Cached input: {} tokens\nTotal input: {used} tokens",
+            session.usage.cached
+        );
+        let layout = FooterLayout::new(width, &session.model, &session.effort);
+        let mut hidden = Vec::new();
+        if !layout.git && !self.git.is_empty() {
+            hidden.push(self.git.clone());
+        }
+        if !layout.usage {
+            hidden.push(token_details.clone());
+        }
+        if !layout.rate {
+            hidden.push(format!("TPS: {rate:.1}\n{rate_details}"));
+        }
+        if !layout.cache {
+            hidden.push(format!("Cache: {cache:.0}%\n{cache_details}"));
+        }
+        let control = |kind, label: &str, width| {
+            let open = self
+                .footer_menu
+                .as_ref()
+                .is_some_and(|menu| menu.control == kind);
+            let chip = button(ellipsized_text(label, 11., None))
+                .width(width)
+                .padding([3, 4])
+                .on_press_maybe((!running).then_some(Message::FooterMenu(kind)))
+                .style(move |theme, status| {
+                    let mut style = sidebar_control(theme, status);
+                    if open {
+                        style.text_color = theme.palette().text;
+                    }
+                    style
+                });
+            if running {
+                footer_tip(
+                    chip,
+                    "Stop the current turn before changing model or effort.".into(),
+                )
+            } else if footer_text_width(label, 11.) > width - 8. {
+                footer_tip(chip, label.into())
+            } else {
+                chip.into()
+            }
+        };
+        let dot = if running {
+            ["◦", "○", "●", "○"][(self.tick as usize / 2) % 4]
+        } else {
+            "●"
+        };
+        let mut info = row![footer_tip(
+            container(
+                text(dot)
+                    .size(11)
+                    .color(if running { ACCENT } else { MUTED })
+            )
+            .width(12),
+            status.clone(),
+        )]
+        .spacing(4)
+        .align_y(iced::Center);
+
+        let path = session.project.display().to_string();
+        let display_path = std::env::var_os("HOME")
+            .and_then(|home| {
+                session.project.strip_prefix(home).ok().map(|suffix| {
+                    if suffix.as_os_str().is_empty() {
+                        "~".into()
+                    } else {
+                        format!("~/{}", suffix.display())
+                    }
+                })
+            })
+            .unwrap_or_else(|| path.clone());
+        if width < 240. {
+            // At the minimum window size, two maximized sidebars leave only 112px.
+            // Collapse all metadata into the status target instead of losing controls.
+            let details = format!("{status}\n{path}\n\n{}", hidden.join("\n\n"));
+            let controls_width = (width - 44.).max(0.);
+            return container(
+                row![
+                    footer_tip(
+                        text(dot)
+                            .size(11)
+                            .color(if running { ACCENT } else { MUTED }),
+                        details
+                    ),
+                    control(FooterControl::Model, &session.model, controls_width * 0.65),
+                    footer_separator(),
+                    control(
+                        FooterControl::Effort,
+                        &session.effort,
+                        controls_width * 0.35
+                    ),
+                ]
+                .spacing(2)
+                .align_y(iced::Center),
+            )
+            .padding([6, 4])
+            .height(36)
             .width(Fill)
-            .style(panel)
+            .into();
+        }
+        let full_path_width = footer_text_width(&display_path, 11.).ceil();
+        let path_width = layout.path_width.min(240.).min(full_path_width);
+        let path_label = if full_path_width <= path_width {
+            display_path
+        } else {
+            shorten(&display_path, (path_width / 7.).max(1.) as usize)
+        };
+        let path_view = container(ellipsized_text(&path_label, 11., Some(MUTED))).width(path_width);
+        info = info.push(
+            if path_label != path || footer_text_width(&path_label, 11.) > path_width {
+                footer_tip(path_view, path)
+            } else {
+                path_view.into()
+            },
+        );
+        if layout.git && !self.git.is_empty() {
+            let label = shorten(&self.git, 18);
+            let git_width = footer_text_width(&label, 11.).ceil().min(126.);
+            let git = container(ellipsized_text(&label, 11., Some(MUTED))).width(git_width);
+            info = info.push(footer_separator()).push(
+                if label != self.git || footer_text_width(&label, 11.) > git_width {
+                    footer_tip(git, self.git.clone())
+                } else {
+                    git.into()
+                },
+            );
+        }
+        if layout.usage {
+            info = info.push(footer_separator()).push(footer_tip(
+                text(tokens).size(11).color(MUTED),
+                token_details,
+            ));
+        }
+        if layout.rate {
+            info = info.push(footer_separator()).push(footer_tip(
+                text(format!("TPS: {rate:.0}")).size(11).color(MUTED),
+                rate_details,
+            ));
+        }
+        if layout.cache {
+            info = info.push(footer_separator()).push(footer_tip(
+                text(format!("{cache:.0}% cache")).size(11).color(MUTED),
+                cache_details,
+            ));
+        }
+        if !hidden.is_empty() {
+            info = info.push(footer_separator()).push(footer_tip(
+                text("…").size(13).color(MUTED),
+                hidden.join("\n\n"),
+            ));
+        }
+        info = info
+            .push(space().width(Fill))
+            .push(control(
+                FooterControl::Model,
+                &session.model,
+                layout.model_width,
+            ))
+            .push(footer_separator())
+            .push(control(
+                FooterControl::Effort,
+                &session.effort,
+                layout.effort_width,
+            ));
+        container(info)
+            .padding([6, 14])
+            .height(36)
+            .width(Fill)
             .into()
+    }
+
+    fn footer_popup<'a>(&'a self, menu: &'a FooterMenu) -> Element<'a, Message> {
+        let session = self.current().expect("footer menu has a session");
+        let selected = match menu.control {
+            FooterControl::Model => &session.model,
+            FooterControl::Effort => &session.effort,
+        };
+        let mut options = column![].spacing(2);
+        for (index, option) in menu.options.iter().enumerate() {
+            let chosen = option == selected;
+            let focused = menu.focused == index;
+            let message = match menu.control {
+                FooterControl::Model => Message::SessionModel(option.clone()),
+                FooterControl::Effort => Message::SessionEffort(option.clone()),
+            };
+            let item = button(
+                row![
+                    ellipsized_text(option, 12., None),
+                    text(if chosen { "✓" } else { "" })
+                        .size(12)
+                        .color(ACCENT)
+                        .width(16),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            )
+            .width(Fill)
+            .height(30)
+            .padding([6, 8])
+            .on_press(message)
+            .style(move |theme, status| {
+                let mut style = button::text(theme, status);
+                if focused
+                    || chosen
+                    || matches!(status, button::Status::Hovered | button::Status::Pressed)
+                {
+                    style.background = Some(Color::from_rgb8(42, 42, 52).into());
+                }
+                style.border.radius = 4.into();
+                style
+            });
+            options = options.push(if footer_text_width(option, 12.) > 228. {
+                footer_tip(item, option.clone())
+            } else {
+                item.into()
+            });
+        }
+        opaque(
+            container(scrollable(options).height((menu.options.len() as f32 * 32. - 2.).min(240.)))
+                .padding(6)
+                .width(280)
+                .style(footer_surface),
+        )
     }
     fn modal_view(&self, modal: &Modal) -> Element<'_, Message> {
         let (title, body, confirm) = match modal {
@@ -2253,6 +2505,9 @@ impl App {
                 });
                 let mut s = Session::new(path, &self.catalog.settings);
                 s.title = "Phase 1 rendered-window check".into();
+                s.usage.input = 60_721;
+                s.usage.cached = 56_470;
+                s.usage.total_output = 1_237;
                 s.entries = vec![
                     Entry::new(EntryKind::User, "Inspect this project and run its tests."),
                     Entry::new(
@@ -2439,10 +2694,17 @@ impl App {
                     delayed_capture(),
                 ]);
             }
+            17 => {
+                self.settings_open = false;
+                let _ = self.update_inner(Message::FooterMenu(FooterControl::Model));
+            }
+            18 => {
+                let _ = self.update_inner(Message::FooterMenu(FooterControl::Effort));
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session menu, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -2463,6 +2725,96 @@ impl Drop for App {
         }
     }
 }
+// Budget against the center column, not the window (both sidebars can resize).
+struct FooterLayout {
+    model_width: f32,
+    effort_width: f32,
+    path_width: f32,
+    git: bool,
+    usage: bool,
+    rate: bool,
+    cache: bool,
+}
+impl FooterLayout {
+    fn new(width: f32, model: &str, effort: &str) -> Self {
+        let model_width =
+            (footer_text_width(model, 11.).ceil() + 8.).min((width * 0.3).clamp(40., 180.));
+        let effort_width =
+            (footer_text_width(effort, 11.).ceil() + 8.).min((width * 0.15).clamp(28., 64.));
+        let available = width - model_width - effort_width - 88.;
+        let usage = available >= 260.;
+        let git = available >= 420.;
+        let rate = available >= 500.;
+        let cache = available >= 580.;
+        let path_width = available
+            - if usage { 158. } else { 0. }
+            - if git { 142. } else { 0. }
+            - if rate { 76. } else { 0. }
+            - if cache { 76. } else { 0. };
+        Self {
+            model_width,
+            effort_width,
+            path_width,
+            git,
+            usage,
+            rate,
+            cache,
+        }
+    }
+}
+fn compact_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.2}M", tokens as f64 / 1_000_000.)
+    } else if tokens >= 1000 {
+        format!("{:.1}k", tokens as f64 / 1000.)
+    } else {
+        tokens.to_string()
+    }
+}
+// Match the label renderer so wide glyphs also get a full-value tooltip.
+fn footer_text_width(value: &str, size: f32) -> f32 {
+    use iced::advanced::text::{Paragraph, Renderer};
+    <iced::Renderer as Renderer>::Paragraph::with_text(iced::advanced::Text {
+        content: value,
+        bounds: iced::Size::INFINITE,
+        size: size.into(),
+        line_height: text::LineHeight::Absolute((size * 1.3).round().into()),
+        font: iced::Font::DEFAULT,
+        align_x: Default::default(),
+        align_y: iced::alignment::Vertical::Top,
+        shaping: text::Shaping::Basic,
+        wrapping: text::Wrapping::None,
+    })
+    .min_width()
+}
+fn footer_separator() -> Element<'static, Message> {
+    text("·").size(11).color(MUTED).width(8).center().into()
+}
+fn footer_tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    details: String,
+) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(details).size(12)).max_width(440),
+        tooltip::Position::Top,
+    )
+    .gap(6)
+    .padding(8)
+    .style(footer_surface)
+    .into()
+}
+fn footer_surface(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgb8(30, 30, 36).into()),
+        border: iced::Border {
+            radius: 6.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 fn sidebar_control(theme: &Theme, status: button::Status) -> button::Style {
     let mut style = button::text(theme, status);
     style.text_color = if matches!(status, button::Status::Hovered | button::Status::Pressed) {
@@ -2764,6 +3116,234 @@ mod tests {
             &mut messages,
         );
         messages
+    }
+
+    #[derive(Default)]
+    struct UiBounds {
+        labels: Vec<(String, iced::Rectangle)>,
+        containers: Vec<iced::Rectangle>,
+    }
+    impl iced::advanced::widget::Operation for UiBounds {
+        fn traverse(
+            &mut self,
+            operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
+        ) {
+            operate(self);
+        }
+        fn container(&mut self, _: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
+            self.containers.push(bounds);
+        }
+        fn text(
+            &mut self,
+            _: Option<&iced::advanced::widget::Id>,
+            bounds: iced::Rectangle,
+            value: &str,
+        ) {
+            self.labels.push((value.into(), bounds));
+        }
+    }
+    impl UiBounds {
+        fn label(&self, value: &str) -> iced::Rectangle {
+            self.labels
+                .iter()
+                .find(|(text, _)| text == value)
+                .unwrap_or_else(|| panic!("missing label {value}"))
+                .1
+        }
+    }
+    fn footer_key(key: keyboard::key::Named) -> Message {
+        Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(key),
+            modified_key: keyboard::Key::Named(key),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Enter),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        }))
+    }
+
+    #[tokio::test]
+    async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
+        let mut app = app();
+        dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
+        app.settings_open = true;
+        let mut renderer = header_renderer();
+        for (width, height, left, right) in [(1600., 800., 260., 320.), (860., 560., 344., 344.)] {
+            app.window_width = width;
+            app.window_height = height;
+            app.catalog.settings.sidebar_width = left;
+            app.catalog.settings.settings_width = right;
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(width, height),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            for label in [
+                &app.current().unwrap().model,
+                &app.current().unwrap().effort,
+            ] {
+                let control = bounds.label(label);
+                assert!(
+                    control.y >= height - 36.,
+                    "footer must not take a fill-height share: {control:?}"
+                );
+                assert!(control.x >= left + 5. && control.x + control.width <= width - right - 55.);
+                assert!(
+                    control.width >= 14.,
+                    "control must remain clickable: {control:?}"
+                );
+            }
+            assert!(
+                bounds
+                    .containers
+                    .iter()
+                    .any(|b| b.x == 0. && b.width == left && b.height == height)
+            );
+            assert!(
+                bounds
+                    .containers
+                    .iter()
+                    .any(|b| b.x == width - 50. && b.height == height)
+            );
+            let has_tps = bounds
+                .labels
+                .iter()
+                .any(|(label, _)| label.starts_with("TPS:"));
+            assert_eq!(
+                has_tps,
+                width == 1600.,
+                "metrics collapse using the available center width"
+            );
+            drop(ui);
+            dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(width, height),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut menu_bounds = UiBounds::default();
+            ui.operate(&renderer, &mut menu_bounds);
+            let option = menu_bounds.label("gpt-5.3-codex");
+            assert!(
+                option.width >= footer_text_width("gpt-5.3-codex", 12.),
+                "popup options must stay readable even with a narrow chat"
+            );
+            drop(ui);
+            dispatch(&mut app, Message::CloseFooterMenu).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn footer_menus_select_with_keyboard_and_dismiss_without_closing_settings() {
+        use keyboard::key::Named;
+        let mut app = app();
+        dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
+        app.settings_open = true;
+        let old_model = app.current().unwrap().model.clone();
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
+        let menu = app.footer_menu.as_ref().unwrap();
+        assert_eq!(menu.options[menu.focused], old_model);
+        let expected = menu.options[(menu.focused + 1) % menu.options.len()].clone();
+        dispatch(&mut app, footer_key(Named::ArrowDown)).await;
+        dispatch(&mut app, footer_key(Named::Enter)).await;
+        assert_eq!(app.current().unwrap().model, expected);
+        assert!(app.footer_menu.is_none());
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        dispatch(&mut app, footer_key(Named::Escape)).await;
+        assert!(app.footer_menu.is_none());
+        assert!(app.settings_open);
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        let menu = app.footer_menu.as_ref().unwrap();
+        let expected =
+            menu.options[(menu.focused + menu.options.len() - 1) % menu.options.len()].clone();
+        dispatch(&mut app, footer_key(Named::ArrowUp)).await;
+        dispatch(&mut app, footer_key(Named::Tab)).await;
+        assert_eq!(app.current().unwrap().effort, expected);
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
+        let messages = {
+            let mut renderer = header_renderer();
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(1200., 800.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            click_header(&mut ui, &mut renderer, 12.)
+        };
+        assert!(matches!(messages.as_slice(), [Message::CloseFooterMenu]));
+        dispatch(&mut app, messages.into_iter().next().unwrap()).await;
+        assert!(app.footer_menu.is_none());
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        let messages = {
+            let mut renderer = header_renderer();
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(1200., 800.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let mut messages = Vec::new();
+            ui.update(
+                &[
+                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ],
+                mouse::Cursor::Available(
+                    bounds
+                        .labels
+                        .iter()
+                        .rev()
+                        .find(|(label, _)| label == "high")
+                        .unwrap()
+                        .1
+                        .center(),
+                ),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            messages
+        };
+        assert!(
+            matches!(messages.as_slice(), [Message::SessionEffort(value)] if value == "high"),
+            "unexpected popup messages: {messages:?}"
+        );
+        dispatch(&mut app, messages.into_iter().next().unwrap()).await;
+        assert_eq!(app.current().unwrap().effort, "high");
+        assert!(app.footer_menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn quit_confirmation_releases_footer_keyboard_ownership() {
+        let mut app = app();
+        dispatch(&mut app, Message::Create(PathBuf::from("/running"))).await;
+        let running = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .get(app.selected.as_ref().unwrap())
+            .unwrap();
+        running.running.store(true, Ordering::Release);
+        dispatch(&mut app, Message::Create(PathBuf::from("/idle"))).await;
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
+        assert!(app.footer_menu.is_some());
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::CloseRequested)),
+        )
+        .await;
+        assert!(matches!(app.modal, Some(Modal::Quit)));
+        assert!(app.footer_menu.is_none());
+        dispatch(&mut app, footer_key(keyboard::key::Named::Escape)).await;
+        assert!(app.modal.is_none());
+        running.running.store(false, Ordering::Release);
     }
 
     #[tokio::test]
