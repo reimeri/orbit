@@ -1,6 +1,7 @@
 mod ellipsized_text;
 mod io_worker;
 mod pointer_input;
+mod search_icon;
 mod tool_output;
 mod ui;
 mod virtual_list;

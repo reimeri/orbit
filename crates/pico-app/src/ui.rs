@@ -42,6 +42,7 @@ const MUTED: Color = Color::from_rgb8(141, 149, 164);
 const PANEL: Color = Color::from_rgb8(29, 32, 37);
 const BORDER: Color = Color::from_rgb8(48, 53, 61);
 const ACCENT: Color = Color::from_rgb8(137, 175, 210);
+const SIDEBAR_CONTENT_PADDING: f32 = 8.;
 const EFFORTS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 pub struct App {
@@ -69,7 +70,7 @@ pub struct App {
     context_menu: Option<(String, iced::Point)>,
     selected: Option<String>,
     search: String,
-    project_filter: Option<PathBuf>,
+    search_active: bool,
     editor: text_editor::Content,
     markdown: HashMap<String, (Arc<Entry>, markdown::Content)>,
     expanded: HashSet<String>,
@@ -129,7 +130,7 @@ pub enum Message {
     Select(String),
     Create(PathBuf),
     Search(String),
-    Filter(PathBuf),
+    ToggleSearch,
     Favorite(PathBuf),
     Editor(text_editor::Action),
     Send,
@@ -233,7 +234,7 @@ impl App {
             context_menu: None,
             selected,
             search: String::new(),
-            project_filter: None,
+            search_active: false,
             editor: text_editor::Content::new(),
             markdown: HashMap::new(),
             expanded: HashSet::new(),
@@ -442,13 +443,9 @@ impl App {
         let needle = self.search.to_lowercase();
         let mut sections = [vec![], vec![], vec![]];
         for (index, s) in self.sessions.iter().enumerate() {
-            if self
-                .project_filter
-                .as_ref()
-                .is_some_and(|p| p != &s.project)
-                || !needle.is_empty()
-                    && !s.title.to_lowercase().contains(&needle)
-                    && !s.project.to_string_lossy().to_lowercase().contains(&needle)
+            if !needle.is_empty()
+                && !s.title.to_lowercase().contains(&needle)
+                && !s.project.to_string_lossy().to_lowercase().contains(&needle)
             {
                 continue;
             }
@@ -788,14 +785,12 @@ impl App {
                 self.prepare_sidebar();
                 return widget::operation::snap_to("sessions", scrollable::RelativeOffset::START);
             }
-            Message::Filter(path) => {
-                self.project_filter = if self.project_filter.as_ref() == Some(&path) {
-                    None
-                } else {
-                    Some(path)
-                };
-                self.sidebar_list.offset = 0.;
-                self.prepare_sidebar();
+            Message::ToggleSearch => {
+                self.search_active = !self.search_active;
+                if self.search_active {
+                    return widget::operation::focus("session-search");
+                }
+                return self.update_inner(Message::Search(String::new()));
             }
             Message::Favorite(path) => {
                 if let Some(p) = self.catalog.projects.iter_mut().find(|p| p.path == path) {
@@ -1165,6 +1160,8 @@ impl App {
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
                             self.modal = None;
+                        } else if self.search_active {
+                            return self.update_inner(Message::ToggleSearch);
                         } else if self.settings_open {
                             self.view_epoch = self.view_epoch.wrapping_add(1);
                             self.settings_open = false;
@@ -1439,56 +1436,101 @@ impl App {
         .into()
     }
 
-    fn sidebar(&self) -> Element<'_, Message> {
-        let mut list = column![
-            row![
-                text("PICO").size(20).color(ACCENT),
-                space().width(Fill),
-                button("+").on_press(Message::New).style(button::text)
-            ]
-            .align_y(iced::Center),
-            text_input("Search sessions or projects…", &self.search)
+    fn sidebar_header(&self) -> Element<'_, Message> {
+        let icon: Element<_> = if self.search_active {
+            text("×").size(14).into()
+        } else {
+            crate::search_icon::search_icon()
+        };
+        let control = button(container(icon).center_x(18).center_y(24))
+            .padding(0)
+            .width(18)
+            .height(24)
+            .on_press(Message::ToggleSearch)
+            .style(sidebar_control);
+        let center: Element<_> = if self.search_active {
+            text_input("Search sessions…", &self.search)
+                .id("session-search")
                 .on_input(Message::Search)
-                .padding(9)
-        ]
-        .spacing(14);
-        let favorites: Vec<_> = self
-            .catalog
-            .projects
-            .iter()
-            .filter(|p| p.favorite)
-            .collect();
-        if !favorites.is_empty() {
-            list = list.push(text("FAVORITES").size(10).color(MUTED));
-            for project in favorites {
-                let active = self.project_filter.as_ref() == Some(&project.path);
-                list = list.push(
-                    button(
-                        text(format!("★  {}", project.name()))
-                            .size(13)
-                            .wrapping(text::Wrapping::WordOrGlyph),
+                .size(13)
+                .padding([0, 4])
+                .style(|theme, status| {
+                    let mut style = text_input::default(theme, status);
+                    style.background = Color::from_rgb8(39, 42, 48).into();
+                    style.border = iced::Border {
+                        radius: 3.into(),
+                        ..Default::default()
+                    };
+                    style.placeholder = MUTED;
+                    style
+                })
+                .into()
+        } else {
+            let badges = row(self
+                .catalog
+                .projects
+                .iter()
+                .filter(|p| p.favorite)
+                .map(|p| {
+                    tooltip(
+                        button(project_badge(&p.path))
+                            .padding(0)
+                            .on_press(Message::Create(p.path.clone()))
+                            .style(button::text),
+                        text(format!("New session in {}\n{}", p.name(), p.path.display())).size(12),
+                        tooltip::Position::Bottom,
                     )
-                    .on_press(Message::Filter(project.path.clone()))
-                    .style(if active { secondary } else { button::text })
-                    .width(Fill),
-                );
-            }
-        }
-        if let Some(path) = &self.project_filter {
-            list = list.push(
-                button(
-                    text(format!(
-                        "×  Clear {} filter",
-                        path.file_name()
-                            .unwrap_or(path.as_os_str())
-                            .to_string_lossy()
+                    .style(card)
+                    .into()
+                }))
+            .spacing(6)
+            .align_y(iced::Center);
+            container(
+                scrollable(badges)
+                    .id("favorite-projects")
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::hidden(),
                     ))
-                    .size(11),
-                )
-                .on_press(Message::Filter(path.clone()))
-                .style(button::text),
-            );
-        }
+                    .height(18),
+            )
+            .center_x(Fill)
+            .into()
+        };
+        row![
+            tooltip(
+                control,
+                text(if self.search_active {
+                    "Close search (Esc)"
+                } else {
+                    "Search sessions"
+                })
+                .size(12),
+                tooltip::Position::Bottom,
+            )
+            .style(card),
+            center,
+            tooltip(
+                button(container(text("+").size(16)).center_x(18).center_y(24))
+                    .padding(0)
+                    .width(18)
+                    .height(24)
+                    .on_press(Message::New)
+                    .style(sidebar_control),
+                text("New session").size(12),
+                tooltip::Position::Bottom,
+            )
+            .style(card),
+        ]
+        .spacing(6)
+        .align_y(iced::Center)
+        .height(24)
+        .into()
+    }
+
+    fn sidebar(&self) -> Element<'_, Message> {
+        let mut list =
+            column![container(self.sidebar_header()).padding([0., SIDEBAR_CONTENT_PADDING])]
+                .spacing(8);
         let epoch = self.sidebar_epoch;
         let range = self.sidebar_list.visible();
         let mut rows: Vec<((u64, usize), Element<'_, Message>)> = vec![(
@@ -1499,7 +1541,7 @@ impl App {
             let content: Element<'_, Message> = match &self.sidebar_rows[index] {
                 SidebarRow::Heading(title, count) => {
                     container(text(format!("{title}  {count}")).size(10).color(MUTED))
-                        .padding([10, 0])
+                        .padding([10., SIDEBAR_CONTENT_PADDING])
                         .into()
                 }
                 SidebarRow::Session(session_index) => {
@@ -1510,29 +1552,7 @@ impl App {
                         .file_name()
                         .unwrap_or(session.project.as_os_str())
                         .to_string_lossy();
-                    let color = project_color(&session.project);
-                    let badge = container(
-                        text(project_initials(&project))
-                            .size(8)
-                            .line_height(text::LineHeight::Absolute(10.into()))
-                            .color(color),
-                    )
-                    .center_x(16)
-                    .center_y(16)
-                    // Asymmetric padding lowers the centered initials by 1 px,
-                    // aligning their baseline with the neighboring project name.
-                    .padding(iced::Padding {
-                        top: 2.,
-                        ..Default::default()
-                    })
-                    .style(move |_| container::Style {
-                        background: Some(Color { a: 0.18, ..color }.into()),
-                        border: iced::Border {
-                            radius: 3.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    });
+                    let badge = project_badge(&session.project);
                     // `updated` changes on accepted user submissions, not agent activity.
                     let age = age(session.updated);
                     let content = mouse_area(
@@ -1549,7 +1569,7 @@ impl App {
                             ]
                             .spacing(3),
                         )
-                        .padding([6, 8])
+                        .padding([6., SIDEBAR_CONTENT_PADDING])
                         .width(Fill)
                         .on_press(Message::Select(session.id.clone()))
                         .style(if active {
@@ -1578,10 +1598,13 @@ impl App {
         if self.sessions.is_empty() {
             rows.push((
                 (epoch, usize::MAX - 2),
-                text("Your sessions will appear here.")
-                    .size(13)
-                    .color(MUTED)
-                    .into(),
+                container(
+                    text("Your sessions will appear here.")
+                        .size(13)
+                        .color(MUTED),
+                )
+                .padding([0., SIDEBAR_CONTENT_PADDING])
+                .into(),
             ));
         }
         let rows = widget::keyed_column(rows);
@@ -1594,7 +1617,12 @@ impl App {
                 }),
         );
         container(list)
-            .padding(14)
+            .padding(iced::Padding {
+                top: 4.,
+                right: 8.,
+                bottom: 14.,
+                left: 8.,
+            })
             .width(
                 self.catalog
                     .settings
@@ -2240,8 +2268,16 @@ impl App {
                 self.select(Some(id));
                 let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
             }
-            2 => self.settings_open = true,
+            2 => {
+                self.settings_open = true;
+                return Task::batch([
+                    self.update_inner(Message::ToggleSearch),
+                    bottom(),
+                    delayed_capture(),
+                ]);
+            }
             3 => {
+                let _ = self.update_inner(Message::ToggleSearch);
                 self.modal = Some(Modal::AddProject);
                 self.modal_input = "/tmp/example-project".into();
             }
@@ -2377,16 +2413,12 @@ impl App {
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered picker, chat, settings, modal, session menu, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search, chat, settings, modal, session menu, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
         }
-        if self.smoke_stage == 2 {
-            Task::batch([bottom(), delayed_capture()])
-        } else {
-            delayed_capture()
-        }
+        delayed_capture()
     }
 }
 impl Drop for App {
@@ -2402,6 +2434,16 @@ impl Drop for App {
         }
     }
 }
+fn sidebar_control(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button::text(theme, status);
+    style.text_color = if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+        theme.palette().text
+    } else {
+        MUTED
+    };
+    style
+}
+
 fn secondary(theme: &Theme, status: button::Status) -> button::Style {
     let mut style = button::secondary(theme, status);
     style.background = Some(
@@ -2445,6 +2487,31 @@ fn delayed_capture() -> Task<Message> {
         |_| Message::Capture,
     )
 }
+fn project_badge(path: &Path) -> Element<'static, Message> {
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    let color = project_color(path);
+    container(
+        text(project_initials(&name))
+            .size(8)
+            .line_height(text::LineHeight::Absolute(10.into()))
+            .color(color),
+    )
+    .center_x(16)
+    .center_y(16)
+    .style(move |_| container::Style {
+        background: Some(Color { a: 0.18, ..color }.into()),
+        border: iced::Border {
+            radius: 3.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
 fn project_initials(name: &str) -> String {
     let mut words = name
         .split(|ch: char| ch.is_whitespace() || ch == '-' || ch == '_')
@@ -2644,6 +2711,281 @@ mod tests {
             }
         }
     }
+    fn header_renderer() -> iced::Renderer {
+        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ))
+    }
+
+    fn click_header(
+        ui: &mut iced_runtime::UserInterface<'_, Message, Theme, iced::Renderer>,
+        renderer: &mut iced::Renderer,
+        x: f32,
+    ) -> Vec<Message> {
+        let mut messages = Vec::new();
+        ui.update(
+            &[
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            ],
+            mouse::Cursor::Available(iced::Point::new(x, 12.)),
+            renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        messages
+    }
+
+    #[tokio::test]
+    async fn sidebar_header_centers_only_favorites_and_creates_in_clicked_project() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap().join("favorite-project");
+        app.catalog.projects = vec![
+            Project {
+                path: PathBuf::from("/not-starred"),
+                favorite: false,
+            },
+            Project {
+                path: path.clone(),
+                favorite: true,
+            },
+        ];
+        let mut renderer = header_renderer();
+        let create = {
+            let mut ui = iced_runtime::UserInterface::build(
+                app.sidebar_header(),
+                iced::Size::new(346., 24.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            assert!(matches!(
+                click_header(&mut ui, &mut renderer, 12.).as_slice(),
+                [Message::ToggleSearch]
+            ));
+            assert!(matches!(
+                click_header(&mut ui, &mut renderer, 334.).as_slice(),
+                [Message::New]
+            ));
+            let messages = click_header(&mut ui, &mut renderer, 173.);
+            assert!(matches!(messages.as_slice(), [Message::Create(p)] if p == &path));
+            messages.into_iter().next().unwrap()
+        };
+        dispatch(&mut app, create).await;
+        assert_eq!(app.current().unwrap().project, path);
+        dispatch(&mut app, Message::New).await;
+        assert!(app.selected.is_none(), "+ must open the project chooser");
+    }
+
+    #[tokio::test]
+    async fn project_badge_labels_are_centered_in_header_and_session_rows() {
+        use iced::advanced::widget::{Id, Operation};
+        #[derive(Default)]
+        struct BadgeBounds {
+            containers: Vec<iced::Rectangle>,
+            labels: Vec<(iced::Rectangle, iced::Rectangle)>,
+        }
+        impl Operation for BadgeBounds {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn container(&mut self, _id: Option<&Id>, bounds: iced::Rectangle) {
+                if bounds.size() == iced::Size::new(16., 16.) {
+                    self.containers.push(bounds);
+                }
+            }
+            fn text(&mut self, _id: Option<&Id>, bounds: iced::Rectangle, text: &str) {
+                if text == "PE" {
+                    let badge = self
+                        .containers
+                        .iter()
+                        .rev()
+                        .find(|badge| badge.contains(bounds.center()))
+                        .unwrap();
+                    self.labels.push((*badge, bounds));
+                }
+            }
+        }
+        let mut app = app();
+        let path = PathBuf::from("/pico-evo");
+        app.catalog.projects.push(Project {
+            path: path.clone(),
+            favorite: true,
+        });
+        dispatch(&mut app, Message::Create(path)).await;
+        let mut renderer = header_renderer();
+        let mut ui = iced_runtime::UserInterface::build(
+            app.sidebar(),
+            iced::Size::new(240., 640.),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = BadgeBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        assert_eq!(
+            bounds.labels.len(),
+            2,
+            "header and session badges must both be checked"
+        );
+        for (badge, label) in bounds.labels {
+            assert_eq!(
+                label.center(),
+                badge.center(),
+                "initials must stay centered inside the badge"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sidebar_favorites_scroll_without_moving_header_controls() {
+        let mut app = app();
+        app.catalog.projects = (0..12)
+            .map(|i| Project {
+                path: PathBuf::from(format!("/project-{i}")),
+                favorite: true,
+            })
+            .collect();
+        let mut renderer = header_renderer();
+        let mut ui = iced_runtime::UserInterface::build(
+            app.sidebar_header(),
+            iced::Size::new(160., 24.),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        assert!(
+            matches!(click_header(&mut ui, &mut renderer, 38.).as_slice(), [Message::Create(p)] if p == Path::new("/project-0"))
+        );
+        ui.update(
+            &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: -1000., y: 0. },
+            })],
+            mouse::Cursor::Available(iced::Point::new(80., 12.)),
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(click_header(&mut ui, &mut renderer, 122.).as_slice(), [Message::Create(p)] if p == Path::new("/project-11"))
+        );
+        assert!(matches!(
+            click_header(&mut ui, &mut renderer, 12.).as_slice(),
+            [Message::ToggleSearch]
+        ));
+        assert!(matches!(
+            click_header(&mut ui, &mut renderer, 148.).as_slice(),
+            [Message::New]
+        ));
+    }
+
+    #[tokio::test]
+    async fn sidebar_search_focuses_filters_and_clears_on_close() {
+        use iced::futures::StreamExt;
+        let mut app = app();
+        for (path, title) in [("/alpha", "Zulu notes"), ("/beta", "Control")] {
+            dispatch(&mut app, Message::Create(PathBuf::from(path))).await;
+            app.harness
+                .as_ref()
+                .unwrap()
+                .edit(app.selected.as_ref().unwrap(), |s| s.title = title.into())
+                .unwrap();
+        }
+        app.refresh();
+        assert!(!app.search_active);
+        let task = app.update(Message::ToggleSearch);
+        assert!(app.search_active);
+        let mut renderer = header_renderer();
+        let input = {
+            let mut ui = iced_runtime::UserInterface::build(
+                app.sidebar_header(),
+                iced::Size::new(346., 24.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            // Execute the returned focus operation, then type without clicking the input.
+            let mut actions = iced_runtime::task::into_stream(task).unwrap();
+            while let Some(action) = actions.next().await {
+                if let iced_runtime::Action::Widget(mut operation) = action {
+                    ui.operate(&renderer, operation.as_mut());
+                }
+            }
+            let mut messages = Vec::new();
+            ui.update(
+                &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Character("z".into()),
+                    modified_key: keyboard::Key::Character("z".into()),
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyZ),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::empty(),
+                    text: Some("z".into()),
+                    repeat: false,
+                })],
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(matches!(messages.as_slice(), [Message::Search(query)] if query == "z"));
+            assert!(matches!(
+                click_header(&mut ui, &mut renderer, 12.).as_slice(),
+                [Message::ToggleSearch]
+            ));
+            messages.into_iter().next().unwrap()
+        };
+        dispatch(&mut app, input).await;
+        let visible: Vec<_> = app
+            .sidebar_rows
+            .iter()
+            .filter_map(|r| match r {
+                SidebarRow::Session(i) => Some(app.sessions[*i].title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible, ["Zulu notes"]);
+        app.sidebar_list.offset = 100.;
+        dispatch(&mut app, Message::ToggleSearch).await;
+        assert!(!app.search_active);
+        assert!(app.search.is_empty());
+        assert_eq!(app.sidebar_list.offset, 0.);
+        assert_eq!(
+            app.sidebar_rows
+                .iter()
+                .filter(|r| matches!(r, SidebarRow::Session(_)))
+                .count(),
+            2
+        );
+        dispatch(&mut app, Message::ToggleSearch).await;
+        dispatch(&mut app, Message::Search("BETA".into())).await;
+        assert_eq!(
+            app.sidebar_rows
+                .iter()
+                .filter(|r| matches!(r, SidebarRow::Session(_)))
+                .count(),
+            1
+        );
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            })),
+        )
+        .await;
+        assert!(!app.search_active);
+        assert!(app.search.is_empty());
+        assert_eq!(
+            app.sidebar_rows
+                .iter()
+                .filter(|r| matches!(r, SidebarRow::Session(_)))
+                .count(),
+            2
+        );
+    }
+
     #[test]
     fn project_badge_initials_follow_name_words() {
         for (name, expected) in [
@@ -2730,6 +3072,8 @@ mod tests {
         selected.running.store(true, Ordering::Release);
         other.running.store(true, Ordering::Release);
         app.settings_open = true;
+        dispatch(&mut app, Message::ToggleSearch).await;
+        dispatch(&mut app, Message::Search("no matches".into())).await;
         app.modal = Some(Modal::AddProject);
         app.context_menu = Some((other.id.clone(), iced::Point::ORIGIN));
         dispatch(&mut app, escape.clone()).await;
@@ -2739,6 +3083,12 @@ mod tests {
         assert_eq!(*selected.status.lock().unwrap(), idle_status);
         dispatch(&mut app, escape.clone()).await;
         assert!(app.modal.is_none());
+        assert!(app.search_active);
+        assert!(app.settings_open);
+        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        dispatch(&mut app, escape.clone()).await;
+        assert!(!app.search_active);
+        assert!(app.search.is_empty());
         assert!(app.settings_open);
         assert_eq!(*selected.status.lock().unwrap(), idle_status);
         dispatch(&mut app, escape.clone()).await;
