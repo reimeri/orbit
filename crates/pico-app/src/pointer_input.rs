@@ -6,7 +6,7 @@ use iced::{
         Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
         widget::{Operation, Tree, tree},
     },
-    mouse, touch,
+    keyboard, mouse, touch,
 };
 use std::cell::Cell;
 
@@ -102,6 +102,32 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             shell.capture_event();
             return;
         }
+        // TextInput already supports Ctrl+Backspace. Normalize Ctrl+W here so
+        // every focused text field shares that behavior without tracking focus.
+        let word_backspace = match event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                location,
+                repeat,
+                ..
+            }) if *modifiers == keyboard::Modifiers::CTRL
+                && key.to_latin(*physical_key) == Some('w') =>
+            {
+                Some(Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Backspace),
+                    modified_key: keyboard::Key::Named(keyboard::key::Named::Backspace),
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Backspace),
+                    location: *location,
+                    modifiers: *modifiers,
+                    text: None,
+                    repeat: *repeat,
+                }))
+            }
+            _ => None,
+        };
+        let event = word_backspace.as_ref().unwrap_or(event);
         let state = tree.state.downcast_mut::<State>();
         let mut messages = Vec::new();
         let mut child_shell = Shell::new(&mut messages);

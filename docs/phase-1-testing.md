@@ -68,6 +68,10 @@ cell completion. Cell IDs and shell session IDs are separate namespaces.
 ## 5. Persistence and UI
 
 - Type an unsent multiline draft. Switch sessions and return; the draft survives.
+- In the composer, search, settings and dialog text fields, Ctrl+Backspace and
+  Ctrl+W delete the previous word (or only the selection when text is selected).
+  Check punctuation, Unicode/RTL text, a cursor in the middle of text, and the
+  start of the input. In the multiline composer, also check the start of a line.
 - Right-click a session to Rename/Delete it. Check that right-clicking a different
   session acts on that session without switching away from the current conversation.
   Star a project, search by title and project, resize both panes,

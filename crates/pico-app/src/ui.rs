@@ -146,6 +146,7 @@ pub enum Message {
     ToggleSearch,
     Favorite(PathBuf),
     Editor(text_editor::Action),
+    DeletePreviousWord,
     Send,
     ToggleSettings,
     ApplySettings,
@@ -611,6 +612,7 @@ impl App {
             && matches!(
                 message,
                 Message::Editor(_)
+                    | Message::DeletePreviousWord
                     | Message::Send
                     | Message::Select(_)
                     | Message::New
@@ -847,7 +849,7 @@ impl App {
                 }
                 self.save_catalog();
             }
-            Message::Editor(action) => {
+            Message::Editor(_) | Message::DeletePreviousWord => {
                 if self.io_busy
                     || self.closing
                     || self.close_requested
@@ -856,6 +858,36 @@ impl App {
                 {
                     return Task::none();
                 }
+                let action = if let Message::Editor(action) = message {
+                    action
+                } else {
+                    let cursor = self.editor.cursor();
+                    if cursor.selection.is_none() {
+                        let mut start = cursor.position;
+                        if start.column > 0 {
+                            let line = self.editor.line(start.line).expect("cursor line exists");
+                            // Match TextInput's Unicode word boundaries, in logical
+                            // order: visual WordLeft moves forward on RTL lines.
+                            start.column = line.text[..start.column]
+                                .split_word_bound_indices()
+                                .rfind(|(_, word)| !word.trim_start().is_empty())
+                                .map_or(0, |(index, _)| index);
+                        } else if start.line > 0 {
+                            start.line -= 1;
+                            start.column = self
+                                .editor
+                                .line(start.line)
+                                .expect("previous cursor line exists")
+                                .text
+                                .len();
+                        }
+                        self.editor.move_to(text_editor::Cursor {
+                            position: cursor.position,
+                            selection: Some(start),
+                        });
+                    }
+                    text_editor::Action::Edit(text_editor::Edit::Backspace)
+                };
                 let edit = action.is_edit();
                 self.editor.perform(action);
                 self.draft_dirty |= edit;
@@ -1821,16 +1853,7 @@ impl App {
                 "Message Pico…"
             })
             .on_action(Message::Editor)
-            .key_binding(|event| {
-                if matches!(event.status, text_editor::Status::Focused { .. })
-                    && event.key == keyboard::Key::Named(keyboard::key::Named::Enter)
-                    && !event.modifiers.shift()
-                {
-                    Some(text_editor::Binding::Custom(Message::Send))
-                } else {
-                    text_editor::Binding::from_key_press(event)
-                }
-            })
+            .key_binding(composer_key_binding)
             .height(100)
             .padding(12)
             .size(self.catalog.settings.font_size);
@@ -3058,6 +3081,24 @@ fn updates(data: &Updates) -> iced::futures::stream::BoxStream<'static, Message>
     ))
 }
 
+fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    if matches!(event.status, text_editor::Status::Focused { .. }) {
+        if event.key == keyboard::Key::Named(keyboard::key::Named::Backspace)
+            && event.modifiers.control()
+            && !event.modifiers.alt()
+            && !event.modifiers.logo()
+        {
+            return Some(text_editor::Binding::Custom(Message::DeletePreviousWord));
+        }
+        if event.key == keyboard::Key::Named(keyboard::key::Named::Enter)
+            && !event.modifiers.shift()
+        {
+            return Some(text_editor::Binding::Custom(Message::Send));
+        }
+    }
+    text_editor::Binding::from_key_press(event)
+}
+
 // Filter before producing application messages: even a no-op update rebuilds the UI.
 fn window_events() -> Subscription<Message> {
     iced::event::listen_with(|event, _, _| match event {
@@ -3097,6 +3138,181 @@ mod tests {
             iced::Font::DEFAULT,
             iced::Pixels(16.),
         ))
+    }
+
+    fn word_delete_events(ctrl_w: bool) -> [iced::Event; 2] {
+        let (key, code) = if ctrl_w {
+            (
+                keyboard::Key::Character("w".into()),
+                keyboard::key::Code::KeyW,
+            )
+        } else {
+            (
+                keyboard::Key::Named(keyboard::key::Named::Backspace),
+                keyboard::key::Code::Backspace,
+            )
+        };
+        [
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(keyboard::Modifiers::CTRL)),
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Code(code),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::CTRL,
+                text: None,
+                repeat: false,
+            }),
+        ]
+    }
+
+    #[test]
+    fn text_fields_delete_words_or_selection_with_both_shortcuts() {
+        use iced::advanced::widget::operation::{focusable, text_input as input};
+        let mut renderer = header_renderer();
+        for ctrl_w in [false, true] {
+            // Cursor/selection columns here are grapheme indices, not bytes.
+            for (value, start, end, expected) in [
+                ("prefix foo/bar tail", 14, 14, "prefix foo/ tail"),
+                ("prefix foo/ tail", 11, 11, "prefix foo tail"),
+                ("אחד שני שלישי", 8, 8, "אחד שלישי"),
+                ("keep cafe\u{301}  tail", 11, 11, "keep tail"),
+                ("prefix foobar tail", 9, 11, "prefix foar tail"),
+                ("unchanged", 0, 0, "unchanged"),
+            ] {
+                let view = pointer_input(
+                    text_input("", value)
+                        .id("field")
+                        .on_input(Message::Search)
+                        .into(),
+                    false,
+                );
+                let mut ui = iced_runtime::UserInterface::build(
+                    view,
+                    iced::Size::new(400., 40.),
+                    iced_runtime::user_interface::Cache::new(),
+                    &mut renderer,
+                );
+                ui.operate(&renderer, &mut focusable::focus("field".into()));
+                ui.operate(
+                    &renderer,
+                    &mut input::select_range("field".into(), start, end),
+                );
+                let mut messages = Vec::new();
+                ui.update(
+                    &word_delete_events(ctrl_w),
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(
+                    matches!(messages.as_slice(), [Message::Search(text)] if text == expected),
+                    "Ctrl+{} on {value:?}: {messages:?}",
+                    if ctrl_w { "W" } else { "Backspace" }
+                );
+            }
+        }
+    }
+
+    fn delete_word_in_composer(app: &mut App, ctrl_w: bool) {
+        let mut renderer = header_renderer();
+        let messages = {
+            let view = pointer_input(
+                text_editor(&app.editor)
+                    .on_action(Message::Editor)
+                    .key_binding(composer_key_binding)
+                    .into(),
+                false,
+            );
+            let mut ui = iced_runtime::UserInterface::build(
+                view,
+                iced::Size::new(400., 100.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            // Focus the real widget, but keep the cursor/selection set by the case.
+            ui.update(
+                &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                    mouse::Button::Left,
+                ))],
+                mouse::Cursor::Available(iced::Point::new(10., 10.)),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Vec::new(),
+            );
+            let mut messages = Vec::new();
+            ui.update(
+                &word_delete_events(ctrl_w),
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(matches!(messages.as_slice(), [Message::DeletePreviousWord]));
+            messages
+        };
+        for message in messages {
+            let _ = app.update(message);
+        }
+    }
+
+    #[tokio::test]
+    async fn composer_word_deletion_preserves_suffix_selection_and_draft_saving() {
+        let mut app = app();
+        for ctrl_w in [false, true] {
+            for (value, line, column, selection, expected) in [
+                ("prefix foo/bar tail", 0, 14, None, "prefix foo/ tail"),
+                ("prefix foo/ tail", 0, 11, None, "prefix foo tail"),
+                ("אחד שני שלישי", 0, "אחד שני ".len(), None, "אחד שלישי"),
+                (
+                    "first\nkeep cafe\u{301}  tail",
+                    1,
+                    13,
+                    None,
+                    "first\nkeep tail",
+                ),
+                (
+                    "prefix foobar tail",
+                    0,
+                    9,
+                    Some((0, 11)),
+                    "prefix foar tail",
+                ),
+                ("first\nsecond tail", 1, 0, None, "firstsecond tail"),
+                ("unchanged", 0, 0, None, "unchanged"),
+                ("", 0, 0, None, ""),
+            ] {
+                app.editor = text_editor::Content::with_text(value);
+                app.editor.move_to(text_editor::Cursor {
+                    position: text_editor::Position { line, column },
+                    selection: selection
+                        .map(|(line, column)| text_editor::Position { line, column }),
+                });
+                app.draft_dirty = false;
+                delete_word_in_composer(&mut app, ctrl_w);
+                assert_eq!(
+                    app.editor.text(),
+                    expected,
+                    "Ctrl+{} on {value:?}",
+                    if ctrl_w { "W" } else { "Backspace" }
+                );
+                assert!(
+                    app.draft_dirty,
+                    "word deletion must be saved like other edits"
+                );
+            }
+        }
+        app.editor = text_editor::Content::with_text("must stay");
+        app.editor
+            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+        app.io_busy = true;
+        delete_word_in_composer(&mut app, true);
+        assert_eq!(
+            app.editor.text(),
+            "must stay",
+            "saving must still block edits"
+        );
     }
 
     fn click_header(
