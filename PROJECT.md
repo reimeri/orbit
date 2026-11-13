@@ -24,6 +24,17 @@ Do not try to directly translate the C code to Rust. Use idiomatic rust instead 
 
 During the development the default folder of pico V2 in .config and such places should be called pico-evo to avoid conflicts with the previous version of pico.
 
+### Phase 0 — Development foundation
+- [x] Pinned Nix flake: Rust development shell and runnable package
+- [x] Rust workspace with an iced app and UI-independent core crate
+- [x] Native Wayland-only window; wgpu with tiny-skia software fallback
+- [x] Isolated `pico-evo` application/configuration identity (no persistence yet)
+- [x] Formatting, linting, unit tests and headless rendered-window smoke check
+- [x] Real desktop GPU window check
+- [x] Incremental-build defaults, fast linker and measured development workflow
+
+See [README.md](README.md) for quick start and [docs/development.md](docs/development.md) for compilation guidance. This phase does not implement the Phase 1 harness.
+
 ### Phase 1
 - Main UI
 	- We should generally keep the look and feel of the UI

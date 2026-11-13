@@ -1,0 +1,14 @@
+[package]
+name = "pico-evo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pico-core = { path = "../pico-core" }
+iced = { version = "0.14.0", default-features = false, features = [
+    "wgpu", "tiny-skia", "wayland", "thread-pool", "crisp",
+] }
+
+[lints]
+workspace = true
