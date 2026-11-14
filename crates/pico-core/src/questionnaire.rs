@@ -6,8 +6,8 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-pub const INSTRUCTIONS: &str = "\nUse tools.ask_user for required clarifications when implementation details are ambiguous, before implementing. Provide all related questions in one call. Select questions automatically include a custom answer; do not add one to options. Await the call and emit its result with text. It may yield a cell ID: use wait to retrieve the answers, never assume an unanswered question has been resolved.\n";
-pub const DESCRIPTION: &str = " tools.ask_user({questions: Array<{id: string, question: string, kind: 'select' | 'text', options?: string[]}>}): Ask required questions in a non-modal panel. Main conversations only. 1–24 questions, unique nonblank IDs up to 128 UTF-8 bytes, nonblank prompts; select requires 1–20 nonblank options and automatically includes Custom answer. Text ignores options. Request limit 1 MiB. Answers have no byte/line cap. Returns JSON {answers:[{id,answer}]} in question order, or a complete-file reference for large results. Await and text the result; ordinary exec yielding/wait applies while the user answers. Unawaited calls are cancelled when the cell ends.";
+pub const INSTRUCTIONS: &str =
+    "\nResolve ambiguous implementation details with the user before implementing.\n";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

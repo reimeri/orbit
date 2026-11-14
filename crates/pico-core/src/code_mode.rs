@@ -20,27 +20,33 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 pub const GRAMMAR: &str = "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n";
-pub fn tools() -> Value {
+mod catalog;
+use catalog::Capabilities;
+
+pub fn tools(child: bool) -> Value {
+    let definitions = catalog::definitions(Capabilities::conversation(child));
+    let description = catalog::description(DESCRIPTION, &definitions);
     json!([
-        {"type":"custom","name":"exec","description":DESCRIPTION,"format":{"type":"grammar","syntax":"lark","definition":GRAMMAR}},
-        {"type":"function","name":"wait","description":"Waits on a yielded exec cell and returns only new output or completion. Use only after exec returns Script running with cell ID. terminate:true stops that cell. yield_time_ms and max_tokens default to 10000.","strict":false,"parameters":{"type":"object","properties":{"cell_id":{"type":"string","description":"Identifier of the running exec cell."},"yield_time_ms":{"type":"number","description":"Wait before yielding more output. Defaults to 10000 ms."},"max_tokens":{"type":"number","description":"Output token budget for this wait call. Defaults to 10000 tokens."},"terminate":{"type":"boolean","description":"True stops the running exec cell; false or omitted waits for output."}},"required":["cell_id"],"additionalProperties":false}}
+        {"type":"custom","name":"exec","description":description,"format":{"type":"grammar","syntax":"lark","definition":GRAMMAR}},
+        {"type":"function","name":"wait","description":"Retrieve new output from a running exec cell or terminate it.","strict":false,"parameters":{"type":"object","properties":{"cell_id":{"type":"string","description":"Identifier of the running exec cell."},"yield_time_ms":{"type":"number","description":"Wait before yielding more output. Defaults to 10000 ms."},"max_tokens":{"type":"number","description":"Output token budget for this wait call. Defaults to 10000 tokens."},"terminate":{"type":"boolean","description":"True stops the running exec cell; false or omitted waits for output."}},"required":["cell_id"],"additionalProperties":false}}
     ])
 }
-const DESCRIPTION: &str = r#"Run raw JavaScript to orchestrate tool calls in a fresh embedded isolate as an async module. No Node, filesystem, network or console. Variables do not survive cells; store/load do. Only explicitly emitted content reaches the model. Unawaited promises are discarded when the module finishes.
+const DESCRIPTION: &str = r#"Run JavaScript tool calls in a fresh async QuickJS module; no Node, filesystem, network or console APIs.
+Only emitted output is returned. Await tool calls; unawaited work ends with the cell. Independent calls can use Promise.all.
 Optional first line: // @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000}
-Output budgets limit inline text only. Oversized output is saved completely under /tmp; results give its path and exact byte size instead of a preview. Use shell commands to read/search that file. Files remain after the cell/command exits.
-exec yields early with a cell ID if still running. Use wait to retrieve subsequent output or terminate it.
-Globals: text(value) emits text (JSON.stringify for nonstrings); exit() ends successfully; store(key,value) and load(key) share serializable state across cells in this conversation; notify(value) immediately injects an extra custom_tool_call_output for this exec call; yield_control() yields accumulated output immediately; setTimeout(callback, delayMs), clearTimeout(id); ALL_TOOLS lists nested tool metadata. Pending timers alone do not keep a cell alive.
-Media helpers (base64 data URLs only; no HTTP URLs or local paths): image(value) emits an image URL, {image_url}, or an MCP image block; audio(value) similarly accepts audio_url or an MCP audio block; content(blockOrIterable) emits MCP text/image/audio/resource/resource_link blocks in order; generatedImage({image_url,output_hint?}) emits an image followed by its hint. No detail argument in unified image mode. Use image(await tools.view_image(...)) and generatedImage(await tools.image_gen__imagegen(...)); do not text()/notify() base64 results. Audio requires a capable chat model. A GIF reaches the model as a static first-frame representation, not a motion inspection.
-Chat display: image()/generatedImage() emit tool-result media, not images in your reply. To show an image to the user, also include ![description](path) in your reply using the existing file path (output_path for generated images); do not regenerate it or embed base64. Prefer workspace paths over /tmp for images the user should keep.
-Image tools return objects, and their expanded chat rows retain previews even without helper emission:
- tools.view_image({path:string}): Promise<{image_url:string}>. Read a local PNG/JPEG/WebP/GIF. Relative paths resolve against the calling workspace. Unified image preparation; no detail argument. Available to main and child agents.
- tools.image_gen__imagegen({prompt:string,output_path:string,transparent_background?:boolean,referenced_image_paths?:string[],num_last_images_to_include?:number,gif?:{frame_count?:number,frame_duration_ms?:number}}): Promise<{image_url:string,output_hint?:string}>. MAIN AGENT ONLY. Uses configured Codex subscription or API billing, model and quality. One PNG (.png output_path) or GIF (.gif with gif supplied), existing parent, no overwrites or Pico media destinations. Paths relative to workspace or absolute. Generates without references; edits with up to 5 absolute referenced_image_paths OR last 1–5 emitted conversation images via num_last_images_to_include, never both. Inspect local references with view_image first. For GIF editing create a regular-grid spritesheet, not a direct GIF reference. gif:{} defaults to 9 frames/200ms; ranges 2–16 frames/20–2000ms. Allow minutes: use @exec yield_time_ms:120000 and wait similarly. Backend errors never silently change quality, model, format or billing. Cancellation/uncertain outcomes may consume usage; inspect files before retrying. output_path is required, unlike Codex. Tool return values contain base64: forward with generatedImage, never print the full result.
-Nested text tools (return strings):
- tools.exec_command({cmd: string, workdir?: string, shell?: string, login?: boolean, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number, timeout_ms?: number}): Run a command in the project (or workdir). Default login=true, tty=false, yield_time_ms=10000. Returns exit code or a running session_id. tty=true keeps interactive stdin open; tty=false closes stdin. Commands are unrestricted, not sandboxed.
- tools.write_stdin({session_id: number, chars?: string, yield_time_ms?: number, max_output_tokens?: number}): Send input to a PTY or poll using empty chars. Default yield_time_ms=250. Ctrl-C is '\u0003'. Returns only new output and exit/session status.
-Example: text(await tools.exec_command({cmd:"pwd; ls -la", max_output_tokens:2000}));
-Use Promise.all for independent parallel tool calls. Tools are only available through exec, not as top-level calls."#;
+Running cells return a cell_id for wait. Oversized text is saved in full to /tmp with its path and byte size.
+Globals:
+- text(value): emit text or JSON.
+- image(value), audio(value): emit a base64 data URL, URL object or MCP media block.
+- generatedImage(result): emit an image tool result and its output hint.
+- content(blockOrIterable): emit MCP text/image/audio/resource/resource_link blocks.
+- notify(value): emit an immediate notification.
+- yield_control(): yield current output without ending the cell.
+- store(key, value), load(key): share serializable values across cells until app exit.
+- setTimeout(callback, delayMs), clearTimeout(id): schedule/cancel callbacks; timers alone do not keep cells alive.
+- exit(): end the cell.
+- ALL_TOOLS: available nested tool definitions.
+Use media helpers, not text, for image/audio results. Reply images use ![description](path)."#;
 
 #[derive(Clone, Debug)]
 pub struct ToolEvent {
@@ -456,10 +462,13 @@ fn run_cell(
                 }),
             )
             .map_err(js_error)?;
-        ctx.globals().set("__delegation", delegation.is_some()).map_err(js_error)?;
-        ctx.globals().set("__questionnaires", questionnaires.is_some()).map_err(js_error)?;
-        ctx.globals().set("__images", images.is_some()).map_err(js_error)?;
-        ctx.globals().set("__imagegen", images.as_ref().is_some_and(|i|i.generation)).map_err(js_error)?;
+        let definitions = catalog::definitions(Capabilities {
+            delegation: delegation.is_some(),
+            questionnaires: questionnaires.is_some(),
+            images: images.is_some(),
+            image_generation: images.as_ref().is_some_and(|i| i.generation),
+        });
+        ctx.globals().set("__tools", serde_json::to_string(&definitions)?).map_err(js_error)?;
         let cancellation = cell.cancel.clone();
         ctx.globals()
             .set(
@@ -467,7 +476,7 @@ fn run_cell(
                 Function::new(
                     ctx.clone(),
                     move |name: String, args: String| -> rquickjs::Result<String> {
-                        if !(images.is_some() && name == "view_image" || images.as_ref().is_some_and(|i|i.generation) && name == "image_gen__imagegen") && !matches!(name.as_str(), "exec_command" | "write_stdin") && !(questionnaires.is_some() && name == "ask_user") && !(delegation.is_some() && matches!(name.as_str(), "spawn_subagent" | "wait_subagent" | "list_subagents")) {
+                        if !definitions.iter().any(|tool| tool.name == name) {
                             return Err(rquickjs::Error::new_from_js_message(
                                 "name",
                                 "tool",

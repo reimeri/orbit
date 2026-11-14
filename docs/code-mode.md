@@ -3,6 +3,20 @@
 Only `exec` and `wait` are sent as top-level Responses tools. Shell, questionnaire and subagent tools are
 exposed on the JavaScript `tools` object, not duplicated in the top-level catalog.
 
+Nested tool documentation lives in `exec.description`, not the system instructions.
+Each entry has a one-line purpose and a TypeScript declaration generated from its
+input and output JSON schemas in `crates/pico-core/src/code_mode/catalog.rs`.
+The same catalog supplies JavaScript `tools`, `ALL_TOOLS` (including both schemas),
+and nested-call availability checks. Main requests include all eight tools; child
+requests include only shell tools and `view_image`. Text-returning tools are
+correctly declared as `Promise<string>`, even when the string contains JSON.
+General assistant/project policies remain in system instructions.
+
+The schema renderer handles only the shapes used by these built-ins (objects,
+arrays, scalar types and enums); no general schema framework or dependency is
+needed. When adding a tool or changing its arguments/results, update its schemas
+alongside its Rust handler. Field descriptions become TypeScript comments.
+
 `exec` is an OpenAI **custom/freeform** tool using Codex's Lark source grammar.
 It accepts raw JavaScript, optionally preceded by:
 
@@ -77,7 +91,13 @@ public OpenAI Codex source (Apache-2.0), retrieved during implementation:
 - `codex-rs/core/src/tools/code_mode/execute_spec.rs`
 - `codex-rs/core/src/tools/code_mode/wait_spec.rs`
 - `codex-rs/code-mode-protocol/src/description.rs`
+- `codex-rs/code-mode-protocol/src/json_schema_types.rs`
+- `codex-rs/core/src/tools/spec_plan.rs`
 - `codex-rs/core/src/tools/handlers/unified_exec.rs`
+
+The generated exec catalog follows Codex's code-mode-only description assembly,
+checked at revision `b1573f102413e96a6481087922bf425231222dee`. Pico does not need
+Codex's deferred-tool discovery or general-purpose schema renderer.
 
 Repository: <https://github.com/openai/codex>. Pico has its own Rust/QuickJS runtime;
 it does not embed Codex/V8, Codex's remote execution service, approval/sandbox

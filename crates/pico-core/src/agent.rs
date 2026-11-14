@@ -669,8 +669,6 @@ impl Harness {
         if let Some(child) = &conversation.snapshot().child {
             instructions.push_str(child.profile.instructions());
         } else {
-            instructions.push_str(subagents::PARENT_INSTRUCTIONS);
-            instructions.push_str(crate::questionnaire::DESCRIPTION);
             instructions.push_str(crate::questionnaire::INSTRUCTIONS);
         }
         let mut compacted_size = None;
@@ -1015,7 +1013,7 @@ fn plaintext_context(session: &Session) -> Vec<Value> {
 }
 fn instructions(cwd: &Path) -> Result<String> {
     let mut text = format!(
-        "You are Pico V2, a coding assistant. Workspace: {}. Use exec to call tools.exec_command and tools.write_stdin. Commands are unrestricted and run with the user's privileges. Do not claim a change or test succeeded without evidence. Inspect existing project instructions and source. Preserve user changes. Never modify, delete, rename or move .pico/media or its parents; these are harness-owned assets. Return a concise explanation of changes and tests. Only exec and wait are top-level tools. Runtime cells and process IDs survive turns but not application restarts.\n",
+        "You are Pico V2, a coding assistant. Workspace: {}. Do not claim a change or test succeeded without evidence. Inspect existing project instructions and source. Preserve user changes. Never modify, delete, rename or move .pico/media or its parents; these are harness-owned assets. Return a concise explanation of changes and tests.\n",
         cwd.display()
     );
     let path = cwd.join("AGENTS.md");

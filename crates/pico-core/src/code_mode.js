@@ -53,12 +53,6 @@
         if (typeof iterator !== 'function') return emitBlock(value);
         for (const block of {[Symbol.iterator]: () => Reflect.apply(iterator, value, [])}) emitBlock(block);
     };
-    const names = ['exec_command','write_stdin'];
-    if (__images) names.push('view_image');
-    if (__imagegen) names.push('image_gen__imagegen');
-    if (__questionnaires) names.push('ask_user');
-    if (__delegation) names.push('spawn_subagent','wait_subagent','list_subagents');
-    globalThis.tools = Object.freeze(Object.fromEntries(names.map(name => [name, args => new Promise((resolve,reject) => { const id = __call(name, JSON.stringify(args ?? {})); pending.set(id, {resolve,reject}); })])));
-    const descriptions = {view_image:'View a local image. Returns {image_url}; emit with image(result). To show it in your reply, also include ![description](path). No detail argument.',image_gen__imagegen:'Generate/edit PNG or GIF using configured billing. Requires prompt and new output_path; emit result with generatedImage, then include ![description](output_path) in your reply. See exec description for full schema.',ask_user:'Ask required select/text questions. Await the ordered answers; custom answers are always available. See main instructions for schema and limits.',exec_command:'Run a shell command; returns output and exit code or session ID.',write_stdin:'Send PTY input or poll an existing command session.',spawn_subagent:'Start or resume an asynchronous read-only child. Returns session_id and run_id.',wait_subagent:'Wait for any requested run to finish. Returns only final response text and status, never intermediate messages.',list_subagents:'List this parent conversation’s children and their latest assignments.'};
-    globalThis.ALL_TOOLS = Object.freeze(names.map(name => ({name, description:descriptions[name]})));
+    globalThis.ALL_TOOLS = Object.freeze(JSON.parse(__tools));
+    globalThis.tools = Object.freeze(Object.fromEntries(ALL_TOOLS.map(({name}) => [name, args => new Promise((resolve,reject) => { const id = __call(name, JSON.stringify(args ?? {})); pending.set(id, {resolve,reject}); })])));
 })();

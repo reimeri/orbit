@@ -371,7 +371,7 @@ fn request_base(session: &Session, instructions: &str, tools: bool) -> Value {
     }
     body["reasoning"] = json!({"effort":session.effort,"summary":"auto"});
     if tools {
-        body["tools"] = code_mode::tools();
+        body["tools"] = code_mode::tools(session.child.is_some());
         body["parallel_tool_calls"] = json!(true);
     } else {
         body["tools"] = json!([]);
