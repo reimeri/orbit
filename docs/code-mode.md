@@ -1,6 +1,6 @@
-# Phase 1 code-mode contract
+# Code-mode contract
 
-Only `exec` and `wait` are sent as top-level Responses tools. Shell tools are
+Only `exec` and `wait` are sent as top-level Responses tools. Shell and subagent tools are
 exposed on the JavaScript `tools` object, not duplicated in the top-level catalog.
 
 `exec` is an OpenAI **custom/freeform** tool using Codex's Lark source grammar.
@@ -99,3 +99,13 @@ these references and is itself saved to a file if it exceeds the inline budget.
 Service error details also use complete-file references when oversized. If saving
 one-shot diagnostics fails, Pico reports the failure and returns the complete data
 inline (hexadecimal for non-UTF-8 bytes), rather than silently discarding it.
+
+## Subagents
+
+Main conversations additionally expose `tools.spawn_subagent`,
+`tools.wait_subagent`, and `tools.list_subagents`. Children expose only shell
+tools, preventing nested delegation. See [subagents](subagents.md) for the complete
+contract, profile defaults, final-only results and completion/Stop lifecycle.
+A successful spawn creates an assignment independent of the JavaScript cell: it
+continues after the cell completes or is terminated. Use the returned persistent
+`run_id` with `wait_subagent`; it is not a process ID or a code-cell ID.

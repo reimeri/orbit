@@ -86,6 +86,8 @@ pub struct App {
     expanded: HashSet<String>,
     groups: HashSet<String>,
     settings_open: bool,
+    agents_open: bool,
+    chat_positions: HashMap<String, (f32, bool)>,
     settings_tab: SettingsTab,
     notice: Option<(String, std::time::Instant)>,
     settings: Settings,
@@ -174,6 +176,8 @@ pub enum Message {
     DeletePreviousWord,
     Send,
     ToggleSettings,
+    ToggleAgents,
+    StopAgent(String),
     ApplySettings,
     CatalogSaved(bool, Result<(), String>),
     SettingsTab(SettingsTab),
@@ -292,6 +296,8 @@ impl App {
             expanded: HashSet::new(),
             groups: HashSet::new(),
             settings_open: false,
+            agents_open: false,
+            chat_positions: HashMap::new(),
             settings_tab: SettingsTab::Account,
             notice: None,
             context_text: settings.context_limit.to_string(),
@@ -514,6 +520,9 @@ impl App {
         let needle = self.search.to_lowercase();
         let mut sections = [vec![], vec![], vec![]];
         for (index, s) in self.sessions.iter().enumerate() {
+            if s.child.is_some() {
+                continue;
+            }
             if !needle.is_empty()
                 && !s.title.to_lowercase().contains(&needle)
                 && !s.project.to_string_lossy().to_lowercase().contains(&needle)
@@ -521,9 +530,18 @@ impl App {
                 continue;
             }
             let c = self.harness.as_ref().and_then(|h| h.get(&s.id));
-            let category = if c.as_ref().is_some_and(|c| c.is_running()) {
+            let category = if c.as_ref().is_some_and(|c| c.is_running())
+                || self
+                    .harness
+                    .as_ref()
+                    .is_some_and(|h| h.active_children(&s.id) > 0)
+            {
                 0
-            } else if s.interrupted
+            } else if self
+                .harness
+                .as_ref()
+                .is_some_and(|h| h.children_need_attention(&s.id))
+                || s.interrupted
                 || s.needs_attention
                 || c.as_ref()
                     .is_some_and(|c| *c.status.lock().expect("status lock") == "Needs attention")
@@ -639,6 +657,10 @@ impl App {
         if self.io_busy {
             return;
         }
+        if let Some(id) = &self.selected {
+            self.chat_positions
+                .insert(id.clone(), (self.transcript.offset, self.auto_scroll));
+        }
         let draft = self.take_draft();
         let settings = self.catalog.settings.clone();
         let mut new_draft = self.new_draft.clone();
@@ -719,6 +741,20 @@ impl App {
         {
             return Task::none();
         }
+        if self.current().is_some_and(|s| s.child.is_some())
+            && matches!(
+                message,
+                Message::Editor(_)
+                    | Message::DeletePreviousWord
+                    | Message::Send
+                    | Message::SessionModel(_)
+                    | Message::SessionEffort(_)
+                    | Message::ToggleSessionFast
+                    | Message::FooterMenu(_)
+            )
+        {
+            return Task::none();
+        }
         match message {
             Message::Press(_) => unreachable!("press requests are resolved by the root widget"),
             Message::Selected(result) => {
@@ -747,6 +783,25 @@ impl App {
                         self.restore_draft();
                         self.git = None;
                         self.save_catalog(false);
+                        if let Some((offset, follow)) = self
+                            .selected
+                            .as_ref()
+                            .and_then(|id| self.chat_positions.get(id))
+                            .copied()
+                        {
+                            self.auto_scroll = follow;
+                            if !follow {
+                                self.transcript.offset = offset;
+                                self.prepare_visible();
+                                return widget::operation::scroll_to(
+                                    "chat",
+                                    scrollable::AbsoluteOffset {
+                                        x: 0.,
+                                        y: offset + 20.,
+                                    },
+                                );
+                            }
+                        }
                         return bottom();
                     }
                     Err(error) => {
@@ -800,7 +855,7 @@ impl App {
                 self.io_busy = false;
                 match result {
                     Ok(()) => {
-                        let selected = self.selected.as_ref() == Some(&id);
+                        let selected = self.parent_id() == Some(id.as_str());
                         if selected {
                             self.draft_dirty = false;
                             self.selected = None;
@@ -1033,9 +1088,20 @@ impl App {
                     }));
                 }
             }
+            Message::StopAgent(id) => {
+                if let Some(h) = &self.harness {
+                    h.stop(&id);
+                }
+            }
+            Message::ToggleAgents => {
+                self.agents_open = !self.agents_open;
+                self.settings_open = false;
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+            }
             Message::ToggleSettings => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings_open = !self.settings_open;
+                self.agents_open = false;
             }
             Message::ApplySettings => {
                 let result = (|| {
@@ -1450,7 +1516,7 @@ impl App {
                     if self
                         .harness
                         .as_ref()
-                        .is_some_and(|h| h.all().iter().any(|c| c.is_running()))
+                        .is_some_and(|h| h.all().iter().any(|c| c.is_executing()))
                     {
                         self.modal = Some(Modal::Quit);
                     } else {
@@ -1493,11 +1559,14 @@ impl App {
                         } else if self.settings_open {
                             self.view_epoch = self.view_epoch.wrapping_add(1);
                             self.settings_open = false;
+                        } else if self.agents_open {
+                            self.agents_open = false;
+                            self.view_epoch = self.view_epoch.wrapping_add(1);
                         } else if let (Some(h), Some(id)) = (&self.harness, &self.selected)
-                            && let Some(session) = h.get(id)
-                            && session.is_running()
+                            && (h.get(id).is_some_and(|s| s.is_running())
+                                || h.active_children(id) > 0)
                         {
-                            session.cancel();
+                            h.stop(id);
                         }
                     } else if self.modal.is_none()
                         && self.context_menu.is_none()
@@ -1576,7 +1645,7 @@ impl App {
                 if self
                     .harness
                     .as_ref()
-                    .is_some_and(|h| h.all().iter().any(|s| s.is_running()))
+                    .is_some_and(|h| h.all().iter().any(|s| s.is_executing()))
                 {
                     self.error = Some("Stop running turns before signing out.".into());
                 } else if let Some(h) = &self.harness {
@@ -1625,7 +1694,7 @@ impl App {
                 // Ordered after earlier jobs: no queued Send can start behind this barrier.
                 h.stop_all();
                 let result=(|| {
-                    while h.all().iter().any(|s|s.is_running()) {std::thread::sleep(Duration::from_millis(20));}
+                    while h.all().iter().any(|s|s.is_executing()) {std::thread::sleep(Duration::from_millis(20));}
                     if let Some((id,draft))=draft {h.edit(&id,|s|s.draft=draft)?;}
                     h.store.save_new_draft(&new_draft)?;
                     h.store.save_catalog(&catalog)?;
@@ -1720,10 +1789,26 @@ impl App {
         .height(Fill);
         if self.settings_open {
             body = body.push(self.divider(true)).push(self.settings_panel());
+        } else if self.agents_open {
+            body = body.push(self.divider(true)).push(self.agents_panel());
         }
         let rail = container(
             column![
                 space().height(Fill),
+                tooltip(
+                    button(
+                        container(crate::agent_icon::agent_icon(self.agent_count() > 0))
+                            .center_x(Fill)
+                            .center_y(34)
+                    )
+                    .width(Fill)
+                    .padding(0)
+                    .on_press(Message::ToggleAgents)
+                    .style(button::text),
+                    text("Agents").size(12),
+                    tooltip::Position::Left,
+                )
+                .style(card),
                 button(container(text("⚙").size(24)).center_x(Fill).center_y(34))
                     .width(Fill)
                     .padding(0)
@@ -1785,7 +1870,7 @@ impl App {
                 .on_right_press(Message::CloseFooterMenu)
                 .on_scroll(|_| Message::CloseFooterMenu);
             let right = 50.
-                + if self.settings_open {
+                + if self.settings_open || self.agents_open {
                     self.catalog
                         .settings
                         .settings_width
@@ -1916,6 +2001,120 @@ impl App {
         .into()
     }
 
+    fn parent_id(&self) -> Option<&str> {
+        self.current().map(|s| {
+            s.child
+                .as_ref()
+                .map_or(s.id.as_str(), |c| c.parent_id.as_str())
+        })
+    }
+    fn agent_count(&self) -> usize {
+        self.parent_id()
+            .and_then(|id| self.harness.as_ref().map(|h| h.active_children(id)))
+            .unwrap_or(0)
+    }
+    fn agents_panel(&self) -> Element<'_, Message> {
+        let mut content = column![
+            row![
+                text("Agents").size(20).width(Fill),
+                button("×")
+                    .on_press(Message::ToggleAgents)
+                    .style(button::text)
+            ],
+            text(format!("{} running", self.agent_count()))
+                .size(12)
+                .color(MUTED)
+        ]
+        .spacing(14);
+        let runs = self
+            .parent_id()
+            .and_then(|id| self.harness.as_ref().map(|h| h.subagent_runs(id)))
+            .unwrap_or_default();
+        let mut cards = column![].spacing(10);
+        for run in runs {
+            let elapsed = run
+                .finished
+                .unwrap_or_else(pico_core::store::now)
+                .saturating_sub(run.started);
+            let activity = self
+                .harness
+                .as_ref()
+                .and_then(|h| h.get(&run.session_id))
+                .filter(|_| run.status == pico_core::agent::subagents::RunStatus::Running)
+                .map(|c| c.status.lock().expect("status lock").clone());
+            let mut card_content = column![
+                row![
+                    text(run.profile.label()).size(13).width(Fill),
+                    text(run.status.label())
+                        .size(11)
+                        .color(if run.status.needs_attention() {
+                            Color::from_rgb8(224, 130, 130)
+                        } else {
+                            MUTED
+                        })
+                ],
+                text(run.title).size(13),
+                text(format!(
+                    "{} · {} · {elapsed}s",
+                    run.profile.model(),
+                    run.profile.effort()
+                ))
+                .size(10)
+                .color(MUTED),
+            ]
+            .spacing(7);
+            if let Some(activity) = activity {
+                card_content = card_content.push(text(activity).size(11).color(ACCENT));
+            }
+            let mut actions = row![
+                button("Open")
+                    .on_press(Message::Select(run.session_id.clone()))
+                    .style(button::text)
+            ]
+            .spacing(10);
+            if run.status == pico_core::agent::subagents::RunStatus::Running {
+                actions = actions.push(
+                    button("Stop")
+                        .on_press(Message::StopAgent(run.session_id))
+                        .style(button::text),
+                );
+            }
+            cards = cards.push(
+                container(card_content.push(actions))
+                    .padding(12)
+                    .width(Fill)
+                    .style(card),
+            );
+        }
+        content = content.push(scrollable(cards).height(Fill));
+        if let Some(parent) = self.parent_id() {
+            content = content.push(
+                button("Stop parent and children")
+                    .on_press_maybe(
+                        (self.agent_count() > 0
+                            || self
+                                .harness
+                                .as_ref()
+                                .and_then(|h| h.get(parent))
+                                .is_some_and(|c| c.is_running()))
+                        .then(|| Message::StopAgent(parent.into())),
+                    )
+                    .style(button::text),
+            );
+        }
+        container(content)
+            .padding(16)
+            .width(
+                self.catalog
+                    .settings
+                    .settings_width
+                    .min(self.window_width * 0.4),
+            )
+            .height(Fill)
+            .style(right_panel)
+            .into()
+    }
+
     fn sidebar(&self) -> Element<'_, Message> {
         let mut list =
             column![container(self.sidebar_header()).padding([0., SIDEBAR_CONTENT_PADDING])]
@@ -1936,7 +2135,7 @@ impl App {
                 }
                 SidebarRow::Session(session_index) => {
                     let session = &self.sessions[*session_index];
-                    let active = self.selected.as_ref() == Some(&session.id);
+                    let active = self.parent_id() == Some(session.id.as_str());
                     let project = session
                         .project
                         .file_name()
@@ -1944,7 +2143,21 @@ impl App {
                         .to_string_lossy();
                     let badge = project_badge(&session.project);
                     // `updated` changes on accepted user submissions, not agent activity.
-                    let age = age(session.updated);
+                    let children = self
+                        .harness
+                        .as_ref()
+                        .map_or(0, |h| h.active_children(&session.id));
+                    let attention = self
+                        .harness
+                        .as_ref()
+                        .is_some_and(|h| h.children_need_attention(&session.id));
+                    let age = if children > 0 {
+                        format!("● {children} · {}", age(session.updated))
+                    } else if attention {
+                        format!("! · {}", age(session.updated))
+                    } else {
+                        age(session.updated)
+                    };
                     let content = mouse_area(
                         button(
                             column![
@@ -2092,6 +2305,52 @@ impl App {
                 )
             });
         let running = self.running();
+        if let Some(child) = &session.child {
+            let parent_title = self
+                .sessions
+                .iter()
+                .find(|s| s.id == child.parent_id)
+                .map_or("Parent", |s| s.title.as_str());
+            let status = self
+                .harness
+                .as_ref()
+                .and_then(|h| {
+                    h.subagent_runs(&child.parent_id)
+                        .into_iter()
+                        .find(|r| r.session_id == session.id)
+                })
+                .map_or("Ready", |r| r.status.label());
+            let header = column![
+                row![
+                    button(ellipsized_text(
+                        &format!("← Back to {parent_title}"),
+                        12.,
+                        None
+                    ))
+                    .width(Fill)
+                    .on_press(Message::Select(child.parent_id.clone()))
+                    .style(button::text),
+                    button("Stop")
+                        .on_press_maybe(running.then(|| Message::StopAgent(session.id.clone())))
+                        .style(button::text)
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+                row![
+                    ellipsized_text(
+                        &format!("{} · {}", child.profile.label(), session.title),
+                        13.,
+                        None
+                    ),
+                    text(status).size(11).color(MUTED)
+                ]
+                .spacing(8)
+            ]
+            .spacing(8);
+            return column![container(header).padding(12).style(panel),chat,
+                container(text("Read-only profile instructions · Shell access is not sandboxed · Continue through the parent").size(11).color(MUTED)).padding(12)
+            ].width(Fill).height(Fill).into();
+        }
         let editor = text_editor(&self.editor)
             .placeholder(if self.io_busy || self.closing {
                 "Saving…"
@@ -2164,6 +2423,24 @@ impl App {
                     .width(Fill)
                 ]
                 .spacing(8);
+                if name == "spawn_subagent"
+                    && let (Some(h), Some(session)) = (&self.harness, self.current())
+                    && let Some(run) = h.subagent_for_request(&session.id, &entry.id)
+                {
+                    block = block.push(
+                        button(
+                            text(format!(
+                                "{} · {} · {} ↗",
+                                run.profile.label(),
+                                run.title,
+                                run.status.label()
+                            ))
+                            .size(12),
+                        )
+                        .on_press(Message::Select(run.session_id))
+                        .style(button::text),
+                    );
+                }
                 if children > 0 {
                     block = block.push(
                         button(
@@ -2505,10 +2782,7 @@ impl App {
                     .min(self.window_width * 0.4),
             )
             .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Color::from_rgb8(24, 27, 31).into()),
-                ..Default::default()
-            })
+            .style(right_panel)
             .into()
     }
     fn footer(&self) -> Element<'_, Message> {
@@ -2605,7 +2879,9 @@ impl App {
             let chip = button(ellipsized_text(label, 11., None))
                 .width(width)
                 .padding([3, 4])
-                .on_press_maybe((!running).then_some(Message::FooterMenu(kind)))
+                .on_press_maybe(
+                    (!running && session.child.is_none()).then_some(Message::FooterMenu(kind)),
+                )
                 .style(move |theme, status| {
                     let mut style = sidebar_control(theme, status);
                     if open {
@@ -2850,7 +3126,7 @@ impl App {
             ),
             Modal::Delete(_) => (
                 "Delete session?",
-                "This permanently deletes the saved conversation. Project files are not deleted. Stop any running turn first.",
+                "This permanently deletes the saved conversation and all its subagent conversations and results. Project files are not deleted. Stop the parent and its children first.",
                 "Delete",
             ),
             Modal::Logout => (
@@ -3069,6 +3345,7 @@ impl App {
                 self.refresh();
                 for i in 0..10000 {
                     self.sessions.push(SessionSummary {
+                        child: None,
                         id: format!("smoke-sidebar-{i}"),
                         title: format!("Historical session {i} with wrapping title"),
                         project: self.smoke_dir.clone().expect("smoke path"),
@@ -3174,10 +3451,48 @@ impl App {
                 self.refresh();
                 let _ = self.update_inner(Message::FooterMenu(FooterControl::Effort));
             }
+            22 => {
+                self.footer_menu = None;
+                self.settings_open = false;
+                self.agents_open = true;
+            }
+            23 => {
+                let parent = self.selected.clone().expect("smoke parent");
+                let mut child = Session::new(
+                    self.smoke_dir.clone().expect("smoke path"),
+                    &self.catalog.settings,
+                );
+                child.child = Some(pico_core::agent::subagents::Child {
+                    parent_id: parent,
+                    profile: pico_core::agent::subagents::Profile::Explore,
+                });
+                child.title = "Trace completion notifications and cancellation".into();
+                child.model = "gpt-6-luna".into();
+                child.effort = "high".into();
+                child.entries.push(Entry::new(
+                    EntryKind::User,
+                    "Inspect the completion notification path. Do not modify files.",
+                ));
+                child.entries.push(Entry::new(EntryKind::Assistant,"## Exploration result\n\nThe **parent wake-up** path preserves cancellation and uses durable completion notices.\n\n- Separate conversation context\n- Repeatable final results\n- No nested delegation"));
+                let id = child.id.clone();
+                self.harness.as_ref().expect("smoke harness").insert(child);
+                self.select(Selection::Session(id));
+            }
+            24 => {
+                self.window_width = 860.;
+                self.window_height = 560.;
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+                if let Some(window) = self.window_id {
+                    return Task::batch([
+                        window::resize(window, iced::Size::new(860., 560.)),
+                        delayed_capture(),
+                    ]);
+                }
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -3346,6 +3661,12 @@ fn secondary(theme: &Theme, status: button::Status) -> button::Style {
         theme.palette().text
     };
     style
+}
+fn right_panel(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgb8(24, 27, 31).into()),
+        ..Default::default()
+    }
 }
 fn panel(_: &Theme) -> container::Style {
     container::Style {
@@ -3925,6 +4246,150 @@ Then implement the fix.";
         assert!(app.transcript.order.is_empty());
         assert!(app.current().unwrap().entries.is_empty());
         let _ = app.center();
+    }
+
+    #[tokio::test]
+    async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits() {
+        use pico_core::agent::subagents::{Child, Profile, RunInfo, RunStatus};
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let parent = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        h.edit(&parent, |s| {
+            s.title = "Parent task".into();
+            for n in 0..60 {
+                s.entries.push(Entry::new(
+                    EntryKind::Assistant,
+                    format!("Historical parent message {n}"),
+                ));
+            }
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        type_message(&mut app, "Keep this unsent parent draft λ").await;
+        let epoch = app.view_epoch;
+        dispatch(&mut app, Message::Scroll(epoch, 437., 300., false)).await;
+        let parent_offset = app.transcript.offset;
+        let mut child = Session::new(path, &app.catalog.settings);
+        child.child = Some(Child {
+            parent_id: parent.clone(),
+            profile: Profile::Explore,
+        });
+        child.title = "Inspect cancellation".into();
+        child.model = "gpt-6-luna".into();
+        child.effort = "high".into();
+        child
+            .entries
+            .push(Entry::new(EntryKind::User, "Inspect without edits"));
+        child
+            .entries
+            .push(Entry::new(EntryKind::Assistant, "Final inspection result"));
+        let child_id = child.id.clone();
+        h.store.save_session(&child).unwrap();
+        let run = RunInfo {
+            run_id: pico_core::store::id(),
+            session_id: child_id.clone(),
+            parent_id: parent.clone(),
+            request_id: "fixture-spawn".into(),
+            profile: Profile::Explore,
+            title: child.title.clone(),
+            status: RunStatus::Completed,
+            assignment: 1,
+            started: pico_core::store::now() - 17,
+            finished: Some(pico_core::store::now()),
+            notified: true,
+        };
+        let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
+        db.execute(
+            "INSERT INTO subagent_runs VALUES (?1,?2,?3,?4,?5,?6,NULL)",
+            rusqlite::params![
+                run.run_id,
+                parent,
+                child_id,
+                run.request_id,
+                serde_json::to_string(&run).unwrap(),
+                "Final inspection result"
+            ],
+        )
+        .unwrap();
+        app.harness = Some(Harness::new(h.store.clone(), h.store.load().unwrap().1).unwrap());
+        app.catalog_revision = u64::MAX;
+        dispatch(&mut app, Message::ToggleAgents).await;
+        assert!(app.agents_open && !app.settings_open);
+        dispatch(&mut app, Message::Select(child_id.clone())).await;
+        assert_eq!(app.parent_id(), Some(parent.as_str()));
+        assert!(
+            app.sidebar_rows
+                .iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Session(i) => Some(&app.sessions[*i]),
+                    _ => None,
+                })
+                .all(|s| s.child.is_none())
+        );
+        assert_eq!(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .store
+                .load_session(&parent)
+                .unwrap()
+                .draft,
+            "Keep this unsent parent draft λ"
+        );
+        let original = app.current().unwrap().clone();
+        type_message(&mut app, "Forbidden direct child edit").await;
+        dispatch(&mut app, Message::SessionModel("gpt-6-astra".into())).await;
+        dispatch(&mut app, Message::Send).await;
+        assert!(app.editor.text().is_empty());
+        assert_eq!(app.current().unwrap().model, original.model);
+        assert_eq!(app.current().unwrap().entries.len(), original.entries.len());
+        let mut renderer = header_renderer();
+        for (width, height) in [(1200., 800.), (860., 560.)] {
+            app.window_width = width;
+            app.window_height = height;
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(width, height),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            for label in ["Agents", "Completed", "Open", "Stop"] {
+                let rect = bounds.label(label);
+                assert!(
+                    rect.x >= 0. && rect.x + rect.width <= width,
+                    "{label} clipped at {width}: {rect:?}"
+                );
+                assert!(
+                    rect.y >= 0. && rect.y + rect.height <= height,
+                    "{label} clipped vertically"
+                );
+            }
+        }
+        dispatch(&mut app, Message::Select(parent.clone())).await;
+        assert_eq!(app.editor.text(), "Keep this unsent parent draft λ");
+        assert!(!app.auto_scroll);
+        assert_eq!(app.transcript.offset, parent_offset);
+        dispatch(&mut app, Message::ToggleSettings).await;
+        assert!(app.settings_open && !app.agents_open);
+        dispatch(&mut app, Message::ToggleAgents).await;
+        assert!(app.agents_open && !app.settings_open);
+        dispatch(&mut app, Message::Select(child_id.clone())).await;
+        dispatch(&mut app, Message::Delete(parent.clone())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(app.selected.is_none());
+        assert!(app.current().is_none());
+        assert!(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .store
+                .load_session(&child_id)
+                .is_err()
+        );
     }
 
     fn header_renderer() -> iced::Renderer {

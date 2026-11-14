@@ -2,7 +2,8 @@
 
 A native Wayland coding harness written in Rust with iced. **Phase 1 is implemented:**
 project/session management, streaming Markdown chat, ChatGPT subscription login,
-an agent loop, and JavaScript code mode over interactive shell tools.
+an agent loop, and JavaScript code mode over interactive shell tools. Phase 2 now
+also includes asynchronous Review and Explore subagents.
 
 ## Run
 
@@ -70,8 +71,14 @@ research and replace these families with newer versions.
   `tools.exec_command` and `tools.write_stdin`. Running cells yield IDs for `wait`.
   Shell sessions support polling, PTY input, output limits and cancellation.
 
-There are **no extensions** and no V1 migration/compatibility layer. Phase 2 browser,
-image, subagent, questionnaire, diff and statistics features are not placeholder UI.
+- Async [Review and Explore subagents](docs/subagents.md), with persistent child
+  sessions, six parallel assignments per parent, resumable context, repeatable
+  final results and completion-driven parent wake-up. Open **Agents** on the right
+  rail to inspect their live transcripts. Both profiles are read-only by
+  instruction, **not sandboxed**.
+
+There are **no extensions** and no V1 migration/compatibility layer. Remaining
+Phase 2 browser, image, questionnaire, diff and statistics features are not placeholder UI.
 
 ## State and recovery
 
@@ -79,7 +86,8 @@ All app state is in `$XDG_CONFIG_HOME/pico-evo`, or `~/.config/pico-evo`:
 
 - `settings.json`: projects, favorites, layout and defaults.
 - `sessions.sqlite3` (and its live WAL): indexed session metadata, full transcript,
-  separate provider context, pending steering, drafts and usage. Compaction does
+  separate provider context, pending steering, drafts, usage, child ownership and
+  durable subagent assignments/results. Compaction does
   **not** delete transcript text. Historical `sessions/*.json` files are left
   untouched but are not migrated or loaded by this format.
 - `auth.json`: OAuth credentials, mode `0600`, inside a mode `0700` directory.

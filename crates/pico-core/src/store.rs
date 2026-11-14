@@ -200,6 +200,10 @@ impl Usage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
+    #[serde(default)]
+    pub child: Option<crate::agent::subagents::Child>,
+    #[serde(default)]
+    pub subagent_notices: Vec<String>,
     pub project: PathBuf,
     pub title: String,
     pub updated: u64,
@@ -226,6 +230,8 @@ impl Session {
     pub fn new(project: PathBuf, settings: &Settings) -> Self {
         Self {
             id: id(),
+            child: None,
+            subagent_notices: vec![],
             project,
             title: "New session".into(),
             updated: now(),
@@ -285,6 +291,10 @@ impl Session {
         self.draft.clear();
     }
     pub fn consume_pending(&mut self) {
+        for notice in self.subagent_notices.drain(..) {
+            self.input
+                .push(serde_json::json!({"role":"user", "content":notice}));
+        }
         self.pending_submissions.clear();
         for output in self.pending_tool_outputs.drain(..) {
             if self.input.iter().any(|item| {
@@ -305,6 +315,8 @@ impl Session {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
+    #[serde(default)]
+    pub child: Option<crate::agent::subagents::Child>,
     pub needs_attention: bool,
     pub id: String,
     pub project: PathBuf,
@@ -315,6 +327,7 @@ pub struct SessionSummary {
 impl From<&Session> for SessionSummary {
     fn from(s: &Session) -> Self {
         Self {
+            child: s.child.clone(),
             needs_attention: s.needs_attention,
             id: s.id.clone(),
             project: s.project.clone(),
@@ -328,7 +341,7 @@ impl From<&Session> for SessionSummary {
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
-    db: Arc<Mutex<Connection>>,
+    pub(crate) db: Arc<Mutex<Connection>>,
     _lock: Arc<nix::fcntl::Flock<File>>,
 }
 impl Store {
@@ -352,6 +365,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, updated INTEGER NOT NULL, summary TEXT NOT NULL, metadata TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS session_order ON sessions(updated DESC, id);
             CREATE TABLE IF NOT EXISTS entries (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));
+            CREATE TABLE IF NOT EXISTS subagent_runs (id TEXT PRIMARY KEY, parent TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, request TEXT NOT NULL, metadata TEXT NOT NULL, result TEXT, error TEXT, UNIQUE(parent,request));
+            CREATE INDEX IF NOT EXISTS subagent_parent ON subagent_runs(parent);
             CREATE TABLE IF NOT EXISTS context (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));")?;
         Ok(Self {
             root,
@@ -448,19 +463,20 @@ impl Store {
     }
     /// Commit the first message and consume its shared draft in one transaction.
     pub fn commit_new_session(&self, session: &Session) -> Result<()> {
-        self.save_session_transaction(None, session, true)
+        self.save_session_transaction(None, session, true, None)
     }
     pub fn save_session(&self, session: &Session) -> Result<()> {
         self.save_changes(None, session)
     }
     pub fn save_changes(&self, before: Option<&Session>, session: &Session) -> Result<()> {
-        self.save_session_transaction(before, session, false)
+        self.save_session_transaction(before, session, false, None)
     }
-    fn save_session_transaction(
+    pub(crate) fn save_session_transaction(
         &self,
         before: Option<&Session>,
         session: &Session,
         consume_draft: bool,
+        run: Option<&crate::agent::subagents::RunInfo>,
     ) -> Result<()> {
         Uuid::parse_str(&session.id)?;
         let mut db = self.db.lock().expect("database lock");
@@ -481,6 +497,9 @@ impl Store {
             before.map(|s| &s.input),
             &session.input,
         )?;
+        if let Some(run) = run {
+            tx.execute("INSERT INTO subagent_runs (id,parent,session,request,metadata) VALUES (?1,?2,?3,?4,?5)", params![run.run_id,run.parent_id,run.session_id,run.request_id,serde_json::to_string(run)?])?;
+        }
         if consume_draft {
             tx.execute("DELETE FROM new_session_draft", [])?;
         }

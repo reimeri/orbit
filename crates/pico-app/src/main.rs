@@ -1,3 +1,4 @@
+mod agent_icon;
 mod animated_column;
 mod chat_selection;
 mod ellipsized_text;

@@ -48,6 +48,8 @@ pub enum Event {
     Tool(ToolEvent),
     Notification { parent: String, text: String },
 }
+pub type Delegation =
+    Arc<dyn Fn(&str, &str, &str, &CancellationToken) -> Result<String> + Send + Sync>;
 pub type Observer = Arc<dyn Fn(Event) -> Result<()> + Send + Sync>;
 #[derive(Default)]
 struct State {
@@ -80,6 +82,7 @@ struct Stored {
     bytes: usize,
 }
 pub struct CodeMode {
+    delegation: Option<Delegation>,
     shell: Arc<Shell>,
     cells: Mutex<HashMap<String, Arc<Cell>>>,
     stored: Arc<Mutex<Stored>>,
@@ -89,7 +92,15 @@ pub struct CodeMode {
 }
 impl CodeMode {
     pub fn new(shell: Arc<Shell>, observer: Observer) -> Self {
+        Self::with_delegation(shell, observer, None)
+    }
+    pub fn with_delegation(
+        shell: Arc<Shell>,
+        observer: Observer,
+        delegation: Option<Delegation>,
+    ) -> Self {
         Self {
+            delegation,
             shell,
             cells: Mutex::new(HashMap::new()),
             stored: Arc::new(Mutex::new(Stored::default())),
@@ -117,7 +128,7 @@ impl CodeMode {
         });
         cells.insert(cell_id.clone(), cell.clone());
         drop(cells);
-        let shell = self.shell.clone();
+        let shell = (self.shell.clone(), self.delegation.clone());
         let stored = self.stored.clone();
         let observer = self.observer.clone();
         let parent = parent.to_owned();
@@ -246,7 +257,7 @@ fn parse(source: &str) -> Result<(Pragma, String)> {
 }
 fn run_cell(
     code: String,
-    shell: Arc<Shell>,
+    (shell, delegation): (Arc<Shell>, Option<Delegation>),
     stored: Arc<Mutex<Stored>>,
     observer: Observer,
     parent: String,
@@ -338,6 +349,7 @@ fn run_cell(
                 }),
             )
             .map_err(js_error)?;
+        ctx.globals().set("__delegation", delegation.is_some()).map_err(js_error)?;
         let cancellation = cell.cancel.clone();
         ctx.globals()
             .set(
@@ -345,7 +357,7 @@ fn run_cell(
                 Function::new(
                     ctx.clone(),
                     move |name: String, args: String| -> rquickjs::Result<String> {
-                        if !matches!(name.as_str(), "exec_command" | "write_stdin") {
+                        if !matches!(name.as_str(), "exec_command" | "write_stdin") && !(delegation.is_some() && matches!(name.as_str(), "spawn_subagent" | "wait_subagent" | "list_subagents")) {
                             return Err(rquickjs::Error::new_from_js_message(
                                 "name",
                                 "tool",
@@ -364,6 +376,7 @@ fn run_cell(
                         let id = id();
                         let request = id.clone();
                         let shell = shell.clone();
+                        let delegation = delegation.clone();
                         let tx = tx.clone();
                         let observer = observer.clone();
                         let cancellation = cancellation.clone();
@@ -385,7 +398,7 @@ fn run_cell(
                                     "write_stdin" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|a| shell.write(a, &cancellation)),
-                                    _ => unreachable!("fixed tool names"),
+                                    _ => delegation.as_ref().expect("validated delegation tool")(&name, &args, &request, &cancellation),
                                 });
                                 let failed = result.is_err();
                                 let output = result.unwrap_or_else(|e| format!("{e:#}"));

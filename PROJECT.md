@@ -63,15 +63,15 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
 ### Phase 2
 
 - Other tools
-  - Subagents
-	- Async subagents run parallel to other work
-	- By default do not share context with the main agent
-	- spawn_subagent Schema takes session_id which determines the agents session. So by giving the same session_id to agent it gets the context of that session.
-	- UI should provide a way to see what the agent is doing.
-	- I think we should have 3 tools for managing subagents: spawn_agent, wait_subagent, and list_subagents
-	- Agent types:
-		- Review (gpt-6.1-sol, medium): Reviews changes for issues
-		- Explore (gpt-6-luna, high): Fast project exploration
+  - [x] Subagents — see [tool contract, lifecycle and acceptance checks](docs/subagents.md)
+    - Async parallel child conversations, isolated from parent context
+    - `spawn_subagent`, `wait_subagent`, `list_subagents` inside code mode
+    - Parent-owned child-session continuation; separate persistent assignment IDs
+    - Six running children per parent; no nested delegation
+    - Final-only repeatable results, durable completion notices and idle-parent wake-up
+    - Agents panel, live child transcript inspection, scoped Stop and family deletion
+    - Review (`gpt-6.1-sol`, medium) and Explore (`gpt-6-luna`, high)
+    - Both profiles are read-only by instruction, not filesystem sandboxing
   - Questionaires
 	- ask_user tool
 	- Should be very similar to how questionaires work in V1

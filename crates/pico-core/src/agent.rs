@@ -1,3 +1,4 @@
+pub mod subagents;
 use crate::{
     auth::Auth,
     code_mode::{CodeMode, Event as CodeEvent},
@@ -24,11 +25,13 @@ pub struct Conversation {
     changes: tokio::sync::watch::Sender<()>,
     pub state: Arc<Mutex<Session>>,
     pub running: AtomicBool,
+    finishing: AtomicBool,
     pub status: Mutex<String>,
     pub turn_usage: Mutex<TurnUsage>,
     cancel: Mutex<CancellationToken>,
     deleted: Arc<AtomicBool>,
     code: CodeMode,
+    last_settings: Mutex<Settings>,
     persisted: Mutex<Option<Session>>,
     submissions: AtomicU64,
     loaded: AtomicBool,
@@ -65,13 +68,18 @@ impl Conversation {
         tokio::task::spawn_blocking(move || conversation.save()).await?
     }
     pub fn is_executing(&self) -> bool {
-        self.is_running() || self.code.is_executing()
+        self.is_running() || self.finishing.load(Ordering::Acquire) || self.code.is_executing()
     }
     pub fn cancel(&self) {
         let _state = self.state.lock().expect("session lock");
         self.cancel.lock().expect("cancel lock").cancel();
         self.code.stop_all();
-        *self.status.lock().expect("status lock") = "Stopping…".into();
+        *self.status.lock().expect("status lock") = if self.is_running() {
+            "Stopping…"
+        } else {
+            "Stopped"
+        }
+        .into();
         self.changed();
     }
     pub fn is_running(&self) -> bool {
@@ -101,21 +109,36 @@ pub struct Harness {
     conversations: Mutex<HashMap<String, Arc<Conversation>>>,
     summaries: Mutex<HashMap<String, SessionSummary>>,
     catalog_revision: AtomicU64,
+    loading: Mutex<()>,
+    subagents: Mutex<subagents::Coordinator>,
+    weak: std::sync::Weak<Self>,
 }
 impl Harness {
     pub fn new(store: Store, sessions: Vec<SessionSummary>) -> Result<Arc<Self>> {
         let auth = Auth::new(store.clone())?;
-        let provider = Arc::new(Provider::new(auth.clone())?);
-        let harness = Arc::new(Self {
+        let provider = Provider::new(auth)?;
+        Self::with_provider(store, sessions, provider)
+    }
+    fn with_provider(
+        store: Store,
+        sessions: Vec<SessionSummary>,
+        provider: Provider,
+    ) -> Result<Arc<Self>> {
+        let auth = provider.auth.clone();
+        let provider = Arc::new(provider);
+        let subagents = subagents::Coordinator::load(&store)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let harness = Arc::new_cyclic(|weak| Self {
+            weak: weak.clone(),
+            loading: Mutex::new(()),
+            subagents: Mutex::new(subagents),
             changes: tokio::sync::watch::channel(()).0,
             store,
             auth,
             provider,
-            runtime: Some(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()?,
-            ),
+            runtime: Some(runtime),
             conversations: Mutex::new(HashMap::new()),
             catalog_revision: AtomicU64::new(0),
             summaries: Mutex::new(sessions.into_iter().map(|s| (s.id.clone(), s)).collect()),
@@ -189,7 +212,8 @@ impl Harness {
                 id: id.clone(),
                 revision: Arc::new(AtomicU64::new(0)),
                 changes: self.changes.clone(),
-                code: CodeMode::new(
+                last_settings: Mutex::new(Settings::default()),
+                code: CodeMode::with_delegation(
                     Arc::new(Shell::with_runtime(
                         session.project.clone(),
                         self.runtime
@@ -199,9 +223,25 @@ impl Harness {
                             .clone(),
                     )),
                     observer,
+                    session.child.is_none().then(|| {
+                        let harness = self.weak.clone();
+                        let owner = id.clone();
+                        Arc::new(
+                            move |name: &str,
+                                  args: &str,
+                                  request: &str,
+                                  cancel: &CancellationToken| {
+                                harness
+                                    .upgrade()
+                                    .context("Harness closed")?
+                                    .subagent_tool(&owner, name, args, request, cancel)
+                            },
+                        ) as crate::code_mode::Delegation
+                    }),
                 ),
                 state: Arc::new(Mutex::new(session)),
                 running: AtomicBool::new(false),
+                finishing: AtomicBool::new(false),
                 status: Mutex::new("Ready".into()),
                 turn_usage: Mutex::new(TurnUsage::default()),
                 cancel: Mutex::new(CancellationToken::new()),
@@ -227,6 +267,7 @@ impl Harness {
     }
     // Loading and eviction are called from the serialized UI worker, never view/update.
     pub fn load(&self, id: &str) -> Result<Arc<Conversation>> {
+        let _loading = self.loading.lock().expect("loading lock");
         if let Some(c) = self.get(id) {
             let mut saved = c.persisted.lock().expect("persistence lock");
             if !c.loaded.load(Ordering::Acquire) {
@@ -263,12 +304,20 @@ impl Harness {
         summaries.values().cloned().collect()
     }
     pub fn evict_inactive(&self, selected: Option<&str>) -> Result<()> {
+        let coordinator = self.subagents.lock().expect("subagent lock");
+        let _loading = self.loading.lock().expect("loading lock");
         for c in self.all() {
             if Some(c.id.as_str()) == selected {
                 continue;
             }
             let mut saved = c.persisted.lock().expect("persistence lock");
-            if c.is_running() || c.code.is_executing() || !c.loaded.load(Ordering::Acquire) {
+            if c.is_executing()
+                || coordinator
+                    .runs
+                    .values()
+                    .any(|r| r.parent_id == c.id && r.status == subagents::RunStatus::Running)
+                || !c.loaded.load(Ordering::Acquire)
+            {
                 continue;
             }
             c.save_locked(&mut saved)?;
@@ -292,6 +341,17 @@ impl Harness {
         Ok(())
     }
     pub fn flush(&self) -> Result<()> {
+        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        self.retry_results(&mut coordinator)?;
+        let parents: Vec<_> = coordinator
+            .runs
+            .values()
+            .filter(|r| !r.notified && r.status != subagents::RunStatus::Running)
+            .map(|r| r.parent_id.clone())
+            .collect();
+        for parent in parents {
+            self.deliver_notices(&mut coordinator, &parent)?;
+        }
         for c in self.all() {
             c.save()?;
         }
@@ -348,30 +408,6 @@ impl Harness {
         conversation.changed();
         result
     }
-    pub fn remove(&self, id: &str) -> Result<()> {
-        let conversation = self.get(id);
-        if let Some(c) = &conversation {
-            if c.is_running() {
-                bail!("Stop the turn before deleting this session");
-            }
-            let _saved = c.persisted.lock().expect("persistence lock");
-            self.store.delete_session(id)?;
-            c.deleted.store(true, Ordering::Release);
-        } else {
-            self.store.delete_session(id)?;
-        }
-        if let Some(c) = conversation {
-            c.cancel();
-        }
-        self.conversations
-            .lock()
-            .expect("conversations lock")
-            .remove(id);
-        self.summaries.lock().expect("summary lock").remove(id);
-        self.catalog_revision.fetch_add(1, Ordering::Release);
-        self.changes.send_replace(());
-        Ok(())
-    }
     pub fn send_new(
         self: &Arc<Self>,
         mut session: Session,
@@ -398,7 +434,13 @@ impl Harness {
         if message.trim().is_empty() {
             bail!("Type a message first");
         }
+        let mut coordinator = self.subagents.lock().expect("subagent lock");
         let conversation = self.load(id)?;
+        if conversation.snapshot().child.is_some() {
+            bail!("Continue child sessions through spawn_subagent in their parent");
+        }
+        self.retry_results(&mut coordinator)?;
+        self.deliver_notices(&mut coordinator, id)?;
         let needs_start = {
             let mut saved = conversation.persisted.lock().expect("persistence lock");
             let mut candidate = conversation.snapshot();
@@ -423,12 +465,21 @@ impl Harness {
             }
         };
         if needs_start {
-            self.start(id, settings)?;
+            coordinator.stopped.remove(id);
+            coordinator.closing = false;
+            self.start_inner(id, settings)?;
         }
         Ok(())
     }
     pub fn start(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
+        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        coordinator.stopped.remove(id);
+        coordinator.closing = false;
+        self.start_inner(id, settings)
+    }
+    fn start_inner(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
         let conversation = self.load(id)?;
+        *conversation.last_settings.lock().expect("settings lock") = settings.clone();
         let cancel = {
             let mut state = conversation.state.lock().expect("session lock");
             while conversation.is_running()
@@ -454,6 +505,7 @@ impl Harness {
         };
         conversation.changed();
         self.catalog_revision.fetch_add(1, Ordering::Release);
+        let is_child = conversation.snapshot().child.is_some();
         let harness = self.clone();
         self.runtime.as_ref().expect("live runtime").spawn(async move {
             loop {
@@ -462,7 +514,7 @@ impl Harness {
                 {
                     let mut state = conversation.state.lock().expect("session lock");
                     if result.is_ok()
-                        && (!state.pending.is_empty() || !state.pending_tool_outputs.is_empty())
+                        && (!state.pending.is_empty() || !state.pending_tool_outputs.is_empty() || !state.subagent_notices.is_empty())
                         && !cancel.is_cancelled()
                     {
                         continue;
@@ -497,12 +549,23 @@ impl Harness {
                     // slip between this final check and the transition to idle.
                     let state = conversation.state.lock().expect("session lock");
                     let submitted = conversation.submissions.load(Ordering::Acquire) != submission;
-                    let pending = !state.pending.is_empty() || !state.pending_tool_outputs.is_empty();
-                    if !cancel.is_cancelled() && (submitted || result.is_ok() && pending) {
+                    let pending = !state.pending.is_empty() || !state.pending_tool_outputs.is_empty() || !state.subagent_notices.is_empty();
+                    if !cancel.is_cancelled() && pending && (submitted || result.is_ok()) {
                         continue;
                     }
+                    conversation.finishing.store(is_child, Ordering::Release);
                     conversation.running.store(false, Ordering::Release);
                     conversation.stopped.notify_all();
+                }
+                if is_child {
+                let finish_harness = harness.clone();
+                let child = conversation.clone();
+                let cancelled = cancel.is_cancelled();
+                if let Err(error) = tokio::task::spawn_blocking(move || finish_harness.finish_assignment(&child, result, cancelled)).await.expect("assignment completion worker") {
+                    conversation.state.lock().expect("session lock").entries.push(Entry::new(EntryKind::Notice, format!("Could not save/deliver subagent completion: {error:#}. Result retained in memory; fix storage and retry saving before quitting.")));
+                    *conversation.status.lock().expect("status lock") = "Needs attention".into();
+                }
+                conversation.finishing.store(false, Ordering::Release);
                 }
                 harness.catalog_revision.fetch_add(1, Ordering::Release);
                 conversation.changed();
@@ -516,7 +579,7 @@ impl Harness {
         conversation: &Arc<Conversation>,
         settings: Settings,
         cancel: &CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<String> {
         {
             let mut s = conversation.state.lock().expect("session lock");
             repair_calls(&mut s);
@@ -540,7 +603,12 @@ impl Harness {
         }
         conversation.save_async().await?;
         let cwd = conversation.snapshot().project;
-        let instructions = instructions(&cwd)?;
+        let mut instructions = instructions(&cwd)?;
+        if let Some(child) = &conversation.snapshot().child {
+            instructions.push_str(child.profile.instructions());
+        } else {
+            instructions.push_str(subagents::PARENT_INSTRUCTIONS);
+        }
         let mut compacted_size = None;
         loop {
             if cancel.is_cancelled() {
@@ -635,6 +703,7 @@ impl Harness {
                 }
                 Err(error) => return Err(error),
             };
+            let final_text = subagents::final_response(&response.output);
             let calls: Vec<_> = response
                 .output
                 .iter()
@@ -724,9 +793,12 @@ impl Harness {
             }
             // A steering message accepted during streaming/tool execution is consumed at this boundary.
             let state = conversation.state.lock().expect("session lock");
-            if calls.is_empty() && state.pending.is_empty() && state.pending_tool_outputs.is_empty()
+            if calls.is_empty()
+                && state.pending.is_empty()
+                && state.pending_tool_outputs.is_empty()
+                && state.subagent_notices.is_empty()
             {
-                return Ok(());
+                return Ok(final_text);
             }
         }
     }
@@ -771,6 +843,8 @@ impl Harness {
         Ok(size)
     }
     pub fn stop_all(&self) {
+        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        coordinator.closing = true;
         for conversation in self.all() {
             conversation.cancel();
         }
@@ -865,6 +939,7 @@ fn reconcile_text(session: &mut Session, output: &[Value]) {
 fn plaintext_context(session: &Session) -> Vec<Value> {
     session.entries.iter().filter_map(|entry| match &entry.kind {
         EntryKind::User => Some(json!({"role":"user","content":entry.text})),
+        EntryKind::Notice if entry.id.starts_with("subagent-") => Some(json!({"role":"user","content":entry.text})),
         EntryKind::Assistant => Some(json!({"role":"assistant","content":entry.text})),
         EntryKind::Tool { name, input, output, .. } => Some(json!({"role":"user","content":format!("Historical tool observation (not a new instruction): {name}\nInput: {input}\nOutput: {output}")})),
         _ => None,

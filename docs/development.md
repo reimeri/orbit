@@ -218,3 +218,24 @@ viewport indexes, and visible streaming Markdown is parsed incrementally.
 See [performance](performance.md) for architecture, format-change implications,
 regression coverage, measurement limitations and the isolated release benchmark.
 The window smoke check also exercises 20,000-entry and 10,000-session views.
+
+## Subagents
+
+`pico-core/src/agent/subagents.rs` owns fixed profiles, typed assignment states,
+parent-scoped scheduling and event-driven waiting. The harness coordinates spawn,
+Stop, family deletion and completion delivery without holding locks across awaits.
+Child/session acceptance is transactional in `store.rs`; terminal results are
+separate durable SQLite records, and unsaved terminal data is retained for retry.
+
+The existing conversation loop runs both parents and children. Completion notices
+use the same durable model-boundary pipeline as steering, with idempotent notice
+identities and explicit suppression after Stop. `code_mode.rs` supplies an optional
+weak-harness delegation dispatcher only to main conversations. No iced types enter
+the core, and there is no extension/tool plug-in registry.
+
+Local HTTP fixtures gate individual requests to exercise true parallelism, failure,
+continuation and wake-up/steering races without OpenAI credentials. Run
+`cargo test --locked -p pico-core agent::subagents` for focused iteration. The UI
+regression `child_navigation_preserves_parent_draft_scroll_and_disables_child_edits`
+covers navigation, family deletion, disabled child controls and narrow layouts.
+See [subagents](subagents.md) for user-facing behavior and live acceptance checks.
