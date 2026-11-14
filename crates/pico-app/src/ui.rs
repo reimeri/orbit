@@ -193,6 +193,7 @@ pub enum Message {
     AgeTick,
     Press(Press),
     SessionMenu(String, iced::Point),
+    CopySessionId(String),
     CloseMenu,
     FooterMenu(FooterControl),
     CloseFooterMenu,
@@ -1139,6 +1140,10 @@ impl App {
             }
             Message::SessionMenu(id, position) => {
                 self.context_menu = Some((id, position));
+            }
+            Message::CopySessionId(id) => {
+                self.context_menu = None;
+                return iced::clipboard::write(id);
             }
             Message::CloseMenu => self.context_menu = None,
             Message::CloseFooterMenu => self.footer_menu = None,
@@ -2093,6 +2098,10 @@ impl App {
                         .width(Fill)
                         .on_press(Message::Rename(id.clone()))
                         .style(button::text),
+                    button("Copy session ID")
+                        .width(Fill)
+                        .on_press(Message::CopySessionId(id.clone()))
+                        .style(button::text),
                     button("Delete")
                         .width(Fill)
                         .on_press(Message::Delete(id.clone()))
@@ -2104,7 +2113,7 @@ impl App {
             .width(170)
             .style(card);
             let x = position.x.min(self.window_width - 180.).max(0.);
-            let y = position.y.min(self.window_height - 100.).max(0.);
+            let y = position.y.min(self.window_height - 140.).max(0.);
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
             stack![base, dismiss, positioned].into()
         } else if let Some(menu) = &self.footer_menu {
@@ -6376,6 +6385,26 @@ Then implement the fix.";
             h.load(&first).unwrap().snapshot().title,
             "Renamed other session"
         );
+        dispatch(
+            &mut app,
+            Message::SessionMenu(first.clone(), iced::Point::new(120., 230.)),
+        )
+        .await;
+        use iced::futures::StreamExt;
+        let task = app.update(Message::CopySessionId(first.clone()));
+        let mut actions = iced_runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            actions.next().await,
+            Some(iced_runtime::Action::Clipboard(
+                iced_runtime::clipboard::Action::Write {
+                    target: iced::advanced::clipboard::Kind::Standard,
+                    contents,
+                }
+            )) if contents == first
+        ));
+        assert!(actions.next().await.is_none());
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.selected.as_deref(), Some(second.as_str()));
         dispatch(
             &mut app,
             Message::SessionMenu(first.clone(), iced::Point::new(120., 230.)),
