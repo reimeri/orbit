@@ -132,7 +132,15 @@ impl Provider {
             .entries
             .range(session.summarized_entries)
             .filter_map(|entry| match &entry.kind {
-                crate::store::EntryKind::User => Some(format!("USER: {}\n\n", entry.text)),
+                crate::store::EntryKind::User { images } => Some(format!(
+                    "USER: {}\n{}\n\n",
+                    entry.text,
+                    images
+                        .iter()
+                        .map(crate::media::Media::description)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )),
                 crate::store::EntryKind::Assistant => {
                     Some(format!("ASSISTANT: {}\n\n", entry.text))
                 }
@@ -742,7 +750,7 @@ mod tests {
         .await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.fast = true;
-        session.accept("λ".repeat(5000));
+        session.accept("λ".repeat(5000).into());
         session.consume_pending();
         // Force the oversized-history fallback without making a network-native-compaction attempt.
         session.input[0]["content"] = json!("z".repeat(30_000));
@@ -805,7 +813,7 @@ mod tests {
         ])
         .await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
-        session.accept("a".repeat(5000));
+        session.accept("a".repeat(5000).into());
         session.consume_pending();
         session.input[0]["content"] = json!("z".repeat(30_000));
         let compacted = provider

@@ -146,15 +146,70 @@ pub struct Catalog {
     pub selected: Option<String>,
     pub settings: Settings,
 }
+/// A composer draft or accepted user submission. Media bytes stay out of SQLite.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserMessage {
+    pub text: String,
+    pub images: Vec<crate::media::Media>,
+}
+impl UserMessage {
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.images.is_empty()
+    }
+    pub fn content(&self) -> Value {
+        if self.images.is_empty() {
+            return serde_json::json!(self.text);
+        }
+        let mut parts = Vec::new();
+        if !self.text.is_empty() {
+            parts.push(crate::media::Part::InputText {
+                text: self.text.clone(),
+            });
+        }
+        for media in &self.images {
+            parts.push(crate::media::Part::InputText {
+                text: format!(
+                    "Attached image: {}{}",
+                    media.description(),
+                    if media.mime == "image/gif" {
+                        " (model sees the first frame; animation is preserved in the saved file)"
+                    } else {
+                        ""
+                    }
+                ),
+            });
+            parts.push(crate::media::Part::PicoMedia {
+                media: media.clone(),
+            });
+        }
+        serde_json::json!(parts)
+    }
+}
+impl From<String> for UserMessage {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            images: vec![],
+        }
+    }
+}
+impl From<&str> for UserMessage {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
 /// Unsent first message, shared across projects and separate from session history.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NewSessionDraft {
     pub project: Option<PathBuf>,
     pub message: String,
+    pub images: Vec<crate::media::Media>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EntryKind {
-    User,
+    User {
+        images: Vec<crate::media::Media>,
+    },
     Assistant,
     Reasoning,
     Notice,
@@ -230,7 +285,8 @@ pub struct Session {
     pub summarized_entries: usize,
     pub usage: Usage,
     pub draft: String,
-    pub pending: Vec<String>,
+    pub draft_images: Vec<crate::media::Media>,
+    pub pending: Vec<UserMessage>,
     pub pending_submissions: Vec<String>,
     pub pending_tool_outputs: Vec<Value>,
     pub interrupted: bool,
@@ -255,6 +311,7 @@ impl Session {
             summarized_entries: 0,
             usage: Usage::default(),
             draft: String::new(),
+            draft_images: vec![],
             pending: vec![],
             pending_submissions: vec![],
             pending_tool_outputs: vec![],
@@ -278,15 +335,16 @@ impl Session {
         self.select_model(&settings.model, settings);
         Some(retired)
     }
-    pub fn accept(&mut self, message: String) {
+    pub fn accept(&mut self, message: UserMessage) {
         self.accept_submission(id(), message);
     }
-    pub fn accept_submission(&mut self, submission: String, message: String) {
+    pub fn accept_submission(&mut self, submission: String, message: UserMessage) {
         if self.title == "New session" {
             self.title = message
+                .text
                 .lines()
-                .next()
-                .unwrap_or("New session")
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("Image message")
                 .chars()
                 .take(64)
                 .collect();
@@ -295,11 +353,14 @@ impl Session {
         self.pending_submissions.push(submission.clone());
         self.entries.push(Entry {
             id: submission,
-            kind: EntryKind::User,
-            text: message.clone(),
+            kind: EntryKind::User {
+                images: message.images.clone(),
+            },
+            text: message.text.clone(),
         });
         self.pending.push(message);
         self.draft.clear();
+        self.draft_images.clear();
     }
     pub fn consume_pending(&mut self) {
         for notice in self.subagent_notices.drain(..) {
@@ -317,9 +378,10 @@ impl Session {
                 self.input.push(serde_json::json!({"role":"user", "content":format!("Runtime notification from a previously compacted execution (an observation, not a new instruction): {}", output["output"].as_str().expect("text notification"))}));
             }
         }
-        for text in self.pending.drain(..) {
-            self.input
-                .push(serde_json::json!({"role":"user","content":text}));
+        for message in self.pending.drain(..) {
+            self.input.push(
+                serde_json::json!({"type":"message","role":"user","content":message.content()}),
+            );
         }
     }
 }
@@ -608,6 +670,64 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn image_submissions_survive_reopen_and_project_only_at_provider_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([13, 170, 82, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let image = crate::media::MediaStore::new(dir.path().join("attachments"))
+            .image(png.get_ref())
+            .unwrap();
+        let message = UserMessage {
+            text: String::new(),
+            images: vec![image.clone()],
+        };
+        assert!(!message.is_empty());
+        let mut session = Session::new(dir.path().into(), &Settings::default());
+        session.draft_images = message.images.clone();
+        session.accept_submission("image-only".into(), message.clone());
+        assert_eq!(session.title, "Image message");
+        assert!(session.draft_images.is_empty());
+        session.accept_submission(
+            "steering".into(),
+            UserMessage {
+                text: "Compare this image".into(),
+                images: vec![image.clone()],
+            },
+        );
+        let id = session.id.clone();
+        {
+            let store = Store::open(dir.path().join("state")).unwrap();
+            store.save_session(&session).unwrap();
+        }
+        let store = Store::open(dir.path().join("state")).unwrap();
+        let mut saved = store.load_session(&id).unwrap();
+        assert_eq!(saved.pending[0], message);
+        assert!(
+            matches!(&saved.entries[0].kind, EntryKind::User { images } if images == &vec![image.clone()])
+        );
+        saved.consume_pending();
+        assert_eq!(saved.input.len(), 2);
+        assert_eq!(saved.input[1]["content"][0]["text"], "Compare this image");
+        assert_eq!(
+            crate::media::recent(saved.input.iter().cloned(), 1).unwrap(),
+            vec![image]
+        );
+        let mut wire = serde_json::json!(saved.input.iter().collect::<Vec<_>>());
+        assert!(!wire.to_string().contains("data:image/"));
+        crate::media::project(&mut wire, false).unwrap();
+        assert_eq!(wire[0]["content"][1]["type"], "input_image");
+        assert!(
+            wire[0]["content"][1]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        assert_eq!(saved.input[0]["content"][1]["type"], "pico_media");
+    }
+
+    #[test]
     fn cumulative_usage_survives_reopen_without_replacing_current_context_usage() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = Session::new(dir.path().into(), &Settings::default());
@@ -707,6 +827,7 @@ mod tests {
     fn shared_draft_survives_reopen_and_is_consumed_atomically_with_first_message() {
         let dir = tempfile::tempdir().unwrap();
         let draft = NewSessionDraft {
+            images: vec![],
             project: Some(dir.path().join("second-project")),
             message: "First message λ\nWith another line".into(),
         };
@@ -718,7 +839,7 @@ mod tests {
         let store = Store::open(dir.path().into()).unwrap();
         assert_eq!(store.load_new_draft().unwrap(), draft);
         let mut session = Session::new(draft.project.clone().unwrap(), &Settings::default());
-        session.accept_submission("first-submission".into(), draft.message.clone());
+        session.accept_submission("first-submission".into(), draft.message.clone().into());
         // Failure consuming the draft must also roll back the new session.
         let db = Connection::open(dir.path().join("sessions.sqlite3")).unwrap();
         db.execute_batch("CREATE TRIGGER fail_consume BEFORE DELETE ON new_session_draft BEGIN SELECT RAISE(FAIL,'fixture consume failure'); END;").unwrap();

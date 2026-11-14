@@ -320,7 +320,7 @@ impl Harness {
             finished: None,
             notified: false,
         };
-        session.accept_submission(run.run_id.clone(), args.task);
+        session.accept_submission(run.run_id.clone(), args.task.into());
         if let Some(child) = &existing {
             let mut saved = child.persisted.lock().expect("persistence lock");
             self.store

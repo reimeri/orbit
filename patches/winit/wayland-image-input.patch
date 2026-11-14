@@ -1,0 +1,538 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -103,6 +103,7 @@
+     "wayland-protocols-plasma",
+     "sctk",
+     "ahash",
++    "dep:url",
+     "memmap2",
+ ]
+ wayland-csd-adwaita = [
+@@ -255,6 +256,8 @@
+ features = [
+     "std",
+     "system",
++    "fs",
++    "pipe",
+     "thread",
+     "process",
+ ]
+@@ -551,3 +554,7 @@
+     "Win32_UI_TextServices",
+     "Win32_UI_WindowsAndMessaging",
+ ]
++
++[target.'cfg(target_os = "linux")'.dependencies.url]
++version = "2"
++optional = true
+--- a/src/platform/wayland.rs
++++ b/src/platform/wayland.rs
+@@ -129,3 +129,11 @@
+         self.inner.native_identifier()
+     }
+ }
++
++/// Request a PNG, JPEG, WebP or GIF from the focused application's ordinary
++/// Wayland selection. Pico extension: no clipboard-manager protocol is required.
++/// Wait for the reply off the event-loop thread. `None` means no image is offered.
++#[cfg(wayland_platform)]
++pub fn request_image_clipboard(max_bytes: usize) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<Option<Vec<u8>>>>> {
++    crate::platform_impl::wayland::data_device::request_image_clipboard(max_bytes)
++}
+--- /dev/null
++++ b/src/platform_impl/linux/wayland/data_device/uri_list.rs
+@@ -0,0 +1,30 @@
++use std::{io, path::PathBuf};
++
++pub(super) fn paths(bytes: &[u8]) -> io::Result<Vec<PathBuf>> {
++    std::str::from_utf8(bytes)
++        .map_err(io::Error::other)?
++        .lines()
++        .filter(|line| !line.is_empty() && !line.starts_with('#'))
++        .map(|line| {
++            url::Url::parse(line)
++                .map_err(io::Error::other)?
++                .to_file_path()
++                .map_err(|_| io::Error::other(format!("Not a local file URI: {line}")))
++        })
++        .collect()
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn local_uri_lists_decode_without_accepting_remote_files() {
++        assert_eq!(
++            paths(b"# comment\r\nfile:///tmp/a%20b.png\r\nfile://localhost/tmp/%CE%BB.gif\r\n")
++                .unwrap(),
++            vec![PathBuf::from("/tmp/a b.png"), PathBuf::from("/tmp/λ.gif")]
++        );
++        assert!(paths(b"file://remote/tmp/private.png").is_err());
++        assert!(paths(b"https://example.com/image.png").is_err());
++        assert!(paths(b"file:///tmp/ok.png\n\xff").is_err());
++    }
++}
+--- /dev/null
++++ b/src/platform_impl/linux/wayland/data_device.rs
+@@ -0,0 +1,351 @@
++//! Ordinary wl_data_device offers for file drops and image paste. Own dropped
++//! offers until their transfers finish, independently of the next drag/selection.
++mod uri_list;
++use super::{make_wid, state::WinitState, WindowId};
++use crate::event::WindowEvent;
++use ahash::AHashMap;
++use sctk::{
++    data_device_manager::ReadPipe,
++    reexports::{
++        calloop::{
++            self, channel,
++            timer::{TimeoutAction, Timer},
++            PostAction,
++        },
++        client::{
++            event_created_child,
++            protocol::{
++                wl_data_device::{self, WlDataDevice},
++                wl_data_device_manager::{DndAction, WlDataDeviceManager},
++                wl_data_offer::{self, WlDataOffer},
++                wl_seat::WlSeat,
++            },
++            Connection, Dispatch, Proxy, QueueHandle,
++        },
++    },
++};
++use std::{
++    cell::RefCell,
++    io,
++    os::fd::AsFd,
++    rc::Rc,
++    sync::{mpsc, Mutex},
++    time::Duration,
++};
++use uri_list::paths;
++
++const URI_MIME: &str = "text/uri-list";
++const IMAGE_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
++type Reply = mpsc::Sender<io::Result<Option<Vec<u8>>>>;
++static REQUESTS: Mutex<Option<channel::Sender<(usize, Reply)>>> = Mutex::new(None);
++
++pub(crate) fn request_image_clipboard(
++    max_bytes: usize,
++) -> io::Result<mpsc::Receiver<io::Result<Option<Vec<u8>>>>> {
++    let (reply, receiver) = mpsc::channel();
++    REQUESTS
++        .lock()
++        .unwrap()
++        .as_ref()
++        .ok_or_else(|| io::Error::other("Wayland clipboard not initialized"))?
++        .send((max_bytes, reply))
++        .map_err(|_| io::Error::other("Wayland event loop closed"))?;
++    Ok(receiver)
++}
++
++pub struct OfferInfo {
++    mimes: Vec<String>,
++    action: DndAction,
++}
++impl Default for OfferInfo {
++    fn default() -> Self {
++        Self {
++            mimes: vec![],
++            action: DndAction::empty(),
++        }
++    }
++}
++struct Offer(WlDataOffer);
++impl Drop for Offer {
++    fn drop(&mut self) {
++        self.0.destroy();
++    }
++}
++impl Offer {
++    fn receive(&self, mime: &str) -> io::Result<ReadPipe> {
++        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
++        self.0.receive(mime.to_owned(), write.as_fd());
++        Ok(read.into())
++    }
++}
++pub struct Device {
++    pub seat: sctk::reexports::client::backend::ObjectId,
++    proxy: WlDataDevice,
++    pending: AHashMap<sctk::reexports::client::backend::ObjectId, Offer>,
++    drag: Option<(Offer, WindowId)>,
++    selection: Option<Offer>,
++}
++impl Drop for Device {
++    fn drop(&mut self) {
++        if self.proxy.version() >= 2 {
++            self.proxy.release();
++        }
++    }
++}
++
++impl WinitState {
++    pub fn add_data_device(&mut self, qh: &QueueHandle<Self>, seat: &WlSeat) {
++        if let Some(manager) = &self.data_device_manager {
++            let proxy = manager.get_data_device(seat, qh, ());
++            self.data_devices.insert(
++                proxy.id(),
++                Device {
++                    seat: seat.id(),
++                    proxy,
++                    pending: Default::default(),
++                    drag: None,
++                    selection: None,
++                },
++            );
++        }
++    }
++    pub fn init_image_clipboard(&mut self) -> Result<(), calloop::Error> {
++        let (sender, receiver) = channel::channel();
++        self.loop_handle
++            .insert_source(receiver, |event, _, state| {
++                if let channel::Event::Msg((limit, reply)) = event {
++                    state.paste_image(limit, reply);
++                }
++            })
++            .map_err(|e| e.error)?;
++        *REQUESTS.lock().unwrap() = Some(sender);
++        Ok(())
++    }
++    fn paste_image(&mut self, limit: usize, reply: Reply) {
++        // Follow the seat that delivered the latest key press, not hash-map order.
++        let selection = self
++            .clipboard_seat
++            .as_ref()
++            .and_then(|seat| {
++                self.data_devices
++                    .values()
++                    .find(|device| &device.seat == seat)
++            })
++            .and_then(|device| device.selection.as_ref());
++        let Some(offer) = selection else {
++            let _ = reply.send(Ok(None));
++            return;
++        };
++        let info = offer.0.data::<Mutex<OfferInfo>>().unwrap().lock().unwrap();
++        let mime = IMAGE_MIMES
++            .iter()
++            .find(|mime| info.mimes.iter().any(|m| m == **mime))
++            .copied();
++        let Some(mime) = mime else {
++            let result = if info.mimes.iter().any(|m| m.starts_with("image/")) {
++                Err(io::Error::other(
++                    "Copy a PNG, JPEG, WebP or GIF image instead",
++                ))
++            } else {
++                Ok(None)
++            };
++            let _ = reply.send(result);
++            return;
++        };
++        drop(info);
++        match offer.receive(mime) {
++            Ok(pipe) => self.read_transfer(pipe, limit, move |result, _| {
++                let _ = reply.send(result.map(Some));
++            }),
++            Err(e) => {
++                let _ = reply.send(Err(e));
++            }
++        }
++    }
++    fn read_transfer(
++        &mut self,
++        pipe: ReadPipe,
++        limit: usize,
++        done: impl FnOnce(io::Result<Vec<u8>>, &mut Self) + 'static,
++    ) {
++        if let Err(e) = rustix::fs::fcntl_getfl(&pipe)
++            .and_then(|flags| rustix::fs::fcntl_setfl(&pipe, flags | rustix::fs::OFlags::NONBLOCK))
++        {
++            done(Err(e.into()), self);
++            return;
++        }
++        let completion = Rc::new(RefCell::new(Some(done)));
++        let finished = completion.clone();
++        let mut bytes = Vec::new();
++        let token = match self.loop_handle.insert_source(pipe, move |_, file, state| {
++            let mut buffer = [0; 16384];
++            let result = loop {
++                match rustix::io::read(&*file, &mut buffer) {
++                    Ok(0) => break Ok(std::mem::take(&mut bytes)),
++                    Ok(count) if bytes.len() + count <= limit => bytes.extend_from_slice(&buffer[..count]),
++                    Ok(_) => break Err(io::Error::other(format!("Transfer exceeds the {limit} byte limit; use a smaller image or fewer files"))),
++                    Err(rustix::io::Errno::AGAIN) => return PostAction::Continue,
++                    Err(rustix::io::Errno::INTR) => continue,
++                    Err(e) => break Err(e.into()),
++                }
++            };
++            finished.borrow_mut().take().unwrap()(result, state);
++            PostAction::Remove
++        }) {
++            Ok(token) => token,
++            Err(e) => { completion.borrow_mut().take().unwrap()(Err(io::Error::other(e.to_string())), self); return; }
++        };
++        let timeout = completion.clone();
++        if let Err(e) = self.loop_handle.insert_source(
++            Timer::from_duration(Duration::from_secs(10)),
++            move |_, _, state| {
++                if let Some(done) = timeout.borrow_mut().take() {
++                    state.loop_handle.remove(token);
++                    done(
++                        Err(io::Error::new(
++                            io::ErrorKind::TimedOut,
++                            "Image/file transfer timed out; copy or drag it again",
++                        )),
++                        state,
++                    );
++                }
++                TimeoutAction::Drop
++            },
++        ) {
++            self.loop_handle.remove(token);
++            completion.borrow_mut().take().unwrap()(Err(io::Error::other(e.to_string())), self);
++        }
++    }
++}
++
++impl Dispatch<WlDataDeviceManager, ()> for WinitState {
++    fn event(
++        _: &mut Self,
++        _: &WlDataDeviceManager,
++        _: sctk::reexports::client::protocol::wl_data_device_manager::Event,
++        _: &(),
++        _: &Connection,
++        _: &QueueHandle<Self>,
++    ) {
++    }
++}
++impl Dispatch<WlDataOffer, Mutex<OfferInfo>> for WinitState {
++    fn event(
++        _: &mut Self,
++        _: &WlDataOffer,
++        event: wl_data_offer::Event,
++        info: &Mutex<OfferInfo>,
++        _: &Connection,
++        _: &QueueHandle<Self>,
++    ) {
++        let mut info = info.lock().unwrap();
++        match event {
++            wl_data_offer::Event::Offer { mime_type } => info.mimes.push(mime_type),
++            wl_data_offer::Event::Action {
++                dnd_action: sctk::reexports::client::WEnum::Value(action),
++            } => info.action = action,
++            _ => {}
++        }
++    }
++}
++impl Dispatch<WlDataDevice, ()> for WinitState {
++    event_created_child!(WinitState, WlDataDevice, [0 => (WlDataOffer, Mutex::<OfferInfo>::default())]);
++    fn event(
++        state: &mut Self,
++        device: &WlDataDevice,
++        event: wl_data_device::Event,
++        _: &(),
++        _: &Connection,
++        _: &QueueHandle<Self>,
++    ) {
++        let device = state.data_devices.get_mut(&device.id()).unwrap();
++        match event {
++            wl_data_device::Event::DataOffer { id } => {
++                device.pending.insert(id.id(), Offer(id));
++            }
++            wl_data_device::Event::Enter {
++                serial,
++                surface,
++                id,
++                ..
++            } => {
++                device.drag = None;
++                if let Some(id) = id {
++                    let offer = device.pending.remove(&id.id()).unwrap();
++                    let window = make_wid(&surface);
++                    let supported = state.windows.borrow().contains_key(&window)
++                        && offer
++                            .0
++                            .data::<Mutex<OfferInfo>>()
++                            .unwrap()
++                            .lock()
++                            .unwrap()
++                            .mimes
++                            .iter()
++                            .any(|m| m == URI_MIME);
++                    offer
++                        .0
++                        .accept(serial, supported.then(|| URI_MIME.to_owned()));
++                    if offer.0.version() >= 3 {
++                        let action = if supported {
++                            DndAction::Copy
++                        } else {
++                            DndAction::empty()
++                        };
++                        offer.0.set_actions(action, action);
++                    }
++                    if supported {
++                        device.drag = Some((offer, window));
++                    }
++                }
++            }
++            wl_data_device::Event::Leave => {
++                device.drag = None;
++            }
++            wl_data_device::Event::Selection { id } => {
++                device.selection = id.map(|id| device.pending.remove(&id.id()).unwrap());
++            }
++            wl_data_device::Event::Drop => {
++                if let Some((offer, window)) = device.drag.take() {
++                    if offer.0.version() >= 3
++                        && offer
++                            .0
++                            .data::<Mutex<OfferInfo>>()
++                            .unwrap()
++                            .lock()
++                            .unwrap()
++                            .action
++                            != DndAction::Copy
++                    {
++                        return;
++                    }
++                    match offer.receive(URI_MIME) {
++                        Ok(pipe) => state.read_transfer(pipe, 1024 * 1024, move |result, state| {
++                            match result.and_then(|bytes| paths(&bytes)) {
++                                Ok(paths) => {
++                                    if state.windows.borrow().contains_key(&window) {
++                                        for path in paths {
++                                            state.events_sink.push_window_event(
++                                                WindowEvent::DroppedFile(path),
++                                                window,
++                                            );
++                                        }
++                                        state.dispatched_events = true;
++                                    }
++                                    if offer.0.version() >= 3 {
++                                        offer.0.finish();
++                                    }
++                                }
++                                Err(e) => tracing::warn!("Could not receive dropped files: {e}"),
++                            }
++                            // Ownership ends here, not at the next enter/leave event.
++                            drop(offer);
++                        }),
++                        Err(e) => tracing::warn!("Could not receive dropped files: {e}"),
++                    }
++                }
++            }
++            _ => {}
++        }
++    }
++}
+--- a/src/platform_impl/linux/wayland/mod.rs
++++ b/src/platform_impl/linux/wayland/mod.rs
+@@ -15,6 +15,7 @@
+ pub use window::Window;
+ 
+ mod event_loop;
++pub(crate) mod data_device;
+ mod output;
+ mod seat;
+ mod state;
+--- a/src/platform_impl/linux/wayland/seat/keyboard/mod.rs
++++ b/src/platform_impl/linux/wayland/seat/keyboard/mod.rs
+@@ -97,6 +97,7 @@
+                 }
+             },
+             WlKeyboardEvent::Leave { surface, .. } => {
++                if state.clipboard_seat.as_ref() == Some(&data.seat.id()) { state.clipboard_seat = None; }
+                 let window_id = wayland::make_wid(&surface);
+ 
+                 // NOTE: we should drop the repeat regardless whether it was for the present
+@@ -132,6 +133,7 @@
+                 }
+             },
+             WlKeyboardEvent::Key { key, state: WEnum::Value(WlKeyState::Pressed), .. } => {
++                state.clipboard_seat = Some(data.seat.id());
+                 let key = key + 8;
+ 
+                 key_input(
+--- a/src/platform_impl/linux/wayland/seat/mod.rs
++++ b/src/platform_impl/linux/wayland/seat/mod.rs
+@@ -202,9 +202,10 @@
+     fn new_seat(
+         &mut self,
+         _connection: &Connection,
+-        _queue_handle: &QueueHandle<Self>,
+-        seat: WlSeat,
+-    ) {
++        queue_handle: &QueueHandle<Self>,
++        seat: WlSeat,
++    ) {
++        self.add_data_device(queue_handle, &seat);
+         self.seats.insert(seat.id(), WinitSeatState::new());
+     }
+ 
+@@ -214,6 +215,7 @@
+         _queue_handle: &QueueHandle<Self>,
+         seat: WlSeat,
+     ) {
++        self.data_devices.retain(|_, device| device.seat != seat.id());
+         let _ = self.seats.remove(&seat.id());
+         self.on_keyboard_destroy(&seat.id());
+     }
+@@ -221,6 +223,7 @@
+ 
+ impl WinitState {
+     fn on_keyboard_destroy(&mut self, seat: &ObjectId) {
++        if self.clipboard_seat.as_ref() == Some(seat) { self.clipboard_seat = None; }
+         for (window_id, window) in self.windows.get_mut() {
+             let mut window = window.lock().unwrap();
+             let had_focus = window.has_focus();
+--- a/src/platform_impl/linux/wayland/state.rs
++++ b/src/platform_impl/linux/wayland/state.rs
+@@ -53,6 +53,10 @@
+ 
+     /// The seat state responsible for all sorts of input.
+     pub seat_state: SeatState,
++
++    pub data_device_manager: Option<sctk::reexports::client::protocol::wl_data_device_manager::WlDataDeviceManager>,
++    pub data_devices: AHashMap<ObjectId, super::data_device::Device>,
++    pub clipboard_seat: Option<ObjectId>,
+ 
+     /// The shm for software buffers, such as cursors.
+     pub shm: Shm,
+@@ -143,6 +147,7 @@
+ 
+         let seat_state = SeatState::new(globals, queue_handle);
+ 
++        let data_device_manager = globals.bind(queue_handle, 1..=3, ()).ok();
+         let mut seats = AHashMap::default();
+         for seat in seat_state.seats() {
+             seats.insert(seat.id(), WinitSeatState::new());
+@@ -158,12 +163,15 @@
+         let shm = Shm::bind(globals, queue_handle).map_err(WaylandError::Bind)?;
+         let custom_cursor_pool = Arc::new(Mutex::new(SlotPool::new(2, &shm).unwrap()));
+ 
+-        Ok(Self {
++        let mut state = Self {
+             registry_state,
+             compositor_state: Arc::new(compositor_state),
+             subcompositor_state: subcompositor_state.map(Arc::new),
+             output_state,
+             seat_state,
++            data_device_manager,
++            data_devices: Default::default(),
++            clipboard_seat: None,
+             shm,
+             custom_cursor_pool,
+ 
+@@ -192,7 +200,10 @@
+             loop_handle,
+             // Make it true by default.
+             dispatched_events: true,
+-        })
++        };
++        for seat in state.seat_state.seats().collect::<Vec<_>>() { state.add_data_device(queue_handle, &seat); }
++        state.init_image_clipboard().map_err(WaylandError::Calloop)?;
++        Ok(state)
+     }
+ 
+     pub fn scale_factor_changed(

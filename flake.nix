@@ -11,13 +11,22 @@
       runtimeLibraries = with pkgs; [ wayland libxkbcommon vulkan-loader libGL fontconfig ];
       runtimePath = lib.makeLibraryPath runtimeLibraries;
       fontConfig = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
+      patchedWinit = import ./patches/winit { inherit pkgs; };
       # Never copy the reference implementation, target/, or session assets into Nix builds.
-      src = lib.fileset.toSource {
+      projectSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
-          ./Cargo.toml ./Cargo.lock ./.cargo ./crates ./scripts
+          ./Cargo.toml ./Cargo.lock ./.cargo ./crates ./scripts ./patches
         ];
       };
+      # The same generated Cargo path is used by package and formatting checks.
+      # Upstream source stays in the Nix store, never in the tracked project.
+      src = pkgs.runCommand "pico-evo-source" { } ''
+        cp -R ${projectSrc} "$out"
+        chmod u+w "$out"
+        mkdir "$out/.build-deps"
+        ln -s ${patchedWinit} "$out/.build-deps/winit"
+      '';
       desktopItem = pkgs.makeDesktopItem {
         name = "pico-evo";
         desktopName = "Pico V2";
@@ -34,6 +43,9 @@
         strictDeps = true;
         nativeBuildInputs = with pkgs; [ pkg-config mold makeWrapper ];
         buildInputs = runtimeLibraries ++ [ pkgs.sqlite ];
+        # Rendered unit tests need fonts inside the build sandbox too, not only
+        # in the development shell and installed wrapper.
+        FONTCONFIG_FILE = fontConfig;
         doCheck = true;
         nativeCheckInputs = [ pkgs.git ];
         cargoTestFlags = [ "--workspace" ];
@@ -85,6 +97,22 @@
         LD_LIBRARY_PATH = runtimePath;
         FONTCONFIG_FILE = fontConfig;
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+        shellHook = ''
+          # Locate this checkout even when entering from a package subdirectory.
+          root="$PWD"
+          while [[ ! -f "$root/patches/winit/default.nix" ]]; do
+            if [[ "$root" == / ]]; then
+              echo "Enter nix develop from the Pico checkout to prepare its patched dependencies." >&2
+              exit 1
+            fi
+            root="$(dirname "$root")"
+          done
+          mkdir -p "$root/.build-deps" &&
+            ln -sfnT ${patchedWinit} "$root/.build-deps/winit" || {
+              echo "Could not prepare .build-deps/winit. Check checkout permissions and re-enter nix develop." >&2
+              exit 1
+            }
+        '';
       };
     };
 }

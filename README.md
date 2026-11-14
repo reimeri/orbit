@@ -15,6 +15,10 @@ nix develop
 just run
 ```
 
+`nix develop` also prepares the locally patched, checksum-pinned winit dependency.
+Only the [patch and pin](patches/winit/README.md) live in this repository; upstream
+source stays in the Nix store, linked through the generated `.build-deps/` folder.
+
 1. Open **Settings** (gear on the right) and **Sign in with ChatGPT**.
 2. Complete the browser login. If browser launch fails, use **Copy login URL**.
 3. Choose **Add project**, browse to a folder or enter its absolute path.

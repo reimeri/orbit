@@ -20,7 +20,12 @@ Phase 1 uses Tokio for provider streams, OAuth and UI tasks.
 New files used by a Git-backed flake must be known to Git (`git add <files>`);
 otherwise Nix cannot see them. A dirty-worktree warning is normal during edits.
 Do not copy `target/` or the V1 reference into Nix sources.
-The flake uses an explicit source allowlist.
+The flake uses an explicit source allowlist. Entering `nix develop` also prepares
+`.build-deps/winit`, a Git-ignored link to the checksum-pinned upstream source with
+our local patch applied in the Nix store. Nothing is downloaded or patched in
+Cargo's registry cache. Re-enter the shell after changing `patches/winit/`.
+The package and formatting checks prepare their own link, independent of the
+working tree. See [patch maintenance](../patches/winit/README.md).
 
 ## Choose the cheapest useful check
 
@@ -276,7 +281,7 @@ regressions. The software/GPU window smoke includes the Images settings tab, sta
 thumbnail, animated modal, pause and natural-size static views using deterministic local
 fixtures. See [images](images.md) for resource limits and paid live acceptance.
 
-The expanded rendered smoke sequence now includes 40 frames (including media and
+The expanded rendered smoke sequence now includes 41 frames (including media and
 Markdown image previews, missing-source errors and the byte-backed GIF modal).
 Its timeout is 60 seconds; a measured software debug run took ~33 seconds locally.
 
@@ -300,3 +305,26 @@ web entries. General settings and a web result are included in the window smoke.
 
 Run `cargo test --locked -p pico-core web` for focused regressions and see
 [web access](web-search.md) for the explicitly opt-in live acceptance command.
+
+### Native image input
+
+The app's image input uses a small patch to pinned `winit` 0.30.13, documented in
+[`patches/winit/README.md`](../patches/winit/README.md). Nix fetches the official
+release by SHA-256, applies the checked-in diff with no fuzz, and supplies the
+same patched source to development and packaged builds. Only the patch and pin
+are tracked; `.build-deps/winit` is generated. No X11 features are enabled.
+URI parsing regressions include the exact patched backend parser in the app
+tests, so they run under `just verify` without a separate dependency workspace.
+Attachment tests cover draft
+persistence, image-only provider projection, import/navigation serialization,
+failed-send retention and hover/remove/modal hit routing. Rendered smoke includes
+the attachment strip; native clipboard/source interoperability still needs the
+manual acceptance checks in `images.md`.
+
+Native input acceptance was also exercised in an isolated nested niri compositor:
+Ctrl+V from an `image/png` clipboard created a durable attachment, and a real
+`wl_data_source` drag containing PNG + GIF file URIs completed the Copy/finish
+handshake and appended both images in order. Restart retained all three images;
+ordinary text pasted exactly once; thumbnail clicks opened the GIF modal, and
+the hover remove button removed just its attachment. This used separate clipboard and
+configuration state, without touching the desktop clipboard or real sessions.

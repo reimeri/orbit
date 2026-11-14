@@ -1,4 +1,5 @@
 mod agent_icon;
+mod attachments;
 mod chat_selection;
 mod ellipsized_text;
 mod git;

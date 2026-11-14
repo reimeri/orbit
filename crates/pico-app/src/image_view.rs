@@ -119,6 +119,38 @@ impl Viewer {
             None => text("Loading image preview…").size(12).into(),
         }
     }
+    pub fn attachment(&self, media: &Media, index: usize) -> Element<'_, crate::ui::Message> {
+        let preview: Element<'_, crate::ui::Message> = match media
+            .thumbnail
+            .as_ref()
+            .and_then(|p| self.thumbnails.get(p))
+        {
+            Some(Ok(handle)) => image(handle.clone())
+                .width(56)
+                .height(56)
+                .content_fit(iced::ContentFit::Contain)
+                .into(),
+            Some(Err(_)) => text("Preview unavailable").size(10).into(),
+            None => text("Loading…").size(10).into(),
+        };
+        let base = button(container(preview).center_x(56).center_y(56))
+            .padding(8)
+            .width(72)
+            .height(72)
+            .style(crate::ui::attachment_button)
+            .on_press(crate::ui::Message::OpenImage(media.clone()));
+        let remove = container(
+            button(text("×").size(14))
+                .padding([0, 5])
+                .style(crate::ui::attachment_button)
+                .on_press(crate::ui::Message::RemoveAttachment(index)),
+        )
+        .width(72)
+        .height(72)
+        .align_x(iced::Right)
+        .padding(3);
+        iced::widget::hover(base, remove)
+    }
     pub fn open(&mut self, media: &Media) -> Task<Message> {
         self.open_source(media.path.clone(), None)
     }
@@ -415,6 +447,83 @@ impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attachment_remove_is_hover_only_and_does_not_open_modal() {
+        use iced::{Point, Size, advanced::Renderer as _};
+        let dir = tempfile::tempdir().unwrap();
+        let media = pico_core::media::MediaStore::new(dir.path().into())
+            .image(include_bytes!("fixtures/media.png"))
+            .unwrap();
+        let viewer = Viewer::default();
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let size = Size::new(72., 72.);
+        let mut ui = iced_runtime::UserInterface::build(
+            viewer.attachment(&media, 3),
+            size,
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        for (point, text_count) in [(Point::new(100., 100.), 1), (Point::new(36., 36.), 2)] {
+            let cursor = mouse::Cursor::Available(point);
+            ui.update(
+                &[iced::Event::Mouse(mouse::Event::CursorMoved {
+                    position: point,
+                })],
+                cursor,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut vec![],
+            );
+            renderer.reset(iced::Rectangle::with_size(size));
+            ui.draw(
+                &mut renderer,
+                &iced::Theme::Dark,
+                &renderer::Style {
+                    text_color: Color::WHITE,
+                },
+                cursor,
+            );
+            let iced::Renderer::Secondary(renderer) = &mut renderer else {
+                unreachable!()
+            };
+            assert_eq!(
+                renderer
+                    .layers()
+                    .iter()
+                    .flat_map(|layer| &layer.text)
+                    .map(|group| group.as_slice().len())
+                    .sum::<usize>(),
+                text_count
+            );
+        }
+        for (point, remove) in [(Point::new(61., 11.), true), (Point::new(28., 40.), false)] {
+            let mut messages = vec![];
+            ui.update(
+                &[
+                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            if remove {
+                assert!(matches!(
+                    messages.as_slice(),
+                    [crate::ui::Message::RemoveAttachment(3)]
+                ));
+            } else {
+                assert!(
+                    matches!(messages.as_slice(), [crate::ui::Message::OpenImage(m)] if m == &media)
+                );
+            }
+        }
+    }
+
     #[test]
     fn modal_keeps_natural_size_and_fits_both_window_axes() {
         use iced::{

@@ -3,6 +3,55 @@
 Pico's built-in image tools use the calling session's workspace, never the currently
 selected UI workspace. `exec` and `wait` remain the only top-level tools.
 
+## Attach images to chat
+
+With the chat text field focused, press **Ctrl+V** (or **Shift+Insert**) to paste
+an image. Drag one or more local image files anywhere into a main conversation
+window to attach them to its current draft. PNG, JPEG, WebP and GIF are supported;
+non-image files produce an error without discarding existing attachments. Text
+clipboard content still pastes normally. Attachments are unavailable in read-only
+child conversations, questionnaires and while a modal is open.
+
+Thumbnails appear in a separate, left-aligned, horizontally scrollable row above
+the text field. Hover a thumbnail to reveal **×**; click its image to open the
+existing full-size viewer (including GIF playback). Removing a thumbnail only
+removes it from the draft, never the original file. Multiple images and image-only
+messages are accepted. Images sent while the agent runs are queued as steering,
+just like text. Sent messages retain clickable previews.
+
+Unsent images survive session/project switches and restarts, and remain attached
+when saving or sending fails. In-flight imports finish before navigation, sending
+or shutdown, preventing images from arriving in the wrong session. Images are
+immutable private snapshots under the V2 configuration directory's `attachments/`
+folder; moving or deleting the source file does not break a draft or sent message.
+Snapshots are content-addressed and shared across drafts/history. They are retained
+rather than removed on draft removal or session deletion, so shared references
+cannot be broken; automatic orphan collection is not implemented.
+
+The existing per-image media limits apply (79 MiB encoded, bounded pixels/animation
+memory). The model receives prepared PNG images, not merely paths; GIF input is
+its first frame, with the original saved path and first-frame limitation reported.
+Attachment references remain in persistent context and fallback context recovery.
+
+### Native input implementation and acceptance
+
+The pinned iced/winit stack does not implement Wayland file drops or expose image
+clipboard reads. `patches/winit/README.md` documents Pico's narrow backend patch.
+It uses ordinary `wl_data_device` on the application's connection, not X11 or
+clipboard-manager/data-control protocols. Transfers are nonblocking and time out
+after ten seconds. File drops negotiate **Copy**, never Move.
+
+Manual checks on a Wayland desktop:
+
+1. Paste a screenshot and ordinary text; confirm text isn't lost or duplicated.
+2. Drop several PNG/JPEG/WebP/GIF files (including spaces/Unicode in filenames).
+3. Hover/remove one thumbnail; click another and inspect/play it in the modal.
+4. Switch sessions and restart before sending; confirm unsent images remain.
+5. Send images without text, and send images while an agent is running. Confirm
+   the model sees them and the transcript previews reopen after restart.
+6. Drop corrupt/unsupported files and try a source that stalls; the app remains
+   responsive, errors are reported, and existing attachments remain intact.
+
 ## View
 
 ```js

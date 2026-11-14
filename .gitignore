@@ -3,3 +3,4 @@ pico-reference
 /result
 /result-*
 /.pico/
+/.build-deps/

@@ -509,11 +509,11 @@ impl Harness {
         self: &Arc<Self>,
         mut session: Session,
         submission: &str,
-        message: String,
+        message: crate::store::UserMessage,
         settings: Settings,
     ) -> Result<()> {
-        if message.trim().is_empty() {
-            bail!("Type a message first");
+        if message.is_empty() {
+            bail!("Type a message or attach an image first");
         }
         session.accept_submission(submission.to_owned(), message);
         self.store.commit_new_session(&session)?;
@@ -525,11 +525,11 @@ impl Harness {
         self: &Arc<Self>,
         id: &str,
         submission: &str,
-        message: String,
+        message: crate::store::UserMessage,
         settings: Settings,
     ) -> Result<()> {
-        if message.trim().is_empty() {
-            bail!("Type a message first");
+        if message.is_empty() {
+            bail!("Type a message or attach an image first");
         }
         let mut coordinator = self.subagents.lock().expect("subagent lock");
         let conversation = self.load(id)?;
@@ -1040,7 +1040,7 @@ fn reconcile_text(session: &mut Session, output: &[Value]) {
 }
 fn plaintext_context(session: &Session) -> Vec<Value> {
     session.entries.iter().filter_map(|entry| match &entry.kind {
-        EntryKind::User => Some(json!({"role":"user","content":entry.text})),
+        EntryKind::User { images } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone() }.content()})),
         EntryKind::Notice if entry.id.starts_with("subagent-") => Some(json!({"role":"user","content":entry.text})),
         EntryKind::Assistant => Some(json!({"role":"assistant","content":entry.text})),
         EntryKind::Tool { name, input, output, .. } => Some(json!({"role":"user","content":format!("Historical tool observation (not a new instruction): {name}\nInput: {input}\nOutput: {output}")})),
@@ -1297,7 +1297,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert_eq!(c.snapshot().pending, vec!["corrected text"]);
+        assert_eq!(c.snapshot().pending, vec!["corrected text".into()]);
         assert!(c.snapshot().entries.by_id("old").is_none());
         h.edit(&id, |s| s.consume_pending()).unwrap();
         let revision = c.revision();
@@ -1361,7 +1361,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             c.snapshot()
                 .entries
                 .iter()
-                .filter(|e| matches!(e.kind, EntryKind::User))
+                .filter(|e| matches!(e.kind, EntryKind::User { .. }))
                 .count(),
             1
         );
@@ -1382,9 +1382,10 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let h = Harness::new(store.clone(), vec![]).unwrap();
         let mut session = Session::new(dir.path().into(), &Settings::default());
         let id = session.id.clone();
-        session
-            .entries
-            .push(Entry::new(EntryKind::User, "preserved history"));
+        session.entries.push(Entry::new(
+            EntryKind::User { images: vec![] },
+            "preserved history",
+        ));
         let c = h.insert(session);
         let result=c.code.exec("// @exec: {\"yield_time_ms\": 1}\nstore('key','retained');await new Promise(r=>setTimeout(r,30));text('unread result');","parent",&CancellationToken::new()).unwrap();
         let cell = result
@@ -1587,12 +1588,12 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
                 std::thread::sleep(Duration::from_millis(5));
             }
             let snapshot = harness.get(&id).unwrap().snapshot();
-            assert_eq!(snapshot.pending, vec!["Do not lose this request"]);
+            assert_eq!(snapshot.pending, vec!["Do not lose this request".into()]);
             assert_eq!(
                 snapshot
                     .entries
                     .iter()
-                    .filter(|e| matches!(e.kind, EntryKind::User))
+                    .filter(|e| matches!(e.kind, EntryKind::User { .. }))
                     .count(),
                 1
             );
@@ -1604,7 +1605,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let (_, sessions, _) = store.load().unwrap();
         assert_eq!(
             store.load_session(&sessions[0].id).unwrap().pending,
-            vec!["Do not lose this request"]
+            vec!["Do not lose this request".into()]
         );
     }
     #[test]

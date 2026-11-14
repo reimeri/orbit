@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/pico-app", "crates/pico-core"]
 default-members = ["crates/pico-app"]
+exclude = [".build-deps/winit"]
 resolver = "3"
 
 [workspace.package]
@@ -19,3 +20,7 @@ incremental = true
 [profile.test]
 debug = "line-tables-only"
 incremental = true
+
+[patch.crates-io]
+# Prepared by nix develop and the package build; see patches/winit/README.md.
+winit = { path = ".build-deps/winit" }

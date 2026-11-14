@@ -20,7 +20,7 @@ use pico_core::{
     models::{MODELS, model},
     store::{
         Catalog, Entry, EntryKind, NewSessionDraft, Project, Session, SessionSummary, Settings,
-        Store,
+        Store, UserMessage,
     },
 };
 use std::{
@@ -89,7 +89,7 @@ pub struct App {
     io_busy: bool,
     closing: bool,
     close_requested: bool,
-    submissions: HashMap<String, (String, String)>,
+    submissions: HashMap<String, (UserMessage, String)>,
     revisions: HashMap<String, u64>,
     outputs: HashMap<String, tool_output::Output>,
     image_view: crate::image_view::Viewer,
@@ -102,6 +102,8 @@ pub struct App {
     search: String,
     search_active: bool,
     editor: text_editor::Content,
+    attachments: Vec<pico_core::media::Media>,
+    importing: usize,
     questionnaires: HashMap<String, questionnaire::Draft>,
     active_questionnaire: Option<String>,
     chat_selection: chat_selection::Shared,
@@ -191,8 +193,12 @@ pub enum Message {
     ApiKeyStatus(Result<bool, String>),
     Selected(Result<(Selection, Option<String>), String>),
     NewDraftSaved(Result<(), String>),
-    Sent(String, String, Result<(), String>),
-    DraftSaved(String, String, Result<(), String>),
+    Sent(String, UserMessage, Result<(), String>),
+    DraftSaved(String, UserMessage, Result<(), String>),
+    Paste,
+    ClipboardText(Option<String>),
+    AttachmentLoaded(Result<crate::attachments::Input, String>),
+    RemoveAttachment(usize),
     Deleted(String, Result<(), String>),
     Edited(Result<(), String>),
     Tick,
@@ -328,6 +334,8 @@ impl App {
             closing: false,
             close_requested: false,
             submissions: HashMap::new(),
+            attachments: vec![],
+            importing: 0,
             revisions: HashMap::new(),
             outputs: HashMap::new(),
             image_view: Default::default(),
@@ -598,7 +606,7 @@ impl App {
         }));
     }
     fn prepare_visible(&mut self) {
-        let mut visible_media = Vec::new();
+        let mut visible_media = self.attachments.clone();
         let mut image_urls = HashSet::new();
         if let Some(session) = &self.current_session {
             let visible = &self.transcript.order[self.transcript.visible()];
@@ -611,7 +619,10 @@ impl App {
                 .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
             for &index in visible {
                 let entry = &session.entries[index];
-                if matches!(entry.kind, EntryKind::User | EntryKind::Assistant)
+                if let EntryKind::User { images } = &entry.kind {
+                    visible_media.extend(images.iter().cloned());
+                }
+                if matches!(entry.kind, EntryKind::User { .. } | EntryKind::Assistant)
                     || matches!(entry.kind, EntryKind::Reasoning)
                         && self.expanded.contains(&entry.id)
                 {
@@ -752,13 +763,13 @@ impl App {
             }));
         }
     }
-    fn take_draft(&mut self) -> Option<(String, String)> {
+    fn take_draft(&mut self) -> Option<(String, UserMessage)> {
         if !self.draft_dirty {
             return None;
         }
         let id = self.selected.clone()?;
         self.draft_dirty = false;
-        Some((id, self.editor.text()))
+        Some((id, self.composer_message()))
     }
     fn save_draft(&mut self) -> bool {
         if self.io_busy || self.closing {
@@ -779,7 +790,7 @@ impl App {
         {
             let h = h.clone();
             self.tasks.push(self.io.run(move || {
-                let result=h.edit(&id,|s|s.draft=draft.clone()).map_err(|e|format!("Could not save draft: {e:#}. Keep Pico open and retry after fixing storage."));
+                let result=h.edit(&id,|s| { s.draft=draft.text.clone(); s.draft_images=draft.images.clone(); }).map_err(|e|format!("Could not save draft: {e:#}. Keep Pico open and retry after fixing storage."));
                 Message::DraftSaved(id,draft,result)
             }));
         }
@@ -791,7 +802,58 @@ impl App {
         } else {
             self.current_session.as_ref().map_or("", |s| &s.draft)
         });
+        self.attachments = if self.draft_session.is_some() {
+            self.new_draft.images.clone()
+        } else {
+            self.current_session
+                .as_ref()
+                .map_or_else(Vec::new, |s| s.draft_images.clone())
+        };
         self.draft_dirty = false;
+        self.prepare_visible();
+    }
+    fn composer_message(&self) -> UserMessage {
+        UserMessage {
+            text: self.editor.text(),
+            images: self.attachments.clone(),
+        }
+    }
+    fn attachment_changed(&mut self) {
+        if self.draft_session.is_some() {
+            self.new_draft.images = self.attachments.clone();
+            self.new_draft_dirty = true;
+        } else {
+            self.draft_dirty = true;
+        }
+        self.prepare_visible();
+    }
+    fn can_attach(&self) -> bool {
+        self.current().is_some_and(|s| s.child.is_none())
+            && !self.closing
+            && !self.close_requested
+            && (!self.io_busy || self.importing > 0)
+            && self.modal.is_none()
+            && self.active_questionnaire.is_none()
+            && self.context_menu.is_none()
+            && self.footer_menu.is_none()
+    }
+    fn import_file(&mut self, path: PathBuf) {
+        if !self.can_attach() {
+            return;
+        }
+        let root = self
+            .harness
+            .as_ref()
+            .expect("active harness")
+            .store
+            .root()
+            .join("attachments");
+        self.importing += 1;
+        self.io_busy = true;
+        self.tasks.push(
+            self.io
+                .run(move || Message::AttachmentLoaded(crate::attachments::file(&root, &path))),
+        );
     }
     fn select(&mut self, selection: Selection) {
         self.chat_selection.borrow_mut().clear();
@@ -818,7 +880,7 @@ impl App {
                 Message::Selected(
                     (|| {
                         if let Some((old, draft)) = draft {
-                            h.edit(&old, |s| s.draft = draft)?;
+                            h.edit(&old, |s| { s.draft = draft.text; s.draft_images = draft.images; })?;
                         }
                         let id = if let Selection::Session(id) = &selection {
                             h.load(id)?;
@@ -903,6 +965,57 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::Paste => {
+                if !self.can_attach() {
+                    return Task::none();
+                }
+                self.importing += 1;
+                self.io_busy = true;
+                return iced::clipboard::read().map(Message::ClipboardText);
+            }
+            Message::ClipboardText(text) => {
+                let root = self
+                    .harness
+                    .as_ref()
+                    .expect("active harness")
+                    .store
+                    .root()
+                    .join("attachments");
+                self.tasks.push(self.io.run(move || {
+                    Message::AttachmentLoaded(crate::attachments::clipboard(&root, text))
+                }));
+            }
+            Message::AttachmentLoaded(result) => {
+                self.importing -= 1;
+                self.io_busy = self.importing > 0;
+                match result {
+                    Ok(crate::attachments::Input::Image(media)) => {
+                        self.attachments.push(media);
+                        self.attachment_changed();
+                    }
+                    Ok(crate::attachments::Input::Text(text)) => {
+                        self.editor
+                            .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                                Arc::new(text),
+                            )));
+                        if self.draft_session.is_some() {
+                            self.new_draft.message = self.editor.text();
+                            self.new_draft_dirty = true;
+                        } else {
+                            self.draft_dirty = true;
+                        }
+                    }
+                    Ok(crate::attachments::Input::Empty) => {}
+                    Err(error) => self.error = Some(format!("Could not attach image: {error}")),
+                }
+            }
+            Message::RemoveAttachment(index) => {
+                if !self.can_attach() || self.io_busy {
+                    return Task::none();
+                }
+                self.attachments.remove(index);
+                self.attachment_changed();
+            }
             Message::Image(message) => {
                 let skipped = matches!(message, crate::image_view::Message::Thumbnail(_, None));
                 self.image_view.update(message);
@@ -1057,8 +1170,9 @@ impl App {
                             self.save_catalog(false);
                         }
                         self.submissions.remove(&id);
-                        if self.selected.as_ref() == Some(&id) && self.editor.text() == text {
+                        if self.selected.as_ref() == Some(&id) && self.composer_message() == text {
                             self.editor = text_editor::Content::new();
+                            self.attachments.clear();
                             self.draft_dirty = false;
                         }
                         self.auto_scroll = true;
@@ -1310,8 +1424,8 @@ impl App {
                     return Task::none();
                 }
                 if let (Some(h), Some(session)) = (&self.harness, self.current()) {
-                    let message = self.editor.text();
-                    if message.trim().is_empty() {
+                    let message = self.composer_message();
+                    if message.is_empty() {
                         return Task::none();
                     }
                     if self.io_busy {
@@ -1736,6 +1850,7 @@ impl App {
                 ));
             }
             Message::Event(event) => match event {
+                iced::Event::Window(window::Event::FileDropped(path)) => self.import_file(path),
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     if let Some((right, start, width)) = self.drag {
                         self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -1951,7 +2066,7 @@ impl App {
                 h.stop_all();
                 let result=(|| {
                     while h.all().iter().any(|s|s.is_executing()) {std::thread::sleep(Duration::from_millis(20));}
-                    if let Some((id,draft))=draft {h.edit(&id,|s|s.draft=draft)?;}
+                    if let Some((id,draft))=draft {h.edit(&id,|s| { s.draft=draft.text; s.draft_images=draft.images; })?;}
                     h.store.save_new_draft(&new_draft)?;
                     h.store.save_catalog(&catalog)?;
                     h.flush()?;
@@ -2648,7 +2763,19 @@ impl App {
             .height(100)
             .padding(12)
             .size(self.catalog.settings.font_size);
-        let mut compose = column![editor].spacing(10);
+        let mut compose = column![].spacing(10);
+        if !self.attachments.is_empty() {
+            let images = row(self
+                .attachments
+                .iter()
+                .enumerate()
+                .map(|(index, media)| self.image_view.attachment(media, index)))
+            .spacing(8);
+            compose = compose.push(scrollable(images).direction(
+                scrollable::Direction::Horizontal(scrollable::Scrollbar::new()),
+            ));
+        }
+        compose = compose.push(editor);
         if !session.pending.is_empty() && running {
             compose = compose.push(
                 text(format!(
@@ -2811,19 +2938,19 @@ impl App {
             }
             _ => {
                 let name = match entry.kind {
-                    EntryKind::User => "YOU",
+                    EntryKind::User { .. } => "YOU",
                     EntryKind::Reasoning => "THINKING",
                     _ => "PICO",
                 };
                 let mut content = column![
                     row![
-                        text(name)
-                            .size(10)
-                            .color(if matches!(entry.kind, EntryKind::User) {
+                        text(name).size(10).color(
+                            if matches!(entry.kind, EntryKind::User { .. }) {
                                 MUTED
                             } else {
                                 ACCENT
-                            }),
+                            }
+                        ),
                         space().width(Fill),
                         button(text("Copy").size(10))
                             .on_press(Message::Copy(entry.id.clone()))
@@ -2832,6 +2959,11 @@ impl App {
                     .align_y(iced::Center)
                 ]
                 .spacing(8);
+                if let EntryKind::User { images } = &entry.kind {
+                    for media in images {
+                        content = content.push(self.image_view.thumbnail(media));
+                    }
+                }
                 if let Some(markdown) = self.markdown.get(&entry.id) {
                     content = content.push(markdown::view_with(
                         markdown.content.items(),
@@ -2865,7 +2997,7 @@ impl App {
                 container(content)
                     .padding(12)
                     .width(Fill)
-                    .style(if matches!(entry.kind, EntryKind::User) {
+                    .style(if matches!(entry.kind, EntryKind::User { .. }) {
                         card
                     } else {
                         container::transparent
@@ -3589,7 +3721,7 @@ impl App {
                 s.usage.cached = 56_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
-                    Entry::new(EntryKind::User, "Inspect this project and run its tests."),
+                    Entry::new(EntryKind::User { images: vec![] }, "Inspect this project and run its tests."),
                     Entry::new(
                         EntryKind::Assistant,
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Pico V2\"); }\n```\n\n[Documentation](https://openai.com)",
@@ -3841,7 +3973,7 @@ impl App {
                 child.model = "gpt-6-luna".into();
                 child.effort = "high".into();
                 child.entries.push(Entry::new(
-                    EntryKind::User,
+                    EntryKind::User { images: vec![] },
                     "Inspect the completion notification path. Do not modify files.",
                 ));
                 child.entries.push(Entry::new(EntryKind::Assistant,"## Exploration result\n\nThe **parent wake-up** path preserves cancellation and uses durable completion notices.\n\n- Separate conversation context\n- Repeatable final results\n- No nested delegation"));
@@ -4071,10 +4203,30 @@ impl App {
                 self.rebuild_transcript();
                 self.prepare_visible();
             }
+            40 => {
+                self.settings_open = false;
+                self.attachments = [
+                    include_bytes!("fixtures/media.png").as_slice(),
+                    include_bytes!("fixtures/media.gif").as_slice(),
+                ]
+                .into_iter()
+                .map(|bytes| {
+                    pico_core::media::MediaStore::new(
+                        self.smoke_dir.as_ref().unwrap().join("attachment-smoke"),
+                    )
+                    .image(bytes)
+                    .unwrap()
+                })
+                .collect();
+                self.editor =
+                    text_editor::Content::with_text("Images are attached above this text field.");
+                self.prepare_visible();
+                return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered composer attachments, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -4265,6 +4417,22 @@ fn panel(_: &Theme) -> container::Style {
         ..Default::default()
     }
 }
+pub(crate) fn attachment_button(theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(PANEL.into()),
+        text_color: theme.palette().text,
+        border: iced::Border {
+            color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                ACCENT
+            } else {
+                BORDER
+            },
+            width: 1.,
+            radius: 8.into(),
+        },
+        ..Default::default()
+    }
+}
 fn card(_: &Theme) -> container::Style {
     container::Style {
         background: Some(PANEL.into()),
@@ -4421,6 +4589,12 @@ fn updates(data: &Updates) -> iced::futures::stream::BoxStream<'static, Message>
 
 fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     if matches!(event.status, text_editor::Status::Focused { .. }) {
+        if (event.modifiers.command() && event.key.as_ref() == keyboard::Key::Character("v"))
+            || (event.modifiers.shift()
+                && event.key == keyboard::Key::Named(keyboard::key::Named::Insert))
+        {
+            return Some(text_editor::Binding::Custom(Message::Paste));
+        }
         if event.key == keyboard::Key::Named(keyboard::key::Named::Backspace)
             && event.modifiers.control()
             && !event.modifiers.alt()
@@ -4441,9 +4615,11 @@ fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Bin
 fn window_events() -> Subscription<Message> {
     iced::event::listen_with(|event, _, _| match event {
         iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
-        | iced::Event::Window(window::Event::Resized(_) | window::Event::CloseRequested) => {
-            Some(Message::Event(event))
-        }
+        | iced::Event::Window(
+            window::Event::Resized(_)
+            | window::Event::CloseRequested
+            | window::Event::FileDropped(_),
+        ) => Some(Message::Event(event)),
         _ => None,
     })
 }
@@ -4934,9 +5110,10 @@ mod tests {
         session.model = "retired-sol".into();
         session.effort = "low".into();
         session.fast = false;
-        session
-            .entries
-            .push(Entry::new(EntryKind::User, "Keep this transcript"));
+        session.entries.push(Entry::new(
+            EntryKind::User { images: vec![] },
+            "Keep this transcript",
+        ));
         session.draft = "Keep this draft".into();
         let id = session.id.clone();
         h.store.save_session(&session).unwrap();
@@ -5015,6 +5192,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_drafts_survive_navigation_storage_and_failed_image_only_send() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        let source = root.join("pasted.png");
+        std::fs::write(&source, include_bytes!("fixtures/media.png")).unwrap();
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::FileDropped(
+                source.clone(),
+            ))),
+        )
+        .await;
+        std::fs::remove_file(&source).unwrap();
+        let images = app.attachments.clone();
+        assert_eq!(images.len(), 1);
+        assert!(
+            images[0].path.is_file(),
+            "attachment is independent of its source"
+        );
+        dispatch(&mut app, Message::SaveDraft).await;
+        assert_eq!(h.store.load_new_draft().unwrap().images, images);
+        stored_session(&mut app, root.clone()).await;
+        let existing = app.selected.clone().unwrap();
+        assert!(app.attachments.is_empty());
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        assert_eq!(app.attachments, images);
+        // Import completion follows the same path for clipboard image bytes.
+        app.importing = 1;
+        app.io_busy = true;
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Ok(crate::attachments::Input::Image(images[0].clone()))),
+        )
+        .await;
+        assert_eq!(app.attachments.len(), 2);
+        dispatch(&mut app, Message::RemoveAttachment(0)).await;
+        assert_eq!(app.attachments, images);
+        dispatch(&mut app, Message::OpenImage(images[0].clone())).await;
+        assert!(matches!(app.modal, Some(Modal::Image(_))));
+        dispatch(&mut app, Message::RemoveAttachment(0)).await;
+        assert_eq!(app.attachments, images, "modal blocks background edits");
+        dispatch(&mut app, Message::Dismiss).await;
+        let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_image_send BEFORE INSERT ON sessions BEGIN SELECT RAISE(FAIL,'image fixture failure'); END;").unwrap();
+        dispatch(&mut app, Message::Send).await;
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("image fixture failure")
+        );
+        assert_eq!(app.attachments, images);
+        db.execute_batch("DROP TRIGGER fail_image_send").unwrap();
+        dispatch(&mut app, Message::Send).await;
+        assert!(app.attachments.is_empty());
+        let saved = h
+            .store
+            .load_session(app.selected.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(saved.entries[0].text, "");
+        assert!(
+            matches!(&saved.entries[0].kind, EntryKind::User { images: saved_images } if saved_images == &images)
+        );
+        assert!(h.store.load_new_draft().unwrap().images.is_empty());
+        dispatch(&mut app, Message::Select(existing.clone())).await;
+        app.importing = 1;
+        app.io_busy = true;
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Ok(crate::attachments::Input::Image(images[0].clone()))),
+        )
+        .await;
+        dispatch(&mut app, Message::New).await;
+        assert_eq!(
+            h.store.load_session(&existing).unwrap().draft_images,
+            images
+        );
+        dispatch(&mut app, Message::Select(existing)).await;
+        assert_eq!(app.attachments, images);
+        dispatch(&mut app, Message::RemoveAttachment(0)).await;
+        dispatch(&mut app, Message::SaveDraft).await;
+        assert!(
+            h.store
+                .load_session(app.selected.as_ref().unwrap())
+                .unwrap()
+                .draft_images
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_file_drops_are_ordered_and_cannot_leak_into_another_session() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root.clone()).await;
+        let id = app.selected.clone();
+        let png = root.join("first.png");
+        let gif = root.join("second.gif");
+        std::fs::write(&png, include_bytes!("fixtures/media.png")).unwrap();
+        std::fs::write(&gif, include_bytes!("fixtures/media.gif")).unwrap();
+        let first = app.update(Message::Event(iced::Event::Window(
+            window::Event::FileDropped(png),
+        )));
+        let second = app.update(Message::Event(iced::Event::Window(
+            window::Event::FileDropped(gif),
+        )));
+        assert_eq!(app.importing, 2);
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        dispatch(&mut app, Message::Send).await;
+        assert_eq!(app.selected, id);
+        drain(&mut app, first).await;
+        assert!(app.io_busy);
+        drain(&mut app, second).await;
+        assert!(!app.io_busy);
+        assert_eq!(
+            app.attachments
+                .iter()
+                .map(|m| m.mime.as_str())
+                .collect::<Vec<_>>(),
+            ["image/png", "image/gif"]
+        );
+        let invalid = root.join("not-an-image.png");
+        std::fs::write(&invalid, b"invalid image bytes").unwrap();
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::FileDropped(invalid))),
+        )
+        .await;
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("Could not attach image")
+        );
+        assert_eq!(app.attachments.len(), 2);
+        assert!(!app.io_busy);
+    }
+
+    #[tokio::test]
     async fn new_session_draft_follows_projects_but_not_existing_sessions() {
         let mut app = app();
         let h = app.harness.as_ref().unwrap().clone();
@@ -5064,7 +5382,7 @@ Then implement the fix.";
         let users: Vec<_> = saved
             .entries
             .iter()
-            .filter(|e| e.kind == EntryKind::User)
+            .filter(|e| matches!(e.kind, EntryKind::User { .. }))
             .collect();
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].text, message);
@@ -5139,7 +5457,10 @@ Then implement the fix.";
             .as_ref()
             .unwrap()
             .edit(&id, |s| {
-                s.entries.push(Entry::new(EntryKind::User, "Old message"));
+                s.entries.push(Entry::new(
+                    EntryKind::User { images: vec![] },
+                    "Old message",
+                ));
             })
             .unwrap();
         dispatch(&mut app, Message::Changed).await;
@@ -5183,9 +5504,10 @@ Then implement the fix.";
         child.title = "Inspect cancellation".into();
         child.model = "gpt-6-luna".into();
         child.effort = "high".into();
-        child
-            .entries
-            .push(Entry::new(EntryKind::User, "Inspect without edits"));
+        child.entries.push(Entry::new(
+            EntryKind::User { images: vec![] },
+            "Inspect without edits",
+        ));
         child
             .entries
             .push(Entry::new(EntryKind::Assistant, "Final inspection result"));
