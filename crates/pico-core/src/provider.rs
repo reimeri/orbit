@@ -7,7 +7,10 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
@@ -21,6 +24,7 @@ pub enum Delta {
 }
 #[derive(Debug)]
 pub struct Response {
+    pub streaming_time: Duration,
     pub output: Vec<Value>,
     pub usage: Usage,
 }
@@ -80,6 +84,7 @@ impl Provider {
         instructions: &str,
         context_limit: u64,
         cancel: &CancellationToken,
+        account: &(dyn Fn(&Response) + Send + Sync),
     ) -> Result<Compaction> {
         let mut body = request(session, instructions, true);
         body["input"]
@@ -88,13 +93,15 @@ impl Provider {
             .push(json!({"type":"compaction_trigger"}));
         if serde_json::to_vec(&body)?.len() as u64 / 3 < context_limit
             && let Ok(response) = self.request(&session.id, body, cancel, &|_| {}).await
-            && valid_compaction(&response.output)
         {
-            return Ok(Compaction {
-                input: response.output,
-                summary: None,
-                summarized_entries: session.summarized_entries,
-            });
+            account(&response);
+            if valid_compaction(&response.output) {
+                return Ok(Compaction {
+                    input: response.output,
+                    summary: None,
+                    summarized_entries: session.summarized_entries,
+                });
+            }
         }
         if cancel.is_cancelled() {
             bail!("Compaction cancelled");
@@ -153,6 +160,7 @@ impl Provider {
             );
             body["input"] = json!([{"role":"user","content":format!("Previous summary:\n{summary}\n\nNext historical chunk:\n{chunk}")}]);
             let response = self.request(&session.id, body, cancel, &|_| {}).await.context("Automatic compaction failed; the original context and transcript are preserved. Check your connection and retry")?;
+            account(&response);
             summary = response
                 .output
                 .iter()
@@ -271,6 +279,7 @@ impl Provider {
             // a truncated function call must not execute or be guessed from partial arguments.
             let mut stream = response.bytes_stream();
             let mut decoder = Sse::default();
+            let mut response_stream = ResponseStream::default();
             loop {
                 let next = tokio::time::timeout(Duration::from_secs(120), stream.next()).await.context("ChatGPT stream stalled. Retry to continue; completed shell commands are not repeated automatically")?;
                 let Some(chunk) = next else {
@@ -281,7 +290,7 @@ impl Provider {
                 for event in decoder.push(&chunk.context(
                     "ChatGPT connection interrupted during streaming; retry to continue",
                 )?)? {
-                    if let Some(response) = handle_event(event, emit)? {
+                    if let Some(response) = response_stream.event(event, emit, Instant::now())? {
                         return Ok(response);
                     }
                 }
@@ -359,75 +368,105 @@ impl Sse {
         Ok(events)
     }
 }
-fn handle_event(event: Value, emit: &(dyn Fn(Delta) + Send + Sync)) -> Result<Option<Response>> {
-    if is_context_limit(&event) || is_context_limit(&event["response"]) {
-        return Err(ContextLimit.into());
-    }
-    match event["type"].as_str().unwrap_or("") {
-        "response.output_text.delta" | "response.reasoning_summary_text.delta" => {
-            let id = event["item_id"]
-                .as_str()
-                .context("Text delta missing item ID")?;
-            let text = event["delta"].as_str().context("Text delta missing text")?;
-            emit(Delta::Text {
-                id: id.into(),
-                text: text.into(),
-                reasoning: event["type"] == "response.reasoning_summary_text.delta",
-            });
+#[derive(Default)]
+struct ResponseStream {
+    first_token: Option<Instant>,
+}
+impl ResponseStream {
+    fn event(
+        &mut self,
+        event: Value,
+        emit: &(dyn Fn(Delta) + Send + Sync),
+        now: Instant,
+    ) -> Result<Option<Response>> {
+        // Tool-call arguments and reasoning are generated output too. Metadata
+        // events do not start the clock, nor does waiting for the first token.
+        if matches!(
+            event["type"].as_str(),
+            Some(
+                "response.output_text.delta"
+                    | "response.reasoning_text.delta"
+                    | "response.reasoning_summary_text.delta"
+                    | "response.function_call_arguments.delta"
+                    | "response.custom_tool_call_input.delta"
+            )
+        ) && event["delta"]
+            .as_str()
+            .is_some_and(|delta| !delta.is_empty())
+        {
+            self.first_token.get_or_insert(now);
         }
-        "response.completed" => {
-            let response = &event["response"];
-            if response["status"] != "completed" {
-                bail!("Provider did not complete the response");
+        if is_context_limit(&event) || is_context_limit(&event["response"]) {
+            return Err(ContextLimit.into());
+        }
+        match event["type"].as_str().unwrap_or("") {
+            "response.output_text.delta" | "response.reasoning_summary_text.delta" => {
+                let id = event["item_id"]
+                    .as_str()
+                    .context("Text delta missing item ID")?;
+                let text = event["delta"].as_str().context("Text delta missing text")?;
+                emit(Delta::Text {
+                    id: id.into(),
+                    text: text.into(),
+                    reasoning: event["type"] == "response.reasoning_summary_text.delta",
+                });
             }
-            let output = response["output"]
-                .as_array()
-                .context("Completed response missing output")?
-                .clone();
-            let mut call_ids = std::collections::HashSet::new();
-            for item in &output {
-                if matches!(
-                    item["type"].as_str(),
-                    Some("function_call" | "custom_tool_call")
-                ) && (item["call_id"].as_str().is_none()
-                    || !call_ids.insert(item["call_id"].as_str())
-                    || item["name"].as_str().is_none()
-                    || (if item["type"] == "custom_tool_call" {
-                        item["input"].as_str()
-                    } else {
-                        item["arguments"].as_str()
-                    })
-                    .is_none()
-                    || item["status"].as_str().is_some_and(|s| s != "completed"))
-                {
-                    bail!(
-                        "Invalid or incomplete tool call; no calls from this response were executed"
-                    );
+            "response.completed" => {
+                let response = &event["response"];
+                if response["status"] != "completed" {
+                    bail!("Provider did not complete the response");
                 }
+                let output = response["output"]
+                    .as_array()
+                    .context("Completed response missing output")?
+                    .clone();
+                let mut call_ids = std::collections::HashSet::new();
+                for item in &output {
+                    if matches!(
+                        item["type"].as_str(),
+                        Some("function_call" | "custom_tool_call")
+                    ) && (item["call_id"].as_str().is_none()
+                        || !call_ids.insert(item["call_id"].as_str())
+                        || item["name"].as_str().is_none()
+                        || (if item["type"] == "custom_tool_call" {
+                            item["input"].as_str()
+                        } else {
+                            item["arguments"].as_str()
+                        })
+                        .is_none()
+                        || item["status"].as_str().is_some_and(|s| s != "completed"))
+                    {
+                        bail!(
+                            "Invalid or incomplete tool call; no calls from this response were executed"
+                        );
+                    }
+                }
+                return Ok(Some(Response {
+                    streaming_time: self.first_token.map_or(Duration::ZERO, |start| now - start),
+                    output,
+                    usage: Usage {
+                        input: response["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                        output: response["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                        cached: response["usage"]["input_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        total_input: 0,
+                        total_output: 0,
+                    },
+                }));
             }
-            return Ok(Some(Response {
-                output,
-                usage: Usage {
-                    input: response["usage"]["input_tokens"].as_u64().unwrap_or(0),
-                    output: response["usage"]["output_tokens"].as_u64().unwrap_or(0),
-                    cached: response["usage"]["input_tokens_details"]["cached_tokens"]
-                        .as_u64()
-                        .unwrap_or(0),
-                    total_output: 0,
-                },
-            }));
+            "response.failed" | "response.incomplete" | "error" => bail!(
+                "ChatGPT response failed or incomplete: {}",
+                safe_error(if event["response"].is_object() {
+                    &event["response"]
+                } else {
+                    &event
+                })
+            ),
+            _ => {}
         }
-        "response.failed" | "response.incomplete" | "error" => bail!(
-            "ChatGPT response failed or incomplete: {}",
-            safe_error(if event["response"].is_object() {
-                &event["response"]
-            } else {
-                &event
-            })
-        ),
-        _ => {}
+        Ok(None)
     }
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -585,10 +624,24 @@ mod tests {
         session.consume_pending();
         // Force the oversized-history fallback without making a network-native-compaction attempt.
         session.input[0]["content"] = json!("z".repeat(30_000));
+        let usage = std::sync::Mutex::new(Usage::default());
         let compacted = provider
-            .compact(&session, "fixture", 8000, &CancellationToken::new())
+            .compact(
+                &session,
+                "fixture",
+                8000,
+                &CancellationToken::new(),
+                &|response| {
+                    usage
+                        .lock()
+                        .unwrap()
+                        .record_response(response.usage.clone());
+                },
+            )
             .await
             .unwrap();
+        assert_eq!(usage.lock().unwrap().total_input, 111);
+        assert_eq!(usage.lock().unwrap().total_output, 33);
         assert!(
             compacted.input[0]["content"]
                 .as_str()
@@ -623,7 +676,13 @@ mod tests {
         session.consume_pending();
         session.input[0]["content"] = json!("z".repeat(30000));
         let first = provider
-            .compact(&session, "fixture", 8000, &CancellationToken::new())
+            .compact(
+                &session,
+                "fixture",
+                8000,
+                &CancellationToken::new(),
+                &|_| {},
+            )
             .await
             .unwrap();
         session.summary = first.summary.unwrap();
@@ -631,7 +690,13 @@ mod tests {
         session.accept("NEW_HISTORY_MARKER".into());
         session.consume_pending();
         let second = provider
-            .compact(&session, "fixture", 8000, &CancellationToken::new())
+            .compact(
+                &session,
+                "fixture",
+                8000,
+                &CancellationToken::new(),
+                &|_| {},
+            )
             .await
             .unwrap();
         assert_eq!(second.summarized_entries, 2);
@@ -649,6 +714,56 @@ mod tests {
         assert!(!request.contains("OLD_HISTORY_MARKER"));
     }
     #[test]
+    fn streaming_time_starts_at_content_not_metadata_and_includes_tool_calls() {
+        let start = Instant::now();
+        let completed = json!({"type":"response.completed","response":{
+            "status":"completed", "output":[], "usage":{"input_tokens":37,"output_tokens":11}
+        }});
+        for kind in [
+            "response.output_text.delta",
+            "response.reasoning_summary_text.delta",
+            "response.function_call_arguments.delta",
+            "response.custom_tool_call_input.delta",
+        ] {
+            let mut stream = ResponseStream::default();
+            stream
+                .event(json!({"type":"response.created"}), &|_| {}, start)
+                .unwrap();
+            stream
+                .event(
+                    json!({"type":kind,"item_id":"a","delta":""}),
+                    &|_| {},
+                    start + Duration::from_secs(2),
+                )
+                .unwrap();
+            stream
+                .event(
+                    json!({"type":kind,"item_id":"a","delta":"first"}),
+                    &|_| {},
+                    start + Duration::from_secs(10),
+                )
+                .unwrap();
+            stream
+                .event(
+                    json!({"type":kind,"item_id":"a","delta":"last"}),
+                    &|_| {},
+                    start + Duration::from_secs(12),
+                )
+                .unwrap();
+            let response = stream
+                .event(completed.clone(), &|_| {}, start + Duration::from_secs(15))
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.streaming_time, Duration::from_secs(5), "{kind}");
+        }
+        let response = ResponseStream::default()
+            .event(completed, &|_| {}, start)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.streaming_time, Duration::ZERO);
+    }
+
+    #[test]
     fn sse_survives_split_unicode_crlf_and_multiple_events() {
         let source = "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"héλ\"}\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":42,\"output_tokens\":7}}}\n\n";
         let mut sse = Sse::default();
@@ -658,7 +773,8 @@ mod tests {
         }
         assert_eq!(events[0]["delta"], "héλ");
         assert_eq!(
-            handle_event(events.pop().unwrap(), &|_| {})
+            ResponseStream::default()
+                .event(events.pop().unwrap(), &|_| {}, Instant::now())
                 .unwrap()
                 .unwrap()
                 .usage
@@ -669,7 +785,15 @@ mod tests {
     #[test]
     fn terminal_failure_cannot_release_tool_calls() {
         let event = json!({"type":"response.completed", "response":{"status":"incomplete","output":[{"type":"function_call","call_id":"a","name":"wait"}]}});
-        assert!(handle_event(event, &|_| {}).is_err());
-        assert!(handle_event(json!({"type":"response.failed"}), &|_| {}).is_err());
+        assert!(
+            ResponseStream::default()
+                .event(event, &|_| {}, Instant::now())
+                .is_err()
+        );
+        assert!(
+            ResponseStream::default()
+                .event(json!({"type":"response.failed"}), &|_| {}, Instant::now())
+                .is_err()
+        );
     }
 }

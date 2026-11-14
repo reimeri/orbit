@@ -184,7 +184,18 @@ pub struct Usage {
     pub input: u64,
     pub output: u64,
     pub cached: u64,
+    #[serde(default)]
+    pub total_input: u64,
     pub total_output: u64,
+}
+impl Usage {
+    pub(crate) fn record_response(&mut self, response: Self) {
+        let total_input = self.total_input + response.input;
+        let total_output = self.total_output + response.output;
+        *self = response;
+        self.total_input = total_input;
+        self.total_output = total_output;
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -555,6 +566,45 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cumulative_usage_survives_reopen_without_replacing_current_context_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::new(dir.path().into(), &Settings::default());
+        for (input, output, cached) in [(1201, 17, 1000), (2345, 43, 2200)] {
+            session.usage.record_response(Usage {
+                input,
+                output,
+                cached,
+                ..Default::default()
+            });
+        }
+        {
+            let store = Store::open(dir.path().into()).unwrap();
+            store.save_session(&session).unwrap();
+        }
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut restored = store.load_session(&session.id).unwrap();
+        assert_eq!(restored.usage.total_input, 3546);
+        assert_eq!(restored.usage.total_output, 60);
+        assert_eq!(restored.usage.input, 2345);
+        assert_eq!(restored.usage.cached, 2200);
+        // Compaction resets the context estimate, not session-wide totals.
+        restored.usage.input = 0;
+        restored.usage.record_response(Usage {
+            input: 100,
+            output: 9,
+            cached: 0,
+            ..Default::default()
+        });
+        assert_eq!(restored.usage.total_input, 3646);
+        assert_eq!(restored.usage.total_output, 69);
+        let existing: Usage = serde_json::from_value(serde_json::json!({
+            "input":1234,"output":12,"cached":1000,"total_output":57
+        }))
+        .unwrap();
+        assert_eq!(existing.total_input, 0);
+    }
+
     #[test]
     fn model_capabilities_and_catalog_refresh_preserve_current_preferences() {
         let dir = tempfile::tempdir().unwrap();

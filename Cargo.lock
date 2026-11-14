@@ -2546,6 +2546,7 @@ dependencies = [
  "rfd",
  "rusqlite",
  "serde_json",
+ "tempfile",
  "tokio",
  "unicode-segmentation",
  "unicode-width",

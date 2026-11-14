@@ -14,7 +14,7 @@ use std::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -25,9 +25,7 @@ pub struct Conversation {
     pub state: Arc<Mutex<Session>>,
     pub running: AtomicBool,
     pub status: Mutex<String>,
-    pub started: Mutex<Option<Instant>>,
-    pub elapsed: Mutex<Duration>,
-    pub output_baseline: AtomicU64,
+    pub turn_usage: Mutex<TurnUsage>,
     cancel: Mutex<CancellationToken>,
     deleted: Arc<AtomicBool>,
     code: CodeMode,
@@ -79,14 +77,21 @@ impl Conversation {
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
-    pub fn duration(&self) -> Duration {
-        self.started
-            .lock()
-            .expect("timer lock")
-            .map(|t| t.elapsed())
-            .unwrap_or(*self.elapsed.lock().expect("elapsed lock"))
+}
+/// Usage and streaming time from completed model responses in the current turn.
+/// Keeping these together prevents TPS from changing during tools or idle time.
+#[derive(Clone, Copy, Default)]
+pub struct TurnUsage {
+    pub output: u64,
+    pub streaming_time: Duration,
+}
+impl TurnUsage {
+    fn record_response(&mut self, response: &crate::provider::Response) {
+        self.output += response.usage.output;
+        self.streaming_time += response.streaming_time;
     }
 }
+
 pub struct Harness {
     changes: tokio::sync::watch::Sender<()>,
     pub store: Store,
@@ -198,9 +203,7 @@ impl Harness {
                 state: Arc::new(Mutex::new(session)),
                 running: AtomicBool::new(false),
                 status: Mutex::new("Ready".into()),
-                started: Mutex::new(None),
-                elapsed: Mutex::new(Duration::ZERO),
-                output_baseline: AtomicU64::new(0),
+                turn_usage: Mutex::new(TurnUsage::default()),
                 cancel: Mutex::new(CancellationToken::new()),
                 deleted: Arc::new(AtomicBool::new(false)),
                 persisted: Mutex::new(saved),
@@ -442,10 +445,7 @@ impl Harness {
             }
             let cancel = CancellationToken::new();
             *conversation.cancel.lock().expect("cancel lock") = cancel.clone();
-            conversation
-                .output_baseline
-                .store(state.usage.total_output, Ordering::Relaxed);
-            *conversation.started.lock().expect("timer lock") = Some(Instant::now());
+            *conversation.turn_usage.lock().expect("turn usage lock") = TurnUsage::default();
             *conversation.status.lock().expect("status lock") = "Connecting…".into();
             // cancel() takes the same state lock: it cannot cancel an obsolete
             // token between publishing a running turn and installing its token.
@@ -501,9 +501,6 @@ impl Harness {
                     if !cancel.is_cancelled() && (submitted || result.is_ok() && pending) {
                         continue;
                     }
-                    let elapsed = conversation.started.lock().expect("timer lock")
-                        .take().expect("active timer").elapsed();
-                    *conversation.elapsed.lock().expect("elapsed lock") = elapsed;
                     conversation.running.store(false, Ordering::Release);
                     conversation.stopped.notify_all();
                 }
@@ -652,9 +649,12 @@ impl Harness {
             {
                 let mut s = conversation.state.lock().expect("session lock");
                 reconcile_text(&mut s, &response.output);
-                let total = s.usage.total_output + response.usage.output;
-                s.usage = response.usage;
-                s.usage.total_output = total;
+                conversation
+                    .turn_usage
+                    .lock()
+                    .expect("turn usage lock")
+                    .record_response(&response);
+                s.usage.record_response(response.usage);
                 s.input.extend(response.output);
                 conversation.changed();
             }
@@ -740,7 +740,17 @@ impl Harness {
     ) -> Result<usize> {
         let input = self
             .provider
-            .compact(snapshot, instructions, limit, cancel)
+            .compact(snapshot, instructions, limit, cancel, &|response| {
+                let mut session = conversation.state.lock().expect("session lock");
+                session.usage.total_input += response.usage.input;
+                session.usage.total_output += response.usage.output;
+                conversation
+                    .turn_usage
+                    .lock()
+                    .expect("turn usage lock")
+                    .record_response(response);
+                conversation.changed();
+            })
             .await?;
         let size = {
             let mut session = conversation.state.lock().expect("session lock");
@@ -889,6 +899,37 @@ impl Drop for Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+    #[test]
+    fn turn_usage_sums_only_response_streaming_time_and_resets_on_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = Session::new(dir.path().into(), &Settings::default());
+        let id = session.id.clone();
+        let harness = Harness::new(store, vec![]).unwrap();
+        harness.insert(session);
+        let conversation = harness.get(&id).unwrap();
+        {
+            let mut usage = conversation.turn_usage.lock().unwrap();
+            for (output, seconds) in [(17, 2), (43, 3)] {
+                usage.record_response(&crate::provider::Response {
+                    output: vec![],
+                    usage: crate::store::Usage {
+                        output,
+                        ..Default::default()
+                    },
+                    streaming_time: Duration::from_secs(seconds),
+                });
+            }
+            assert_eq!(usage.output, 60);
+            assert_eq!(usage.streaming_time, Duration::from_secs(5));
+        }
+        harness.start(&id, Settings::default()).unwrap();
+        let usage = conversation.turn_usage.lock().unwrap();
+        assert_eq!(usage.output, 0);
+        assert_eq!(usage.streaming_time, Duration::ZERO);
+    }
+
     #[test]
     fn failed_acceptance_can_be_edited_and_restarted_without_queuing_old_text() {
         let dir = tempfile::tempdir().unwrap();

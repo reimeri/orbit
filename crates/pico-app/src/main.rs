@@ -1,5 +1,6 @@
 mod animated_column;
 mod ellipsized_text;
+mod git;
 mod io_worker;
 mod pointer_input;
 mod search_icon;

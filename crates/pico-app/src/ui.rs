@@ -100,7 +100,7 @@ pub struct App {
     window_height: f32,
     drag: Option<(bool, f32, f32)>,
     auto_scroll: bool,
-    git: String,
+    git: Option<crate::git::Info>,
     git_pending: bool,
     git_cost: Duration,
     draft_dirty: bool,
@@ -209,7 +209,7 @@ pub enum Message {
     Account(Option<String>),
     CancelLogin,
     Logout,
-    Git(String, String, Duration),
+    Git(String, crate::git::Info, Duration),
     External(Result<(), String>),
     ErrorDismiss,
     ResizeStart(bool, iced::Point),
@@ -304,7 +304,7 @@ impl App {
             window_height: 800.,
             drag: None,
             auto_scroll: true,
-            git: String::new(),
+            git: None,
             git_pending: false,
             git_cost: Duration::ZERO,
             draft_dirty: false,
@@ -734,7 +734,7 @@ impl App {
                         self.auto_scroll = true;
                         self.refresh();
                         self.restore_draft();
-                        self.git.clear();
+                        self.git = None;
                         self.save_catalog(false);
                         return bottom();
                     }
@@ -853,7 +853,7 @@ impl App {
                     return Task::perform(
                         async move {
                             let start = std::time::Instant::now();
-                            let result = git_info(path).await;
+                            let result = crate::git::info(path).await;
                             (id, result, start.elapsed())
                         },
                         |(id, info, cost)| Message::Git(id, info, cost),
@@ -1341,7 +1341,7 @@ impl App {
                 self.git_cost = cost;
                 self.git_pending = false;
                 if self.current().is_some_and(|s| s.id == id) {
-                    self.git = info;
+                    self.git = Some(info);
                 }
             }
             Message::External(result) => self.fail(result),
@@ -2468,15 +2468,13 @@ impl App {
             .as_ref()
             .map(|c| c.status.lock().expect("status lock").clone())
             .unwrap_or_else(|| "Ready".into());
-        let seconds = conversation
+        let turn_usage = conversation
             .as_ref()
-            .map_or(0., |c| c.duration().as_secs_f64());
-        let output = conversation.as_ref().map_or(0, |c| {
-            session
-                .usage
-                .total_output
-                .saturating_sub(c.output_baseline.load(Ordering::Relaxed))
-        });
+            .map_or(pico_core::agent::TurnUsage::default(), |c| {
+                *c.turn_usage.lock().expect("turn usage lock")
+            });
+        let seconds = turn_usage.streaming_time.as_secs_f64();
+        let output = turn_usage.output;
         let rate = if seconds > 0. {
             output as f64 / seconds
         } else {
@@ -2490,15 +2488,18 @@ impl App {
             compact_tokens(self.catalog.settings.context_limit)
         );
         let token_details = format!(
-            "Context input: {used} tokens\nContext limit: {} tokens\nSession output: {} tokens",
-            self.catalog.settings.context_limit, session.usage.total_output,
+            "Input: {}\nOutput: {}",
+            compact_tokens(session.usage.total_input),
+            compact_tokens(session.usage.total_output),
         );
         let rate_details = format!(
-            "Latest turn: {output} output tokens\nElapsed: {seconds:.1}s\nAverage over the whole turn, including tool time"
+            "Latest turn: {} output tokens\nElapsed: {seconds:.1}s",
+            compact_tokens(output),
         );
         let cache_details = format!(
-            "Cached input: {} tokens\nTotal input: {used} tokens",
-            session.usage.cached
+            "Cached input: {}\nTotal input: {}",
+            compact_tokens(session.usage.cached),
+            compact_tokens(used),
         );
         let effort_label = if session.fast {
             format!("{} · Fast", session.effort)
@@ -2507,8 +2508,10 @@ impl App {
         };
         let layout = FooterLayout::new(width, &session.model, &effort_label);
         let mut hidden = Vec::new();
-        if !layout.git && !self.git.is_empty() {
-            hidden.push(self.git.clone());
+        if !layout.git
+            && let Some(git) = &self.git
+        {
+            hidden.push(git.to_string());
         }
         if !layout.usage {
             hidden.push(token_details.clone());
@@ -2615,17 +2618,46 @@ impl App {
                 path_view.into()
             },
         );
-        if layout.git && !self.git.is_empty() {
-            let label = shorten(&self.git, 18);
-            let git_width = footer_text_width(&label, 11.).ceil().min(126.);
-            let git = container(ellipsized_text(&label, 11., Some(MUTED))).width(git_width);
-            info = info.push(footer_separator()).push(
-                if label != self.git || footer_text_width(&label, 11.) > git_width {
-                    footer_tip(git, self.git.clone())
-                } else {
-                    git.into()
-                },
-            );
+        if layout.git
+            && let Some(git) = &self.git
+        {
+            let view: Element<'_, Message> = match git {
+                crate::git::Info::Changes {
+                    branch,
+                    added,
+                    removed,
+                } => {
+                    let additions = format!("+{added}");
+                    let deletions = format!("−{removed}");
+                    let counts_width = footer_text_width(&additions, 11.)
+                        + footer_text_width(&deletions, 11.)
+                        + 8.;
+                    row![
+                        ellipsized_text(branch, 11., Some(MUTED)),
+                        text(additions)
+                            .size(11)
+                            .color(Color::from_rgb8(125, 192, 154)),
+                        text(deletions)
+                            .size(11)
+                            .color(Color::from_rgb8(220, 120, 120)),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Center)
+                    .width(
+                        (footer_text_width(branch, 11.).ceil() + counts_width.ceil() + 2.)
+                            .min(126.),
+                    )
+                    .into()
+                }
+                crate::git::Info::Unavailable(message) => {
+                    container(ellipsized_text(message, 11., Some(MUTED)))
+                        .width(126.)
+                        .into()
+                }
+            };
+            info = info
+                .push(footer_separator())
+                .push(footer_tip(view, git.to_string()));
         }
         if layout.usage {
             info = info.push(footer_separator()).push(footer_tip(
@@ -2833,6 +2865,7 @@ impl App {
                 let mut s = Session::new(path, &self.catalog.settings);
                 s.title = "Phase 1 rendered-window check".into();
                 s.usage.input = 60_721;
+                s.usage.total_input = 160_721;
                 s.usage.cached = 56_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
@@ -2860,6 +2893,11 @@ impl App {
                 let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
             }
             2 => {
+                self.git = Some(crate::git::Info::Changes {
+                    branch: "main".into(),
+                    added: 123,
+                    removed: 45,
+                });
                 self.settings_open = true;
                 return Task::batch([
                     self.update_inner(Message::ToggleSearch),
@@ -3106,13 +3144,45 @@ impl FooterLayout {
         }
     }
 }
+/// Format token counts with at most three digits, rounding half up.
 fn compact_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.2}M", tokens as f64 / 1_000_000.)
-    } else if tokens >= 1000 {
-        format!("{:.1}k", tokens as f64 / 1000.)
+    const SUFFIXES: [&str; 7] = ["", "k", "M", "B", "T", "Q", "Qi"];
+    if tokens < 1000 {
+        return tokens.to_string();
+    }
+
+    let mut unit = 1;
+    let mut scale = 1000;
+    while tokens / scale >= 1000 {
+        unit += 1;
+        scale *= 1000;
+    }
+    let mut decimals = match tokens / scale {
+        0..=9 => 2,
+        10..=99 => 1,
+        _ => 0,
+    };
+    // Integer arithmetic preserves exact rounding even for large u64 counts.
+    let step = scale / 10_u64.pow(decimals);
+    let mut rounded = tokens / step + u64::from(tokens % step >= step / 2);
+    if rounded == 1000 {
+        if decimals == 0 {
+            return format!("1.00{}", SUFFIXES[unit + 1]);
+        }
+        rounded /= 10;
+        decimals -= 1;
+    }
+    let suffix = SUFFIXES[unit];
+    if decimals == 0 {
+        format!("{rounded}{suffix}")
     } else {
-        tokens.to_string()
+        let factor = 10_u64.pow(decimals);
+        format!(
+            "{}.{:0width$}{suffix}",
+            rounded / factor,
+            rounded % factor,
+            width = decimals as usize,
+        )
     }
 }
 // Match the label renderer so wide glyphs also get a full-value tooltip.
@@ -3298,57 +3368,6 @@ fn external(url: String) -> Task<Message> {
         Message::External,
     )
 }
-async fn git_info(path: PathBuf) -> String {
-    let mut command = tokio::process::Command::new("git");
-    command.kill_on_drop(true);
-    let result = tokio::time::timeout(
-        Duration::from_secs(15),
-        command
-            .args([
-                "--no-optional-locks",
-                "status",
-                "--porcelain=v1",
-                "--branch",
-                "--untracked-files=normal",
-            ])
-            .current_dir(path)
-            .output(),
-    )
-    .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(_) => return "Git status timed out; will retry automatically".into(),
-    };
-    match result {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let mut lines = text.lines();
-            let branch = lines
-                .next()
-                .unwrap_or("")
-                .trim_start_matches("## ")
-                .split("...")
-                .next()
-                .unwrap_or("");
-            let mut added = 0;
-            let mut modified = 0;
-            let mut deleted = 0;
-            for line in lines {
-                let state = line.get(..2).unwrap_or("");
-                if state.contains('D') {
-                    deleted += 1;
-                } else if state == "??" || state.contains('A') {
-                    added += 1;
-                } else {
-                    modified += 1;
-                }
-            }
-            format!("{branch}  +{added} ~{modified} −{deleted}")
-        }
-        Ok(_) => "Not a Git checkout".into(),
-        Err(_) => "Git unavailable".into(),
-    }
-}
 
 fn model_options() -> Vec<String> {
     MODELS.iter().map(|m| m.id.to_owned()).collect()
@@ -3429,6 +3448,36 @@ fn window_events() -> Subscription<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn token_counts_use_three_digits_and_promote_rounded_units() {
+        for (tokens, expected) in [
+            (0, "0"),
+            (9, "9"),
+            (121, "121"),
+            (999, "999"),
+            (1000, "1.00k"),
+            (1201, "1.20k"),
+            (22_600, "22.6k"),
+            (754_600, "755k"),
+            (4_299_000, "4.30M"),
+            (100_000, "100k"),
+            (9_994, "9.99k"),
+            (9_995, "10.0k"),
+            (9_999, "10.0k"),
+            (99_949, "99.9k"),
+            (99_950, "100k"),
+            (999_499, "999k"),
+            (999_500, "1.00M"),
+            (999_500_000, "1.00B"),
+            (1_234_000_000_000, "1.23T"),
+            (1_235_000_000_000_000, "1.24Q"),
+            (999_500_000_000_000_000, "1.00Qi"),
+            (u64::MAX, "18.4Qi"),
+        ] {
+            assert_eq!(compact_tokens(tokens), expected, "{tokens}");
+        }
+    }
+
     fn app() -> App {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
@@ -4037,6 +4086,11 @@ Then implement the fix.";
     async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
         let mut app = app();
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
+        app.git = Some(crate::git::Info::Changes {
+            branch: "long-feature-branch-name".into(),
+            added: 12345,
+            removed: 678,
+        });
         app.settings_open = true;
         let mut renderer = header_renderer();
         for (width, height, left, right) in [(1600., 800., 260., 320.), (860., 560., 344., 344.)] {
@@ -4088,6 +4142,15 @@ Then implement the fix.";
                 width == 1600.,
                 "metrics collapse using the available center width"
             );
+            if width == 1600. {
+                let added = bounds.label("+12345");
+                let removed = bounds.label("−678");
+                assert!(added.y >= height - 36. && removed.y >= height - 36.);
+                assert!(added.x + added.width <= removed.x);
+                assert!(removed.x + removed.width <= width - right - 55.);
+            } else {
+                assert!(!bounds.labels.iter().any(|(label, _)| label == "+12345"));
+            }
             drop(ui);
             dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
             let mut ui = iced_runtime::UserInterface::build(
