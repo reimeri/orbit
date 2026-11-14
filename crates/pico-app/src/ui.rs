@@ -2083,21 +2083,6 @@ impl App {
             );
         }
         content = content.push(scrollable(cards).height(Fill));
-        if let Some(parent) = self.parent_id() {
-            content = content.push(
-                button("Stop parent and children")
-                    .on_press_maybe(
-                        (self.agent_count() > 0
-                            || self
-                                .harness
-                                .as_ref()
-                                .and_then(|h| h.get(parent))
-                                .is_some_and(|c| c.is_running()))
-                        .then(|| Message::StopAgent(parent.into())),
-                    )
-                    .style(button::text),
-            );
-        }
         container(content)
             .padding(RIGHT_PANEL_PADDING)
             .width(
