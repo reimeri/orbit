@@ -194,6 +194,16 @@ fixed-row virtual viewport, including long single-line output and Unicode; only
 about 22 rows are passed to text shaping. Collapsing a tool or leaving its session
 releases its detail cache. The complete output remains available through Copy.
 
+Chat selection is stored as logical entry/block/UTF-8 positions outside the
+virtualized widget tree. A custom Markdown viewer preserves iced's layout and
+styles while selectable text uses the renderer's shaped paragraphs for hits and
+highlights. Ctrl+C reconstructs only the selected entries, including unmounted
+tool rows; it does not depend on the visible widget slice. Selection is invalidated
+when selected entries change or the session/content visibility changes. Pointer
+motion and scroll-induced redraws update selection locally, without idle app
+messages. Interaction tests cover cross-message dragging, hard breaks/Unicode,
+links, stationary-pointer wheel scrolling and streaming Markdown reparses.
+
 A local before/after check using the same debug build profile, wgpu on the Wayland
 desktop, isolated state and a two-message idle session measured **2.00% → 0.13% of
 one CPU** over 15 seconds after a three-second warm-up. This is one local sample,

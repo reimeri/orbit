@@ -1,4 +1,5 @@
 mod animated_column;
+mod chat_selection;
 mod ellipsized_text;
 mod git;
 mod io_worker;

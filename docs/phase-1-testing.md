@@ -32,6 +32,15 @@ Check:
 - Actual files exist in the project and tests really ran. Errors, if any, are
   visible and the agent can correct them.
 - Markdown/code blocks render; Copy works; links require confirmation.
+- Drag to select part of a message, then across paragraphs and messages in either
+  direction. Ctrl+C copies the displayed text, not Markdown markup. Check code
+  blocks (including blank lines), Unicode, notices and expanded thinking/tool
+  details. While holding the mouse button, wheel-scroll the chat or a large tool
+  output, then release and copy; offscreen selected text must be included.
+- Clicking a link still opens confirmation; dragging over it only selects text.
+  Click the composer and verify its own selection/Copy works normally. Changing
+  sessions or collapsing content clears the chat selection. A streaming update
+  to selected content also clears it, rather than keeping stale text offsets.
 - Git branch and change counts update if the folder is a repository. The footer
   reports model, effort, elapsed time and provider usage where available.
 

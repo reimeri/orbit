@@ -1,8 +1,12 @@
 //! Fixed-height visual rows: only the visible slice is handed to text shaping.
 //! The complete source remains available to scrolling and the chat's Copy action.
+use crate::{
+    chat_selection::{self, Position},
+    ui::Message,
+};
 use iced::{
-    Element, Fill, Font,
-    widget::{column, scrollable, sensor, space, text},
+    Element, Fill,
+    widget::{column, scrollable, sensor, space},
 };
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
@@ -21,6 +25,19 @@ pub struct Output {
     rows: Vec<Range<usize>>,
     columns: usize,
     offset: f32,
+}
+pub fn display(input: &str, output: &str) -> String {
+    format!(
+        "Input\n{}\n\nOutput\n{}",
+        input,
+        if output.is_empty() {
+            "Waiting for output…"
+        } else {
+            output
+        }
+    )
+    .replace('\t', "    ")
+    .replace("\r\n", "\n")
 }
 impl Output {
     pub fn new(input: &str, output: &str) -> Self {
@@ -43,17 +60,7 @@ impl Output {
         }
     }
     fn rebuild(&mut self) {
-        self.display = format!(
-            "Input\n{}\n\nOutput\n{}",
-            self.input,
-            if self.output.is_empty() {
-                "Waiting for output…"
-            } else {
-                &self.output
-            }
-        )
-        .replace('\t', "    ")
-        .replace("\r\n", "\n");
+        self.display = display(&self.input, &self.output);
         self.reflow();
     }
     fn reflow(&mut self) {
@@ -98,29 +105,40 @@ impl Output {
         start.min(self.rows.len())
             ..(start + (MAX_HEIGHT / LINE_HEIGHT).ceil() as usize + 2).min(self.rows.len())
     }
-    pub fn view(&self, id: &str) -> Element<'_, Event> {
+    pub fn view(
+        &self,
+        id: &str,
+        selection: chat_selection::Shared,
+        entry: usize,
+    ) -> Element<'_, Message> {
         let visible = self.visible();
         let mut rows = column![space().height(visible.start as f32 * LINE_HEIGHT)]
             .spacing(0)
             .width(Fill);
         for range in &self.rows[visible.clone()] {
-            rows = rows.push(
-                text(&self.display[range.clone()])
-                    .font(Font::MONOSPACE)
-                    .size(12)
-                    .line_height(iced::widget::text::LineHeight::Absolute(LINE_HEIGHT.into()))
-                    .wrapping(text::Wrapping::None)
-                    .height(LINE_HEIGHT),
-            );
+            rows = rows.push(chat_selection::tool_row(
+                &self.display[range.clone()],
+                selection.clone(),
+                Position {
+                    entry,
+                    block: 0,
+                    byte: range.start,
+                },
+                LINE_HEIGHT,
+            ));
         }
         rows = rows.push(space().height((self.rows.len() - visible.end) as f32 * LINE_HEIGHT));
+        let scroll_id = id.to_owned();
+        let resize_id = id.to_owned();
         sensor(
             scrollable(rows)
                 .id(format!("tool-output-{id}"))
                 .height((self.rows.len() as f32 * LINE_HEIGHT).min(MAX_HEIGHT))
-                .on_scroll(|v| Event::Scroll(v.absolute_offset().y)),
+                .on_scroll(move |v| {
+                    Message::ToolOutput(scroll_id.clone(), Event::Scroll(v.absolute_offset().y))
+                }),
         )
-        .on_resize(|size| Event::Resize(size.width))
+        .on_resize(move |size| Message::ToolOutput(resize_id.clone(), Event::Resize(size.width)))
         .into()
     }
 }

@@ -20,16 +20,19 @@ pub enum Press {
 pub fn pointer_input(
     content: Element<'_, Message>,
     capture_keyboard: bool,
+    selection: crate::chat_selection::Shared,
 ) -> Element<'_, Message> {
     Element::new(PointerInput {
         content,
         capture_keyboard,
+        selection,
     })
 }
 
 struct PointerInput<'a> {
     content: Element<'a, Message>,
     capture_keyboard: bool,
+    selection: crate::chat_selection::Shared,
 }
 
 #[derive(Default)]
@@ -102,6 +105,55 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             shell.capture_event();
             return;
         }
+        // Chat selection owns Copy ahead of the composer, which can still have
+        // keyboard focus. Any new click/keyboard navigation returns ownership.
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) = event
+        {
+            if modifiers.command()
+                && key.to_latin(*physical_key) == Some('c')
+                && self.selection.borrow().range().is_some()
+            {
+                shell.publish(Message::CopySelection);
+                shell.capture_event();
+                return;
+            }
+            if matches!(key, keyboard::Key::Character(_))
+                || matches!(
+                    key,
+                    keyboard::Key::Named(
+                        keyboard::key::Named::Escape
+                            | keyboard::key::Named::Tab
+                            | keyboard::key::Named::Enter
+                            | keyboard::key::Named::Backspace
+                            | keyboard::key::Named::Delete
+                            | keyboard::key::Named::ArrowLeft
+                            | keyboard::key::Named::ArrowRight
+                            | keyboard::key::Named::ArrowUp
+                            | keyboard::key::Named::ArrowDown
+                            | keyboard::key::Named::Home
+                            | keyboard::key::Named::End
+                            | keyboard::key::Named::PageUp
+                            | keyboard::key::Named::PageDown
+                    )
+                )
+            {
+                self.selection.borrow_mut().clear();
+                shell.request_redraw();
+            }
+        }
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                | Event::Window(iced::window::Event::Unfocused)
+        ) {
+            self.selection.borrow_mut().clear();
+            shell.request_redraw();
+        }
         // TextInput already supports Ctrl+Backspace. Normalize Ctrl+W here so
         // every focused text field shares that behavior without tracking focus.
         let word_backspace = match event {
@@ -128,6 +180,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             _ => None,
         };
         let event = word_backspace.as_ref().unwrap_or(event);
+        if crate::chat_selection::selection_motion(event) {
+            self.selection.borrow_mut().begin_motion();
+        }
         let state = tree.state.downcast_mut::<State>();
         let mut messages = Vec::new();
         let mut child_shell = Shell::new(&mut messages);
@@ -159,6 +214,17 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             }
             message => message,
         });
+        if crate::chat_selection::selection_motion(event)
+            && self.selection.borrow_mut().finish_motion()
+        {
+            shell.request_redraw();
+        }
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+        ) {
+            self.selection.borrow_mut().dragging = false;
+        }
         // Widget-local state changes during the press event, before the next event
         // in the same batch. No subscription installation race or idle motion messages.
         if state.dragging.get() {
@@ -255,6 +321,7 @@ mod tests {
                 .on_press(Message::Press(Press::Resize(false)))
                 .into(),
             false,
+            Default::default(),
         )
     }
 
@@ -269,6 +336,7 @@ mod tests {
                     .on_submit(Message::Send)
                     .into(),
                 capture,
+                Default::default(),
             );
             let mut ui = UserInterface::build(
                 view,
@@ -406,6 +474,7 @@ mod tests {
                 .height(100)
                 .into(),
             false,
+            Default::default(),
         );
         let mut ui = UserInterface::build(
             view,

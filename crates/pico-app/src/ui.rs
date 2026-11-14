@@ -1,4 +1,5 @@
 use crate::{
+    chat_selection::{self, Position},
     ellipsized_text::ellipsized_text,
     pointer_input::{Press, pointer_input},
     tool_output,
@@ -80,6 +81,7 @@ pub struct App {
     search: String,
     search_active: bool,
     editor: text_editor::Content,
+    chat_selection: chat_selection::Shared,
     markdown: HashMap<String, (Arc<Entry>, markdown::Content)>,
     expanded: HashSet<String>,
     groups: HashSet<String>,
@@ -161,6 +163,7 @@ pub enum Message {
     CloseFooterMenu,
     ToolOutput(String, tool_output::Event),
     CopyOutput(String),
+    CopySelection,
     New,
     Select(String),
     Create(PathBuf),
@@ -284,6 +287,7 @@ impl App {
             search: String::new(),
             search_active: false,
             editor: text_editor::Content::new(),
+            chat_selection: Default::default(),
             markdown: HashMap::new(),
             expanded: HashSet::new(),
             groups: HashSet::new(),
@@ -365,6 +369,7 @@ impl App {
             }
             self.outputs.clear();
             self.markdown.clear();
+            self.chat_selection.borrow_mut().clear();
             return false;
         };
         let revision = conversation.revision();
@@ -385,6 +390,7 @@ impl App {
         if !same {
             self.outputs.clear();
             self.markdown.clear();
+            self.chat_selection.borrow_mut().clear();
             self.view_epoch = self.view_epoch.wrapping_add(1);
             self.transcript = crate::virtual_list::List::default();
             self.transcript_count = 0;
@@ -398,6 +404,9 @@ impl App {
             &empty
         };
         for (index, entry) in old.changes(&snapshot.entries) {
+            // Markdown can reparse earlier blocks while streaming. Do not keep
+            // stale byte/block positions when a selected entry changes.
+            self.chat_selection.borrow_mut().invalidate_entry(index);
             let Some(entry) = entry else {
                 continue;
             };
@@ -448,6 +457,7 @@ impl App {
         self.transcript_count = session.entries.len();
     }
     fn rebuild_transcript(&mut self) {
+        self.chat_selection.borrow_mut().clear();
         let Some(session) = &self.current_session else {
             return;
         };
@@ -624,6 +634,7 @@ impl App {
         self.draft_dirty = false;
     }
     fn select(&mut self, selection: Selection) {
+        self.chat_selection.borrow_mut().clear();
         self.footer_menu = None;
         if self.io_busy {
             return;
@@ -1271,6 +1282,55 @@ impl App {
             Message::Link(url) => {
                 self.modal = Some(Modal::Link(url));
             }
+            Message::CopySelection => {
+                if let Some(session) = self.current()
+                    && let Some((start, end)) = self.chat_selection.borrow().range()
+                {
+                    let settings = markdown::Settings::with_text_size(
+                        self.catalog.settings.font_size,
+                        markdown::Style::from_palette(Theme::Dark.palette()),
+                    );
+                    let entries = self
+                        .transcript
+                        .order
+                        .iter()
+                        .copied()
+                        .filter(|i| (start.entry..=end.entry).contains(i))
+                        .map(|index| {
+                            let entry = &session.entries[index];
+                            let blocks = match &entry.kind {
+                                EntryKind::Tool { input, output, .. }
+                                    if self.expanded.contains(&entry.id) =>
+                                {
+                                    vec![chat_selection::Block {
+                                        text: tool_output::display(input, output),
+                                        separator: "\n\n",
+                                    }]
+                                }
+                                EntryKind::Tool { .. } => vec![],
+                                EntryKind::Reasoning if !self.expanded.contains(&entry.id) => {
+                                    vec![]
+                                }
+                                EntryKind::Notice => vec![chat_selection::Block {
+                                    text: entry.text.clone(),
+                                    separator: "\n\n",
+                                }],
+                                _ => {
+                                    let content = markdown::Content::parse(&entry.text);
+                                    let viewer = chat_selection::Viewer::new(
+                                        self.chat_selection.clone(),
+                                        index,
+                                    );
+                                    let _ = markdown::view_with(content.items(), settings, &viewer);
+                                    viewer.blocks.into_inner()
+                                }
+                            };
+                            (index, blocks)
+                        });
+                    let value = chat_selection::copy_blocks(&self.chat_selection.borrow(), entries);
+                    return iced::clipboard::write(value);
+                }
+            }
             Message::Copy(id) => {
                 if let Some(entry) = self.current().and_then(|s| s.entries.by_id(&id)) {
                     return iced::clipboard::write(entry.text.clone());
@@ -1612,7 +1672,11 @@ impl App {
         Subscription::batch(subscriptions)
     }
     pub fn view(&self) -> Element<'_, Message> {
-        pointer_input(self.content(), self.footer_menu.is_some())
+        pointer_input(
+            self.content(),
+            self.footer_menu.is_some(),
+            self.chat_selection.clone(),
+        )
     }
     fn content(&self) -> Element<'_, Message> {
         let mut center = column![self.center()].width(Fill).height(Fill);
@@ -1996,7 +2060,7 @@ impl App {
         }
         for &index in &self.transcript.order[range.clone()] {
             let entry = &session.entries[index];
-            let row = widget::sensor(self.entry_view(entry, session))
+            let row = widget::sensor(self.entry_view(entry, index))
                 .key((epoch, index))
                 .on_show(move |size| Message::RowSize(epoch, index, size.height))
                 .on_resize(move |size| Message::RowSize(epoch, index, size.height));
@@ -2066,7 +2130,7 @@ impl App {
         .height(Fill)
         .into()
     }
-    fn entry_view<'a>(&'a self, entry: &'a Entry, _session: &'a Session) -> Element<'a, Message> {
+    fn entry_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
         match &entry.kind {
             EntryKind::Tool {
                 name,
@@ -2119,11 +2183,8 @@ impl App {
                 }
                 if open {
                     if let Some(view) = self.outputs.get(&entry.id) {
-                        let id = entry.id.clone();
-                        block = block.push(
-                            view.view(&entry.id)
-                                .map(move |event| Message::ToolOutput(id.clone(), event)),
-                        );
+                        block =
+                            block.push(view.view(&entry.id, self.chat_selection.clone(), index));
                     }
                     block = block.push(
                         button("Copy output")
@@ -2137,11 +2198,17 @@ impl App {
                     .style(card)
                     .into()
             }
-            EntryKind::Notice => container(
-                text(&entry.text)
-                    .size(12)
-                    .color(Color::from_rgb8(224, 186, 120)),
-            )
+            EntryKind::Notice => container(chat_selection::plain(
+                &entry.text,
+                12.,
+                Some(Color::from_rgb8(224, 186, 120)),
+                self.chat_selection.clone(),
+                Position {
+                    entry: index,
+                    block: 0,
+                    byte: 0,
+                },
+            ))
             .padding(12)
             .style(card)
             .into(),
@@ -2175,18 +2242,26 @@ impl App {
                 ]
                 .spacing(8);
                 if let Some((_, items)) = self.markdown.get(&entry.id) {
-                    content = content.push(
-                        markdown::view(
-                            items.items(),
-                            markdown::Settings::with_text_size(
-                                self.catalog.settings.font_size,
-                                markdown::Style::from_palette(Theme::Dark.palette()),
-                            ),
-                        )
-                        .map(|uri| Message::Link(uri.to_string())),
-                    );
+                    content = content.push(markdown::view_with(
+                        items.items(),
+                        markdown::Settings::with_text_size(
+                            self.catalog.settings.font_size,
+                            markdown::Style::from_palette(Theme::Dark.palette()),
+                        ),
+                        &chat_selection::Viewer::new(self.chat_selection.clone(), index),
+                    ));
                 } else {
-                    content = content.push(text(&entry.text).size(self.catalog.settings.font_size));
+                    content = content.push(chat_selection::plain(
+                        &entry.text,
+                        self.catalog.settings.font_size,
+                        None,
+                        self.chat_selection.clone(),
+                        Position {
+                            entry: index,
+                            block: 0,
+                            byte: 0,
+                        },
+                    ));
                 }
                 if matches!(entry.kind, EntryKind::Reasoning) {
                     content = content.push(
@@ -2893,6 +2968,21 @@ impl App {
                 let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
             }
             2 => {
+                // Render a cross-message selection through rich text and lists,
+                // including after the settings panel reflows the transcript.
+                {
+                    let mut selection = self.chat_selection.borrow_mut();
+                    selection.anchor = Some(Position {
+                        entry: 0,
+                        block: 0,
+                        byte: 8,
+                    });
+                    selection.focus = Some(Position {
+                        entry: 1,
+                        block: 2,
+                        byte: 7,
+                    });
+                }
                 self.git = Some(crate::git::Info::Changes {
                     branch: "main".into(),
                     added: 123,
@@ -2906,6 +2996,7 @@ impl App {
                 ]);
             }
             3 => {
+                self.chat_selection.borrow_mut().clear();
                 let _ = self.update_inner(Message::ToggleSearch);
                 self.modal = Some(Modal::AddProject);
                 self.modal_input = "/tmp/example-project".into();
@@ -3889,6 +3980,7 @@ Then implement the fix.";
                         .on_input(Message::Search)
                         .into(),
                     false,
+                    Default::default(),
                 );
                 let mut ui = iced_runtime::UserInterface::build(
                     view,
@@ -3927,6 +4019,7 @@ Then implement the fix.";
                     .key_binding(composer_key_binding)
                     .into(),
                 false,
+                Default::default(),
             );
             let mut ui = iced_runtime::UserInterface::build(
                 view,
@@ -4770,6 +4863,37 @@ Then implement the fix.";
         let quit = app.quit();
         drain(&mut app, quit).await;
         assert!(app.closing);
+    }
+    #[tokio::test]
+    async fn streaming_reparse_invalidates_even_a_zero_length_selection_anchor() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let h = app.harness.as_ref().unwrap().clone();
+        let id = app.selected.clone().unwrap();
+        h.edit(&id, |s| {
+            s.entries.push(Entry::new(EntryKind::Assistant, "*é"))
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        // Press between the literal '*' and 'é', before the first drag motion.
+        let at = Position {
+            entry: 0,
+            block: 0,
+            byte: 1,
+        };
+        {
+            let mut selection = app.chat_selection.borrow_mut();
+            selection.anchor = Some(at);
+            selection.focus = Some(at);
+            selection.dragging = true;
+        }
+        h.edit(&id, |s| s.entries[0].text.push('*')).unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        // The closing '*' reparses the block to just 'é'. Byte 1 is now inside
+        // its UTF-8 encoding, so retaining that anchor would panic on Copy.
+        assert!(app.chat_selection.borrow().anchor.is_none());
+        assert!(!app.chat_selection.borrow().dragging);
     }
     #[tokio::test]
     async fn long_transcript_only_caches_viewport_and_appends_preserve_heights() {
