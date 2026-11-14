@@ -2750,19 +2750,6 @@ impl App {
             .height(Fill)
             .into();
         }
-        let editor = text_editor(&self.editor)
-            .placeholder(if self.io_busy || self.closing {
-                "Saving…"
-            } else if running {
-                "Steer the agent after its current tool batch…"
-            } else {
-                "Message Pico…"
-            })
-            .on_action(Message::Editor)
-            .key_binding(composer_key_binding)
-            .height(100)
-            .padding(12)
-            .size(self.catalog.settings.font_size);
         let mut compose = column![].spacing(10);
         if !self.attachments.is_empty() {
             let images = row(self
@@ -2775,7 +2762,7 @@ impl App {
                 scrollable::Direction::Horizontal(scrollable::Scrollbar::new()),
             ));
         }
-        compose = compose.push(editor);
+        compose = compose.push(self.composer_editor(running));
         if !session.pending.is_empty() && running {
             compose = compose.push(
                 text(format!(
@@ -2800,6 +2787,34 @@ impl App {
         .height(Fill)
         .into()
     }
+    fn composer_editor(&self, running: bool) -> Element<'_, Message> {
+        let line_height = self.catalog.settings.font_size * 1.3;
+        let editor = text_editor(&self.editor)
+            .placeholder(if self.io_busy || self.closing {
+                "Saving…"
+            } else if running {
+                "Steer the agent after its current tool batch…"
+            } else {
+                "Message Pico…"
+            })
+            .on_action(Message::Editor)
+            .key_binding(composer_key_binding)
+            .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
+            .min_height(2. * line_height)
+            .padding(12)
+            .size(self.catalog.settings.font_size);
+        crate::growing_editor::growing_editor(
+            editor,
+            &self.editor,
+            10. * line_height + 24.,
+            Message::Editor,
+            |message| match message {
+                Message::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
+                _ => None,
+            },
+        )
+    }
+
     fn entry_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
         match &entry.kind {
             EntryKind::Tool {
@@ -4225,15 +4240,21 @@ impl App {
                     .unwrap()
                 })
                 .collect();
-                self.editor =
-                    text_editor::Content::with_text("Images are attached above this text field.");
+                self.editor = text_editor::Content::with_text(
+                    &(0..16)
+                        .map(|line| {
+                            format!("Draft line {line}: images are attached above this field.")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
                 self.prepare_visible();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered composer attachments, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -5632,6 +5653,63 @@ Then implement the fix.";
         ))
     }
 
+    #[test]
+    fn composer_grows_with_newlines_and_wrapping_up_to_ten_lines() {
+        use iced::advanced::{layout, widget::Tree};
+
+        let mut app = app();
+        let renderer = header_renderer();
+        let measure = |app: &App, width| {
+            let mut editor = app.composer_editor(false);
+            let mut tree = Tree::new(editor.as_widget());
+            editor
+                .as_widget_mut()
+                .layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, iced::Size::new(width, 600.)),
+                )
+                .size()
+                .height
+        };
+        for font_size in [15., 20.] {
+            app.catalog.settings.font_size = font_size;
+            let line_height = font_size * 1.3;
+            let min_height = 2. * line_height + 24.;
+            let max_height = 10. * line_height + 24.;
+            for (value, lines) in [
+                ("".to_owned(), 2.),
+                ("first\n".to_owned(), 2.),
+                ("first\nsecond\nthird".to_owned(), 3.),
+                (["line"; 10].join("\n"), 10.),
+                (["line"; 25].join("\n"), 10.),
+            ] {
+                app.editor = text_editor::Content::with_text(&value);
+                assert_eq!(measure(&app, 400.), lines * line_height + 24., "{value:?}");
+            }
+            // Cursor scrolling must not grow the field or discard overflow.
+            app.editor
+                .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+            assert_eq!(measure(&app, 400.), max_height);
+            assert_eq!(app.editor.line_count(), 25);
+            app.editor.perform(text_editor::Action::Select(
+                text_editor::Motion::DocumentStart,
+            ));
+            app.editor
+                .perform(text_editor::Action::Edit(text_editor::Edit::Backspace));
+            assert!(app.editor.is_empty());
+            assert_eq!(measure(&app, 400.), min_height);
+
+            let wrapped = "Words that wrap naturally. ".repeat(8);
+            app.editor = text_editor::Content::with_text(&wrapped);
+            let height = measure(&app, 400.);
+            assert!(height > min_height && height < max_height);
+            assert_eq!(measure(&app, 100.), max_height);
+            assert_eq!(measure(&app, 2400.), min_height);
+            assert_eq!(app.editor.text(), wrapped);
+        }
+    }
+
     fn word_delete_events(ctrl_w: bool) -> [iced::Event; 2] {
         let (key, code) = if ctrl_w {
             (
@@ -5711,14 +5789,7 @@ Then implement the fix.";
     fn delete_word_in_composer(app: &mut App, ctrl_w: bool) {
         let mut renderer = header_renderer();
         let messages = {
-            let view = pointer_input(
-                text_editor(&app.editor)
-                    .on_action(Message::Editor)
-                    .key_binding(composer_key_binding)
-                    .into(),
-                false,
-                Default::default(),
-            );
+            let view = pointer_input(app.composer_editor(false), false, Default::default());
             let mut ui = iced_runtime::UserInterface::build(
                 view,
                 iced::Size::new(400., 100.),

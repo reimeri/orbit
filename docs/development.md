@@ -24,7 +24,10 @@ The flake uses an explicit source allowlist. Entering `nix develop` also prepare
 `.build-deps/winit`, a Git-ignored link to the checksum-pinned upstream source with
 our local patch applied in the Nix store. Nothing is downloaded or patched in
 Cargo's registry cache. Re-enter the shell after changing `patches/winit/`.
-The package and formatting checks prepare their own link, independent of the
+The composer also uses a checksum-pinned iced widget patch to read native editor
+scroll metrics; see [its maintenance notes](../patches/iced-widget/README.md).
+The shell prepares `.build-deps/iced-widget` alongside winit.
+The package and formatting checks prepare their own links, independent of the
 working tree. See [patch maintenance](../patches/winit/README.md).
 
 ## Choose the cheapest useful check
@@ -328,3 +331,17 @@ handshake and appended both images in order. Restart retained all three images;
 ordinary text pasted exactly once; thumbnail clicks opened the GIF modal, and
 the hover remove button removed just its attachment. This used separate clipboard and
 configuration state, without touching the desktop clipboard or real sessions.
+
+
+### Growing message composer
+
+The composer starts at two visual lines, grows to ten, and then scrolls internally.
+A scrollbar in its right padding appears only for overflow; it supports thumb
+dragging and track clicks without changing the text selection. Native wheel and
+cursor scrolling update the same thumb. Width/font changes and deletion remeasure
+wrapped rows and hide the scrollbar when the text fits again.
+
+The composer regression tests exercise retained widget state, dragging (including
+batched motion), wheel/keyboard scrolling, selection preservation, exact-boundary
+visibility, and single-logical-line wrapping/reflow. The final rendered smoke
+frame includes overflowing draft text and image attachments.

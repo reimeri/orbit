@@ -1,0 +1,14 @@
+--- a/src/text_editor.rs
++++ b/src/text_editor.rs
+@@ -422,6 +422,11 @@
+         internal.editor.move_to(cursor);
+     }
+ 
++    /// Reads the underlying renderer editor without changing its state.
++    pub fn with_editor<T>(&self, read: impl FnOnce(&R::Editor) -> T) -> T {
++        read(&self.0.borrow().editor)
++    }
++
+     /// Returns the current cursor position of the [`Content`].
+     pub fn cursor(&self) -> Cursor {
+         self.0.borrow().editor.cursor()

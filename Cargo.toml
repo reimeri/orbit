@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/pico-app", "crates/pico-core"]
 default-members = ["crates/pico-app"]
-exclude = [".build-deps/winit"]
+exclude = [".build-deps/winit", ".build-deps/iced-widget"]
 resolver = "3"
 
 [workspace.package]
@@ -22,5 +22,6 @@ debug = "line-tables-only"
 incremental = true
 
 [patch.crates-io]
-# Prepared by nix develop and the package build; see patches/winit/README.md.
+# Prepared by nix develop and the package build; see patches/*/README.md.
 winit = { path = ".build-deps/winit" }
+iced_widget = { path = ".build-deps/iced-widget" }

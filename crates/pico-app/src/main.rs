@@ -3,6 +3,7 @@ mod attachments;
 mod chat_selection;
 mod ellipsized_text;
 mod git;
+mod growing_editor;
 mod image_view;
 mod io_worker;
 mod keyed_column;

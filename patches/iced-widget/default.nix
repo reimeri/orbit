@@ -1,0 +1,11 @@
+{ pkgs }:
+pkgs.applyPatches {
+  name = "pico-iced-widget-0.14.2-patched";
+  src = pkgs.fetchurl {
+    name = "iced_widget-0.14.2.tar.gz";
+    url = "https://static.crates.io/crates/iced_widget/iced_widget-0.14.2.crate";
+    hash = "sha256-sVlq+g0xCcJhjovBK65sEdMGTfj5XELfzlcDl9vpV6s=";
+  };
+  patches = [ ./editor-access.patch ];
+  patchFlags = [ "-p1" "--fuzz=0" ];
+}
