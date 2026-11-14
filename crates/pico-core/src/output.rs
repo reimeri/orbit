@@ -94,6 +94,12 @@ impl OutputBuffer {
     /// Consume only after successful preservation. A returned file is a closed,
     /// immutable snapshot of this read, not a live log. Files are left to the OS.
     pub(crate) fn read(&mut self, characters: usize) -> Result<String> {
+        let result = self.prepare_read(characters)?;
+        *self = Self::default();
+        Ok(result)
+    }
+    /// Prepare without consuming: ordered multimodal batches commit all buffers together.
+    pub(crate) fn prepare_read(&mut self, characters: usize) -> Result<String> {
         let text = std::str::from_utf8(&self.pending);
         let result = if self.spill.is_some()
             || self.spill_failed
@@ -106,7 +112,6 @@ impl OutputBuffer {
         } else {
             text.expect("validated UTF-8").to_owned()
         };
-        *self = Self::default();
         Ok(result)
     }
 }

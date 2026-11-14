@@ -133,11 +133,12 @@ fn main() -> Result<()> {
         std::sync::Arc::new(pico_core::shell::Shell::new(dir.path().into())),
         std::sync::Arc::new(|_| Ok(())),
     );
-    let result = mode.exec(
+    let result = mode.exec_output(
         "// @exec: {\"yield_time_ms\": 1}\nawait new Promise(r=>setTimeout(r,1100));text('done');",
         "timer",
         &pico_core::CancellationToken::new(),
     )?;
+    let result = result.summary();
     let id = result
         .lines()
         .find_map(|s| s.strip_prefix("Script running with cell ID "))
@@ -149,7 +150,7 @@ fn main() -> Result<()> {
         "Process CPU ticks during 1s awaiting JS timer: {} (Linux /proc/self/stat user+system)",
         after - before
     );
-    black_box(mode.wait(
+    black_box(mode.wait_output(
         &json!({"cell_id":id}).to_string(),
         &pico_core::CancellationToken::new(),
     )?);

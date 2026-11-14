@@ -551,6 +551,11 @@ impl Harness {
             .iter()
             .map(|c| c.persisted.lock().expect("persistence lock"))
             .collect();
+        // Serialize publication with logical deletion, not merely directory cleanup.
+        let mut media_leases: Vec<_> = family
+            .iter()
+            .filter_map(|c| c.code.media_lifecycle())
+            .collect();
         // Delete the whole family atomically before evicting runtime state.
         {
             let mut db = self.store.db.lock().expect("database lock");
@@ -560,10 +565,20 @@ impl Harness {
             }
             tx.commit()?;
         }
+        for lease in &mut media_leases {
+            **lease = false;
+        }
+        drop(media_leases);
+        let mut cleanup_errors = Vec::new();
         for id in children.iter().chain(std::iter::once(&session.to_owned())) {
             if let Some(c) = self.get(id) {
                 c.deleted.store(true, Ordering::Release);
                 c.cancel();
+                if let Err(e) = c.code.remove_media() {
+                    cleanup_errors.push(format!("{id}: {e:#}"));
+                }
+            } else if let Err(e) = crate::media::remove(&self.store.root().join("media").join(id)) {
+                cleanup_errors.push(format!("{id}: {e:#}"));
             }
             self.conversations
                 .lock()
@@ -577,6 +592,13 @@ impl Harness {
             .retain(|_, (r, _, _)| r.parent_id != session);
         self.catalog_revision.fetch_add(1, Ordering::Release);
         self.changes.send_replace(());
+        if !cleanup_errors.is_empty() {
+            bail!(
+                "Session family was deleted and cannot be recreated by late callbacks, but private media cleanup needs attention under {}: {}",
+                self.store.root().join("media").display(),
+                cleanup_errors.join("; ")
+            );
+        }
         Ok(())
     }
 }

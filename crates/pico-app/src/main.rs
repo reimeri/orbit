@@ -3,6 +3,7 @@ mod animated_column;
 mod chat_selection;
 mod ellipsized_text;
 mod git;
+mod image_view;
 mod io_worker;
 mod pointer_input;
 mod questionnaire;

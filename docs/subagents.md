@@ -21,7 +21,7 @@ cannot delegate.
 ## Tools
 
 Only `exec` and `wait` are top-level Responses tools. Main conversations have
-three additional nested tools on `tools`; children have only the shell tools.
+three additional nested tools on `tools`; children have shell tools and `view_image`, but cannot generate images.
 Nested tools return strings. Subagent results are JSON text unless an output
 budget requires a complete-file reference.
 

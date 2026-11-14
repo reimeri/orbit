@@ -1,12 +1,12 @@
 ---
 name: update-openai-models
-description: Check official OpenAI documentation for newer Astra, Sol, and Luna models, then update Pico V2's fixed model catalog and supported reasoning efforts.
+description: Check official OpenAI documentation for newer Astra, Sol, Luna, and API image models, then update Pico V2's catalog, reasoning efforts and default image model.
 ---
 
 # Update the OpenAI model catalog
 
 Use this skill when asked to refresh Pico's OpenAI models or check for newer
-Astra, Sol, or Luna versions. This is a repository maintenance workflow, not a
+Astra, Sol, Luna, or API image-model versions. This is a repository maintenance workflow, not a
 runtime model-discovery feature. Read `PROJECT.md` and `docs/development.md` first.
 
 ## Research before editing
@@ -51,9 +51,24 @@ Current capability reference links (catalog introduced 2026-11-14):
   model list. Removed session models must be replaced by the configured app
   default, with that model's effort/Fast defaults, persisted, and accompanied by
   an informational toast. Existing valid session selections stay unchanged.
-- There is currently **no custom-model editing**. Do not add it, remove other
-  families, or read/modify user configuration or credentials as part of this
-  skill. If the app later adds custom models, preserve them during refresh.
+- Chat models remain a fixed catalog. Image models have a custom editable ID:
+  never replace saved image IDs (including an ID equal to an earlier default).
+  Do not read/modify user configuration or credentials during this workflow.
+- Check the official Images generation/edit references, model pages and changelog
+  for the newest generally available successor to the default API image model
+  (currently `gpt-image-2.6-sunburst`). Keep the same family/purpose unless the user
+  approves a change; do not infer identifiers or replace it with a preview.
+  Update only `DEFAULT_API_MODEL` in `crates/pico-core/src/image_tools.rs`. That
+  constant supplies fresh settings and the explicit Reset button. Saved model
+  fields survive unchanged. Verify both generation and editing support, document
+  supported quality/GIF restrictions, and do not silently change the selected
+  quality or backend. Runtime discovery is out of scope.
+- Subscription image defaults (`CODEX_MODEL`) are separate: inspect current public
+  Codex sources and subscription availability before changing them. API model
+  availability alone is not evidence of subscription access.
+- Update model `audio_input` capability flags only from verified documentation.
+  All current chat catalog models accept images and reject native audio; Codex
+  voice UI availability is not evidence of direct model audio support.
 - `crates/pico-core/src/provider.rs` uses ChatGPT/Codex Responses. Fast currently
   sends `service_tier: "priority"` and
   `x-codex-routing-hint: model=<id>;tier=priority`. Normal mode omits the body tier
@@ -64,13 +79,21 @@ Current capability reference links (catalog introduced 2026-11-14):
 - Update this skill's reference links, README, acceptance checklist, and affected
   tests. No V1 compatibility layer; all state remains under `pico-evo`.
 
+Image references:
+- https://developers.openai.com/api/reference/resources/images/methods/generate
+- https://developers.openai.com/api/reference/resources/images/methods/edit
+- https://developers.openai.com/api/docs/guides/image-generation
+- https://developers.openai.com/api/docs/changelog
+- https://github.com/openai/codex/tree/main/codex-rs/ext/image-generation
+
 ## Verify and report
 
 Use `nix develop --command ...` for tooling. Keep `target/` and existing build
 flags. Run focused core/UI tests and `just verify`; run `just smoke-gpu` for UI
 changes when a Wayland desktop is available. Cover any changed effort boundary,
-preserved model preferences, retired-session recovery and notices, and request
-body/header consistency. Avoid redundant catalog snapshot tests.
+preserved model preferences, retired-session recovery and notices, request
+body/header consistency, and preserved custom/saved image IDs versus fresh/reset
+image defaults. Update `docs/images.md` and its live acceptance checklist. Avoid redundant catalog snapshot tests.
 
 Report replacements, evidence, checks run, and any unverified subscription
 availability. If there are no verified newer models, report that result without

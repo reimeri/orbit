@@ -1,5 +1,7 @@
 //! Fresh QuickJS cells implementing Codex's public code-mode contract.
 use crate::{
+    image_tools::ImageTools,
+    media::{Output, Part},
     output::{OutputBuffer, character_budget},
     shell::Shell,
     store::id,
@@ -24,12 +26,16 @@ pub fn tools() -> Value {
         {"type":"function","name":"wait","description":"Waits on a yielded exec cell and returns only new output or completion. Use only after exec returns Script running with cell ID. terminate:true stops that cell. yield_time_ms and max_tokens default to 10000.","strict":false,"parameters":{"type":"object","properties":{"cell_id":{"type":"string","description":"Identifier of the running exec cell."},"yield_time_ms":{"type":"number","description":"Wait before yielding more output. Defaults to 10000 ms."},"max_tokens":{"type":"number","description":"Output token budget for this wait call. Defaults to 10000 tokens."},"terminate":{"type":"boolean","description":"True stops the running exec cell; false or omitted waits for output."}},"required":["cell_id"],"additionalProperties":false}}
     ])
 }
-const DESCRIPTION: &str = r#"Run raw JavaScript to orchestrate tool calls in a fresh embedded isolate as an async module. No Node, filesystem, network or console. Variables do not survive cells; store/load do. Only explicitly emitted text reaches the model. Unawaited promises are discarded when the module finishes.
+const DESCRIPTION: &str = r#"Run raw JavaScript to orchestrate tool calls in a fresh embedded isolate as an async module. No Node, filesystem, network or console. Variables do not survive cells; store/load do. Only explicitly emitted content reaches the model. Unawaited promises are discarded when the module finishes.
 Optional first line: // @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000}
 Output budgets limit inline text only. Oversized output is saved completely under /tmp; results give its path and exact byte size instead of a preview. Use shell commands to read/search that file. Files remain after the cell/command exits.
 exec yields early with a cell ID if still running. Use wait to retrieve subsequent output or terminate it.
 Globals: text(value) emits text (JSON.stringify for nonstrings); exit() ends successfully; store(key,value) and load(key) share serializable state across cells in this conversation; notify(value) immediately injects an extra custom_tool_call_output for this exec call; yield_control() yields accumulated output immediately; setTimeout(callback, delayMs), clearTimeout(id); ALL_TOOLS lists nested tool metadata. Pending timers alone do not keep a cell alive.
-Nested tools (return strings):
+Media helpers (base64 data URLs only; no HTTP URLs or local paths): image(value) emits an image URL, {image_url}, or an MCP image block; audio(value) similarly accepts audio_url or an MCP audio block; content(blockOrIterable) emits MCP text/image/audio/resource/resource_link blocks in order; generatedImage({image_url,output_hint?}) emits an image followed by its hint. No detail argument in unified image mode. Use image(await tools.view_image(...)) and generatedImage(await tools.image_gen__imagegen(...)); do not text()/notify() base64 results. Audio requires a capable chat model. A GIF reaches the model as a static first-frame representation, not a motion inspection.
+Image tools return objects, and their expanded chat rows retain previews even without helper emission:
+ tools.view_image({path:string}): Promise<{image_url:string}>. Read a local PNG/JPEG/WebP/GIF. Relative paths resolve against the calling workspace. Unified image preparation; no detail argument. Available to main and child agents.
+ tools.image_gen__imagegen({prompt:string,output_path:string,transparent_background?:boolean,referenced_image_paths?:string[],num_last_images_to_include?:number,gif?:{frame_count?:number,frame_duration_ms?:number}}): Promise<{image_url:string,output_hint?:string}>. MAIN AGENT ONLY. Uses configured Codex subscription or API billing, model and quality. One PNG (.png output_path) or GIF (.gif with gif supplied), existing parent, no overwrites or Pico media destinations. Paths relative to workspace or absolute. Generates without references; edits with up to 5 absolute referenced_image_paths OR last 1–5 emitted conversation images via num_last_images_to_include, never both. Inspect local references with view_image first. For GIF editing create a regular-grid spritesheet, not a direct GIF reference. gif:{} defaults to 9 frames/200ms; ranges 2–16 frames/20–2000ms. Allow minutes: use @exec yield_time_ms:120000 and wait similarly. Backend errors never silently change quality, model, format or billing. Cancellation/uncertain outcomes may consume usage; inspect files before retrying. output_path is required, unlike Codex. Tool return values contain base64: forward with generatedImage, never print the full result.
+Nested text tools (return strings):
  tools.exec_command({cmd: string, workdir?: string, shell?: string, login?: boolean, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number, timeout_ms?: number}): Run a command in the project (or workdir). Default login=true, tty=false, yield_time_ms=10000. Returns exit code or a running session_id. tty=true keeps interactive stdin open; tty=false closes stdin. Commands are unrestricted, not sandboxed.
  tools.write_stdin({session_id: number, chars?: string, yield_time_ms?: number, max_output_tokens?: number}): Send input to a PTY or poll using empty chars. Default yield_time_ms=250. Ctrl-C is '\u0003'. Returns only new output and exit/session status.
 Example: text(await tools.exec_command({cmd:"pwd; ls -la", max_output_tokens:2000}));
@@ -42,6 +48,7 @@ pub struct ToolEvent {
     pub name: String,
     pub input: String,
     pub output: Option<String>,
+    pub media: Vec<crate::media::Media>,
 }
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -54,9 +61,14 @@ pub type Observer = Arc<dyn Fn(Event) -> Result<()> + Send + Sync>;
 #[derive(Default)]
 struct State {
     output: OutputBuffer,
+    parts: Vec<BufferedPart>,
     done: bool,
     error: Option<String>,
     yielded: bool,
+}
+enum BufferedPart {
+    Text(OutputBuffer),
+    Media(crate::media::Media),
 }
 struct Cell {
     state: Arc<(Mutex<State>, tokio::sync::Notify)>,
@@ -82,6 +94,7 @@ struct Stored {
     bytes: usize,
 }
 pub struct CodeMode {
+    images: Option<Arc<ImageTools>>,
     questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     delegation: Option<Delegation>,
     shell: Arc<Shell>,
@@ -102,6 +115,7 @@ impl CodeMode {
         questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     ) -> Self {
         Self {
+            images: None,
             questionnaires,
             delegation,
             shell,
@@ -112,7 +126,30 @@ impl CodeMode {
             active_cells: Arc::new(AtomicUsize::new(0)),
         }
     }
+    pub fn with_images(mut self, images: Arc<ImageTools>) -> Self {
+        self.images = Some(images);
+        self
+    }
+    pub(crate) fn media_lifecycle(&self) -> Option<std::sync::MutexGuard<'_, bool>> {
+        self.images.as_ref().map(|i| i.media.lifecycle())
+    }
+    pub fn remove_media(&self) -> Result<()> {
+        if let Some(images) = &self.images {
+            images.media.remove()?;
+        }
+        Ok(())
+    }
+    #[cfg(test)]
     pub fn exec(&self, source: &str, parent: &str, cancel: &CancellationToken) -> Result<String> {
+        self.exec_output(source, parent, cancel)
+            .map(|o| o.summary())
+    }
+    pub fn exec_output(
+        &self,
+        source: &str,
+        parent: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Output> {
         if cancel.is_cancelled() {
             bail!("Execution cancelled");
         }
@@ -131,11 +168,12 @@ impl CodeMode {
         });
         cells.insert(cell_id.clone(), cell.clone());
         drop(cells);
-        let shell = (
-            self.shell.clone(),
-            self.delegation.clone(),
-            self.questionnaires.clone(),
-        );
+        let services = Services {
+            shell: self.shell.clone(),
+            delegation: self.delegation.clone(),
+            questionnaires: self.questionnaires.clone(),
+            images: self.images.clone(),
+        };
         let stored = self.stored.clone();
         let observer = self.observer.clone();
         let parent = parent.to_owned();
@@ -145,7 +183,7 @@ impl CodeMode {
         let active = WorkerPermit(self.active_cells.clone());
         thread::spawn(move || {
             let _active = active;
-            let result = run_cell(code, shell, stored, observer, parent, workers, &worker);
+            let result = run_cell(code, services, stored, observer, parent, workers, &worker);
             worker.cancel.cancel();
             let mut state = worker.state.0.lock().expect("cell state");
             if let Err(error) = result {
@@ -161,7 +199,11 @@ impl CodeMode {
             cancel,
         )
     }
+    #[cfg(test)]
     pub fn wait(&self, args: &str, cancel: &CancellationToken) -> Result<String> {
+        self.wait_output(args, cancel).map(|o| o.summary())
+    }
+    pub fn wait_output(&self, args: &str, cancel: &CancellationToken) -> Result<Output> {
         let args: Wait = serde_json::from_str(args)?;
         if args.terminate.unwrap_or(false) {
             let cells = self.cells.lock().expect("cell lock");
@@ -184,7 +226,7 @@ impl CodeMode {
         ms: u64,
         tokens: usize,
         cancel: &CancellationToken,
-    ) -> Result<String> {
+    ) -> Result<Output> {
         let cell = self
             .cells
             .lock()
@@ -208,12 +250,30 @@ impl CodeMode {
         })?;
         let mut state = cell.state.0.lock().expect("cell state");
         state.yielded = false;
-        let output = state
-            .output
-            .read(character_budget(tokens))
-            .with_context(|| {
-                format!("Could not return cell output. Retry wait with cell_id {id}")
-            })?;
+        let mut budget = character_budget(tokens);
+        let mut pending = Vec::new();
+        for part in &mut state.parts {
+            pending.push(match part {
+                BufferedPart::Text(buffer) => {
+                    let text = buffer.prepare_read(budget).with_context(|| {
+                        format!("Could not return cell output; retry wait with cell_id {id}")
+                    })?;
+                    budget = budget.saturating_sub(text.chars().count());
+                    Part::InputText { text }
+                }
+                BufferedPart::Media(media) => Part::PicoMedia {
+                    media: media.clone(),
+                },
+            });
+        }
+        let output = state.output.prepare_read(budget).with_context(|| {
+            format!("Could not return cell output; retry wait with cell_id {id}")
+        })?;
+        if !output.is_empty() {
+            pending.push(Part::InputText { text: output });
+        }
+        state.parts.clear();
+        state.output = OutputBuffer::default();
         let status = if state.done {
             self.cells.lock().expect("cell lock").remove(id);
             match &state.error {
@@ -226,7 +286,11 @@ impl CodeMode {
         } else {
             format!("Script running with cell ID {id}")
         };
-        Ok(format!("{status}\nOutput:\n{output}"))
+        let mut parts = vec![Part::InputText {
+            text: format!("{status}\nOutput:"),
+        }];
+        parts.extend(pending);
+        Ok(Output { parts })
     }
     pub fn is_executing(&self) -> bool {
         self.active_cells.load(Ordering::Acquire) > 0 || self.workers.load(Ordering::Acquire) > 0
@@ -262,13 +326,20 @@ fn parse(source: &str) -> Result<(Pragma, String)> {
         Ok((Pragma::default(), source.into()))
     }
 }
+struct Services {
+    shell: Arc<Shell>,
+    delegation: Option<Delegation>,
+    questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
+    images: Option<Arc<ImageTools>>,
+}
 fn run_cell(
     code: String,
-    (shell, delegation, questionnaires): (
-        Arc<Shell>,
-        Option<Delegation>,
-        Option<Arc<crate::questionnaire::Questionnaires>>,
-    ),
+    Services {
+        shell,
+        delegation,
+        questionnaires,
+        images,
+    }: Services,
     stored: Arc<Mutex<Stored>>,
     observer: Observer,
     parent: String,
@@ -277,7 +348,7 @@ fn run_cell(
 ) -> Result<()> {
     let executor = shell.runtime().clone();
     let runtime = Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-    runtime.set_memory_limit(64 * 1024 * 1024);
+    runtime.set_memory_limit(256 * 1024 * 1024);
     runtime.set_max_stack_size(1024 * 1024);
     let cancel = cell.cancel.clone();
     let exited = Arc::new(AtomicBool::new(false));
@@ -296,7 +367,7 @@ fn run_cell(
                 }),
             )
             .map_err(js_error)?;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, bool)>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, bool, bool)>();
         let notify_observer = observer.clone();
         let notify_parent = parent.clone();
         ctx.globals()
@@ -328,6 +399,30 @@ fn run_cell(
                 }),
             )
             .map_err(js_error)?;
+        let media_state=cell.state.clone();
+        let media_tools=images.clone();
+        ctx.globals().set("__media", Function::new(ctx.clone(), move |url:String,audio:bool|->rquickjs::Result<()> {
+            let result=(||->Result<()> {
+                if media_state.0.lock().expect("cell state").parts.iter().filter(|p|matches!(p,BufferedPart::Media(_))).count()>=64 {bail!("64 media items already emitted; yield or complete this cell before emitting more");}
+                let tools=media_tools.as_ref().context("Media storage is unavailable in this runtime")?;
+                let media=tools.media.from_url(&url,audio)?;
+                if audio && crate::media::short_wav(&media.path)? {
+                    let mut state=media_state.0.lock().expect("cell state");
+                    if !state.output.is_empty() {state.output.append(b"\n",4*1024*1024);}
+                    state.output.append(b"Audio output omitted because the clip is shorter than 25 ms; use a longer clip.",4*1024*1024);
+                    return Ok(());
+                }
+                if audio && !tools.audio_supported()? {bail!("This chat model does not support audio input. Audio was preserved at {}; use text or select a model that supports audio.",media.path.display());}
+                let mut state=media_state.0.lock().expect("cell state");
+                if !state.output.is_empty() {let buffer=std::mem::take(&mut state.output);state.parts.push(BufferedPart::Text(buffer));}
+                let note=crate::image_tools::animation_notice(&media);
+                state.parts.push(BufferedPart::Media(media.clone()));
+                if !note.is_empty() {state.output.append(note.as_bytes(),4*1024*1024);}
+                media_state.1.notify_one();
+                Ok(())
+            })();
+            result.map_err(|e|rquickjs::Error::new_from_js_message("media","output",format!("{e:#}")))
+        })).map_err(js_error)?;
         let save = stored.clone();
         ctx.globals()
             .set(
@@ -362,6 +457,8 @@ fn run_cell(
             .map_err(js_error)?;
         ctx.globals().set("__delegation", delegation.is_some()).map_err(js_error)?;
         ctx.globals().set("__questionnaires", questionnaires.is_some()).map_err(js_error)?;
+        ctx.globals().set("__images", images.is_some()).map_err(js_error)?;
+        ctx.globals().set("__imagegen", images.as_ref().is_some_and(|i|i.generation)).map_err(js_error)?;
         let cancellation = cell.cancel.clone();
         ctx.globals()
             .set(
@@ -369,7 +466,7 @@ fn run_cell(
                 Function::new(
                     ctx.clone(),
                     move |name: String, args: String| -> rquickjs::Result<String> {
-                        if !matches!(name.as_str(), "exec_command" | "write_stdin") && !(questionnaires.is_some() && name == "ask_user") && !(delegation.is_some() && matches!(name.as_str(), "spawn_subagent" | "wait_subagent" | "list_subagents")) {
+                        if !(images.is_some() && name == "view_image" || images.as_ref().is_some_and(|i|i.generation) && name == "image_gen__imagegen") && !matches!(name.as_str(), "exec_command" | "write_stdin") && !(questionnaires.is_some() && name == "ask_user") && !(delegation.is_some() && matches!(name.as_str(), "spawn_subagent" | "wait_subagent" | "list_subagents")) {
                             return Err(rquickjs::Error::new_from_js_message(
                                 "name",
                                 "tool",
@@ -390,6 +487,7 @@ fn run_cell(
                         let shell = shell.clone();
                         let delegation = delegation.clone();
                         let questionnaires = questionnaires.clone();
+                        let images = images.clone();
                         let tx = tx.clone();
                         let observer = observer.clone();
                         let cancellation = cancellation.clone();
@@ -403,8 +501,13 @@ fn run_cell(
                                     name: name.clone(),
                                     input: args.clone(),
                                     output: None,
+                                    media: vec![],
                                 }));
+                                let mut attachments=Vec::new();
+                                let mut display=None;
+                                let structured=matches!(name.as_str(),"view_image"|"image_gen__imagegen");
                                 let result = started.and_then(|()| match name.as_str() {
+                                    "view_image"|"image_gen__imagegen" => shell.runtime().block_on(images.as_ref().expect("validated image tool").call(&name,&args,&request,&cancellation)).map(|result| {attachments.push(result.media);display=Some(result.text);result.value.to_string()}),
                                     "exec_command" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|a| shell.exec(a, &cancellation)),
@@ -422,11 +525,12 @@ fn run_cell(
                                     parent,
                                     name,
                                     input: args,
-                                    output: Some(output.clone()),
+                                    output: Some(display.clone().unwrap_or_else(||output.clone())),
+                                    media: attachments,
                                 }));
-                                let (output, failed) = match saved { Ok(()) => (output,failed), Err(e) => (format!("{output}\nCould not save tool result: {e:#}. Side effects may have occurred; do not blindly repeat the command."),true) };
+                                let (output, failed) = match saved { Ok(()) => (output,failed), Err(e) => (format!("{}\nCould not save tool result: {e:#}. Side effects may have occurred; do not blindly repeat the command.",display.unwrap_or_else(||output.clone())),true) };
                                 let output = if name_for_output == "ask_user" { crate::output::preserve_text(&output, 40_000) } else { output };
-                                let _ = tx.send((request, output, failed));
+                                let _ = tx.send((request, output, failed, structured));
                             })
                             .map_err(|e| {
                                 rquickjs::Error::new_from_js_message("call", "tool", e.to_string())
@@ -469,8 +573,8 @@ fn run_cell(
                     _=async {match delay {Some(ms)=>tokio::time::sleep(Duration::from_secs_f64((ms/1000.).clamp(0.,86400.))).await,None=>std::future::pending().await}}=>None,
                 }
             });
-            if let Some((id,output,failed))=completion {
-                ctx.globals().get::<_,Function>("__deliver").map_err(js_error)?.call::<_,()>((id,output,failed)).map_err(|e|exception(&ctx,e))?;
+            if let Some((id,output,failed,structured))=completion {
+                ctx.globals().get::<_,Function>("__deliver").map_err(js_error)?.call::<_,()>((id,output,failed,structured)).map_err(|e|exception(&ctx,e))?;
             }
             ctx.globals().get::<_,Function>("__tick").map_err(js_error)?.call::<_,()>(()).map_err(|e|exception(&ctx,e))?;
         }
@@ -508,6 +612,103 @@ mod tests {
             Arc::new(Shell::new(std::env::temp_dir())),
             Arc::new(|_| Ok(())),
         )
+    }
+    #[test]
+    fn media_helpers_preserve_order_yield_and_reject_bad_content_without_losing_prior_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("state")).unwrap();
+        let session =
+            crate::store::Session::new(dir.path().into(), &crate::store::Settings::default());
+        let session_id = session.id.clone();
+        let tools = Arc::new(ImageTools::new(
+            store.clone(),
+            crate::auth::Auth::new(store).unwrap(),
+            dir.path().into(),
+            &session_id,
+            false,
+            Arc::new(move || Ok(session.clone())),
+            ImageTools::client().unwrap(),
+        ));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let mode = CodeMode::new(
+            Arc::new(Shell::new(dir.path().into())),
+            Arc::new(move |event| {
+                captured.lock().unwrap().push(event);
+                Ok(())
+            }),
+        )
+        .with_images(tools.clone());
+        std::fs::write(dir.path().join("source.png"), crate::media::tests::png()).unwrap();
+        let cancel = CancellationToken::new();
+        let source = r#"text('before'); const result=await tools.view_image({path:'source.png'}); store('viewed',result); image(result); text('after'); text(typeof tools.image_gen__imagegen);"#;
+        let out = mode.exec_output(source, "parent", &cancel).unwrap();
+        assert_eq!(out.media().len(), 1);
+        assert!(matches!(&out.parts[1],Part::InputText {text} if text=="before"));
+        assert!(matches!(&out.parts[2], Part::PicoMedia { .. }));
+        assert!(matches!(&out.parts[3],Part::InputText {text} if text=="after\nundefined"));
+        let events = events.lock().unwrap();
+        let finished = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Tool(t) if t.output.is_some() => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(finished.media.len(), 1);
+        assert!(!finished.output.as_ref().unwrap().contains("base64"));
+        drop(events);
+        let out = mode
+            .exec_output(
+                "content([{type:'text',text:'retained'}, {type:'image',data:'not-base64'}]);",
+                "bad",
+                &cancel,
+            )
+            .unwrap();
+        assert!(out.summary().contains("Script failed"));
+        assert!(out.summary().contains("retained"));
+        let out = mode
+            .exec_output(
+                "generatedImage({...load('viewed'),output_hint:'saved hint'});",
+                "generated",
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(out.media().len(), 1);
+        assert!(out.summary().ends_with("saved hint"));
+        let out=mode.exec_output("// @exec: {\"yield_time_ms\": 1, \"max_output_tokens\": 0}\nimage(load('viewed'));text('first text');await yield_control();await new Promise(r=>setTimeout(r,100));image(load('viewed'));text('second text');","yield",&cancel).unwrap();
+        let mut all = out.media().len();
+        let summary = out.summary();
+        let id = summary
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Script running with cell ID ")
+            .unwrap();
+        loop {
+            let next = mode
+                .wait_output(&json!({"cell_id":id,"max_tokens":0}).to_string(), &cancel)
+                .unwrap();
+            all += next.media().len();
+            if next.summary().starts_with("Script completed") {
+                break;
+            }
+        }
+        assert_eq!(all, 2);
+        let out = mode
+            .exec_output("image('https://example.com/x.png');", "remote", &cancel)
+            .unwrap();
+        assert!(out.summary().contains("Script failed"));
+        let out = mode
+            .exec_output("audio('data:audio/wav;base64,AQID');", "audio", &cancel)
+            .unwrap();
+        assert!(out.summary().contains("does not support audio"));
+        assert!(out.media().is_empty());
+        assert!(out.summary().contains("preserved at"));
+        let out = mode
+            .exec_output("__call('image_gen__imagegen','{}');", "forbidden", &cancel)
+            .unwrap();
+        assert!(out.summary().contains("Unknown nested tool"));
     }
     #[test]
     fn questionnaires_yield_preserve_full_results_and_follow_cell_lifetime() {

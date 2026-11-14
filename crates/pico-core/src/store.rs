@@ -65,6 +65,8 @@ fn model_defaults() -> BTreeMap<String, ModelDefaults> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub images: crate::image_tools::Settings,
     pub model: String,
     #[serde(default = "model_defaults")]
     pub models: BTreeMap<String, ModelDefaults>,
@@ -79,6 +81,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            images: crate::image_tools::Settings::default(),
             model: DEFAULT_MODEL.into(),
             models: model_defaults(),
             context_limit: 272_000,
@@ -103,6 +106,7 @@ impl Settings {
         }
     }
     pub fn validate(&self) -> Result<()> {
+        self.images.validate()?;
         if model(&self.model).is_none() {
             bail!("Choose a default model from the Models tab.");
         }
@@ -157,6 +161,8 @@ pub enum EntryKind {
         output: String,
         complete: bool,
         parent: Option<String>,
+        #[serde(default)]
+        media: Vec<crate::media::Media>,
     },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -512,6 +518,17 @@ impl Store {
             .expect("database lock")
             .execute("DELETE FROM sessions WHERE id=?1", [id])?;
         Ok(())
+    }
+    pub fn api_key(&self) -> Result<Option<String>> {
+        self.read_optional::<String>("image-api-key.json")
+            .map(|v| v.filter(|s| !s.is_empty()))
+    }
+    pub fn save_api_key(&self, key: &str) -> Result<()> {
+        let key = key.trim();
+        if key.chars().any(char::is_whitespace) {
+            bail!("API key cannot contain whitespace");
+        }
+        self.write("image-api-key.json", &key)
     }
     pub fn write(&self, name: &str, value: &impl Serialize) -> Result<()> {
         atomic_write(&self.root.join(name), &serde_json::to_vec(value)?)

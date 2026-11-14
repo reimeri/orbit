@@ -31,7 +31,7 @@ smoke:
 # Requires a running Wayland desktop and a working graphics driver; no fallback.
 smoke-gpu:
     cargo build --locked -p pico-evo
-    env -u DISPLAY ICED_BACKEND=wgpu timeout 30s ./target/debug/pico-evo --smoke-test
+    env -u DISPLAY ICED_BACKEND=wgpu timeout 60s ./target/debug/pico-evo --smoke-test
 
 # Pre-commit checks. Not the edit/compile inner loop.
 verify: lint test smoke

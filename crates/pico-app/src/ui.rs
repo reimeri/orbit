@@ -77,6 +77,9 @@ pub struct App {
     submissions: HashMap<String, (String, String)>,
     revisions: HashMap<String, u64>,
     outputs: HashMap<String, tool_output::Output>,
+    image_view: crate::image_view::Viewer,
+    api_key_draft: String,
+    api_key_configured: bool,
     context_menu: Option<(String, iced::Point)>,
     footer_menu: Option<FooterMenu>,
     selected: Option<String>,
@@ -121,6 +124,7 @@ pub struct App {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
     Account,
+    Images,
     General,
     Models,
 }
@@ -136,6 +140,7 @@ struct FooterMenu {
 }
 #[derive(Clone, Debug)]
 enum Modal {
+    Image(pico_core::media::Media),
     AddProject,
     Rename(String),
     Delete(String),
@@ -151,6 +156,18 @@ pub enum Selection {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    Image(crate::image_view::Message),
+    OpenImage(pico_core::media::Media),
+    ImageBackend(pico_core::image_tools::Backend),
+    ImageModel(String),
+    ImageQuality(String),
+    ResetImageModel,
+    CancelSettings,
+    ApiKey(String),
+    SaveApiKey,
+    RemoveApiKey,
+    ApiKeySaved(Result<bool, String>),
+    ApiKeyStatus(Result<bool, String>),
     Selected(Result<(Selection, Option<String>), String>),
     NewDraftSaved(Result<(), String>),
     Sent(String, String, Result<(), String>),
@@ -290,6 +307,9 @@ impl App {
             submissions: HashMap::new(),
             revisions: HashMap::new(),
             outputs: HashMap::new(),
+            image_view: Default::default(),
+            api_key_draft: String::new(),
+            api_key_configured: false,
             context_menu: None,
             footer_menu: None,
             selected,
@@ -331,6 +351,17 @@ impl App {
             smoke_dir,
             window_id: None,
         };
+        if let Some(h) = &app.harness {
+            let h = h.clone();
+            app.tasks.push(app.io.run(move || {
+                Message::ApiKeyStatus(
+                    h.store
+                        .api_key()
+                        .map(|k| k.is_some())
+                        .map_err(|e| format!("{e:#}")),
+                )
+            }));
+        }
         app.refresh();
         let initial = app.selected.take();
         if let Some(id) = initial {
@@ -403,6 +434,11 @@ impl App {
         }
     }
     fn refresh(&mut self) -> bool {
+        // Later smoke stages render synthetic UI fixtures, not harness-owned asks.
+        // A delayed core notice must not replace them between captured frames.
+        if self.smoke && self.smoke_stage >= 26 {
+            return false;
+        }
         self.sync_questionnaires();
         let Some(h) = &self.harness else {
             return false;
@@ -534,6 +570,7 @@ impl App {
         }));
     }
     fn prepare_visible(&mut self) {
+        let mut visible_media = Vec::new();
         if let Some(session) = &self.current_session {
             let visible = &self.transcript.order[self.transcript.visible()];
             let ids: HashSet<_> = visible
@@ -556,15 +593,23 @@ impl App {
                         )
                     });
                 }
-                if let EntryKind::Tool { input, output, .. } = &entry.kind
+                if let EntryKind::Tool {
+                    input,
+                    output,
+                    media,
+                    ..
+                } = &entry.kind
                     && self.expanded.contains(&entry.id)
                 {
+                    visible_media.extend(media.iter().cloned());
                     self.outputs
                         .entry(entry.id.clone())
                         .or_insert_with(|| tool_output::Output::new(input, output));
                 }
             }
         }
+        self.tasks
+            .push(self.image_view.prepare(&visible_media).map(Message::Image));
     }
     fn prepare_sidebar(&mut self) {
         let needle = self.search.to_lowercase();
@@ -761,6 +806,9 @@ impl App {
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
+        if !matches!(self.modal, Some(Modal::Image(_))) {
+            self.image_view.close();
+        }
         if self.modal.is_some() || self.context_menu.is_some() {
             self.footer_menu = None;
         }
@@ -813,6 +861,64 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::Image(message) => {
+                let skipped = matches!(message, crate::image_view::Message::Thumbnail(_, None));
+                self.image_view.update(message);
+                if skipped {
+                    self.prepare_visible();
+                }
+            }
+            Message::OpenImage(media) => {
+                let task = self.image_view.open(&media).map(Message::Image);
+                self.modal = Some(Modal::Image(media));
+                return task;
+            }
+            Message::ImageBackend(backend) => self.settings.images.backend = backend,
+            Message::ImageModel(model) => self.settings.images.model = model,
+            Message::ImageQuality(quality) => self.settings.images.quality = quality,
+            Message::ResetImageModel => {
+                self.settings.images.model = pico_core::image_tools::DEFAULT_API_MODEL.into()
+            }
+            Message::CancelSettings => {
+                self.settings = self.catalog.settings.clone();
+                self.context_text = self.settings.context_limit.to_string();
+                self.threshold_text = self.settings.compact_percent.to_string();
+                self.settings_open = false;
+                self.api_key_draft.clear();
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+            }
+            Message::ApiKey(key) => self.api_key_draft = key,
+            Message::SaveApiKey | Message::RemoveApiKey => {
+                if let Some(h) = &self.harness {
+                    let h = h.clone();
+                    let key = if matches!(message, Message::RemoveApiKey) {
+                        String::new()
+                    } else {
+                        self.api_key_draft.clone()
+                    };
+                    self.tasks.push(self.io.run(move || {
+                        Message::ApiKeySaved(
+                            h.store
+                                .save_api_key(&key)
+                                .map(|()| !key.trim().is_empty())
+                                .map_err(|e| {
+                                    format!("Could not save API key: {e:#}. Fix storage and retry.")
+                                }),
+                        )
+                    }));
+                }
+            }
+            Message::ApiKeySaved(result) => match result {
+                Ok(configured) => {
+                    self.api_key_configured = configured;
+                    self.api_key_draft.clear();
+                }
+                Err(e) => self.error = Some(e),
+            },
+            Message::ApiKeyStatus(result) => match result {
+                Ok(configured) => self.api_key_configured = configured,
+                Err(e) => self.error = Some(e),
+            },
             Message::Press(_) => unreachable!("press requests are resolved by the root widget"),
             Message::Selected(result) => {
                 self.io_busy = false;
@@ -910,21 +1016,21 @@ impl App {
             }
             Message::Deleted(id, result) => {
                 self.io_busy = false;
-                match result {
-                    Ok(()) => {
-                        let selected = self.parent_id() == Some(id.as_str());
-                        if selected {
-                            self.draft_dirty = false;
-                            self.selected = None;
-                        }
-                        self.refresh();
-                        if selected {
-                            self.restore_draft();
-                        }
-                        self.modal = None;
+                let deleted =
+                    result.is_ok() || self.harness.as_ref().is_some_and(|h| h.get(&id).is_none());
+                if deleted {
+                    let selected = self.parent_id() == Some(id.as_str());
+                    if selected {
+                        self.draft_dirty = false;
+                        self.selected = None;
                     }
-                    Err(error) => self.error = Some(error),
+                    self.refresh();
+                    if selected {
+                        self.restore_draft();
+                    }
+                    self.modal = None;
                 }
+                self.fail(result);
             }
             Message::Edited(result) => {
                 self.fail(result);
@@ -1656,6 +1762,9 @@ impl App {
                 }
             }
             Message::Capture => {
+                if self.io_busy {
+                    return delayed_capture();
+                }
                 if let Some(id) = self.window_id {
                     return window::screenshot(id).map(Message::Screenshot);
                 }
@@ -1731,6 +1840,7 @@ impl App {
                     );
                 }
             }
+            Some(Modal::Image(_)) => {}
             Some(Modal::Quit) => return self.quit(),
             Some(Modal::Link(url)) => {
                 self.modal = None;
@@ -1809,6 +1919,7 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveDraft));
         }
+        subscriptions.push(self.image_view.subscription().map(Message::Image));
         Subscription::batch(subscriptions)
     }
     pub fn view(&self) -> Element<'_, Message> {
@@ -2484,6 +2595,7 @@ impl App {
                 input,
                 complete,
                 parent,
+                media,
                 ..
             } => {
                 let open = self.expanded.contains(&entry.id);
@@ -2547,6 +2659,11 @@ impl App {
                     );
                 }
                 if open {
+                    for item in media {
+                        if item.thumbnail.is_some() {
+                            block = block.push(self.image_view.thumbnail(item));
+                        }
+                    }
                     if let Some(view) = self.outputs.get(&entry.id) {
                         block =
                             block.push(view.view(&entry.id, self.chat_selection.clone(), index));
@@ -2707,6 +2824,7 @@ impl App {
             (SettingsTab::Account, "Account"),
             (SettingsTab::General, "General"),
             (SettingsTab::Models, "Models"),
+            (SettingsTab::Images, "Images"),
         ] {
             tabs = tabs.push(
                 button(text(label).size(13).width(Fill).align_x(iced::Center))
@@ -2757,6 +2875,33 @@ impl App {
                                 .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
                                 .padding(10),
                         );
+                }
+                settings=settings.push(widget::rule::horizontal(1))
+                    .push(text("OpenAI API key · images only").size(14))
+                    .push(text(if self.api_key_configured {"A private API key is saved."}else{"No API key saved."}).size(12).color(MUTED))
+                    .push(text_input(if self.api_key_configured {"Enter a replacement key"}else{"Enter API key"},&self.api_key_draft).secure(true).on_input(Message::ApiKey).padding(8))
+                    .push(row![button("Save key").on_press_maybe((!self.api_key_draft.trim().is_empty()).then_some(Message::SaveApiKey)),button("Remove key").on_press_maybe(self.api_key_configured.then_some(Message::RemoveApiKey))].spacing(8))
+                    .push(text("Stored privately, separately from settings. No environment override. Signing out of ChatGPT does not remove this key.").size(12).color(MUTED));
+            }
+            SettingsTab::Images => {
+                use pico_core::image_tools::{Backend, DEFAULT_API_MODEL, QUALITIES};
+                settings=settings
+                    .push(text("Image generation").size(18))
+                    .push(text("Billing backend").size(12))
+                    .push(pick_list([Backend::Codex,Backend::Api],Some(self.settings.images.backend),Message::ImageBackend).width(Fill))
+                    .push(text("Codex uses your ChatGPT subscription. API generations are billed separately. Pico never switches billing automatically.").size(12).color(MUTED))
+                    .push(text("API model · generation and editing").size(12))
+                    .push(text_input(DEFAULT_API_MODEL,&self.settings.images.model).on_input(Message::ImageModel).padding(8))
+                    .push(button("Reset API model to current default").on_press(Message::ResetImageModel).style(button::text))
+                    .push(text("Quality · both backends").size(12))
+                    .push(pick_list(QUALITIES,Some(self.settings.images.quality.as_str()),|q|Message::ImageQuality(q.into())).width(Fill))
+                    .push(text("Size is automatic. GIF and quality availability depend on your model and account. Unsupported choices return an error, never a silent downgrade.").size(12).color(MUTED));
+                if self.settings.images.backend == Backend::Api && !self.api_key_configured {
+                    settings = settings.push(
+                        text("Add an API key in Account before generating.")
+                            .size(12)
+                            .color(ACCENT),
+                    );
                 }
             }
             SettingsTab::General => {
@@ -2850,9 +2995,15 @@ impl App {
         let mut panel_content = column![header, scrollable(settings).height(Fill)].spacing(14);
         if self.settings_tab != SettingsTab::Account {
             panel_content = panel_content.push(
-                button("Save")
-                    .on_press(Message::ApplySettings)
-                    .style(secondary),
+                row![
+                    button("Save")
+                        .on_press(Message::ApplySettings)
+                        .style(secondary),
+                    button("Cancel")
+                        .on_press(Message::CancelSettings)
+                        .style(button::text)
+                ]
+                .spacing(8),
             );
         }
         container(panel_content)
@@ -3196,6 +3347,11 @@ impl App {
     }
     fn modal_view(&self, modal: &Modal) -> Element<'_, Message> {
         let (title, body, confirm) = match modal {
+            Modal::Image(media) => {
+                return self
+                    .image_view
+                    .view(media, self.window_width, self.window_height);
+            }
             Modal::AddProject => (
                 "Add project",
                 "Choose a local folder. Commands run without approval prompts and can access files outside this folder.",
@@ -3317,6 +3473,7 @@ impl App {
                         output: "Script completed\n14 tests passed".into(),
                         complete: true,
                         parent: None,
+                        media: vec![],
                     },
                 };
                 s.entries.push(tool);
@@ -3661,10 +3818,69 @@ impl App {
                     ]);
                 }
             }
+            32 => {
+                self.active_questionnaire = None;
+                self.questionnaires.clear();
+                self.settings_open = true;
+                self.settings_tab = SettingsTab::Images;
+            }
+            33 => {
+                self.settings_open = false;
+                let media = pico_core::media::MediaStore::new(
+                    self.smoke_dir
+                        .as_ref()
+                        .expect("smoke directory")
+                        .join("image-smoke"),
+                )
+                .image(include_bytes!("fixtures/media.png"))
+                .expect("valid PNG fixture");
+                let mut session = Session::new(
+                    self.smoke_dir.as_ref().unwrap().clone(),
+                    &self.catalog.settings,
+                );
+                let entry = Entry {
+                    id: "smoke-image".into(),
+                    text: String::new(),
+                    kind: EntryKind::Tool {
+                        name: "view_image".into(),
+                        input: "{path:example.png}".into(),
+                        output: media.description(),
+                        complete: true,
+                        parent: None,
+                        media: vec![media],
+                    },
+                };
+                session.entries.push(entry);
+                self.current_session = Some(session);
+                self.expanded.insert("smoke-image".into());
+                self.rebuild_transcript();
+                self.prepare_visible();
+                return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
+            }
+            34 => {
+                let media = pico_core::media::MediaStore::new(
+                    self.smoke_dir
+                        .as_ref()
+                        .expect("smoke directory")
+                        .join("image-smoke"),
+                )
+                .image(include_bytes!("fixtures/media.gif"))
+                .expect("valid GIF fixture");
+                let task = self.image_view.open(&media).map(Message::Image);
+                self.modal = Some(Modal::Image(media));
+                return Task::batch([task, delayed_capture()]);
+            }
+            35 => {
+                self.image_view.update(crate::image_view::Message::Toggle);
+            }
+            36 => {
+                self.image_view
+                    .update(crate::image_view::Message::ActualSize);
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -4073,6 +4289,106 @@ mod tests {
 
     fn app() -> App {
         App::new(true, Arc::new(AtomicBool::new(false))).0
+    }
+    #[tokio::test]
+    async fn image_settings_credentials_and_modal_survive_real_ui_updates() {
+        let mut app = app();
+        dispatch(&mut app, Message::ToggleSettings).await;
+        dispatch(&mut app, Message::SettingsTab(SettingsTab::Images)).await;
+        dispatch(&mut app, Message::ImageModel("custom-image-model".into())).await;
+        dispatch(
+            &mut app,
+            Message::ImageBackend(pico_core::image_tools::Backend::Api),
+        )
+        .await;
+        dispatch(&mut app, Message::ImageQuality("high".into())).await;
+        dispatch(&mut app, Message::ApplySettings).await;
+        let saved = app.harness.as_ref().unwrap().store.load().unwrap().0;
+        assert_eq!(saved.settings.images.model, "custom-image-model");
+        assert_eq!(saved.settings.images.quality, "high");
+        dispatch(&mut app, Message::ImageModel("discard-me".into())).await;
+        dispatch(&mut app, Message::CancelSettings).await;
+        assert_eq!(app.settings.images.model, "custom-image-model");
+        dispatch(&mut app, Message::ApiKey("private-test-key".into())).await;
+        dispatch(&mut app, Message::SaveApiKey).await;
+        assert!(app.api_key_configured);
+        assert!(app.api_key_draft.is_empty());
+        assert_eq!(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .store
+                .api_key()
+                .unwrap()
+                .as_deref(),
+            Some("private-test-key")
+        );
+        dispatch(&mut app, Message::RemoveApiKey).await;
+        assert!(!app.api_key_configured);
+        let root = app.smoke_dir.as_ref().unwrap().clone();
+        let media = pico_core::media::MediaStore::new(root.join("test-media"))
+            .image(include_bytes!("fixtures/media.gif"))
+            .unwrap();
+        stored_session(&mut app, root).await;
+        let id = app.selected.clone().unwrap();
+        let entry_id = pico_core::store::id();
+        let h = app.harness.as_ref().unwrap().clone();
+        h.edit(&id, |s| {
+            s.entries.push(Entry {
+                id: entry_id.clone(),
+                text: String::new(),
+                kind: EntryKind::Tool {
+                    name: "image_gen__imagegen".into(),
+                    input: "generate".into(),
+                    output: media.description(),
+                    complete: true,
+                    parent: None,
+                    media: vec![media.clone()],
+                },
+            })
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        dispatch(&mut app, Message::ToggleEntry(entry_id)).await;
+        dispatch(&mut app, Message::OpenImage(media.clone())).await;
+        assert!(matches!(&app.modal,Some(Modal::Image(m)) if m==&media));
+        let _ = app.view();
+        dispatch(&mut app, Message::Image(crate::image_view::Message::Toggle)).await;
+        dispatch(
+            &mut app,
+            Message::Image(crate::image_view::Message::ActualSize),
+        )
+        .await;
+        let _ = app.view();
+        dispatch(&mut app, Message::Dismiss).await;
+        assert!(app.modal.is_none());
+        let reloaded = h.store.load_session(&id).unwrap();
+        assert!(
+            matches!(&reloaded.entries[0].kind,EntryKind::Tool {media:m,..} if m==&vec![media])
+        );
+    }
+    #[tokio::test]
+    async fn late_core_notifications_do_not_replace_rendered_smoke_fixtures() {
+        let mut app = app();
+        app.smoke_stage = 26;
+        let request = pico_core::questionnaire::Request::parse(
+            r#"{"questions":[{"id":"q","question":"fixture","kind":"text"}]}"#,
+        )
+        .unwrap();
+        app.questionnaires.insert(
+            "smoke-questionnaire".into(),
+            questionnaire::Draft::new(pico_core::questionnaire::Pending {
+                id: "smoke-questionnaire".into(),
+                request: Arc::new(request),
+            }),
+        );
+        app.active_questionnaire = Some("smoke-questionnaire".into());
+        dispatch(&mut app, Message::Changed).await;
+        assert!(app.questionnaires.contains_key("smoke-questionnaire"));
+        assert_eq!(
+            app.active_questionnaire.as_deref(),
+            Some("smoke-questionnaire")
+        );
     }
     async fn stored_session(app: &mut App, path: PathBuf) {
         let session = Session::new(path, &app.catalog.settings);
@@ -5742,6 +6058,7 @@ Then implement the fix.";
                     output: "long output".repeat(10000),
                     complete: true,
                     parent: None,
+                    media: vec![],
                 },
             })
         })

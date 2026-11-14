@@ -112,6 +112,7 @@ pub struct Harness {
     pub store: Store,
     pub auth: Arc<Auth>,
     provider: Arc<Provider>,
+    image_client: reqwest::Client,
     runtime: Option<tokio::runtime::Runtime>,
     conversations: Mutex<HashMap<String, Arc<Conversation>>>,
     summaries: Mutex<HashMap<String, SessionSummary>>,
@@ -137,7 +138,9 @@ impl Harness {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
+        let image_client = crate::image_tools::ImageTools::client()?;
         let harness = Arc::new_cyclic(|weak| Self {
+            image_client,
             weak: weak.clone(),
             loading: Mutex::new(()),
             subagents: Mutex::new(subagents),
@@ -186,9 +189,13 @@ impl Harness {
                             if let Some(result) = event.output {
                                 if let Some(entry) = session.entries.by_id_mut(&event.id)
                                     && let EntryKind::Tool {
-                                        output, complete, ..
+                                        output,
+                                        complete,
+                                        media,
+                                        ..
                                     } = &mut entry.kind
                                 {
+                                    *media = event.media;
                                     *output = result;
                                     *complete = true;
                                 }
@@ -202,6 +209,7 @@ impl Harness {
                                         output: String::new(),
                                         complete: false,
                                         parent: Some(event.parent),
+                                        media: vec![],
                                     },
                                 });
                             }
@@ -223,6 +231,22 @@ impl Harness {
                     }
                 }))
             });
+            let history_target = weak.clone();
+            let images = Arc::new(crate::image_tools::ImageTools::new(
+                self.store.clone(),
+                self.auth.clone(),
+                session.project.clone(),
+                &id,
+                session.child.is_none(),
+                Arc::new(move || {
+                    let conversation = history_target.upgrade().context("Session closed")?;
+                    if conversation.deleted.load(Ordering::Acquire) {
+                        bail!("Session deleted");
+                    }
+                    Ok(conversation.snapshot())
+                }),
+                self.image_client.clone(),
+            ));
             Conversation {
                 id: id.clone(),
                 revision: Arc::new(AtomicU64::new(0)),
@@ -254,7 +278,8 @@ impl Harness {
                         ) as crate::code_mode::Delegation
                     }),
                     questionnaires.clone(),
-                ),
+                )
+                .with_images(images),
                 questionnaires,
                 state: Arc::new(Mutex::new(session)),
                 running: AtomicBool::new(false),
@@ -798,6 +823,7 @@ impl Harness {
                             output: String::new(),
                             complete: false,
                             parent: None,
+                            media: vec![],
                         },
                     });
                     conversation.changed();
@@ -807,25 +833,28 @@ impl Harness {
                 let token = cancel.clone();
                 let parent = call_id.clone();
                 let result = tokio::task::spawn_blocking(move || match name.as_str() {
-                    "exec" => conv.code.exec(&input, &parent, &token),
-                    "wait" => conv.code.wait(&input, &token),
+                    "exec" => conv.code.exec_output(&input, &parent, &token),
+                    "wait" => conv.code.wait_output(&input, &token),
                     _ => bail!("Unknown tool {name}; only exec and wait are top-level tools"),
                 })
                 .await?;
-                let output = result.unwrap_or_else(|e| format!("Tool error: {e:#}"));
+                let output = result
+                    .unwrap_or_else(|e| crate::media::Output::text(format!("Tool error: {e:#}")));
                 {
                     let mut s = conversation.state.lock().expect("session lock");
                     if let Some(entry) = s.entries.by_id_mut(&call_id)
                         && let EntryKind::Tool {
                             output: result,
+                            media,
                             complete,
                             ..
                         } = &mut entry.kind
                     {
-                        *result = output.clone();
+                        *result = output.summary();
+                        *media = output.media();
                         *complete = true;
                     }
-                    s.input.push(json!({"type":if call["type"] == "custom_tool_call" { "custom_tool_call_output" } else { "function_call_output" },"call_id":call_id,"output":output}));
+                    s.input.push(json!({"type":if call["type"] == "custom_tool_call" { "custom_tool_call_output" } else { "function_call_output" },"call_id":call_id,"output":output.history()}));
                     conversation.changed();
                 }
                 conversation.save_async().await?;
@@ -1108,6 +1137,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
                 output: String::new(),
                 complete: false,
                 parent: Some("yielded-exec".into()),
+                media: vec![],
             },
         });
         let abandoned_id = abandoned.id.clone();
@@ -1393,6 +1423,55 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         std::thread::sleep(Duration::from_millis(80));
         assert!(!store.root().join(format!("sessions/{id}.json")).exists());
         assert!(store.load().unwrap().1.is_empty());
+    }
+    #[test]
+    fn image_snapshots_persist_and_cleanup_failure_never_resurrects_deleted_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state")).unwrap();
+        let session = Session::new(dir.path().into(), &Settings::default());
+        let id = session.id.clone();
+        store.save_session(&session).unwrap();
+        let h = Harness::new(store.clone(), vec![]).unwrap();
+        let c = h.insert(session);
+        let source = dir.path().join("image.png");
+        std::fs::write(&source, crate::media::tests::png()).unwrap();
+        let result = c
+            .code
+            .exec_output(
+                "image(await tools.view_image({path:'image.png'}));",
+                "view",
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let media = result.media().remove(0);
+        let saved = store.load_session(&id).unwrap();
+        assert!(saved.entries.iter().any(|e|matches!(&e.kind,EntryKind::Tool {media:m,complete:true,..} if m==&vec![media.clone()])));
+        std::fs::remove_file(source).unwrap();
+        assert_eq!(
+            std::fs::read(&media.path).unwrap(),
+            crate::media::tests::png()
+        );
+        // Force cleanup failure after the SQL transaction commits.
+        let media_dir = store.root().join("media").join(&id);
+        std::fs::remove_dir_all(&media_dir).unwrap();
+        std::fs::write(&media_dir, b"not a directory").unwrap();
+        let error = h.remove(&id).unwrap_err().to_string();
+        assert!(error.contains("was deleted"), "{error}");
+        assert!(h.get(&id).is_none());
+        c.save().unwrap();
+        assert!(store.load_session(&id).is_err());
+        assert!(store.load().unwrap().1.is_empty());
+        assert!(
+            c.code
+                .exec_output(
+                    "image(await tools.view_image({path:'image.png'}));",
+                    "late",
+                    &CancellationToken::new()
+                )
+                .unwrap()
+                .summary()
+                .contains("Session deleted")
+        );
     }
     #[test]
     fn missing_login_preserves_a_message_across_retry_and_restart() {

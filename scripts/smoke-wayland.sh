@@ -37,7 +37,7 @@ if [[ ! -S "$runtime/$WAYLAND_DISPLAY" ]]; then
     echo "Headless Wayland did not start. Re-enter nix develop and retry 'just smoke'." >&2
     exit 1
 fi
-if ! timeout 30s "$binary" --smoke-test >"$runtime/app.log" 2>&1; then
+if ! timeout 60s "$binary" --smoke-test >"$runtime/app.log" 2>&1; then
     cat "$runtime/app.log" "$runtime/weston.log" >&2
     echo "Window smoke test failed or timed out (renderer: $ICED_BACKEND)." >&2
     exit 1

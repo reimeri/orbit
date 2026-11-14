@@ -244,6 +244,15 @@ impl Provider {
         body: Value,
         emit: &(dyn Fn(Delta) + Send + Sync),
     ) -> Result<Response> {
+        let mut body = body;
+        let audio_supported =
+            crate::models::model(body["model"].as_str().context("Missing model")?)
+                .is_some_and(|m| m.audio_input);
+        body = tokio::task::spawn_blocking(move || {
+            crate::media::project(&mut body, audio_supported)?;
+            Ok::<_, anyhow::Error>(body)
+        })
+        .await??;
         let mut credentials = self.auth.token(None).await?;
         // V1's advisory Codex routing hint must match the pinned request body,
         // including retries and compaction. Normal mode has no tier hint.
@@ -636,6 +645,59 @@ mod tests {
         assert_eq!(body["store"], false);
     }
     #[tokio::test]
+    async fn durable_media_replays_as_images_and_compaction_archives_references() {
+        let reply = crate::test_support::completed(
+            json!([{"type":"message","content":[{"type":"output_text","text":"summary"}]}]),
+        );
+        let (dir, provider, mut requests, server) =
+            fixture(vec![(200, reply.clone()), (200, reply)]).await;
+        let store = crate::store::Store::open(dir.path().join("media-state")).unwrap();
+        let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        let media = crate::media::MediaStore::new(store.root().join("media").join(&session.id))
+            .image(&crate::media::tests::png())
+            .unwrap();
+        session.input.push(json!({"type":"custom_tool_call","name":"exec","call_id":"view","input":"image(await tools.view_image({path:'x.png'}))"}));
+        session.input.push(json!({"type":"custom_tool_call_output","call_id":"view","output":[{"type":"pico_media","media":media}]}));
+        session.entries.push(crate::store::Entry::new(
+            crate::store::EntryKind::Tool {
+                name: "exec".into(),
+                input: "view".into(),
+                output: media.description(),
+                complete: true,
+                parent: None,
+                media: vec![media.clone()],
+            },
+            "",
+        ));
+        store.save_session(&session).unwrap();
+        let mut restored = store.load_session(&session.id).unwrap();
+        provider
+            .respond(&restored, "test", &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap();
+        let request = requests.recv().await.unwrap();
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["input"][1]["output"][0]["type"], "input_image");
+        assert!(!request.contains("pico_media"));
+        assert!(restored.input[1]["output"][0]["media"]["path"].is_string());
+        restored
+            .input
+            .push(json!({"role":"user","content":"z".repeat(30_000)}));
+        let compacted = provider
+            .compact(&restored, "test", 8000, &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap();
+        let archive = crate::test_support::saved_output(compacted.summary.as_ref().unwrap());
+        assert!(
+            String::from_utf8(archive)
+                .unwrap()
+                .contains(media.path.to_str().unwrap())
+        );
+        assert!(media.path.exists());
+        assert!(media.thumbnail.unwrap().exists());
+        server.await.unwrap();
+    }
+    #[tokio::test]
     async fn truncated_stream_is_not_replayed_or_executed() {
         let partial = "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"partial\"}\n\n";
         let (dir, provider, mut requests, server) = fixture(vec![(200, partial.into())]).await;
@@ -801,6 +863,7 @@ mod tests {
                 output: tool_notice.clone(),
                 complete: true,
                 parent: Some("outer-call".into()),
+                media: vec![],
             },
             "",
         );

@@ -1,0 +1,208 @@
+# Images and code-mode media
+
+Pico's built-in image tools use the calling session's workspace, never the currently
+selected UI workspace. `exec` and `wait` remain the only top-level tools.
+
+## View
+
+```js
+image(await tools.view_image({path: "assets/screenshot.png"}));
+```
+
+`view_image({path: string})` returns `{image_url: string}`. Both main and child agents
+can call it. It accepts local PNG, JPEG, WebP and GIF; paths may be relative or
+absolute. Non-regular files (including FIFOs) are rejected without blocking.
+There is no `detail` argument: Pico uses the Codex unified image budget (original
+transport detail, at most 6000 pixels per dimension and 10,000 32-pixel patches).
+EXIF orientation is applied during preparation. The source file is never modified.
+Model images are prepared as PNG; animated GIF model input is a **static first
+frame**, explicitly reported to the agent, not an inspection of the animation.
+
+## Generate and edit
+
+```ts
+tools.image_gen__imagegen({
+  prompt: string,
+  output_path: string,
+  transparent_background?: boolean,             // false by default
+  referenced_image_paths?: string[],              // up to 5 absolute paths
+  num_last_images_to_include?: number,            // 1–5
+  gif?: {
+    frame_count?: number,                        // 2–16, default 9
+    frame_duration_ms?: number                   // 20–2000, default 200
+  }
+}): Promise<{image_url: string; output_hint?: string}>
+```
+
+Generation is available only to the **main agent**. The schema follows Codex,
+except that Pico requires `output_path` instead of automatically choosing an
+artifact destination. Unknown arguments are rejected.
+
+```js
+// @exec: {"yield_time_ms": 120000}
+generatedImage(await tools.image_gen__imagegen({
+  prompt: "A simple blue compass icon on a transparent background",
+  output_path: "assets/compass.png",
+  transparent_background: true
+}));
+```
+
+- Omit both reference mechanisms to generate a new image. Supply references to edit.
+- Explicit `referenced_image_paths` are absolute, following Codex's contract.
+- Alternatively, use `num_last_images_to_include` for images actually emitted to
+  the model in this session's current history. They are selected newest-first,
+  then sent oldest-first. Nested UI previews and child-session images do not count.
+  Complete/yield the emitting cell before selecting those images in another call.
+  Compaction can remove images from current context; use their saved paths if so.
+- Never provide both mechanisms. Too few available images is an actionable error.
+- For GIF editing, inspect extracted frames and create a regular-grid spritesheet.
+  Reference the spritesheet and supply `gif`; direct GIF references are rejected,
+  including GIFs selected through recent history.
+- Omit `gif` for PNG output, or supply `gif: {}` for the default animation.
+- Do not print full results with `text` or `notify`: they contain base64. Use
+  `generatedImage(result)`, which emits the image and the saved-path hint.
+
+### Files and recovery
+
+`output_path` must have `.png` without `gif`, or `.gif` with it. Relative paths
+resolve against the calling workspace; absolute paths are allowed. The parent
+must already exist and pass a write preflight. Existing files and symlinks, including dangling symlinks,
+are **never overwritten**. Pico-owned storage and `.pico/media` destinations,
+including resolved parent aliases, are rejected.
+
+Pico holds the resolved parent directory open and publishes a complete staged file
+with Linux `renameat2(RENAME_NOREPLACE)`. A competing destination writer wins
+without being overwritten; a moved parent is rejected. Files are caller-owned:
+session deletion never removes them. A crash can leave an uncommitted
+`.pico-image-*.tmp` in the destination directory.
+
+Invalid arguments explain what to correct and are rejected before requests.
+Generation can consume usage even if cancelled or if a connection fails. Pico
+never automatically retries uncertain image requests, HTTP 429/5xx, or API 401.
+Only a definite Codex 401 gets one synchronized OAuth refresh/retry. There are
+no redirects, model/quality downgrades, format fallbacks, or billing switches.
+
+After receiving valid image bytes, Pico saves a private recovery snapshot before
+publishing the caller file. If publication fails or cancellation is observed before
+publication, the error identifies those bytes: copy them to a new destination,
+**do not regenerate**. Malformed/unexpected returned image bytes are preserved
+under `/tmp` when possible, with a complete-data fallback if preservation fails.
+A successful publication is never undone because of a later persistence failure.
+Publication and logical session deletion share a lifecycle lease. If deletion wins,
+received bytes are preserved outside the deleted session directory; the recovery
+path therefore remains usable. Successful tool return data is built from the
+received bytes, not by rereading a concurrently deletable preview.
+Restart marks unfinished calls interrupted; it never replays a generation request.
+
+## Settings and credentials
+
+**Settings → Images**:
+
+- Codex subscription (default): ChatGPT OAuth. The pinned public Codex image
+  backend model is `gpt-image-2`; this is independent of the API model field.
+- OpenAI API: official `/v1/images/generations` and `/v1/images/edits`, using the
+  privately saved API key. API billing is separate from ChatGPT subscription usage.
+- API model ID: one editable ID for generation and editing, initially
+  `gpt-image-2.6-sunburst`. Reset explicitly adopts the current built-in default.
+- Shared quality: `auto` (default), `low`, `medium`, `high`, `xhigh`, `max`.
+  Values are sent unchanged. Backend/account/model support is not assumed.
+- Size is automatic. Save applies settings; Cancel discards staged image changes.
+  Each image call snapshots the saved settings; changing settings does not mutate
+  a request already underway.
+
+**Settings → Account** has a masked API-key entry, Save key, and Remove key.
+Credentials are in private `image-api-key.json` alongside the application's
+existing OAuth storage, not in `settings.json`, transcripts or model prompts.
+There is no environment override. OAuth sign-out does not remove the API key.
+Private files use mode 0600 and the application storage root uses mode 0700.
+
+The model-update skill maintains `image_tools::DEFAULT_API_MODEL` from official
+documentation. Updating that constant does **not** replace saved IDs, including
+IDs that once matched the default. Subscription defaults must be checked against
+Codex separately, not inferred from public API availability.
+
+## Helpers, persistence and UI
+
+- `image(url | {image_url} | ImageContent)` emits an image.
+- `audio(url | {audio_url} | AudioContent)` emits audio for a capable chat model.
+  PCM/float WAV clips shorter than 25 ms produce Codex's explanatory text notice.
+- `content(block | iterable)` emits MCP text, image, audio, resource and resource-link
+  blocks in order. Invalid blocks fail without discarding preceding emissions;
+  encrypted MCP text is not accepted by this helper.
+- `generatedImage({image_url, output_hint?})` emits image then optional hint.
+
+Only inline base64 data URLs are accepted, not HTTP(S) URLs or filesystem paths.
+`text`, `notify`, and existing text tools keep their text contracts. The three
+current catalog models support images but **not native audio**: `audio` preserves
+the artifact and returns an explicit capability error before adding unsupported
+content to model history. Audio playback, recording and generation are not part
+of this phase. The provider transport supports typed inline audio for future
+verified audio-capable catalog entries.
+
+JavaScript sees Codex-shaped result objects. Rust, SQLite and UI snapshots use
+ordered typed text/media parts and private file references, not repeated base64
+strings. Provider projection materializes bytes at the request boundary. Text
+budgets still preserve complete oversize output under `/tmp`; they never stringify
+or discard image/audio parts. Yields consume emitted content once. Fallback
+compaction archives full transcript metadata and media paths independently of
+model summaries.
+
+Private originals, prepared images and thumbnails live in `media/<session-id>/`
+under the existing **pico-evo storage root**. They survive restart and source-file
+changes. They are removed with their owning session/family, not during compaction
+or transcript eviction. Existing `.pico/media` assets are untouched. Failed cleanup
+after committed deletion is reported without allowing late callbacks to recreate
+sessions.
+
+Expanded tool results show static thumbnails. Click one for a fit-to-window or
+actual-size modal; GIFs animate there with Play/Pause. Closing the modal cancels
+obsolete decoding and stops animation subscriptions. Decoding runs on workers,
+with at most two UI decoders and visible-only thumbnail retention.
+
+Resource policy: 79 MiB per media input, 10,240,000 decoded image pixels,
+512 GIF frames / 256 MiB cumulative decoded animation data, 256 MiB JS heap,
+16 MiB serializable store and 64 media emissions between yields. Two image-tool
+calls can be active globally; waiting acquisition is cancellable. Image preparation
+is serialized to bound decoded allocations. These are explicit Pico resource
+limits, not promises about every backend's acceptance limits.
+
+## Reference provenance and live acceptance
+
+Public OpenAI Codex source, Apache-2.0, checked at commit
+`b1573f102413e96a6481087922bf425231222dee`:
+
+- `ext/image-generation/src/tool.rs`, `imagegen_description.md`, `imagegen_gif_description.md`
+- `core/src/tools/handlers/view_image.rs`, `view_image_spec.rs`, `core/src/image_preparation.rs`
+- `code-mode-runtime/src/runtime/{content.js,value.rs,audio.rs}`
+- `protocol/src/models/mcp_content.rs`, `codex-api/src/images.rs`
+
+Repository: <https://github.com/openai/codex>. Pico independently implements the
+contracts in Rust/QuickJS, not Codex/V8 or its extension/attachment machinery.
+Image preparation shares its budget and validation approach, not byte-identical
+encoding. Metadata is not retained in prepared PNGs; originals remain unchanged.
+
+Official capability/reference pages checked 2026-11-14:
+- <https://developers.openai.com/api/reference/resources/images/methods/generate>
+- <https://developers.openai.com/api/reference/resources/images/methods/edit>
+- <https://developers.openai.com/api/docs/models/gpt-6-astra>
+- <https://developers.openai.com/api/docs/models/gpt-6.1-sol>
+- <https://developers.openai.com/api/docs/models/gpt-6-luna>
+
+Automated tests use local fixtures, never user credentials. The following live
+acceptance checks consume account usage and must be authorized separately:
+
+1. Codex sign-in: generate a PNG, edit it with an absolute reference, inspect both.
+2. API key + explicit API selection: generate/edit with the configured model;
+   verify separate billing and requested model/quality in the result hint.
+3. Generate a 2-frame GIF if the account has access; verify animation and pause in
+   the modal. If unavailable, confirm an explicit backend error with no fallback.
+4. Try an invalid format, reference combination and existing destination: confirm
+   actionable errors and no remote request.
+5. Restart; move/delete the caller image. Open the saved tool thumbnail/modal.
+6. Switch sessions and inspect a child image. Confirm children cannot call imagegen.
+7. Cancel a slow generation: confirm the uncertainty/recovery message; inspect the
+   destination and recovery artifacts before choosing whether to repeat anything.
+
+Public Codex source and HTTP fixtures do not establish live subscription model
+entitlement or availability. GIF is backend/account-dependent; unsupported quality
+combinations are also expected service errors, not reasons for implicit fallback.

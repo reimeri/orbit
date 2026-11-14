@@ -28,8 +28,9 @@ include `text`, `exit`, `store`/`load`, timers, `ALL_TOOLS`, `notify` and `yield
 `notify` injects an additional custom-tool output into the conversation;
 `yield_control` yields the accumulated cell output while execution continues.
 Unawaited promises do not keep a completed module alive. `store` values survive
-cells/turns in the current app process, not restarts. Image/audio helpers are outside
-Phase 1.
+cells/turns in the current app process, not restarts. Image/audio helpers and image
+tools are now implemented; see [images](images.md) for schemas, billing, file
+ownership, capability handling and media limits.
 
 Nested shell inputs:
 
@@ -51,7 +52,7 @@ TTY disabled, exec yield 10,000 ms, stdin yield 250 ms. A running command return
 a numeric session ID; empty `chars` polls it. TTY mode keeps input open and accepts
 control characters such as `\u0003`. Non-TTY commands have closed stdin.
 
-Pico resource policy: 64 MiB JS heap and 1 MiB stack per cell, 16 MiB serializable
+Pico resource policy: 256 MiB JS heap and 1 MiB stack per cell, 16 MiB serializable
 session store, 32 open cells, 64 concurrent nested calls and 64 shell sessions per
 conversation. Waits are bounded to 300 seconds. Command output uses a
 1 MiB in-memory spill threshold, spilling the complete unread output to a private file under
@@ -80,7 +81,7 @@ public OpenAI Codex source (Apache-2.0), retrieved during implementation:
 
 Repository: <https://github.com/openai/codex>. Pico has its own Rust/QuickJS runtime;
 it does not embed Codex/V8, Codex's remote execution service, approval/sandbox
-machinery, or Phase 2 multimedia tools. No backwards-compatibility adapters exist.
+machinery, or its extension/attachment infrastructure. No backwards-compatibility adapters exist.
 
 Cell text buffers spill to `/tmp` after 4 MiB of UTF-8 (including inserted separators),
 retaining all text. The outer `exec`/`wait` budget also uses complete-file references
@@ -103,8 +104,8 @@ inline (hexadecimal for non-UTF-8 bytes), rather than silently discarding it.
 ## Subagents
 
 Main conversations additionally expose `tools.spawn_subagent`,
-`tools.wait_subagent`, and `tools.list_subagents`. Children expose only shell
-tools, preventing nested delegation. See [subagents](subagents.md) for the complete
+`tools.wait_subagent`, and `tools.list_subagents`. Children expose shell tools and `view_image`, but not generation, questionnaires
+or delegation. See [subagents](subagents.md) for the complete
 contract, profile defaults, final-only results and completion/Stop lifecycle.
 A successful spawn creates an assignment independent of the JavaScript cell: it
 continues after the cell completes or is terminated. Use the returned persistent

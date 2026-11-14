@@ -3,7 +3,8 @@
 A native Wayland coding harness written in Rust with iced. **Phase 1 is implemented:**
 project/session management, streaming Markdown chat, ChatGPT subscription login,
 an agent loop, and JavaScript code mode over interactive shell tools. Phase 2 now
-also includes asynchronous Review and Explore subagents.
+also includes asynchronous Review/Explore subagents, questionnaires, image
+viewing/generation, and multimodal code-mode helpers.
 
 ## Run
 
@@ -78,7 +79,8 @@ research and replace these families with newer versions.
   instruction, **not sandboxed**.
 
 There are **no extensions** and no V1 migration/compatibility layer. Remaining
-Phase 2 browser, image, questionnaire, diff and statistics features are not placeholder UI.
+Phase 2 browser, diff, skill-loading and statistics features remain unimplemented;
+there is no placeholder UI for them.
 
 ## State and recovery
 
@@ -142,3 +144,15 @@ shell/PTYS, steering, Stop, restart persistence and compaction.
 - `docs/development.md`: incremental builds, verification and troubleshooting.
 - `docs/code-mode.md`: tool contract, runtime limits and upstream references.
 - `pico-reference/`: ignored V1 reference; not a dependency or packaging input.
+
+### Image tools
+
+[Image tools and settings](docs/images.md) are built in: main/child `view_image`,
+main-only `image_gen__imagegen` with required caller-owned output paths, PNG/GIF
+generation/editing through Codex subscription or explicit OpenAI API billing,
+and `image`/`audio`/`content`/`generatedImage` code-mode helpers. Expanded results
+show durable thumbnails with an in-app full-size/animated GIF viewer.
+Settings → Images selects backend, API model and quality; Account stores a masked
+private API key separately from OAuth. Current chat models do not accept audio;
+the helper reports this explicitly. Live generation acceptance consumes usage and
+is documented separately from credential-free fixture tests.

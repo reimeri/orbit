@@ -35,6 +35,7 @@
         nativeBuildInputs = with pkgs; [ pkg-config mold makeWrapper ];
         buildInputs = runtimeLibraries ++ [ pkgs.sqlite ];
         doCheck = true;
+        nativeCheckInputs = [ pkgs.git ];
         cargoTestFlags = [ "--workspace" ];
         doInstallCheck = true;
         nativeInstallCheckInputs = [ pkgs.weston ];

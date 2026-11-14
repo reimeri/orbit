@@ -7,7 +7,7 @@ rust-version.workspace = true
 [dependencies]
 pico-core = { path = "../pico-core" }
 iced = { version = "0.14.0", default-features = false, features = [
-    "wgpu", "tiny-skia", "wayland", "tokio", "crisp", "markdown", "advanced",
+    "wgpu", "tiny-skia", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs",
 ] }
 
 unicode-width = "0.2"

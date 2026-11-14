@@ -23,6 +23,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net",
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
 [dev-dependencies]
 tempfile = "3"
 

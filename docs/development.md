@@ -110,7 +110,7 @@ and launches `pico-evo --smoke-test`. The app requests an iced screenshot after
 its window opens, checks nonzero size, the RGBA byte count and non-uniform pixels,
 prints `SMOKE_OK`, and exits successfully only on a valid frame. This exercises
 real window creation and rendering, not just process startup. The script times
-out after 30 seconds, reports logs on failure, and removes its private runtime
+out after 60 seconds, reports logs on failure, and removes its private runtime
 directory and compositor on exit. It does not change your existing compositor.
 
 `just smoke-gpu` forces `ICED_BACKEND=wgpu`, disables `DISPLAY`, and exercises
@@ -250,3 +250,28 @@ no iced types enter the core. Pending state is in-memory only, and restart expli
 cancels unfinished asks. Run `cargo test --locked --workspace questionnaire` for
 focused coverage. Window smoke stages exercise questionnaire states and constrained
 layouts. See [questionnaires](questionnaires.md) for acceptance checks.
+
+## Media pipeline
+
+`media.rs` owns typed output parts, private immutable snapshots, bounded image/GIF
+preparation and provider projection. `image_tools.rs` owns strict tool arguments,
+Codex/API transport, billing settings and atomic no-replace output publication.
+Code-mode buffers text and media in order; all text buffers are prepared before
+consuming an output batch, so a spill failure remains retryable. Only the provider
+boundary materializes data URLs for persisted media references.
+
+`image_view.rs` in the app decodes thumbnails/modal frames on bounded workers,
+rejects stale completion messages, and animates only an open playing modal.
+Iced uses `image-without-codecs`; the core enables PNG/JPEG/WebP/GIF explicitly,
+without image's broad default codec dependency set or any X11 backend.
+
+Run `cargo test --locked --workspace` for media, generation fixture and UI lifecycle
+regressions. The software/GPU window smoke includes the Images settings tab, static
+thumbnail, animated modal, pause and actual-size views using deterministic local
+fixtures. See [images](images.md) for resource limits and paid live acceptance.
+
+The expanded rendered smoke sequence now includes 37 frames (including media).
+Its timeout is 60 seconds; a measured software debug run took ~33 seconds locally.
+
+The Nix package supplies Git through `nativeCheckInputs` for Git fixture tests;
+this is separate from the installed wrapper's runtime PATH.

@@ -5,6 +5,7 @@ pub struct Model {
     pub id: &'static str,
     pub name: &'static str,
     pub efforts: &'static [&'static str],
+    pub audio_input: bool,
 }
 
 pub const DEFAULT_MODEL: &str = "gpt-6.1-sol";
@@ -12,16 +13,19 @@ pub const MODELS: &[Model] = &[
     Model {
         id: "gpt-6-astra",
         name: "GPT-6-Astra",
+        audio_input: false,
         efforts: &["low", "medium", "high", "xhigh", "max"],
     },
     Model {
         id: "gpt-6.1-sol",
         name: "GPT-6.1-Sol",
+        audio_input: false,
         efforts: &["low", "medium", "high", "xhigh", "max"],
     },
     Model {
         id: "gpt-6-luna",
         name: "GPT-6-Luna",
+        audio_input: false,
         efforts: &["none", "low", "medium", "high", "xhigh", "max"],
     },
 ];

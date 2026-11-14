@@ -77,13 +77,17 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - V1-style select/text panel, editable options, custom answers and keyboard navigation
     - Session-local drafts, Collapse/Resume, scoped cancellation; no clarification conversation
     - Lossless large answers without V1's answer byte/line limits
-  - Image viewing, and image generation
-    - view_image tool for the agent. This should follow the implementation used in openai codex
-    - codex based image_gen__imagegen tool for image generation in the code mode. Uses you openai account for generations. Same schema as what codex image_gen__imagegen tool provides
-    - For image generation add a option to settings to switch to using api image models with api key. Add api key setting to the account tab of settings. You can set the used API image generation model id in setting in a text field.
-    - When looking at expanded tool results of view_image and the image generation tools you should see a thumbnail image in the chat
-  - Implement rest of the code mode helpers. These should follow how codex handles these in code mode.
-    - image, audio, content, generatedImage 
+  - [x] Image viewing and image generation — see [contracts, settings and acceptance](docs/images.md)
+    - Codex-style unified `view_image` for main and child agents
+    - Main-only `image_gen__imagegen`, with required `output_path`, PNG/GIF generation and editing
+    - Codex subscription or explicit OpenAI API billing; private Account API-key setting
+    - Images settings: editable API model ID, shared quality, automatic size
+    - Durable expanded-result thumbnails; full-size modal with GIF Play/Pause
+    - Atomic no-overwrite output publication, explicit failures and paid-result recovery
+    - Model-update skill maintains the default API image model without replacing saved IDs
+  - [x] Remaining code-mode helpers: `image`, `audio`, `content`, `generatedImage`
+    - Ordered typed media through yielding, persistence, replay and compaction
+    - Explicit unsupported-audio capability errors; no audio recording/playback tools
   - Browser tools
   - Use skill
 - UI
