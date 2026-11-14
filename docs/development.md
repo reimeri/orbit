@@ -270,7 +270,8 @@ regressions. The software/GPU window smoke includes the Images settings tab, sta
 thumbnail, animated modal, pause and actual-size views using deterministic local
 fixtures. See [images](images.md) for resource limits and paid live acceptance.
 
-The expanded rendered smoke sequence now includes 37 frames (including media).
+The expanded rendered smoke sequence now includes 39 frames (including media and
+Markdown image previews, missing-source errors and the byte-backed GIF modal).
 Its timeout is 60 seconds; a measured software debug run took ~33 seconds locally.
 
 The Nix package supplies Git through `nativeCheckInputs` for Git fixture tests;

@@ -144,20 +144,26 @@ pub fn copy_blocks(
     result
 }
 
-pub struct Viewer {
+pub struct Viewer<'a> {
+    images: Option<&'a crate::markdown_images::Cache>,
     selection: Shared,
     entry: usize,
     next: Cell<usize>,
     pub blocks: RefCell<Vec<Block>>,
 }
-impl Viewer {
+impl<'a> Viewer<'a> {
     pub fn new(selection: Shared, entry: usize) -> Self {
         Self {
+            images: None,
             selection,
             entry,
             next: Cell::new(0),
             blocks: RefCell::new(Vec::new()),
         }
+    }
+    pub fn with_images(mut self, images: &'a crate::markdown_images::Cache) -> Self {
+        self.images = Some(images);
+        self
     }
     fn block(
         &self,
@@ -186,7 +192,7 @@ impl Viewer {
         )
     }
 }
-impl<'a> markdown::Viewer<'a, Message> for Viewer {
+impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
     fn on_link_click(url: String) -> Message {
         Message::Link(url)
     }
@@ -259,19 +265,34 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
     fn image(
         &self,
         settings: markdown::Settings,
-        _url: &'a String,
-        _title: &'a str,
+        url: &'a String,
+        title: &'a str,
         alt: &markdown::Text,
     ) -> Element<'a, Message> {
-        container(self.block(
+        // Keep the alt-text block in the same logical position for selection/copy,
+        // regardless of whether the image is loading, failed, or ready.
+        let caption = self.block(
             alt.spans(settings.style),
             settings.text_size,
             Font::DEFAULT,
             "\n\n",
-        ))
-        .padding(settings.spacing.0)
-        .class(<iced::Theme as markdown::Catalog>::code_block())
-        .into()
+        );
+        let mut body = column![].spacing(4);
+        if let Some(images) = self.images {
+            body = body.push(images.view(url));
+        }
+        body = body.push(caption);
+        let content = container(body).max_width(640).padding(settings.spacing.0);
+        if title.is_empty() {
+            content.into()
+        } else {
+            iced::widget::tooltip(
+                content,
+                iced::widget::text(title.to_owned()),
+                iced::widget::tooltip::Position::FollowCursor,
+            )
+            .into()
+        }
     }
 }
 
@@ -683,6 +704,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn markdown_image_previews_preserve_alt_text_selection_positions() {
+        let selection = Shared::default();
+        let content = markdown::Content::parse("Before\n\n![Caption](image.png)\n\nAfter");
+        let images = crate::markdown_images::Cache::default();
+        let visible = Viewer::new(selection.clone(), 0).with_images(&images);
+        let copy = Viewer::new(selection.clone(), 0);
+        let settings = markdown::Settings::from(iced::Theme::Dark);
+        let _ = markdown::view_with(content.items(), settings, &visible);
+        let _ = markdown::view_with(content.items(), settings, &copy);
+        for viewer in [visible, copy] {
+            selection.borrow_mut().start(Position {
+                entry: 0,
+                block: 0,
+                byte: 0,
+            });
+            selection.borrow_mut().extend(Position {
+                entry: 0,
+                block: 2,
+                byte: 5,
+            });
+            assert_eq!(
+                copy_blocks(&selection.borrow(), [(0, viewer.blocks.into_inner())]),
+                "Before\n\nCaption\n\nAfter"
+            );
+        }
+    }
     #[test]
     fn drag_across_markdown_and_messages_copies_visible_text_in_both_directions() {
         let selection = Shared::default();

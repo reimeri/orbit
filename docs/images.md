@@ -166,6 +166,45 @@ calls can be active globally; waiting acquisition is cancellable. Image preparat
 is serialized to bound decoded allocations. These are explicit Pico resource
 limits, not promises about every backend's acceptance limits.
 
+## Markdown images in chat
+
+Chat renders standard Markdown images such as:
+
+```md
+![Screenshot](assets/screenshot.png "Click to inspect")
+![Local image](file:///home/me/Pictures/example.png)
+![Remote image](https://example.com/image.webp)
+```
+
+Relative paths resolve against the **displayed conversation's workspace**, including
+child conversations, not the process working directory or another selected project.
+Absolute paths and local `file://` URLs are also supported. URL-encode spaces and
+special characters in destinations, or use Markdown angle-bracket destinations for
+paths with spaces. PNG, JPEG, WebP and GIF share the existing image validation limits;
+SVG, data URLs and other source schemes are not supported.
+
+HTTP(S) images load **automatically** when their message is mounted in the chat.
+This contacts the image host (including any tracking URL in the Markdown); Pico
+sends no account credentials or browser cookies. Downloads have a 30-second timeout,
+at most five redirects and the same 79 MiB input limit, including responses without a
+Content-Length header. Embedded URL credentials and non-HTTP(S) redirects are rejected.
+
+Previews fit the chat column and show the image's alt text beneath them. The optional
+title appears on hover. Click a preview for the existing full-size viewer, with
+fit/actual-size controls and GIF Play/Pause. Chat previews themselves remain static.
+Loading and error states preserve the alt text; failed images offer **Retry image**.
+Ordinary links to image files remain links, not embedded previews.
+
+Markdown images are **not saved with the conversation** and are not added to model
+context as media. Only their Markdown source text is persisted. A visible-message
+memory cache retains source bytes and thumbnails; leaving the message/session evicts
+it and cancels pending work. Reopening reloads the original source, so a moved/deleted
+file or unavailable URL produces an explicit error. An already open modal can finish
+using its loaded bytes. Two source loads and two shared decoders may run concurrently;
+the retained Markdown cache is capped at 256 MiB across visible messages. If that
+limit is reached, use fewer/smaller images or scroll other image messages out of view
+and retry. Images never create files in session media storage or `.pico/media`.
+
 ## Reference provenance and live acceptance
 
 Public OpenAI Codex source, Apache-2.0, checked at commit

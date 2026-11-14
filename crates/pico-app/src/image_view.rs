@@ -41,7 +41,7 @@ pub struct Viewer {
     generation: u64,
     cancel: Arc<AtomicBool>,
 }
-static DECODERS: LazyLock<Arc<tokio::sync::Semaphore>> =
+pub(crate) static DECODERS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 fn handles(frames: Vec<Frame>) -> Arc<Vec<DisplayFrame>> {
     Arc::new(
@@ -120,9 +120,14 @@ impl Viewer {
         }
     }
     pub fn open(&mut self, media: &Media) -> Task<Message> {
+        self.open_source(media.path.clone(), None)
+    }
+    pub fn open_bytes(&mut self, title: &str, bytes: Arc<Vec<u8>>) -> Task<Message> {
+        self.open_source(PathBuf::from(title), Some(bytes))
+    }
+    fn open_source(&mut self, path: PathBuf, bytes: Option<Arc<Vec<u8>>>) -> Task<Message> {
         self.close();
-        self.current = Some(media.path.clone());
-        let path = media.path.clone();
+        self.current = Some(path.clone());
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -137,9 +142,12 @@ impl Viewer {
                     .expect("decoder semaphore");
                 let result = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    pico_core::media::frames_cancellable(&input, &cancel)
-                        .map(handles)
-                        .map_err(|e| format!("{e:#}"))
+                    match bytes {
+                        Some(bytes) => pico_core::media::frames_from_bytes(&bytes, &cancel),
+                        None => pico_core::media::frames_cancellable(&input, &cancel),
+                    }
+                    .map(handles)
+                    .map_err(|e| format!("{e:#}"))
                 })
                 .await
                 .map_err(|e| e.to_string())
@@ -212,18 +220,20 @@ impl Viewer {
             Subscription::none()
         }
     }
-    pub fn view(&self, media: &Media, width: f32, height: f32) -> Element<'_, crate::ui::Message> {
+    pub fn view(
+        &self,
+        title: String,
+        description: String,
+        width: f32,
+        height: f32,
+    ) -> Element<'_, crate::ui::Message> {
         let mut body = column![
             row![
-                text(media.path.display().to_string()).size(14).width(Fill),
+                text(title).size(14).width(Fill),
                 button("Close").on_press(crate::ui::Message::Dismiss)
             ]
             .spacing(12),
-            text(format!(
-                "{} × {} · {} bytes",
-                media.width, media.height, media.bytes
-            ))
-            .size(12)
+            text(description).size(12)
         ]
         .spacing(12);
         match &self.frames {
@@ -335,6 +345,33 @@ mod tests {
         assert!(!viewer.pending.contains(&thumbnail));
         let _retry = viewer.prepare(&[media]);
         assert!(viewer.pending.contains(&thumbnail));
+    }
+    #[tokio::test]
+    async fn ephemeral_gif_bytes_use_the_existing_modal_playback_and_error_states() {
+        use iced::futures::StreamExt;
+        let mut viewer = Viewer::default();
+        let bytes = Arc::new(include_bytes!("fixtures/media.gif").to_vec());
+        let task = viewer.open_bytes("https://example.com/animation.gif", bytes);
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                viewer.update(message);
+            }
+        }
+        assert_eq!(viewer.frames.as_ref().unwrap().as_ref().unwrap().len(), 2);
+        assert!(viewer.playing);
+        viewer.update(Message::Toggle);
+        assert!(!viewer.playing);
+        viewer.close();
+        let task = viewer.open_bytes("broken.png", Arc::new(b"not an image".to_vec()));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                viewer.update(message);
+            }
+        }
+        assert!(viewer.frames.as_ref().unwrap().is_err());
+        assert!(!viewer.playing);
     }
     #[test]
     fn playback_preserves_lateness_instead_of_slowing_each_frame() {

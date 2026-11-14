@@ -362,12 +362,21 @@ pub fn frames_cancellable(
     path: &Path,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<Frame>> {
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("Image decoding cancelled");
+    }
+    frames_from_bytes(&read(path)?, cancel)
+}
+/// Decode an ephemeral image without creating a durable media artifact.
+pub fn frames_from_bytes(
+    bytes: &[u8],
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<Frame>> {
     use image::AnimationDecoder;
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         bail!("Image decoding cancelled");
     }
-    let bytes = read(path)?;
-    let (first, format) = decode_image(&bytes)?;
+    let (first, format) = decode_image(bytes)?;
     if format != ImageFormat::Gif {
         let rgba = first.to_rgba8();
         return Ok(vec![Frame {

@@ -52,6 +52,12 @@ const SIDEBAR_CONTENT_PADDING: f32 = 8.;
 const RIGHT_PANEL_PADDING: f32 = 18.;
 const FAST_OPTION: &str = "Fast mode";
 
+struct Markdown {
+    source: Arc<Entry>,
+    content: markdown::Content,
+    images: HashSet<String>,
+}
+
 pub struct App {
     harness: Option<Arc<Harness>>,
     catalog: Catalog,
@@ -78,6 +84,7 @@ pub struct App {
     revisions: HashMap<String, u64>,
     outputs: HashMap<String, tool_output::Output>,
     image_view: crate::image_view::Viewer,
+    markdown_images: crate::markdown_images::Cache,
     api_key_draft: String,
     api_key_configured: bool,
     context_menu: Option<(String, iced::Point)>,
@@ -89,7 +96,7 @@ pub struct App {
     questionnaires: HashMap<String, questionnaire::Draft>,
     active_questionnaire: Option<String>,
     chat_selection: chat_selection::Shared,
-    markdown: HashMap<String, (Arc<Entry>, markdown::Content)>,
+    markdown: HashMap<String, Markdown>,
     expanded: HashSet<String>,
     groups: HashSet<String>,
     settings_open: bool,
@@ -141,6 +148,7 @@ struct FooterMenu {
 #[derive(Clone, Debug)]
 enum Modal {
     Image(pico_core::media::Media),
+    MarkdownImage(Arc<crate::markdown_images::Loaded>),
     AddProject,
     Rename(String),
     Delete(String),
@@ -158,6 +166,9 @@ pub enum Selection {
 pub enum Message {
     Image(crate::image_view::Message),
     OpenImage(pico_core::media::Media),
+    MarkdownImage(crate::markdown_images::Message),
+    OpenMarkdownImage(String),
+    RetryMarkdownImage(String),
     ImageBackend(pico_core::image_tools::Backend),
     ImageModel(String),
     ImageQuality(String),
@@ -308,6 +319,7 @@ impl App {
             revisions: HashMap::new(),
             outputs: HashMap::new(),
             image_view: Default::default(),
+            markdown_images: Default::default(),
             api_key_draft: String::new(),
             api_key_configured: false,
             context_menu: None,
@@ -462,6 +474,7 @@ impl App {
             self.outputs.clear();
             self.markdown.clear();
             self.chat_selection.borrow_mut().clear();
+            self.prepare_visible();
             return false;
         };
         let revision = conversation.revision();
@@ -507,13 +520,16 @@ impl App {
             {
                 view.set(input, output);
             }
-            if let Some((source, content)) = self.markdown.get_mut(&entry.id) {
-                if entry.text.starts_with(&source.text) {
-                    content.push_str(&entry.text[source.text.len()..]);
+            if let Some(markdown) = self.markdown.get_mut(&entry.id) {
+                if entry.text.starts_with(&markdown.source.text) {
+                    markdown
+                        .content
+                        .push_str(&entry.text[markdown.source.text.len()..]);
                 } else {
-                    *content = markdown::Content::parse(&entry.text);
+                    markdown.content = markdown::Content::parse(&entry.text);
                 }
-                *source = snapshot.entries.shared(index);
+                markdown.images = crate::markdown_images::urls(&markdown.content);
+                markdown.source = snapshot.entries.shared(index);
             }
         }
         self.current_session = Some(snapshot);
@@ -571,6 +587,7 @@ impl App {
     }
     fn prepare_visible(&mut self) {
         let mut visible_media = Vec::new();
+        let mut image_urls = HashSet::new();
         if let Some(session) = &self.current_session {
             let visible = &self.transcript.order[self.transcript.visible()];
             let ids: HashSet<_> = visible
@@ -586,12 +603,15 @@ impl App {
                     || matches!(entry.kind, EntryKind::Reasoning)
                         && self.expanded.contains(&entry.id)
                 {
-                    self.markdown.entry(entry.id.clone()).or_insert_with(|| {
-                        (
-                            session.entries.shared(index),
-                            markdown::Content::parse(&entry.text),
-                        )
+                    let markdown = self.markdown.entry(entry.id.clone()).or_insert_with(|| {
+                        let content = markdown::Content::parse(&entry.text);
+                        Markdown {
+                            source: session.entries.shared(index),
+                            images: crate::markdown_images::urls(&content),
+                            content,
+                        }
                     });
+                    image_urls.extend(markdown.images.iter().cloned());
                 }
                 if let EntryKind::Tool {
                     input,
@@ -608,6 +628,16 @@ impl App {
                 }
             }
         }
+        self.tasks.push(
+            self.markdown_images
+                .prepare(
+                    self.current_session
+                        .as_ref()
+                        .map(|s| (s.id.as_str(), s.project.as_path())),
+                    image_urls,
+                )
+                .map(Message::MarkdownImage),
+        );
         self.tasks
             .push(self.image_view.prepare(&visible_media).map(Message::Image));
     }
@@ -806,7 +836,7 @@ impl App {
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
-        if !matches!(self.modal, Some(Modal::Image(_))) {
+        if !matches!(self.modal, Some(Modal::Image(_) | Modal::MarkdownImage(_))) {
             self.image_view.close();
         }
         if self.modal.is_some() || self.context_menu.is_some() {
@@ -866,6 +896,21 @@ impl App {
                 self.image_view.update(message);
                 if skipped {
                     self.prepare_visible();
+                }
+            }
+            Message::MarkdownImage(message) => self.markdown_images.update(message),
+            Message::RetryMarkdownImage(url) => {
+                self.markdown_images.retry(&url);
+                self.prepare_visible();
+            }
+            Message::OpenMarkdownImage(url) => {
+                if let Some(image) = self.markdown_images.loaded(&url) {
+                    let task = self
+                        .image_view
+                        .open_bytes(&image.url, image.bytes.clone())
+                        .map(Message::Image);
+                    self.modal = Some(Modal::MarkdownImage(image));
+                    return task;
                 }
             }
             Message::OpenImage(media) => {
@@ -1840,7 +1885,7 @@ impl App {
                     );
                 }
             }
-            Some(Modal::Image(_)) => {}
+            Some(Modal::Image(_) | Modal::MarkdownImage(_)) => {}
             Some(Modal::Quit) => return self.quit(),
             Some(Modal::Link(url)) => {
                 self.modal = None;
@@ -2723,14 +2768,15 @@ impl App {
                     .align_y(iced::Center)
                 ]
                 .spacing(8);
-                if let Some((_, items)) = self.markdown.get(&entry.id) {
+                if let Some(markdown) = self.markdown.get(&entry.id) {
                     content = content.push(markdown::view_with(
-                        items.items(),
+                        markdown.content.items(),
                         markdown::Settings::with_text_size(
                             self.catalog.settings.font_size,
                             markdown::Style::from_palette(Theme::Dark.palette()),
                         ),
-                        &chat_selection::Viewer::new(self.chat_selection.clone(), index),
+                        &chat_selection::Viewer::new(self.chat_selection.clone(), index)
+                            .with_images(&self.markdown_images),
                     ));
                 } else {
                     content = content.push(chat_selection::plain(
@@ -3348,9 +3394,25 @@ impl App {
     fn modal_view(&self, modal: &Modal) -> Element<'_, Message> {
         let (title, body, confirm) = match modal {
             Modal::Image(media) => {
-                return self
-                    .image_view
-                    .view(media, self.window_width, self.window_height);
+                return self.image_view.view(
+                    media.path.display().to_string(),
+                    format!("{} × {} · {} bytes", media.width, media.height, media.bytes),
+                    self.window_width,
+                    self.window_height,
+                );
+            }
+            Modal::MarkdownImage(image) => {
+                return self.image_view.view(
+                    image.url.clone(),
+                    format!(
+                        "{} × {} · {} bytes",
+                        image.width,
+                        image.height,
+                        image.bytes.len()
+                    ),
+                    self.window_width,
+                    self.window_height,
+                );
             }
             Modal::AddProject => (
                 "Add project",
@@ -3877,10 +3939,43 @@ impl App {
                 self.image_view
                     .update(crate::image_view::Message::ActualSize);
             }
+            37 => {
+                self.modal = None;
+                self.image_view.close();
+                let root = self.smoke_dir.as_ref().expect("smoke directory");
+                std::fs::write(
+                    root.join("markdown.gif"),
+                    include_bytes!("fixtures/media.gif"),
+                )
+                .expect("GIF fixture");
+                let mut session = Session::new(root.clone(), &self.catalog.settings);
+                session.entries.push(Entry {
+                    id: "smoke-markdown-image".into(),
+                    text: "![Markdown GIF preview](markdown.gif \"Click to inspect\")\n\n![Missing image](missing.png)".into(),
+                    kind: EntryKind::Assistant,
+                });
+                self.current_session = Some(session);
+                self.markdown.clear();
+                self.rebuild_transcript();
+                self.prepare_visible();
+                return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
+            }
+            38 => {
+                let image = self
+                    .markdown_images
+                    .loaded("markdown.gif")
+                    .expect("Markdown GIF preview loaded");
+                let task = self
+                    .image_view
+                    .open_bytes(&image.url, image.bytes.clone())
+                    .map(Message::Image);
+                self.modal = Some(Modal::MarkdownImage(image));
+                return Task::batch([task, delayed_capture()]);
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -4366,6 +4461,54 @@ mod tests {
         assert!(
             matches!(&reloaded.entries[0].kind,EntryKind::Tool {media:m,..} if m==&vec![media])
         );
+    }
+    #[tokio::test]
+    async fn markdown_images_load_in_chat_open_modal_and_retry_after_source_disappears() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        std::fs::write(root.join("chat.gif"), include_bytes!("fixtures/media.gif")).unwrap();
+        stored_session(&mut app, root.clone()).await;
+        let id = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        h.edit(&id, |s| {
+            s.entries.push(Entry {
+                id: "markdown-image".into(),
+                text: "Before\n\n![Caption](chat.gif)\n\nAfter".into(),
+                kind: EntryKind::Assistant,
+            })
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        let loaded = app
+            .markdown_images
+            .loaded("chat.gif")
+            .expect("visible image decoded");
+        assert_eq!((loaded.width, loaded.height), (96, 64));
+        dispatch(&mut app, Message::OpenMarkdownImage("chat.gif".into())).await;
+        assert!(
+            matches!(&app.modal, Some(Modal::MarkdownImage(image)) if Arc::ptr_eq(image, &loaded))
+        );
+        let _ = app.view();
+        dispatch(&mut app, Message::Image(crate::image_view::Message::Toggle)).await;
+        dispatch(&mut app, Message::Dismiss).await;
+        assert!(app.modal.is_none());
+        std::fs::remove_file(root.join("chat.gif")).unwrap();
+        stored_session(&mut app, root.clone()).await;
+        assert!(app.markdown_images.loaded("chat.gif").is_none());
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        assert!(
+            app.markdown_images.loaded("chat.gif").is_none(),
+            "reopening must read the source, not a saved copy"
+        );
+        std::fs::write(root.join("chat.gif"), include_bytes!("fixtures/media.gif")).unwrap();
+        dispatch(&mut app, Message::RetryMarkdownImage("chat.gif".into())).await;
+        assert!(app.markdown_images.loaded("chat.gif").is_some());
+        let saved = h.store.load_session(&id).unwrap();
+        assert_eq!(
+            saved.entries[0].text,
+            "Before\n\n![Caption](chat.gif)\n\nAfter"
+        );
+        assert!(matches!(saved.entries[0].kind, EntryKind::Assistant));
     }
     #[tokio::test]
     async fn late_core_notifications_do_not_replace_rendered_smoke_fixtures() {

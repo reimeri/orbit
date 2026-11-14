@@ -5,6 +5,7 @@ mod ellipsized_text;
 mod git;
 mod image_view;
 mod io_worker;
+mod markdown_images;
 mod pointer_input;
 mod questionnaire;
 mod search_icon;
