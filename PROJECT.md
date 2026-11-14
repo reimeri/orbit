@@ -78,9 +78,10 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - Session-local drafts, Collapse/Resume, scoped cancellation; no clarification conversation
     - Lossless large answers without V1's answer byte/line limits
   - Image viewing, and image generation
-    - view_image tool for the agent.
+    - view_image tool for the agent. This should follow the implementation used in openai codex
     - codex based image_gen__imagegen tool for image generation in the code mode. Uses you openai account for generations. Same schema as what codex image_gen__imagegen tool provides
     - For image generation add a option to settings to switch to using api image models with api key. Add api key setting to the account tab of settings. You can set the used API image generation model id in setting in a text field.
+    - When looking at expanded tool results of view_image and the image generation tools you should see a thumbnail image in the chat
   - Implement rest of the code mode helpers. These should follow how codex handles these in code mode.
     - image, audio, content, generatedImage 
   - Browser tools
