@@ -1049,7 +1049,7 @@ fn plaintext_context(session: &Session) -> Vec<Value> {
 }
 fn instructions(cwd: &Path) -> Result<String> {
     let mut text = format!(
-        "You are a coding assistant, working inside Pico agent harness. Workspace: {}. Return a concise explanation of changes and tests.\n",
+        "You are a coding assistant, working inside Pico agent harness. Workspace: {}. Return a concise explanation of changes and tests. Use subagents when necessary.\n",
         cwd.display()
     );
     let path = cwd.join("AGENTS.md");
