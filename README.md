@@ -32,6 +32,10 @@ input context limit in Settings; the initial limit is 272,000 tokens.
 
 - Project picker, favorites, session search by title/project, automatic initial
   titles, right-click Rename/Delete menus with confirmations, saved drafts, restored selection.
+  Choosing a project opens a shared new-session draft; no session is created until
+  the first message is sent. Its text follows project changes and survives restarts.
+  Switching projects resets model/effort to defaults; existing sessions retain
+  their own separate unsent messages.
 - Dark three-column layout, resizable sidebar/settings panes, animated activity,
   Markdown and code blocks, link confirmation, copy actions, expandable reasoning,
   tool groups and individual tool inputs/results. Large tool details are virtualized: only

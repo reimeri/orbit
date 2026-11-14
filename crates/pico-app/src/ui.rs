@@ -16,7 +16,10 @@ use pico_core::CancellationToken;
 use pico_core::{
     agent::Harness,
     auth::Login,
-    store::{Catalog, Entry, EntryKind, Project, Session, SessionSummary, Settings, Store},
+    store::{
+        Catalog, Entry, EntryKind, NewSessionDraft, Project, Session, SessionSummary, Settings,
+        Store,
+    },
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -50,6 +53,9 @@ pub struct App {
     catalog: Catalog,
     sessions: Vec<SessionSummary>,
     current_session: Option<Session>,
+    draft_session: Option<Session>,
+    new_draft: NewSessionDraft,
+    new_draft_dirty: bool,
     transcript: crate::virtual_list::List,
     transcript_count: usize,
     child_counts: HashMap<String, usize>,
@@ -121,8 +127,15 @@ enum Modal {
     Link(String),
 }
 #[derive(Clone, Debug)]
+pub enum Selection {
+    Picker,
+    Session(String),
+    Draft(PathBuf),
+}
+#[derive(Clone, Debug)]
 pub enum Message {
-    Selected(Result<Option<String>, String>),
+    Selected(Result<Selection, String>),
+    NewDraftSaved(Result<(), String>),
     Sent(String, String, Result<(), String>),
     DraftSaved(String, String, Result<(), String>),
     Deleted(String, Result<(), String>),
@@ -204,14 +217,16 @@ impl App {
             }
             .map_err(|e| format!("{e:#}"))?;
             let (catalog, sessions, warnings) = store.load().map_err(|e| format!("{e:#}"))?;
+            let draft = store.load_new_draft().map_err(|e| format!("{e:#}"))?;
             let harness = Harness::new(store, sessions).map_err(|e| format!("{e:#}"))?;
-            Ok::<_, String>((harness, catalog, warnings))
+            Ok::<_, String>((harness, catalog, draft, warnings))
         })();
-        let (harness, catalog, error) = match loaded {
-            Ok((h, c, w)) => (Some(h), c, (!w.is_empty()).then(|| w.join("\n"))),
+        let (harness, catalog, new_draft, error) = match loaded {
+            Ok((h, c, d, w)) => (Some(h), c, d, (!w.is_empty()).then(|| w.join("\n"))),
             Err(error) => (
                 None,
                 Catalog::default(),
+                NewSessionDraft::default(),
                 Some(format!(
                     "Cannot open Pico V2 storage: {error}. Fix the indicated file/permissions and restart. Nothing has been reset."
                 )),
@@ -228,6 +243,9 @@ impl App {
             catalog,
             sessions: vec![],
             current_session: None,
+            draft_session: None,
+            new_draft,
+            new_draft_dirty: false,
             transcript: crate::virtual_list::List::default(),
             transcript_count: 0,
             child_counts: HashMap::new(),
@@ -281,8 +299,12 @@ impl App {
         };
         app.refresh();
         let initial = app.selected.take();
-        if initial.is_some() {
-            app.select(initial);
+        if let Some(id) = initial {
+            app.select(Selection::Session(id));
+        } else if app.catalog.settings.resume_last
+            && let Some(path) = app.new_draft.project.clone()
+        {
+            app.select(Selection::Draft(path));
         }
         let task = if let Some(h) = &app.harness {
             let auth = h.auth.clone();
@@ -294,7 +316,9 @@ impl App {
         (app, task)
     }
     fn current(&self) -> Option<&Session> {
-        self.current_session.as_ref()
+        self.current_session
+            .as_ref()
+            .or(self.draft_session.as_ref())
     }
     fn running(&self) -> bool {
         self.selected
@@ -316,7 +340,12 @@ impl App {
         }
         let h = self.harness.as_ref().expect("harness");
         let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
-            self.current_session = None;
+            if self.current_session.take().is_some() {
+                self.transcript = crate::virtual_list::List::default();
+                self.transcript_count = 0;
+                self.child_counts.clear();
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+            }
             self.outputs.clear();
             self.markdown.clear();
             return false;
@@ -546,6 +575,16 @@ impl App {
         if self.io_busy || self.closing {
             return true;
         }
+        if self.new_draft_dirty
+            && let Some(h) = &self.harness
+        {
+            let h = h.clone();
+            let draft = self.new_draft.clone();
+            self.new_draft_dirty = false;
+            self.tasks.push(self.io.run(move || Message::NewDraftSaved(
+                h.store.save_new_draft(&draft).map_err(|e| format!("Could not save new-session draft: {e:#}. Keep Pico open and retry after fixing storage."))
+            )));
+        }
         if let Some((id, draft)) = self.take_draft()
             && let Some(h) = &self.harness
         {
@@ -558,15 +597,25 @@ impl App {
         true
     }
     fn restore_draft(&mut self) {
-        self.editor =
-            text_editor::Content::with_text(self.current().map(|s| s.draft.as_str()).unwrap_or(""));
+        self.editor = text_editor::Content::with_text(if self.draft_session.is_some() {
+            &self.new_draft.message
+        } else {
+            self.current_session.as_ref().map_or("", |s| &s.draft)
+        });
+        self.draft_dirty = false;
     }
-    fn select(&mut self, id: Option<String>) {
+    fn select(&mut self, selection: Selection) {
         self.footer_menu = None;
         if self.io_busy {
             return;
         }
         let draft = self.take_draft();
+        let mut new_draft = self.new_draft.clone();
+        match &selection {
+            Selection::Picker => new_draft.project = None,
+            Selection::Draft(path) => new_draft.project = Some(path.clone()),
+            Selection::Session(_) => {}
+        }
         if let Some(h) = &self.harness {
             let h = h.clone();
             self.io_busy = true;
@@ -576,11 +625,15 @@ impl App {
                         if let Some((old, draft)) = draft {
                             h.edit(&old, |s| s.draft = draft)?;
                         }
-                        if let Some(id) = &id {
+                        let id = if let Selection::Session(id) = &selection {
                             h.load(id)?;
-                        }
-                        h.evict_inactive(id.as_deref())?;
-                        Ok::<_, pico_core::Error>(id)
+                            Some(id.as_str())
+                        } else {
+                            None
+                        };
+                        h.store.save_new_draft(&new_draft)?;
+                        h.evict_inactive(id)?;
+                        Ok::<_, pico_core::Error>(selection)
                     })()
                     .map_err(|e| {
                         format!("Could not switch sessions: {e:#}. Fix storage and retry.")
@@ -635,8 +688,20 @@ impl App {
             Message::Selected(result) => {
                 self.io_busy = false;
                 match result {
-                    Ok(id) => {
-                        self.selected = id;
+                    Ok(selection) => {
+                        self.draft_session = None;
+                        self.selected = None;
+                        match selection {
+                            Selection::Session(id) => self.selected = Some(id),
+                            Selection::Picker => self.new_draft.project = None,
+                            Selection::Draft(path) => {
+                                self.new_draft.project = Some(path.clone());
+                                self.draft_session =
+                                    Some(Session::new(path, &self.catalog.settings));
+                            }
+                        }
+                        self.new_draft_dirty = false;
+                        self.view_epoch = self.view_epoch.wrapping_add(1);
                         self.context_menu = None;
                         self.auto_scroll = true;
                         self.refresh();
@@ -647,8 +712,14 @@ impl App {
                     }
                     Err(error) => {
                         self.error = Some(error);
-                        self.draft_dirty = true;
+                        self.draft_dirty = self.selected.is_some();
                     }
+                }
+            }
+            Message::NewDraftSaved(result) => {
+                if let Err(error) = result {
+                    self.error = Some(error);
+                    self.new_draft_dirty = true;
                 }
             }
             Message::DraftSaved(id, _draft, result) => {
@@ -663,6 +734,13 @@ impl App {
                 self.io_busy = false;
                 match result {
                     Ok(()) => {
+                        if self.draft_session.as_ref().is_some_and(|s| s.id == id) {
+                            self.draft_session = None;
+                            self.new_draft = NewSessionDraft::default();
+                            self.new_draft_dirty = false;
+                            self.selected = Some(id.clone());
+                            self.save_catalog();
+                        }
                         self.submissions.remove(&id);
                         if self.selected.as_ref() == Some(&id) && self.editor.text() == text {
                             self.editor = text_editor::Content::new();
@@ -674,7 +752,8 @@ impl App {
                     }
                     Err(error) => {
                         self.error = Some(error);
-                        self.draft_dirty = true;
+                        self.draft_dirty = self.selected.is_some();
+                        self.new_draft_dirty |= self.draft_session.is_some();
                     }
                 }
             }
@@ -682,13 +761,15 @@ impl App {
                 self.io_busy = false;
                 match result {
                     Ok(()) => {
-                        if self.selected.as_ref() == Some(&id) {
+                        let selected = self.selected.as_ref() == Some(&id);
+                        if selected {
                             self.draft_dirty = false;
                             self.selected = None;
-                            self.current_session = None;
-                            self.restore_draft();
                         }
                         self.refresh();
+                        if selected {
+                            self.restore_draft();
+                        }
                         self.modal = None;
                     }
                     Err(error) => self.error = Some(error),
@@ -702,7 +783,8 @@ impl App {
                 Ok(()) => return iced::exit(),
                 Err(error) => {
                     self.closing = false;
-                    self.draft_dirty = true;
+                    self.draft_dirty = self.selected.is_some();
+                    self.new_draft_dirty = true;
                     self.modal = None;
                     self.error = Some(error);
                 }
@@ -799,37 +881,12 @@ impl App {
                     return iced::clipboard::write(output.clone());
                 }
             }
-            Message::New => self.select(None),
+            Message::New => self.select(Selection::Picker),
             Message::Select(id) => {
-                self.select(Some(id));
+                self.select(Selection::Session(id));
                 return bottom();
             }
-            Message::Create(path) => {
-                if !self.io_busy
-                    && let Some(h) = &self.harness
-                {
-                    let h = h.clone();
-                    let settings = self.catalog.settings.clone();
-                    let draft = self.take_draft();
-                    self.io_busy = true;
-                    self.tasks.push(self.io.run(move || {
-                        Message::Selected(
-                            (|| {
-                                if let Some((id, draft)) = draft {
-                                    h.edit(&id, |s| s.draft = draft)?;
-                                }
-                                let session = Session::new(path, &settings);
-                                let id = session.id.clone();
-                                h.store.save_session(&session)?;
-                                h.insert(session);
-                                h.evict_inactive(Some(&id))?;
-                                Ok::<_, pico_core::Error>(Some(id))
-                            })()
-                            .map_err(|e| format!("Could not create session: {e:#}")),
-                        )
-                    }));
-                }
-            }
+            Message::Create(path) => self.select(Selection::Draft(path)),
             Message::Search(search) => {
                 self.search = search;
                 self.sidebar_list.offset = 0.;
@@ -890,13 +947,18 @@ impl App {
                 };
                 let edit = action.is_edit();
                 self.editor.perform(action);
-                self.draft_dirty |= edit;
+                if edit && self.draft_session.is_some() {
+                    self.new_draft.message = self.editor.text();
+                    self.new_draft_dirty = true;
+                } else {
+                    self.draft_dirty |= edit;
+                }
             }
             Message::Send => {
                 if self.modal.is_some() || self.context_menu.is_some() {
                     return Task::none();
                 }
-                if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
+                if let (Some(h), Some(session)) = (&self.harness, self.current()) {
                     let message = self.editor.text();
                     if message.trim().is_empty() {
                         return Task::none();
@@ -905,7 +967,8 @@ impl App {
                         return Task::none();
                     }
                     let h = h.clone();
-                    let id = id.clone();
+                    let id = session.id.clone();
+                    let draft = self.draft_session.clone();
                     let settings = self.catalog.settings.clone();
                     self.io_busy = true;
                     let submission = self
@@ -917,9 +980,11 @@ impl App {
                     }
                     let submission = submission.1.clone();
                     self.tasks.push(self.io.run(move || {
-                        let result = h
-                            .send(&id, &submission, message.clone(), settings)
-                            .map_err(|e| format!("{e:#}"));
+                        let result = if let Some(draft) = draft {
+                            h.send_new(draft, &submission, message.clone(), settings)
+                        } else {
+                            h.send(&id, &submission, message.clone(), settings)
+                        }.map_err(|e| format!("Could not send message: {e:#}. Your message is preserved; fix the problem and retry."));
                         Message::Sent(id, message, result)
                     }));
                 }
@@ -970,7 +1035,12 @@ impl App {
             }
             Message::SessionModel(value) => {
                 self.footer_menu = None;
-                if !self.running()
+                if self.io_busy {
+                    return Task::none();
+                }
+                if let Some(draft) = &mut self.draft_session {
+                    draft.model = value;
+                } else if !self.running()
                     && let (Some(h), Some(id)) = (&self.harness, &self.selected)
                 {
                     let h = h.clone();
@@ -985,7 +1055,12 @@ impl App {
             }
             Message::SessionEffort(value) => {
                 self.footer_menu = None;
-                if !self.running()
+                if self.io_busy {
+                    return Task::none();
+                }
+                if let Some(draft) = &mut self.draft_session {
+                    draft.effort = value;
+                } else if !self.running()
                     && let (Some(h), Some(id)) = (&self.harness, &self.selected)
                 {
                     let h = h.clone();
@@ -1181,7 +1256,7 @@ impl App {
             Message::Git(id, info, cost) => {
                 self.git_cost = cost;
                 self.git_pending = false;
-                if self.selected.as_deref() == Some(&id) {
+                if self.current().is_some_and(|s| s.id == id) {
                     self.git = info;
                 }
             }
@@ -1282,7 +1357,7 @@ impl App {
                         && modifiers.control()
                         && key.as_ref() == keyboard::Key::Character("n")
                     {
-                        self.select(None);
+                        self.select(Selection::Picker);
                     }
                 }
                 _ => {}
@@ -1391,6 +1466,7 @@ impl App {
         }
         self.closing = true;
         let draft = self.take_draft();
+        let new_draft = self.new_draft.clone();
         let mut catalog = self.catalog.clone();
         catalog.selected = self.selected.clone();
         if let Some(cancel) = &self.login_cancel {
@@ -1404,6 +1480,7 @@ impl App {
                 let result=(|| {
                     while h.all().iter().any(|s|s.is_running()) {std::thread::sleep(Duration::from_millis(20));}
                     if let Some((id,draft))=draft {h.edit(&id,|s|s.draft=draft)?;}
+                    h.store.save_new_draft(&new_draft)?;
                     h.store.save_catalog(&catalog)?;
                     h.flush()?;
                     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(h.auth.flush())
@@ -1426,7 +1503,7 @@ impl App {
                     .push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick));
             }
         }
-        if self.selected.is_some() {
+        if self.current().is_some() {
             subscriptions.push(
                 iced::time::every(
                     self.git_cost
@@ -1437,7 +1514,7 @@ impl App {
                 .map(|_| Message::GitTick),
             );
         }
-        if self.draft_dirty {
+        if self.draft_dirty || self.new_draft_dirty {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveDraft));
         }
@@ -2552,7 +2629,7 @@ impl App {
                 s.entries.push(tool);
                 let id = s.id.clone();
                 h.insert(s);
-                self.select(Some(id));
+                self.select(Selection::Session(id));
                 let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
             }
             2 => {
@@ -3116,6 +3193,14 @@ mod tests {
     fn app() -> App {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
+    async fn stored_session(app: &mut App, path: PathBuf) {
+        let session = Session::new(path, &app.catalog.settings);
+        let id = session.id.clone();
+        let h = app.harness.as_ref().unwrap();
+        h.store.save_session(&session).unwrap();
+        h.insert(session);
+        dispatch(app, Message::Select(id)).await;
+    }
     async fn dispatch(app: &mut App, message: Message) {
         let task = app.update(message);
         drain(app, task).await;
@@ -3133,6 +3218,151 @@ mod tests {
             }
         }
     }
+    async fn type_message(app: &mut App, message: &str) {
+        dispatch(
+            app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Paste(
+                Arc::new(message.to_owned()),
+            ))),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn new_session_draft_follows_projects_but_not_existing_sessions() {
+        let mut app = app();
+        let h = app.harness.as_ref().unwrap().clone();
+        dispatch(&mut app, Message::Create(PathBuf::from("/project-one"))).await;
+        dispatch(&mut app, Message::Send).await;
+        assert!(app.selected.is_none());
+        assert!(h.summaries().is_empty());
+        assert!(h.store.load().unwrap().1.is_empty());
+
+        let message = "Investigate λ
+Then implement the fix.";
+        type_message(&mut app, message).await;
+        dispatch(&mut app, Message::SessionModel("custom-model".into())).await;
+        dispatch(&mut app, Message::SessionEffort("high".into())).await;
+        dispatch(&mut app, Message::Create(PathBuf::from("/project-two"))).await;
+        assert_eq!(app.editor.text(), message);
+        assert_eq!(app.current().unwrap().model, app.catalog.settings.model);
+        assert_eq!(app.current().unwrap().effort, app.catalog.settings.effort);
+        assert!(h.summaries().is_empty());
+        assert!(h.store.load().unwrap().1.is_empty());
+
+        // Leaving the draft and editing an existing conversation must not replace it.
+        stored_session(&mut app, PathBuf::from("/existing")).await;
+        let existing = app.selected.clone().unwrap();
+        type_message(&mut app, "Existing conversation follow-up").await;
+        dispatch(&mut app, Message::Create(PathBuf::from("/project-three"))).await;
+        assert_eq!(app.editor.text(), message);
+        dispatch(&mut app, Message::Select(existing)).await;
+        assert_eq!(app.editor.text(), "Existing conversation follow-up");
+        dispatch(&mut app, Message::New).await;
+        assert!(app.current().is_none());
+        dispatch(&mut app, Message::Create(PathBuf::from("/project-two"))).await;
+        assert_eq!(app.editor.text(), message);
+        dispatch(&mut app, Message::SaveDraft).await;
+        assert_eq!(h.store.load_new_draft().unwrap(), app.new_draft);
+
+        // First send alone creates a session, in the final chosen project.
+        dispatch(&mut app, Message::SessionEffort("low".into())).await;
+        dispatch(&mut app, Message::Send).await;
+        let id = app.selected.as_ref().unwrap();
+        let saved = h.store.load_session(id).unwrap();
+        assert_eq!(saved.project, Path::new("/project-two"));
+        assert_eq!(saved.effort, "low");
+        let users: Vec<_> = saved
+            .entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::User)
+            .collect();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].text, message);
+        assert_eq!(h.store.load().unwrap().1.len(), 2);
+        assert_eq!(
+            h.store.load_new_draft().unwrap(),
+            NewSessionDraft::default()
+        );
+        assert!(app.editor.text().is_empty());
+        dispatch(&mut app, Message::Create(PathBuf::from("/project-one"))).await;
+        assert!(app.editor.text().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_shared_draft_save_and_first_send_keep_message_for_retry() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        dispatch(&mut app, Message::Create(path)).await;
+        type_message(&mut app, "  \n").await;
+        dispatch(&mut app, Message::Send).await;
+        assert!(h.store.load().unwrap().1.is_empty());
+        type_message(&mut app, "Do not lose this message").await;
+        let message = app.editor.text();
+        let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_draft BEFORE INSERT ON new_session_draft BEGIN SELECT RAISE(FAIL,'fixture draft failure'); END;").unwrap();
+        dispatch(&mut app, Message::SaveDraft).await;
+        assert!(app.new_draft_dirty);
+        assert_eq!(app.editor.text(), message);
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("fixture draft failure")
+        );
+        db.execute_batch("DROP TRIGGER fail_draft;").unwrap();
+        dispatch(&mut app, Message::SaveDraft).await;
+        assert!(!app.new_draft_dirty);
+        assert_eq!(h.store.load_new_draft().unwrap().message, message);
+
+        db.execute_batch("CREATE TRIGGER fail_session BEFORE INSERT ON sessions BEGIN SELECT RAISE(FAIL,'fixture session failure'); END;").unwrap();
+        dispatch(&mut app, Message::Send).await;
+        assert!(app.selected.is_none());
+        assert_eq!(app.editor.text(), message);
+        assert!(h.summaries().is_empty());
+        assert!(h.store.load().unwrap().1.is_empty());
+        assert_eq!(h.store.load_new_draft().unwrap().message, message);
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("fixture session failure")
+        );
+        db.execute_batch("DROP TRIGGER fail_session;").unwrap();
+        dispatch(&mut app, Message::Send).await;
+        assert!(app.selected.is_some());
+        assert!(app.editor.text().is_empty());
+        assert_eq!(h.store.load().unwrap().1.len(), 1);
+        assert_eq!(
+            h.store.load_new_draft().unwrap(),
+            NewSessionDraft::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_populated_session_then_opening_draft_clears_transcript() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let id = app.selected.clone().unwrap();
+        app.harness
+            .as_ref()
+            .unwrap()
+            .edit(&id, |s| {
+                s.entries.push(Entry::new(EntryKind::User, "Old message"));
+            })
+            .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert!(!app.transcript.order.is_empty());
+        dispatch(&mut app, Message::Delete(id)).await;
+        dispatch(&mut app, Message::Confirm).await;
+        dispatch(&mut app, Message::Create(path)).await;
+        assert!(app.transcript.order.is_empty());
+        assert!(app.current().unwrap().entries.is_empty());
+        let _ = app.center();
+    }
+
     fn header_renderer() -> iced::Renderer {
         iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
             iced::Font::DEFAULT,
@@ -3539,7 +3769,7 @@ mod tests {
     #[tokio::test]
     async fn quit_confirmation_releases_footer_keyboard_ownership() {
         let mut app = app();
-        dispatch(&mut app, Message::Create(PathBuf::from("/running"))).await;
+        stored_session(&mut app, PathBuf::from("/running")).await;
         let running = app
             .harness
             .as_ref()
@@ -3547,7 +3777,7 @@ mod tests {
             .get(app.selected.as_ref().unwrap())
             .unwrap();
         running.running.store(true, Ordering::Release);
-        dispatch(&mut app, Message::Create(PathBuf::from("/idle"))).await;
+        stored_session(&mut app, PathBuf::from("/idle")).await;
         dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
         assert!(app.footer_menu.is_some());
         dispatch(
@@ -3563,7 +3793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidebar_header_centers_only_favorites_and_creates_in_clicked_project() {
+    async fn sidebar_header_centers_only_favorites_and_opens_draft_in_clicked_project() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap().join("favorite-project");
         app.catalog.projects = vec![
@@ -3598,6 +3828,8 @@ mod tests {
         };
         dispatch(&mut app, create).await;
         assert_eq!(app.current().unwrap().project, path);
+        assert!(app.selected.is_none());
+        assert!(app.sessions.is_empty());
         dispatch(&mut app, Message::New).await;
         assert!(app.selected.is_none(), "+ must open the project chooser");
     }
@@ -3637,7 +3869,7 @@ mod tests {
             path: path.clone(),
             favorite: true,
         });
-        dispatch(&mut app, Message::Create(path)).await;
+        stored_session(&mut app, path).await;
         let mut renderer = header_renderer();
         let mut ui = iced_runtime::UserInterface::build(
             app.sidebar(),
@@ -3707,7 +3939,7 @@ mod tests {
         use iced::futures::StreamExt;
         let mut app = app();
         for (path, title) in [("/alpha", "Zulu notes"), ("/beta", "Control")] {
-            dispatch(&mut app, Message::Create(PathBuf::from(path))).await;
+            stored_session(&mut app, PathBuf::from(path)).await;
             app.harness
                 .as_ref()
                 .unwrap()
@@ -3867,14 +4099,14 @@ mod tests {
     async fn escape_dismisses_ui_before_stopping_only_the_selected_running_agent() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        dispatch(&mut app, Message::Create(path.clone())).await;
+        stored_session(&mut app, path.clone()).await;
         let other = app
             .harness
             .as_ref()
             .unwrap()
             .get(app.selected.as_ref().unwrap())
             .unwrap();
-        dispatch(&mut app, Message::Create(path)).await;
+        stored_session(&mut app, path).await;
         let selected = app
             .harness
             .as_ref()
@@ -3965,7 +4197,7 @@ mod tests {
     async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        dispatch(&mut app, Message::Create(path.clone())).await;
+        stored_session(&mut app, path.clone()).await;
         let first = app.selected.clone().unwrap();
         dispatch(
             &mut app,
@@ -4056,7 +4288,7 @@ mod tests {
     async fn long_transcript_only_caches_viewport_and_appends_preserve_heights() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        dispatch(&mut app, Message::Create(path)).await;
+        stored_session(&mut app, path).await;
         let h = app.harness.as_ref().unwrap().clone();
         let id = app.selected.clone().unwrap();
         h.edit(&id, |s| {
@@ -4094,9 +4326,9 @@ mod tests {
     async fn session_menu_targets_the_clicked_session_and_releases_deleted_output() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        dispatch(&mut app, Message::Create(path.clone())).await;
+        stored_session(&mut app, path.clone()).await;
         let first = app.selected.clone().unwrap();
-        dispatch(&mut app, Message::Create(path)).await;
+        stored_session(&mut app, path).await;
         let second = app.selected.clone().unwrap();
         let h = app.harness.as_ref().unwrap().clone();
         h.edit(&first, |s| {
@@ -4177,7 +4409,7 @@ mod tests {
         use iced::futures::StreamExt;
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        dispatch(&mut app, Message::Create(path)).await;
+        stored_session(&mut app, path).await;
         let id = app.selected.clone().unwrap();
         let h = app.harness.as_ref().unwrap().clone();
         h.edit(&id, |s| s.title = "before subscription".into())
@@ -4221,7 +4453,7 @@ mod tests {
     async fn modal_blocks_composer_edits_and_failed_draft_save_keeps_text() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        dispatch(&mut app, Message::Create(path)).await;
+        stored_session(&mut app, path).await;
         dispatch(
             &mut app,
             Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('a'))),

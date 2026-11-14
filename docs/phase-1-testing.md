@@ -67,7 +67,16 @@ cell completion. Cell IDs and shell session IDs are separate namespaces.
 
 ## 5. Persistence and UI
 
-- Type an unsent multiline draft. Switch sessions and return; the draft survives.
+- Choose a project from the new-session picker, type an unsent multiline message,
+  and click another favorite project badge. The message follows the project, the
+  model/effort reset to defaults, and no new sidebar session appears yet.
+- Visit an existing session, type a separate follow-up, then return through the
+  project picker. The new-session draft and existing-session follow-up stay separate.
+- Close and reopen before sending the new draft. Its text survives (with resume
+  enabled, its project opens too). Send it: exactly one session appears in the final
+  project and the next new draft is empty. Blank sends create nothing.
+- Type an unsent multiline draft in an existing session. Switch sessions and return;
+  the draft survives.
 - In the composer, search, settings and dialog text fields, Ctrl+Backspace and
   Ctrl+W delete the previous word (or only the selection when text is selected).
   Check punctuation, Unicode/RTL text, a cursor in the middle of text, and the

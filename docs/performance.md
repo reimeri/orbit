@@ -50,6 +50,11 @@ limits. Execution limits remain per conversation; no global admission cap was ad
 
 ### Durability and recovery
 
+New-session drafts occupy a singleton SQLite row, not a session row. Their message
+is shared across project choices and loaded on restart. The first send commits the
+session and its user message while deleting the shared draft in the same transaction.
+Existing-session composer drafts remain session-local.
+
 Drafts debounce on a one-second timer. Switching sessions flushes the old draft
 before loading the new session. Composer input/autosave is temporarily suspended
 while a selection/send transition is pending, while the window continues updating.

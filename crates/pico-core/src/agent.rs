@@ -350,6 +350,22 @@ impl Harness {
         self.changes.send_replace(());
         Ok(())
     }
+    pub fn send_new(
+        self: &Arc<Self>,
+        mut session: Session,
+        submission: &str,
+        message: String,
+        settings: Settings,
+    ) -> Result<()> {
+        if message.trim().is_empty() {
+            bail!("Type a message first");
+        }
+        session.accept_submission(submission.to_owned(), message);
+        self.store.commit_new_session(&session)?;
+        let id = session.id.clone();
+        self.make_conversation(session, true);
+        self.start(&id, settings)
+    }
     pub fn send(
         self: &Arc<Self>,
         id: &str,

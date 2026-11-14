@@ -95,6 +95,12 @@ pub struct Catalog {
     pub selected: Option<String>,
     pub settings: Settings,
 }
+/// Unsent first message, shared across projects and separate from session history.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NewSessionDraft {
+    pub project: Option<PathBuf>,
+    pub message: String,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EntryKind {
     User,
@@ -269,6 +275,7 @@ impl Store {
         let db = Connection::open(&path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
+            CREATE TABLE IF NOT EXISTS new_session_draft (singleton INTEGER PRIMARY KEY CHECK(singleton=1), data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, updated INTEGER NOT NULL, summary TEXT NOT NULL, metadata TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS session_order ON sessions(updated DESC, id);
             CREATE TABLE IF NOT EXISTS entries (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));
@@ -344,10 +351,43 @@ impl Store {
         catalog.settings.validate()?;
         self.write("settings.json", catalog)
     }
+    pub fn load_new_draft(&self) -> Result<NewSessionDraft> {
+        let db = self.db.lock().expect("database lock");
+        let json: Option<String> = db
+            .query_row(
+                "SELECT data FROM new_session_draft WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match json {
+            Some(json) => Ok(serde_json::from_str(&json)?),
+            None => Ok(NewSessionDraft::default()),
+        }
+    }
+    pub fn save_new_draft(&self, draft: &NewSessionDraft) -> Result<()> {
+        self.db.lock().expect("database lock").execute(
+            "INSERT INTO new_session_draft VALUES (1,?1) ON CONFLICT(singleton) DO UPDATE SET data=excluded.data",
+            [serde_json::to_string(draft)?],
+        )?;
+        Ok(())
+    }
+    /// Commit the first message and consume its shared draft in one transaction.
+    pub fn commit_new_session(&self, session: &Session) -> Result<()> {
+        self.save_session_transaction(None, session, true)
+    }
     pub fn save_session(&self, session: &Session) -> Result<()> {
         self.save_changes(None, session)
     }
     pub fn save_changes(&self, before: Option<&Session>, session: &Session) -> Result<()> {
+        self.save_session_transaction(before, session, false)
+    }
+    fn save_session_transaction(
+        &self,
+        before: Option<&Session>,
+        session: &Session,
+        consume_draft: bool,
+    ) -> Result<()> {
         Uuid::parse_str(&session.id)?;
         let mut db = self.db.lock().expect("database lock");
         let tx = db.transaction()?;
@@ -367,6 +407,9 @@ impl Store {
             before.map(|s| &s.input),
             &session.input,
         )?;
+        if consume_draft {
+            tx.execute("DELETE FROM new_session_draft", [])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -449,6 +492,40 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_draft_survives_reopen_and_is_consumed_atomically_with_first_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let draft = NewSessionDraft {
+            project: Some(dir.path().join("second-project")),
+            message: "First message λ\nWith another line".into(),
+        };
+        {
+            let store = Store::open(dir.path().into()).unwrap();
+            store.save_new_draft(&draft).unwrap();
+            assert!(store.load().unwrap().1.is_empty());
+        }
+        let store = Store::open(dir.path().into()).unwrap();
+        assert_eq!(store.load_new_draft().unwrap(), draft);
+        let mut session = Session::new(draft.project.clone().unwrap(), &Settings::default());
+        session.accept_submission("first-submission".into(), draft.message.clone());
+        // Failure consuming the draft must also roll back the new session.
+        let db = Connection::open(dir.path().join("sessions.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_consume BEFORE DELETE ON new_session_draft BEGIN SELECT RAISE(FAIL,'fixture consume failure'); END;").unwrap();
+        assert!(store.commit_new_session(&session).is_err());
+        assert!(store.load().unwrap().1.is_empty());
+        assert_eq!(store.load_new_draft().unwrap(), draft);
+        db.execute_batch("DROP TRIGGER fail_consume;").unwrap();
+        store.commit_new_session(&session).unwrap();
+        drop(db);
+        drop(store);
+        let store = Store::open(dir.path().into()).unwrap();
+        assert_eq!(store.load_new_draft().unwrap(), NewSessionDraft::default());
+        let saved = store.load_session(&session.id).unwrap();
+        assert_eq!(saved.entries.len(), 1);
+        assert_eq!(saved.entries[0].id, "first-submission");
+        assert_eq!(saved.entries[0].text, draft.message);
+    }
+
     #[test]
     fn incremental_save_only_changes_touched_rows_and_is_atomic() {
         let dir = tempfile::tempdir().unwrap();
