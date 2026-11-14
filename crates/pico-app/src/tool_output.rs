@@ -1,12 +1,13 @@
 //! Fixed-height visual rows: only the visible slice is handed to text shaping.
 //! The complete source remains available to scrolling and selection-copy.
+use crate::scrollbar::scroll;
 use crate::{
     chat_selection::{self, Position},
     ui::Message,
 };
 use iced::{
     Element,
-    widget::{scrollable, sensor, space},
+    widget::{sensor, space},
 };
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
@@ -149,7 +150,7 @@ impl Output {
         let scroll_id = id.to_owned();
         let resize_id = id.to_owned();
         sensor(
-            scrollable(crate::keyed_column::keyed_column(rows))
+            scroll(crate::keyed_column::keyed_column(rows))
                 .id(format!("tool-output-{id}"))
                 .height((self.rows.len() as f32 * LINE_HEIGHT).min(MAX_HEIGHT))
                 .on_scroll(move |v| {

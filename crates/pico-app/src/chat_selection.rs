@@ -1,5 +1,6 @@
 //! Logical transcript positions survive virtualized widgets being unmounted.
 //! Only mounted text is shaped; copy reconstructs the selected entries on demand.
+use crate::scrollbar::scroll;
 use crate::ui::Message;
 use iced::{
     Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Vector,
@@ -240,7 +241,7 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
         lines: &'a [markdown::Text],
     ) -> Element<'a, Message> {
         container(
-            scrollable(
+            scroll(
                 container(column(lines.iter().enumerate().map(|(i, line)| {
                     self.block(
                         line.spans(settings.style),
@@ -251,11 +252,7 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
                 })))
                 .padding(settings.code_size),
             )
-            .direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::default()
-                    .width(settings.code_size / 2)
-                    .scroller_width(settings.code_size / 2),
-            )),
+            .direction(scrollable::Direction::Horizontal(crate::scrollbar::rail())),
         )
         .width(Length::Fill)
         .padding(settings.code_size / 4)

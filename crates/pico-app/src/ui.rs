@@ -1,4 +1,5 @@
 use crate::activity::{self, Row as ActivityRow};
+use crate::scrollbar::scroll;
 use crate::{
     chat_selection::{self, Position},
     chevron_icon::chevron_icon,
@@ -2353,7 +2354,7 @@ impl App {
             .spacing(6)
             .align_y(iced::Center);
             container(
-                scrollable(badges)
+                scroll(badges)
                     .id("favorite-projects")
                     .direction(scrollable::Direction::Horizontal(
                         scrollable::Scrollbar::hidden(),
@@ -2474,7 +2475,7 @@ impl App {
                     .style(card),
             );
         }
-        content = content.push(scrollable(cards).height(Fill));
+        content = content.push(scroll(cards).height(Fill));
         container(content)
             .padding(RIGHT_PANEL_PADDING)
             .width(
@@ -2595,7 +2596,7 @@ impl App {
         }
         let rows = crate::keyed_column::animated_column(rows);
         list = list.push(
-            scrollable(rows)
+            scroll(rows)
                 .id("sessions")
                 .height(Fill)
                 .on_scroll(move |v| {
@@ -2673,7 +2674,7 @@ impl App {
             .max_width(self.catalog.settings.chat_width)
             .width(Fill)
             .padding([20, 26]);
-        let chat = scrollable(container(transcript).center_x(Fill))
+        let chat = scroll(container(transcript).center_x(Fill))
             .id("chat")
             .height(Fill)
             .on_scroll(move |v| {
@@ -2687,6 +2688,7 @@ impl App {
                     offset.y + bounds.height >= content.height - 40.,
                 )
             });
+        let chat = container(chat).padding(iced::Padding::ZERO.right(6));
         let running = self.running();
         if let Some(child) = &session.child {
             let parent_title = self
@@ -2777,9 +2779,10 @@ impl App {
                 .enumerate()
                 .map(|(index, media)| self.image_view.attachment(media, index)))
             .spacing(8);
-            compose = compose.push(scrollable(images).direction(
-                scrollable::Direction::Horizontal(scrollable::Scrollbar::new()),
-            ));
+            compose = compose.push(
+                scroll(images)
+                    .direction(scrollable::Direction::Horizontal(crate::scrollbar::rail())),
+            );
         }
         compose = compose.push(self.composer_editor(running));
         if !session.pending.is_empty() && running {
@@ -3251,7 +3254,7 @@ impl App {
         if self.account.is_none() {
             content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).color(MUTED),button("Open Settings →").on_press(Message::ToggleSettings).style(button::text)].spacing(10)).padding(18).style(card));
         }
-        container(scrollable(container(content).max_width(650).padding(36)))
+        container(scroll(container(content).max_width(650).padding(36)))
             .center_x(Fill)
             .center_y(Fill)
             .height(Fill)
@@ -3437,7 +3440,7 @@ impl App {
                 }
             }
         }
-        let mut panel_content = column![header, scrollable(settings).height(Fill)].spacing(14);
+        let mut panel_content = column![header, scroll(settings).height(Fill)].spacing(14);
         if self.settings_tab != SettingsTab::Account {
             panel_content = panel_content.push(
                 row![
@@ -3791,7 +3794,7 @@ impl App {
             });
         }
         opaque(
-            container(scrollable(options).height((menu.options.len() as f32 * 32. - 2.).min(240.)))
+            container(scroll(options).height((menu.options.len() as f32 * 32. - 2.).min(240.)))
                 .padding(6)
                 .width(280)
                 .style(footer_surface),

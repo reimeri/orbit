@@ -12,6 +12,7 @@ mod keyed_column;
 mod markdown_images;
 mod pointer_input;
 mod questionnaire;
+mod scrollbar;
 mod search_icon;
 mod tool_output;
 mod ui;

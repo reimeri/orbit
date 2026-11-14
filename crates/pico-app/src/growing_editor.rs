@@ -299,7 +299,7 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
                 .scrollbar(layout.bounds())
                 .is_some_and(|bar| cursor.is_over(bar.track))
         {
-            mouse::Interaction::Pointer
+            mouse::Interaction::None
         } else {
             self.editor
                 .mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
@@ -329,33 +329,16 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
         if let Some(bar) = state.scrollbar(layout.bounds())
             && let Some(clip) = layout.bounds().intersection(viewport)
         {
-            let palette = theme.extended_palette();
+            let thumb = crate::scrollbar::thumb(theme, state.hovered || state.drag.is_some());
             renderer.with_layer(clip, |renderer| {
-                let rail = Rectangle {
-                    x: bar.thumb.x,
-                    width: bar.thumb.width,
-                    ..bar.track
-                };
-                for (bounds, color) in [
-                    (rail, palette.background.weak.color),
-                    (
-                        bar.thumb,
-                        if state.hovered || state.drag.is_some() {
-                            palette.primary.strong.color
-                        } else {
-                            palette.background.strongest.color
-                        },
-                    ),
-                ] {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds,
-                            border: iced::border::rounded(2),
-                            ..Default::default()
-                        },
-                        color,
-                    );
-                }
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: bar.thumb,
+                        border: thumb.border,
+                        ..Default::default()
+                    },
+                    thumb.background,
+                );
             });
         }
     }
@@ -426,6 +409,16 @@ mod tests {
                 .scrollbar(node.bounds())
         }
 
+        fn interaction(&self, node: &layout::Node, point: Point) -> mouse::Interaction {
+            view(&self.content).as_widget().mouse_interaction(
+                &self.tree,
+                Layout::new(node),
+                mouse::Cursor::Available(point),
+                &node.bounds(),
+                &self.renderer,
+            )
+        }
+
         fn events(&mut self, node: &layout::Node, events: &[(Event, Point)]) -> Vec<Action> {
             let mut messages = Vec::new();
             {
@@ -455,6 +448,24 @@ mod tests {
     }
     fn release() -> Event {
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+    }
+
+    #[test]
+    fn scrollbar_keeps_default_cursor_without_changing_text_cursor() {
+        let mut editor = Editor::new(&"A line of text\n".repeat(30));
+        let node = editor.layout(400.);
+        let bar = editor.bar(&node).unwrap();
+        let text = Point::new(35., 20.);
+        for point in [bar.thumb.center(), bar.track.center()] {
+            assert_eq!(editor.interaction(&node, point), mouse::Interaction::None);
+        }
+        assert_eq!(editor.interaction(&node, text), mouse::Interaction::Text);
+
+        editor.events(&node, &[(press(), bar.thumb.center())]);
+        // Keep the arrow even when a drag leaves the scrollbar's hit area.
+        assert_eq!(editor.interaction(&node, text), mouse::Interaction::None);
+        editor.events(&node, &[(release(), text)]);
+        assert_eq!(editor.interaction(&node, text), mouse::Interaction::Text);
     }
 
     #[test]

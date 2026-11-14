@@ -1,4 +1,5 @@
 //! V1-style composer replacement. Drafts live in the app, never in session storage.
+use crate::scrollbar::scroll;
 use iced::{
     Color, Element, Event, Fill, Length, Rectangle, Size, Task, Theme, Vector,
     advanced::{
@@ -375,7 +376,7 @@ impl Draft {
             // Keep the editor and navigation stationary while long prompts/options
             // scroll independently. The editor has its own multiline scrolling.
             panel = panel.push(
-                container(scrollable(body).id(self.scroll_id()).height(Length::Shrink))
+                container(scroll(body).id(self.scroll_id()).height(Length::Shrink))
                     .max_height((max_height - reserved).max(60.)),
             );
             if editor_open {
