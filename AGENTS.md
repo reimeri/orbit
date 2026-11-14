@@ -13,6 +13,13 @@ Use `nix develop` environment for development tooling.
 - Identify the primary user task and prioritize it over supporting features.
 - Keep implementation simple without reducing useful functionality to a barebones demo.
 
+## Preserve agent-relevant data
+
+- Never truncate or discard data that the agent might need. Output budgets limit what is sent inline, not what is preserved.
+- If data is too large to send inline, save it completely to a private temporary file under `/tmp` and give the agent the file's absolute path and exact byte size instead. The agent can read or search the file for what it needs.
+- Do not delete or otherwise manage these temporary files; leave cleanup to the OS. If saving fails, retain the data and report a recoverable error rather than returning incomplete output as though it were complete.
+- Display-only shortening is fine when the complete underlying data remains available.
+
 ## Failure recovery
 
 - When something inevitably goes wrong the last thing you want to do is to just present the user a error message and let them figure out how to continue

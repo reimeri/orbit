@@ -1,6 +1,7 @@
 //! Fresh QuickJS cells implementing Codex's public code-mode contract.
 use crate::{
-    shell::{Shell, truncate},
+    output::{OutputBuffer, character_budget},
+    shell::Shell,
     store::id,
 };
 use anyhow::{Context as _, Result, bail};
@@ -25,6 +26,7 @@ pub fn tools() -> Value {
 }
 const DESCRIPTION: &str = r#"Run raw JavaScript to orchestrate tool calls in a fresh embedded isolate as an async module. No Node, filesystem, network or console. Variables do not survive cells; store/load do. Only explicitly emitted text reaches the model. Unawaited promises are discarded when the module finishes.
 Optional first line: // @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000}
+Output budgets limit inline text only. Oversized output is saved completely under /tmp; results give its path and exact byte size instead of a preview. Use shell commands to read/search that file. Files remain after the cell/command exits.
 exec yields early with a cell ID if still running. Use wait to retrieve subsequent output or terminate it.
 Globals: text(value) emits text (JSON.stringify for nonstrings); exit() ends successfully; store(key,value) and load(key) share serializable state across cells in this conversation; notify(value) immediately injects an extra custom_tool_call_output for this exec call; yield_control() yields accumulated output immediately; setTimeout(callback, delayMs), clearTimeout(id); ALL_TOOLS lists nested tool metadata. Pending timers alone do not keep a cell alive.
 Nested tools (return strings):
@@ -49,8 +51,7 @@ pub enum Event {
 pub type Observer = Arc<dyn Fn(Event) -> Result<()> + Send + Sync>;
 #[derive(Default)]
 struct State {
-    output: String,
-    truncated: bool,
+    output: OutputBuffer,
     done: bool,
     error: Option<String>,
     yielded: bool,
@@ -189,14 +190,19 @@ impl CodeMode {
         })?;
         let mut state = cell.state.0.lock().expect("cell state");
         state.yielded = false;
-        let mut output = truncate(&std::mem::take(&mut state.output), tokens);
-        if std::mem::take(&mut state.truncated) {
-            output.push_str("\n[Cell output limit reached; additional text discarded]");
-        }
+        let output = state
+            .output
+            .read(character_budget(tokens))
+            .with_context(|| {
+                format!("Could not return cell output. Retry wait with cell_id {id}")
+            })?;
         let status = if state.done {
             self.cells.lock().expect("cell lock").remove(id);
             match &state.error {
-                Some(e) => format!("Script failed: {e}"),
+                Some(e) => format!(
+                    "Script failed: {}",
+                    crate::output::preserve_text(e, character_budget(tokens))
+                ),
                 None => "Script completed".into(),
             }
         } else {
@@ -290,11 +296,8 @@ fn run_cell(
                     let mut s = state.0.lock().expect("cell state");
                     const LIMIT:usize=4*1024*1024;
                     if !value.is_empty() {
-                        if !s.output.is_empty() && s.output.len()<LIMIT {s.output.push('\n');}
-                        let mut bytes=value.len().min(LIMIT-s.output.len());
-                        while !value.is_char_boundary(bytes) {bytes-=1;}
-                        s.output.push_str(&value[..bytes]);
-                        s.truncated |= bytes<value.len();
+                        if !s.output.is_empty() {s.output.append(b"\n", LIMIT);}
+                        s.output.append(value.as_bytes(), LIMIT);
                     }
                     if immediate {
                         s.yielded = true;
@@ -538,7 +541,7 @@ mod tests {
         assert!(!dir.path().join("marker").exists());
     }
     #[test]
-    fn cell_output_cap_handles_unicode_and_releases_capacity_after_reading() {
+    fn cell_output_spills_all_unicode_and_releases_capacity_after_reading() {
         let mode = mode();
         let result = mode
             .exec(
@@ -547,14 +550,92 @@ mod tests {
                 &CancellationToken::new(),
             )
             .unwrap();
-        assert!(result.contains("Cell output limit reached"));
-        assert!(result.len() < 200000);
+        let expected = format!("{}\n界界", "λ".repeat(2097151));
+        assert_eq!(
+            crate::test_support::saved_output(&result),
+            expected.as_bytes()
+        );
+        assert!(result.contains("Script completed"));
         let result = mode
             .exec("text('small output');", "next", &CancellationToken::new())
             .unwrap();
         assert!(result.contains("small output"));
         assert!(!result.contains("limit reached"));
     }
+    #[test]
+    fn outer_exec_and_wait_budgets_spill_instead_of_hiding_text() {
+        let mode = mode();
+        let cancel = CancellationToken::new();
+        let result = mode
+            .exec(
+                "// @exec: {\"max_output_tokens\": 0}\ntext('important middle λ');",
+                "zero",
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(
+            crate::test_support::saved_output(&result),
+            "important middle λ".as_bytes()
+        );
+
+        // Hold the cell in notify until exec has returned its running ID.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let waiter = release.clone();
+        let waiting = CodeMode::new(
+            Arc::new(Shell::new(std::env::temp_dir())),
+            Arc::new(move |_| {
+                entered_tx.send(()).unwrap();
+                let mut ready = waiter.0.lock().unwrap();
+                while !*ready {
+                    ready = waiter.1.wait(ready).unwrap();
+                }
+                Ok(())
+            }),
+        );
+        let initial = waiting
+            .exec(
+                "// @exec: {\"yield_time_ms\": 0}\nnotify('ready');text('start λ middle 界 end');",
+                "wait",
+                &cancel,
+            )
+            .unwrap();
+        let id = initial
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Script running with cell ID ")
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        let result = waiting
+            .wait(
+                &json!({"cell_id": id, "max_tokens": 1}).to_string(),
+                &cancel,
+            )
+            .unwrap();
+        assert!(result.contains("Script completed"));
+        drop(waiting);
+        assert_eq!(
+            crate::test_support::saved_output(&result),
+            "start λ middle 界 end".as_bytes()
+        );
+    }
+
+    #[test]
+    fn oversized_exception_preserves_complete_message_with_zero_budget() {
+        let result = mode().exec(
+            "// @exec: {\"max_output_tokens\": 0}\nthrow new Error('start ' + 'λ'.repeat(50000) + ' crucial end');",
+            "error", &CancellationToken::new(),
+        ).unwrap();
+        assert!(result.starts_with("Script failed:"));
+        assert_eq!(
+            crate::test_support::saved_output(&result),
+            format!("start {} crucial end", "λ".repeat(50000)).as_bytes()
+        );
+    }
+
     #[test]
     fn notifications_are_separate_from_direct_cell_output() {
         let events = Arc::new(Mutex::new(vec![]));

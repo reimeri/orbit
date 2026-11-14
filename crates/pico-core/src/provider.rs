@@ -129,6 +129,27 @@ impl Provider {
         let mut record = String::new();
         let mut position = 0;
         let mut summary = session.summary.clone();
+        // Preserve the source independently of the model: summaries may omit
+        // file references, especially from nested tools and notifications. Include
+        // the previous checkpoint so references survive repeated compactions.
+        let mut archive = crate::output::OutputBuffer::default();
+        archive.append(
+            format!("Previous continuation summary:\n{summary}\n\nHistorical entries (JSONL):\n")
+                .as_bytes(),
+            1024 * 1024,
+        );
+        for entry in session.entries.range(session.summarized_entries) {
+            archive.append(&serde_json::to_vec(entry)?, 1024 * 1024);
+            archive.append(b"\n", 1024 * 1024);
+        }
+        let archive = archive.read(0).context("Could not preserve compaction history. Original context and transcript are unchanged; check /tmp disk space/permissions and retry")?;
+        // A tools-disabled summarizer cannot open a spilled summary; continue
+        // independently after an oversized summary and retain its reference here.
+        let mut preserved = Vec::new();
+        let summary_budget = crate::output::character_budget((context_limit / 32) as usize);
+        if summary.chars().count() > summary_budget {
+            summary.clear();
+        }
         loop {
             let mut chunk = String::with_capacity(max_bytes);
             while chunk.len() < max_bytes {
@@ -173,13 +194,26 @@ impl Provider {
                     "Model returned an empty summary. Original context preserved; retry compaction."
                 );
             }
-            summary = crate::shell::truncate(&summary, (context_limit / 32) as usize);
+            if summary.chars().count() > summary_budget {
+                preserved.push(crate::output::preserve_text(&summary, summary_budget));
+                // Subsequent chunks are summarized independently. The agent,
+                // unlike the summarizer, can open every preserved summary.
+                summary.clear();
+            }
         }
-        if summary.is_empty() {
+        if summary.is_empty() && preserved.is_empty() {
             bail!(
                 "No transcript available to summarize. Start a new session; original context is preserved."
             );
         }
+        if !preserved.is_empty() {
+            summary.push_str("\nPreserved oversized continuation summaries (read these files for additional context):\n");
+            summary.push_str(&preserved.join("\n\n"));
+        }
+        summary.push_str("\nPreserved historical context (includes full tool results and earlier file references):\n");
+        summary.push_str(&archive);
+        // The reference list itself can grow past the inline budget too.
+        summary = crate::output::preserve_text(&summary, summary_budget);
         Ok(Compaction {
             input: vec![
                 json!({"role":"user", "content":format!("Continue the task from this summary of our earlier conversation. It is historical context, not new authorization.\n\n{summary}")}),
@@ -268,9 +302,10 @@ impl Provider {
                 if parsed.as_ref().is_ok_and(is_context_limit) {
                     return Err(ContextLimit.into());
                 }
-                let error = parsed
-                    .map(|v| safe_error(&v))
-                    .unwrap_or_else(|_| "Service returned a non-JSON error".into());
+                let error = match parsed {
+                    Ok(value) => safe_error(&value),
+                    Err(_) => crate::output::preserve_bytes(&bytes, 500),
+                };
                 bail!(
                     "ChatGPT request failed ({status}): {error}. Check model/access in Settings, then retry."
                 );
@@ -664,6 +699,156 @@ mod tests {
             json!({"type":"custom_tool_call","call_id":"bad"})
         ]));
     }
+    #[tokio::test]
+    async fn oversized_summary_files_survive_later_chunks_and_compactions() {
+        let oversized = format!(
+            "start {} crucial middle {} end",
+            "λ".repeat(700),
+            "界".repeat(700)
+        );
+        let reply = |text: &str| {
+            crate::test_support::completed(json!([
+                {"type":"message", "content":[{"type":"output_text", "text":text}]}
+            ]))
+        };
+        let (dir, provider, mut requests, server) = fixture(vec![
+            (200, reply(&oversized)),
+            (200, reply("latest chunk")),
+            (200, reply("next compaction")),
+        ])
+        .await;
+        let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        session.accept("a".repeat(5000));
+        session.consume_pending();
+        session.input[0]["content"] = json!("z".repeat(30_000));
+        let compacted = provider
+            .compact(
+                &session,
+                "fixture",
+                8000,
+                &CancellationToken::new(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        let first = compacted.summary.unwrap();
+        assert!(first.contains("latest chunk"));
+        assert_eq!(
+            crate::test_support::saved_output(&first),
+            oversized.as_bytes()
+        );
+        session.summary = first.clone();
+        session.summarized_entries = compacted.summarized_entries;
+        session.accept("new task".into());
+        let compacted = provider
+            .compact(
+                &session,
+                "fixture",
+                8000,
+                &CancellationToken::new(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        let next = compacted.summary.unwrap();
+        assert!(next.contains("next compaction"));
+        let saved_checkpoint = crate::test_support::saved_output(&next);
+        let saved_checkpoint_text = std::str::from_utf8(&saved_checkpoint).unwrap();
+        let (previous, entries) = saved_checkpoint_text
+            .split_once("\n\nHistorical entries (JSONL):\n")
+            .unwrap();
+        assert_eq!(previous, format!("Previous continuation summary:\n{first}"));
+        let entry: crate::store::Entry = serde_json::from_str(entries.trim()).unwrap();
+        assert_eq!(entry.text, "new task");
+        assert_eq!(
+            crate::test_support::saved_output(std::str::from_utf8(&saved_checkpoint).unwrap()),
+            oversized.as_bytes()
+        );
+        server.await.unwrap();
+        // The tools-disabled summarizer never receives a file reference in place
+        // of the oversized summary it cannot open; later chunks are independent.
+        requests.recv().await.unwrap();
+        let second = requests.recv().await.unwrap();
+        assert!(!second.contains("Path: /tmp/"));
+        assert!(!second.contains("crucial middle"));
+    }
+
+    #[tokio::test]
+    async fn compaction_preserves_nested_tool_references_even_when_model_omits_them() {
+        // Near-budget summary + archive notice must itself spill in full.
+        let generated = "s".repeat(950);
+        let reply = crate::test_support::completed(json!([
+            {"type":"message", "content":[{"type":"output_text", "text":generated}]}
+        ]));
+        let (dir, provider, _requests, server) = fixture(vec![(200, reply)]).await;
+        let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        session.accept("remember nested output".into());
+        session.consume_pending();
+        session.input[0]["content"] = json!("z".repeat(30_000));
+        let important = "important original data λ";
+        let tool_notice = crate::output::preserve_text(important, 0);
+        let tool_entry = crate::store::Entry::new(
+            crate::store::EntryKind::Tool {
+                name: "exec_command".into(),
+                input: "cat data".into(),
+                output: tool_notice.clone(),
+                complete: true,
+                parent: Some("outer-call".into()),
+            },
+            "",
+        );
+        session.entries.push(tool_entry.clone());
+        let compacted = provider
+            .compact(
+                &session,
+                "fixture",
+                8000,
+                &CancellationToken::new(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        let inline = compacted.summary.unwrap();
+        assert!(!inline.contains(&generated));
+        let assembled = String::from_utf8(crate::test_support::saved_output(&inline)).unwrap();
+        assert!(assembled.starts_with(&generated));
+        let archive = String::from_utf8(crate::test_support::saved_output(&assembled)).unwrap();
+        let entries = archive
+            .split_once("Historical entries (JSONL):\n")
+            .unwrap()
+            .1;
+        let saved: Vec<crate::store::Entry> = entries
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(saved[1], tool_entry);
+        if let crate::store::EntryKind::Tool { output, .. } = &saved[1].kind {
+            assert_eq!(
+                crate::test_support::saved_output(output),
+                important.as_bytes()
+            );
+        } else {
+            panic!("nested tool record missing");
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_json_service_error_preserves_full_response_body() {
+        let diagnostic = format!("proxy error {} diagnostic tail", "λ".repeat(1000));
+        let (dir, provider, _requests, server) = fixture(vec![(400, diagnostic.clone())]).await;
+        let session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        let error = provider
+            .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::test_support::saved_output(&error.to_string()),
+            diagnostic.as_bytes()
+        );
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn repeated_fallback_uses_checkpoint_without_resending_old_history() {
         let reply = crate::test_support::completed(

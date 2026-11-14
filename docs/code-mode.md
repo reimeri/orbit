@@ -53,10 +53,19 @@ control characters such as `\u0003`. Non-TTY commands have closed stdin.
 
 Pico resource policy: 64 MiB JS heap and 1 MiB stack per cell, 16 MiB serializable
 session store, 32 open cells, 64 concurrent nested calls and 64 shell sessions per
-conversation. Waits are bounded to 300 seconds. Command output keeps a bounded
-1 MiB ring-buffer tail with an explicit dropped-byte notice; returned output is further limited
-by the requested approximate token budget. The app cancels process groups on Stop
-and exit. Deliberately daemonized/re-parented processes can escape process-group
+conversation. Waits are bounded to 300 seconds. Command output uses a
+1 MiB in-memory spill threshold, spilling the complete unread output to a private file under
+`/tmp` when needed. Returned output exceeding the requested approximate token budget
+is likewise saved in full, not truncated. Results contain an absolute file path and
+exact byte size, with no partial preview. A zero budget still returns a file reference
+for nonempty output. Budgets use four Unicode characters per approximate token,
+capped at 100,000 tokens. Non-UTF-8 command output is always saved byte-for-byte to
+a file rather than decoded lossily. Each read consumes new output once; its file is
+an immutable snapshot, not a growing log. Files survive command, cell, session and
+app exit; Pico does not clean them up. Read or search files using shell commands.
+If saving fails, buffered data is retained and the error provides the session/cell
+ID for retry after fixing disk space or permissions; do not rerun the command.
+The app cancels process groups on Stop and exit. Deliberately daemonized/re-parented processes can escape process-group
 cleanup; this is not a sandbox or a process supervisor.
 
 ## Reference provenance
@@ -73,9 +82,20 @@ Repository: <https://github.com/openai/codex>. Pico has its own Rust/QuickJS run
 it does not embed Codex/V8, Codex's remote execution service, approval/sandbox
 machinery, or Phase 2 multimedia tools. No backwards-compatibility adapters exist.
 
-Cell text buffers retain at most 4 MiB of UTF-8 (including inserted separators)
-and emit an explicit discard notice on overflow. Empty emissions do not allocate
+Cell text buffers spill to `/tmp` after 4 MiB of UTF-8 (including inserted separators),
+retaining all text. The outer `exec`/`wait` budget also uses complete-file references
+for oversized output, independently of nested shell tool budgets. Large JavaScript
+exception details use the same file-backed behavior. Empty emissions do not allocate
 fragments. Waiting cells are event-driven; timer callbacks scheduled during a tick
 run on a subsequent tick so resolved modules can finish. Tool-start persistence
 must succeed before commands launch. Session switching can release transcript
 bodies without discarding process/cell IDs, unread results or shared `store` values.
+
+Fallback context compaction preserves oversized generated summaries in `/tmp`
+instead of clipping them. It also archives the previous checkpoint and the new
+transcript entries (including nested tools and notifications) so file references
+remain accessible even if the summarizer omits them. The final continuation includes
+these references and is itself saved to a file if it exceeds the inline budget.
+Service error details also use complete-file references when oversized. If saving
+one-shot diagnostics fails, Pico reports the failure and returns the complete data
+inline (hexadecimal for non-UTF-8 bytes), rather than silently discarding it.

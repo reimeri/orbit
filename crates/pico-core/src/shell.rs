@@ -1,4 +1,5 @@
 //! Codex-style command sessions, scoped to one conversation. No approval/sandbox layer.
+use crate::output::{OutputBuffer, character_budget};
 use anyhow::{Context, Result, bail};
 use nix::{
     sys::signal::{Signal, killpg},
@@ -7,7 +8,7 @@ use nix::{
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Deserialize;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io::{Read, Write},
     path::PathBuf,
     process::Stdio,
@@ -53,8 +54,7 @@ pub struct StdinArgs {
 }
 #[derive(Default)]
 struct Output {
-    bytes: VecDeque<u8>,
-    dropped: usize,
+    buffer: OutputBuffer,
     exit: Option<String>,
     readers: usize,
 }
@@ -97,14 +97,13 @@ impl Process {
         let mut output = self.output.0.lock().expect("process output lock");
         let complete = output.exit.is_some() && output.readers == 0;
         let exit = output.exit.clone();
-        let dropped = std::mem::take(&mut output.dropped);
-        let bytes: Vec<_> = std::mem::take(&mut output.bytes).into();
+        let body = output
+            .buffer
+            .read(character_budget(tokens))
+            .with_context(|| {
+                format!("Could not return command output. Retry write_stdin with session_id {id}")
+            })?;
         drop(output);
-        let mut body = String::from_utf8_lossy(&bytes).into_owned();
-        if dropped > 0 {
-            body.insert_str(0, &format!("[Dropped {dropped} earlier output bytes]\n"));
-        }
-        let body = truncate(&body, tokens);
         let status = if complete {
             format!(
                 "Process exited with code {}",
@@ -133,11 +132,7 @@ fn register_pty(
 type SharedOutput = Arc<(Mutex<Output>, tokio::sync::Notify)>;
 fn append(output: &SharedOutput, bytes: &[u8]) {
     let mut state = output.0.lock().expect("output lock");
-    let excess = (state.bytes.len() + bytes.len()).saturating_sub(BUFFER_LIMIT);
-    let old = excess.min(state.bytes.len());
-    state.bytes.drain(..old);
-    state.dropped += excess;
-    state.bytes.extend(&bytes[excess - old..]);
+    state.buffer.append(bytes, BUFFER_LIMIT);
     // Readers do not need to wake consumers until exit: reads yield on their deadline.
 }
 fn finish_reader(output: &SharedOutput, error: Option<std::io::Error>) {
@@ -437,27 +432,6 @@ impl Drop for Shell {
         self.stop_all();
     }
 }
-pub fn truncate(text: &str, tokens: usize) -> String {
-    if tokens == 0 {
-        return String::new();
-    }
-    let limit = tokens.clamp(1, 100_000) * 4;
-    if text.chars().count() <= limit {
-        text.into()
-    } else {
-        let first: String = text.chars().take(limit / 2).collect();
-        let last: String = text
-            .chars()
-            .rev()
-            .take(limit / 2)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!("{first}\n… [output truncated] …\n{last}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,25 +444,61 @@ mod tests {
             .unwrap()
     }
     #[test]
-    fn ring_retains_exact_asymmetric_tail_and_counts_discarded_bytes() {
-        let output = Arc::new((Mutex::new(Output::default()), tokio::sync::Notify::new()));
-        let bytes: Vec<_> = (0..BUFFER_LIMIT + 17777)
+    fn command_and_poll_preserve_oversized_output_after_session_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        // Below the memory threshold, but above the default response budget.
+        let text = format!("start\n{}\nend", "λ中".repeat(25_000));
+        std::fs::write(dir.path().join("text"), &text).unwrap();
+        let shell = Shell::new(dir.path().into());
+        let first = shell
+            .exec(
+                serde_json::from_value(serde_json::json!({
+                    "cmd": "cat text", "login": false
+                }))
+                .unwrap(),
+                &cancel,
+            )
+            .unwrap();
+        assert!(first.contains("Process exited with code 0"));
+        assert_eq!(crate::test_support::saved_output(&first), text.as_bytes());
+
+        // Hold output until write_stdin, then exceed the old ring buffer with
+        // asymmetric binary data, exercising both stdout and stderr capture paths.
+        let bytes: Vec<_> = (0..1024 * 1024 + 17777)
             .map(|i| ((i * 17 + i / 29) % 251) as u8)
             .collect();
-        for chunk in bytes.chunks(8191) {
-            append(&output, chunk);
-        }
-        let state = output.0.lock().unwrap();
-        assert_eq!(state.dropped, 17777);
-        assert_eq!(state.bytes.len(), BUFFER_LIMIT);
-        assert!(
-            state
-                .bytes
-                .iter()
-                .copied()
-                .eq(bytes[17777..].iter().copied())
-        );
+        std::fs::write(dir.path().join("binary"), &bytes).unwrap();
+        let initial = shell
+            .exec(
+                serde_json::from_value(serde_json::json!({
+                    "cmd": "while [ ! -f release ]; do sleep 0.01; done; cat binary >&2; exit 7",
+                    "login": false, "yield_time_ms": 0
+                }))
+                .unwrap(),
+                &cancel,
+            )
+            .unwrap();
+        let session_id = running_id(&initial);
+        std::fs::write(dir.path().join("release"), "").unwrap();
+        let result = shell
+            .write(
+                StdinArgs {
+                    session_id,
+                    chars: String::new(),
+                    yield_time_ms: 3000,
+                    max_output_tokens: None,
+                },
+                &cancel,
+            )
+            .unwrap();
+        assert!(result.contains("Process exited with code 7"));
+        assert!(!shell.has_work());
+        drop(shell);
+        assert_eq!(crate::test_support::saved_output(&result), bytes);
+        assert_eq!(crate::test_support::saved_output(&first), text.as_bytes());
     }
+
     #[test]
     fn cancelled_commands_release_slots_without_stop_all() {
         let shell = Arc::new(Shell::new(std::env::temp_dir()));

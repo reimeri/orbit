@@ -65,3 +65,20 @@ pub fn completed(output: serde_json::Value) -> String {
         serde_json::json!({"type":"response.completed","response":{"status":"completed","output":output,"usage":{"input_tokens":37,"output_tokens":11}}})
     )
 }
+
+/// Assert the public spill notice identifies a private file with the exact size.
+pub fn saved_output(notice: &str) -> Vec<u8> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = notice
+        .lines()
+        .find_map(|line| line.strip_prefix("Path: "))
+        .expect("complete output file path");
+    assert!(path.starts_with("/tmp/pico-evo-output-"), "{path}");
+    let metadata = std::fs::metadata(path).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert!(
+        notice.contains(&format!("({} bytes)", metadata.len())),
+        "{notice}"
+    );
+    std::fs::read(path).unwrap()
+}

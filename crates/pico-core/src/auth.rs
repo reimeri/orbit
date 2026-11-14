@@ -82,14 +82,14 @@ impl Auth {
             .await
             .context("Could not refresh login; check your connection and retry")?;
         let status = response.status();
-        let body: Value = response.json().await?;
+        let bytes = response.bytes().await?;
         if !status.is_success() {
             bail!(
                 "ChatGPT login refresh failed ({status}). Sign in again in Settings. {}",
-                safe_error(&body)
+                service_error(&bytes)
             );
         }
-        let credentials = parse_tokens(body, Some(current))?;
+        let credentials = parse_tokens(serde_json::from_slice(&bytes)?, Some(current))?;
         *guard = Some(credentials.clone());
         self.needs_save.store(true, Ordering::Relaxed);
         self.store.write("auth.json", &credentials).context("Refreshed login is retained in memory but could not be saved. Fix disk space/permissions and retry before quitting")?;
@@ -214,15 +214,15 @@ impl Auth {
                     .send()
                     .await?;
                 let status = response.status();
-                let body: Value = response.json().await?;
+                let bytes = response.bytes().await?;
                 if !status.is_success() {
                     socket.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nLogin failed. Return to Pico for details and retry.").await?;
                     bail!(
                         "Login token exchange failed ({status}): {}",
-                        safe_error(&body)
+                        service_error(&bytes)
                     );
                 }
-                let credentials = parse_tokens(body, None)?;
+                let credentials = parse_tokens(serde_json::from_slice(&bytes)?, None)?;
                 let label = credentials
                     .email
                     .clone()
@@ -302,19 +302,48 @@ fn parse_tokens(body: Value, old: Option<&Credentials>) -> Result<Credentials> {
     })
 }
 pub(crate) fn safe_error(body: &Value) -> String {
-    body["error"]["message"]
+    let text = body["error"]["message"]
         .as_str()
         .or_else(|| body["error_description"].as_str())
-        .or_else(|| body["message"].as_str())
-        .unwrap_or("No service error details")
-        .chars()
-        .take(500)
-        .collect()
+        .or_else(|| body["message"].as_str());
+    match text {
+        Some(text) => crate::output::preserve_text(text, 500),
+        None => crate::output::preserve_text(&body.to_string(), 500),
+    }
+}
+fn service_error(bytes: &[u8]) -> String {
+    match serde_json::from_slice(bytes) {
+        Ok(body) => safe_error(&body),
+        Err(_) => crate::output::preserve_bytes(bytes, 500),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_service_error_preserves_details_after_old_cutoff() {
+        let message = format!("{} crucial diagnostic at the end", "λ".repeat(501));
+        let result = safe_error(&serde_json::json!({"error": {"message": message}}));
+        assert_eq!(
+            crate::test_support::saved_output(&result),
+            message.as_bytes()
+        );
+        assert_eq!(
+            safe_error(&serde_json::json!({"message": "small error"})),
+            "small error"
+        );
+        assert_eq!(
+            crate::test_support::saved_output(&service_error(b"proxy\xfferror")),
+            b"proxy\xfferror"
+        );
+        let unknown = serde_json::json!({"unrecognized_error": "x".repeat(501)});
+        assert_eq!(
+            crate::test_support::saved_output(&safe_error(&unknown)),
+            unknown.to_string().as_bytes()
+        );
+    }
+
     #[tokio::test]
     async fn rotated_token_is_retained_and_resaved_after_storage_failure() {
         let dir = tempfile::tempdir().unwrap();
