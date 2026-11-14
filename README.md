@@ -107,8 +107,6 @@ are not resurrected after restart. User instructions, transcript and model conte
 are durable. Switching ChatGPT accounts rebuilds incompatible encrypted context
 from the transcript.
 
-No old `pico` directories or workspace `.pico/media` assets are migrated or modified.
-
 See [performance](docs/performance.md) for lazy loading, rendering, durability
 boundaries and reproducible large-session measurements.
 

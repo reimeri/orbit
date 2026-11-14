@@ -97,4 +97,4 @@ image defaults. Update `docs/images.md` and its live acceptance checklist. Avoid
 
 Report replacements, evidence, checks run, and any unverified subscription
 availability. If there are no verified newer models, report that result without
-making speculative edits. Never modify `.pico/media/` or the V1 reference.
+making speculative edits. Never modify the V1 reference.

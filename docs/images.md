@@ -67,7 +67,7 @@ generatedImage(await tools.image_gen__imagegen({
 `output_path` must have `.png` without `gif`, or `.gif` with it. Relative paths
 resolve against the calling workspace; absolute paths are allowed. The parent
 must already exist and pass a write preflight. Existing files and symlinks, including dangling symlinks,
-are **never overwritten**. Pico-owned storage and `.pico/media` destinations,
+are **never overwritten**. Pico-owned storage destinations,
 including resolved parent aliases, are rejected.
 
 Pico holds the resolved parent directory open and publishes a complete staged file
@@ -150,7 +150,7 @@ model summaries.
 Private originals, prepared images and thumbnails live in `media/<session-id>/`
 under the existing **pico-evo storage root**. They survive restart and source-file
 changes. They are removed with their owning session/family, not during compaction
-or transcript eviction. Existing `.pico/media` assets are untouched. Failed cleanup
+or transcript eviction. Failed cleanup
 after committed deletion is reported without allowing late callbacks to recreate
 sessions.
 
@@ -217,7 +217,7 @@ file or unavailable URL produces an explicit error. An already open modal can fi
 using its loaded bytes. Two source loads and two shared decoders may run concurrently;
 the retained Markdown cache is capped at 256 MiB across visible messages. If that
 limit is reached, use fewer/smaller images or scroll other image messages out of view
-and retry. Images never create files in session media storage or `.pico/media`.
+and retry. Images never create files in session media storage.
 
 ## Reference provenance and live acceptance
 

@@ -19,7 +19,7 @@ Phase 1 uses Tokio for provider streams, OAuth and UI tasks.
 
 New files used by a Git-backed flake must be known to Git (`git add <files>`);
 otherwise Nix cannot see them. A dirty-worktree warning is normal during edits.
-Do not copy `target/`, the V1 reference, or `.pico` session assets into Nix sources.
+Do not copy `target/` or the V1 reference into Nix sources.
 The flake uses an explicit source allowlist.
 
 ## Choose the cheapest useful check

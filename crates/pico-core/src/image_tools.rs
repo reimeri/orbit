@@ -447,14 +447,7 @@ impl Destination {
         if !parent.metadata()?.is_dir() {
             bail!("Output parent is not a directory");
         }
-        if resolved.starts_with(private.canonicalize()?)
-            || resolved.ancestors().any(|p| {
-                p.file_name().is_some_and(|v| v == "media")
-                    && p.parent()
-                        .and_then(Path::file_name)
-                        .is_some_and(|v| v == ".pico")
-            })
-        {
+        if resolved.starts_with(private.canonicalize()?) {
             bail!(
                 "output_path cannot point into Pico-owned storage, including symlink aliases. Choose a caller-owned destination; no request was sent"
             );
@@ -835,8 +828,9 @@ mod tests {
         fs::remove_file(&path).unwrap();
         symlink("missing-target", &path).unwrap();
         assert!(Destination::new(&path, &private).is_err());
-        let protected = dir.path().join(".pico/media");
-        fs::create_dir_all(&protected).unwrap();
+        assert!(Destination::new(&private.join("new.png"), &private).is_err());
+        let protected = private.join("media");
+        fs::create_dir(&protected).unwrap();
         let alias = dir.path().join("alias");
         symlink(&protected, &alias).unwrap();
         assert!(Destination::new(&alias.join("new.png"), &private).is_err());

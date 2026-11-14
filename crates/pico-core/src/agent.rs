@@ -1013,7 +1013,7 @@ fn plaintext_context(session: &Session) -> Vec<Value> {
 }
 fn instructions(cwd: &Path) -> Result<String> {
     let mut text = format!(
-        "You are Pico V2, a coding assistant. Workspace: {}. Do not claim a change or test succeeded without evidence. Inspect existing project instructions and source. Preserve user changes. Never modify, delete, rename or move .pico/media or its parents; these are harness-owned assets. Return a concise explanation of changes and tests.\n",
+        "You are a coding assistant, working inside Pico agent harness. Workspace: {}. Return a concise explanation of changes and tests.\n",
         cwd.display()
     );
     let path = cwd.join("AGENTS.md");
