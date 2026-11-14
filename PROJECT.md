@@ -66,9 +66,9 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
   - Subagents
 	- Async subagents run parallel to other work
 	- By default do not share context with the main agent
-	- Schema takes session_id which determines the agents session. So by giving the same session_id to agent it gets the context of that session.
+	- spawn_subagent Schema takes session_id which determines the agents session. So by giving the same session_id to agent it gets the context of that session.
 	- UI should provide a way to see what the agent is doing.
-	- I think we should have 3 tools for managing subagents: spawn_agent, wait_agent, and list_agents
+	- I think we should have 3 tools for managing subagents: spawn_agent, wait_subagent, and list_subagents
 	- Agent types:
 		- Review (gpt-6.1-sol, medium): Reviews changes for issues
 		- Explore (gpt-6-luna, high): Fast project exploration
