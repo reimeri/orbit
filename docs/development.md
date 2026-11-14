@@ -267,7 +267,7 @@ without image's broad default codec dependency set or any X11 backend.
 
 Run `cargo test --locked --workspace` for media, generation fixture and UI lifecycle
 regressions. The software/GPU window smoke includes the Images settings tab, static
-thumbnail, animated modal, pause and actual-size views using deterministic local
+thumbnail, animated modal, pause and natural-size static views using deterministic local
 fixtures. See [images](images.md) for resource limits and paid live acceptance.
 
 The expanded rendered smoke sequence now includes 39 frames (including media and

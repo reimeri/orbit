@@ -154,8 +154,13 @@ or transcript eviction. Existing `.pico/media` assets are untouched. Failed clea
 after committed deletion is reported without allowing late callbacks to recreate
 sessions.
 
-Expanded tool results show static thumbnails. Click one for a fit-to-window or
-actual-size modal; GIFs animate there with Play/Pause. Closing the modal cancels
+Expanded tool results show static thumbnails. Click one for a modal on a dark
+overlay, with no solid panel. Images retain their natural size unless they must
+shrink to fit the window. Path, resolution and byte size appear in a compact,
+translucent panel at the image’s top left only while hovering over the image.
+Long paths and URLs are ellipsized to keep the panel compact.
+Click the image or outside it, or press Escape, to close. GIFs animate with an
+icon-only Play/Pause button centered below the image. Closing the modal cancels
 obsolete decoding and stops animation subscriptions. Decoding runs on workers,
 with at most two UI decoders and visible-only thumbnail retention.
 
@@ -190,8 +195,8 @@ at most five redirects and the same 79 MiB input limit, including responses with
 Content-Length header. Embedded URL credentials and non-HTTP(S) redirects are rejected.
 
 Previews fit the chat column and show the image's alt text beneath them. The optional
-title appears on hover. Click a preview for the existing full-size viewer, with
-fit/actual-size controls and GIF Play/Pause. Chat previews themselves remain static.
+title appears on hover. Click a preview for the same natural-size viewer and
+GIF Play/Pause control. Chat previews themselves remain static.
 Loading previews are rectangles sized from image metadata, including EXIF rotation,
 before pixel decoding starts. The rectangle, loaded preview and error/retry state
 share the same aspect-ratio layout, so decoding completion does not move the chat.

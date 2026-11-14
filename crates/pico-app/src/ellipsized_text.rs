@@ -19,6 +19,20 @@ pub fn ellipsized_text<'a, Message: 'a>(
         value: value.replace(['\n', '\r'], " "),
         size,
         color,
+        width: Length::Fill,
+    })
+}
+
+pub fn shrinking_ellipsized_text<'a, Message: 'a>(
+    value: &str,
+    size: f32,
+    color: Option<Color>,
+) -> Element<'a, Message> {
+    Element::new(Label {
+        value: value.replace(['\n', '\r'], " "),
+        size,
+        color,
+        width: Length::Shrink,
     })
 }
 
@@ -26,11 +40,13 @@ struct Label {
     value: String,
     size: f32,
     color: Option<Color>,
+    width: Length,
 }
 
 #[derive(Default)]
 struct State {
     key: Option<(String, f32, f32, Font)>,
+    fitted_width: f32,
     paragraph: paragraph::Plain<<iced::Renderer as text::Renderer>::Paragraph>,
 }
 
@@ -45,7 +61,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Label {
 
     fn size(&self) -> Size<Length> {
         // Whole-pixel line heights keep repeated sidebar rows on the same pixel grid.
-        Size::new(Length::Fill, Length::Fixed((self.size * 1.3).round()))
+        Size::new(self.width, Length::Fixed((self.size * 1.3).round()))
     }
 
     fn layout(
@@ -80,10 +96,14 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Label {
             };
             let fitted = fit(&self.value, width, &mut measure);
             // The last binary-search probe need not be the final fitted string.
-            measure(&fitted);
+            state.fitted_width = measure(&fitted);
             state.key = Some(key);
         }
-        layout::Node::new(limits.resolve(Length::Fill, (self.size * 1.3).round(), Size::ZERO))
+        layout::Node::new(limits.resolve(
+            self.width,
+            (self.size * 1.3).round(),
+            Size::new(state.fitted_width, 0.),
+        ))
     }
 
     fn draw(

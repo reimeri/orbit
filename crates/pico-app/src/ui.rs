@@ -3936,8 +3936,17 @@ impl App {
                 self.image_view.update(crate::image_view::Message::Toggle);
             }
             36 => {
-                self.image_view
-                    .update(crate::image_view::Message::ActualSize);
+                let media = pico_core::media::MediaStore::new(
+                    self.smoke_dir
+                        .as_ref()
+                        .expect("smoke directory")
+                        .join("image-smoke"),
+                )
+                .image(include_bytes!("fixtures/media.png"))
+                .expect("valid PNG fixture");
+                let task = self.image_view.open(&media).map(Message::Image);
+                self.modal = Some(Modal::Image(media));
+                return Task::batch([task, delayed_capture()]);
             }
             37 => {
                 self.modal = None;
@@ -4449,11 +4458,6 @@ mod tests {
         assert!(matches!(&app.modal,Some(Modal::Image(m)) if m==&media));
         let _ = app.view();
         dispatch(&mut app, Message::Image(crate::image_view::Message::Toggle)).await;
-        dispatch(
-            &mut app,
-            Message::Image(crate::image_view::Message::ActualSize),
-        )
-        .await;
         let _ = app.view();
         dispatch(&mut app, Message::Dismiss).await;
         assert!(app.modal.is_none());

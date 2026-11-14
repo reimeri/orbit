@@ -1,7 +1,9 @@
 //! Images decode off the UI thread. Chat uses static thumbnails; only the modal animates.
 use iced::{
-    Element, Fill, Subscription, Task,
-    widget::{button, column, container, image, row, scrollable, text},
+    Color, Element, Length, Rectangle, Size, Subscription, Task,
+    advanced::{Layout, Widget, image as image_primitive, layout, renderer, widget::Tree},
+    mouse,
+    widget::{button, column, container, image, mouse_area, text},
 };
 use pico_core::media::{Frame, Media};
 use std::{
@@ -20,7 +22,6 @@ pub enum Message {
     Loaded(u64, PathBuf, Result<Arc<Vec<DisplayFrame>>, String>),
     Toggle,
     Tick,
-    ActualSize,
 }
 #[derive(Debug)]
 pub struct DisplayFrame {
@@ -36,7 +37,6 @@ pub struct Viewer {
     index: usize,
     playing: bool,
     deadline: Option<Instant>,
-    actual_size: bool,
     wanted: Arc<Mutex<HashSet<PathBuf>>>,
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -164,7 +164,6 @@ impl Viewer {
         self.playing = false;
         self.deadline = None;
         self.index = 0;
-        self.actual_size = false;
     }
     pub fn update(&mut self, message: Message) {
         match message {
@@ -189,7 +188,6 @@ impl Viewer {
                     self.deadline = Some(Instant::now() + frames[self.index].delay);
                 }
             }
-            Message::ActualSize => self.actual_size = !self.actual_size,
             Message::Tick if self.playing => {
                 if let Some(Ok(frames)) = &self.frames
                     && self.deadline.is_some_and(|t| Instant::now() >= t)
@@ -227,69 +225,505 @@ impl Viewer {
         width: f32,
         height: f32,
     ) -> Element<'_, crate::ui::Message> {
-        let mut body = column![
-            row![
-                text(title).size(14).width(Fill),
-                button("Close").on_press(crate::ui::Message::Dismiss)
-            ]
-            .spacing(12),
-            text(description).size(12)
-        ]
-        .spacing(12);
-        match &self.frames {
-            None => body = body.push(text("Loading image…")),
-            Some(Err(error)) => body = body.push(text(format!("Could not open image: {error}"))),
+        let available_width = (width - 48.).max(1.);
+        let available_height = (height - 48.).max(1.);
+        let body: Element<'_, crate::ui::Message> = match &self.frames {
+            None => text("Loading image…").into(),
+            Some(Err(error)) => text(format!("Could not open image: {error}")).into(),
             Some(Ok(frames)) => {
-                let handle = frames[self.index].handle.clone();
-                let picture: Element<'_, crate::ui::Message> = if self.actual_size {
-                    scrollable(image(handle))
-                        .direction(scrollable::Direction::Both {
-                            vertical: scrollable::Scrollbar::new(),
-                            horizontal: scrollable::Scrollbar::new(),
-                        })
-                        .width(Fill)
-                        .height(Fill)
-                        .into()
-                } else {
-                    image(handle)
-                        .width(Fill)
-                        .height(Fill)
-                        .content_fit(iced::ContentFit::Contain)
-                        .into()
-                };
-                body = body.push(picture);
-                let mut controls = row![
-                    button(if self.actual_size {
-                        "Fit to window"
-                    } else {
-                        "Actual size"
-                    })
-                    .on_press(crate::ui::Message::Image(Message::ActualSize))
-                ]
-                .spacing(12);
-                if frames.len() > 1 {
-                    controls = controls
-                        .push(
-                            button(if self.playing { "Pause" } else { "Play" })
-                                .on_press(crate::ui::Message::Image(Message::Toggle)),
+                let animated = frames.len() > 1;
+                // Shrink sizing preserves natural dimensions, with no empty hit area
+                // around images that need to scale down to the available space.
+                let picture = container(image(frames[self.index].handle.clone()))
+                    .max_width(available_width)
+                    .max_height((available_height - if animated { 40. } else { 0. }).max(1.));
+                let info = container(
+                    column![
+                        crate::ellipsized_text::shrinking_ellipsized_text(
+                            &title,
+                            14.,
+                            Some(Color::WHITE)
+                        ),
+                        text(description).size(12),
+                    ]
+                    .spacing(2),
+                )
+                .max_width(600)
+                .padding(8)
+                .style(|_| container::Style {
+                    text_color: Some(Color::WHITE),
+                    ..Default::default()
+                });
+                let mut body = column![Element::new(ImageInfo {
+                    picture: picture.into(),
+                    info: info.into(),
+                    hovered: false,
+                })]
+                .spacing(8)
+                .align_x(iced::Center);
+                if animated {
+                    body = body.push(
+                        button(
+                            container(text(if self.playing { "❚❚" } else { "▶" }).size(16))
+                                .center_x(20)
+                                .center_y(20),
                         )
-                        .push(text(format!("Frame {} / {}", self.index + 1, frames.len())));
+                        .padding(6)
+                        .on_press(crate::ui::Message::Image(Message::Toggle)),
+                    );
                 }
-                body = body.push(controls);
+                body.into()
             }
-        }
-        container(body)
-            .padding(20)
-            .width((width - 48.).max(240.))
-            .height((height - 48.).max(240.))
-            .style(container::rounded_box)
+        };
+        // The play/pause button captures its own click; all other modal content
+        // dismisses just like the surrounding dark overlay.
+        mouse_area(body)
+            .on_press(crate::ui::Message::Dismiss)
             .into()
+    }
+}
+
+/// A passive image/info pair. Unlike iced's general-purpose `hover`, this does
+/// not introduce a separately rounded scissor at the image's top/left edges.
+struct ImageInfo<'a> {
+    picture: Element<'a, crate::ui::Message>,
+    info: Element<'a, crate::ui::Message>,
+    hovered: bool,
+}
+
+impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.picture), Tree::new(&self.info)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(&[&self.picture, &self.info]);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.picture.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let picture = self
+            .picture
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits);
+        let info = self.info.as_widget_mut().layout(
+            &mut tree.children[1],
+            renderer,
+            &layout::Limits::new(Size::ZERO, picture.size()),
+        );
+        layout::Node::with_children(picture.size(), vec![picture, info])
+    }
+
+    fn update(
+        &mut self,
+        _tree: &mut Tree,
+        _event: &iced::Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, crate::ui::Message>,
+        _viewport: &Rectangle,
+    ) {
+        let hovered = cursor.is_over(layout.bounds());
+        if self.hovered != hovered {
+            self.hovered = hovered;
+            shell.request_redraw();
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        use iced::advanced::Renderer as _;
+        use image_primitive::Renderer as _;
+        let mut children = layout.children();
+        let picture = children.next().expect("picture layout");
+        self.picture.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            picture,
+            cursor,
+            viewport,
+        );
+        if cursor.is_over(picture.bounds())
+            && let Some(visible) = picture.bounds().intersection(viewport)
+        {
+            let info = children.next().expect("info layout");
+            // Use the same image primitive/snap rules as the picture. A container
+            // quad rounds half-pixels differently on WGPU and can leave a seam.
+            static BACKGROUND: LazyLock<image::Handle> =
+                LazyLock::new(|| image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]));
+            // Keep text in the same foreground layer as its background;
+            // returning to the parent layer would draw it underneath the panel.
+            renderer.with_layer(*viewport, |renderer| {
+                match renderer {
+                    iced::Renderer::Primary(_) => renderer.draw_image(
+                        image_primitive::Image::new(BACKGROUND.clone())
+                            .opacity(0.65_f32)
+                            .snap(true),
+                        info.bounds(),
+                        picture.bounds(),
+                    ),
+                    // tiny-skia truncates raster origins and cannot accurately
+                    // position a stretched one-pixel texture. Match its origin
+                    // with a solid quad instead.
+                    iced::Renderer::Secondary(_) => renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: info.bounds().x.floor(),
+                                y: info.bounds().y.floor(),
+                                ..info.bounds()
+                            },
+                            snap: false,
+                            ..Default::default()
+                        },
+                        Color::from_rgba(0., 0., 0., 0.65),
+                    ),
+                }
+                self.info.as_widget().draw(
+                    &tree.children[1],
+                    renderer,
+                    theme,
+                    style,
+                    info,
+                    cursor,
+                    &visible,
+                );
+            });
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn modal_keeps_natural_size_and_fits_both_window_axes() {
+        use iced::{
+            Size,
+            advanced::{layout, widget::Tree},
+        };
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        for (width, height, animated, expected) in [
+            (96, 64, false, Size::new(96., 64.)),
+            (96, 64, true, Size::new(96., 104.)),
+            (1600, 400, false, Size::new(752., 188.)),
+            (400, 1600, false, Size::new(138., 552.)),
+            (400, 1600, true, Size::new(128., 552.)),
+        ] {
+            let frames = (0..if animated { 2 } else { 1 })
+                .map(|_| Frame {
+                    width,
+                    height,
+                    rgba: vec![255; (width * height * 4) as usize],
+                    delay: Duration::from_millis(100),
+                })
+                .collect();
+            let viewer = Viewer {
+                frames: Some(Ok(handles(frames))),
+                ..Default::default()
+            };
+            let mut view = viewer.view(
+                "/long/path/to/image.png".into(),
+                "resolution · bytes".into(),
+                800.,
+                600.,
+            );
+            let mut tree = Tree::new(view.as_widget());
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(800., 600.)),
+            );
+            assert_eq!(node.size(), expected);
+        }
+    }
+
+    #[test]
+    fn long_paths_leave_room_for_image_details() {
+        use iced::{
+            Size,
+            advanced::{layout, widget::Tree},
+        };
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let viewer = Viewer {
+            frames: Some(Ok(handles(vec![Frame {
+                width: 320,
+                height: 120,
+                rgba: vec![255; 320 * 120 * 4],
+                delay: Duration::from_millis(100),
+            }]))),
+            ..Default::default()
+        };
+        let mut view = viewer.view(
+            format!("/{}image.png", "long-directory/".repeat(20)),
+            "320 × 120 · 2588760 bytes".into(),
+            800.,
+            600.,
+        );
+        let mut tree = Tree::new(view.as_widget());
+        let node = view.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(800., 600.)),
+        );
+        // Column → hover → info container. Metadata stays two lines,
+        // not a path-sized paragraph that clips the dimensions/byte count.
+        let info = &node.children()[0].children()[1];
+        assert!((300. ..=320.).contains(&info.size().width));
+        assert!(info.size().height <= 52., "{:?}", info.size());
+    }
+
+    #[test]
+    fn metadata_shrinks_to_the_wider_text_line() {
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let viewer = Viewer {
+            frames: Some(Ok(handles(vec![Frame {
+                width: 800,
+                height: 400,
+                rgba: vec![255; 800 * 400 * 4],
+                delay: Duration::from_millis(100),
+            }]))),
+            ..Default::default()
+        };
+        for (title, description) in [
+            ("/tmp/car-generated.png", "1672 × 941 · 2588760 bytes"),
+            ("a.png", "800 × 400 · 2588760 bytes"),
+        ] {
+            let mut natural: Element<'_, crate::ui::Message> = container(
+                iced::widget::column![text(title).size(14), text(description).size(12)].spacing(2),
+            )
+            .padding(8)
+            .into();
+            let mut tree = Tree::new(natural.as_widget());
+            let expected = natural
+                .as_widget_mut()
+                .layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, Size::INFINITE),
+                )
+                .size()
+                .width;
+            let mut view = viewer.view(title.into(), description.into(), 1000., 800.);
+            let mut tree = Tree::new(view.as_widget());
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(1000., 800.)),
+            );
+            let info = &node.children()[0].children()[1];
+            assert!(
+                (info.size().width - expected).abs() < 0.01,
+                "actual {} expected {expected}",
+                info.size().width
+            );
+        }
+    }
+
+    async fn metadata_edges_match_image_pixels(backend: &str) {
+        use iced::advanced::{Renderer as _, renderer::Headless};
+        let mut renderer =
+            iced::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.), Some(backend))
+                .await
+                .expect("requested renderer is available");
+        let viewer = Viewer {
+            frames: Some(Ok(handles(vec![Frame {
+                width: 320,
+                height: 120,
+                rgba: vec![255; 320 * 120 * 4],
+                delay: Duration::from_millis(100),
+            }]))),
+            ..Default::default()
+        };
+        let size = Size::new(721., 321.); // Centering puts both edges at .5 logical pixels.
+        let mut ui = iced_runtime::UserInterface::build(
+            container(viewer.view(
+                "a.png".into(),
+                "320 × 120 · 1234 bytes".into(),
+                size.width,
+                size.height,
+            ))
+            .center_x(iced::Fill)
+            .center_y(iced::Fill),
+            size,
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        for scale in [1., 1.25, 2.] {
+            let physical = Size::new((size.width * scale) as u32, (size.height * scale) as u32);
+            let mut screenshots = Vec::new();
+            for cursor in [
+                mouse::Cursor::Unavailable,
+                mouse::Cursor::Available(iced::Point::new(250., 120.)),
+            ] {
+                renderer.reset(Rectangle::with_size(size));
+                ui.draw(
+                    &mut renderer,
+                    &iced::Theme::Dark,
+                    &renderer::Style {
+                        text_color: Color::WHITE,
+                    },
+                    cursor,
+                );
+                screenshots.push(renderer.screenshot(physical, scale, Color::BLACK));
+            }
+            let plain = &screenshots[0];
+            let hovered = &screenshots[1];
+            let first = plain
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .position(|pixel| pixel[0] > 200)
+                .unwrap();
+            let x = first % physical.width as usize;
+            let y = first / physical.width as usize;
+            // Both text lines must remain bright above the translucent panel,
+            // not be dimmed by a background submitted in a later render layer.
+            for (top, bottom) in [(8., 26.), (28., 44.)] {
+                let left = x + (8. * scale) as usize;
+                let right = x + (48. * scale) as usize;
+                let top = y + (top * scale) as usize;
+                let bottom = y + (bottom * scale) as usize;
+                let brightest = (top..bottom)
+                    .flat_map(|y| (left..right).map(move |x| (y * physical.width as usize + x) * 4))
+                    .map(|offset| hovered[offset])
+                    .max()
+                    .unwrap();
+                assert!(
+                    brightest > 220,
+                    "dimmed metadata text on {backend} at scale {scale}: {brightest}"
+                );
+            }
+            // Check the first painted top row and left column, away from text.
+            // Quad/scissor rounding previously left these bright on WGPU.
+            for (x, y) in [(x + 4, y), (x, y + 4)] {
+                let offset = (y * physical.width as usize + x) * 4;
+                assert!(plain[offset] > 200);
+                assert!(
+                    hovered[offset] < 180,
+                    "uncovered image edge on {backend} at scale {scale}: {}",
+                    hovered[offset]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_covers_fractional_edges_software() {
+        metadata_edges_match_image_pixels("tiny-skia").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a working GPU; run alongside smoke-gpu"]
+    async fn metadata_covers_fractional_edges_gpu() {
+        metadata_edges_match_image_pixels("wgpu").await;
+    }
+
+    #[test]
+    fn metadata_is_hover_only_and_playback_click_does_not_dismiss() {
+        use iced::{Point, Size, advanced::Renderer as _, mouse};
+        let viewer = Viewer {
+            frames: Some(Ok(handles(
+                pico_core::media::frames_from_bytes(
+                    include_bytes!("fixtures/media.gif"),
+                    &AtomicBool::new(false),
+                )
+                .unwrap(),
+            ))),
+            playing: true,
+            ..Default::default()
+        };
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let mut ui = iced_runtime::UserInterface::build(
+            viewer.view("image.gif".into(), "96 × 64 · 123 bytes".into(), 800., 600.),
+            Size::new(800., 600.),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        // The 96×64 fixture is not enlarged. The button is centered below it.
+        for (point, expected_text_count) in [
+            (Point::new(48., 32.), 3),
+            (Point::new(48., 88.), 1),
+            (Point::new(200., 200.), 1),
+        ] {
+            renderer.reset(iced::Rectangle::with_size(Size::new(800., 600.)));
+            ui.draw(
+                &mut renderer,
+                &iced::Theme::Dark,
+                &iced::advanced::renderer::Style {
+                    text_color: Color::WHITE,
+                },
+                mouse::Cursor::Available(point),
+            );
+            let iced::Renderer::Secondary(renderer) = &mut renderer else {
+                unreachable!()
+            };
+            let count: usize = renderer
+                .layers()
+                .iter()
+                .flat_map(|layer| &layer.text)
+                .map(|group| group.as_slice().len())
+                .sum();
+            assert_eq!(count, expected_text_count);
+        }
+        for (point, toggle) in [
+            (Point::new(48., 88.), true),
+            (Point::new(4., 4.), false), // Includes clicks over the metadata.
+            (Point::new(48., 60.), false),
+        ] {
+            let mut messages = Vec::new();
+            ui.update(
+                &[
+                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            if toggle {
+                assert!(matches!(
+                    messages.as_slice(),
+                    [crate::ui::Message::Image(Message::Toggle)]
+                ));
+            } else {
+                assert!(matches!(messages.as_slice(), [crate::ui::Message::Dismiss]));
+            }
+        }
+    }
+
     #[test]
     fn stale_decodes_do_not_restore_closed_images_or_invisible_thumbnails() {
         let dir = tempfile::tempdir().unwrap();
