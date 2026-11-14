@@ -24,24 +24,33 @@ impl fmt::Display for Info {
                 branch,
                 added,
                 removed,
-            } => write!(f, "{branch}  +{added} −{removed}"),
+            } => {
+                f.write_str(branch)?;
+                if *added != 0 || *removed != 0 {
+                    write!(f, "  +{added} −{removed}")?;
+                }
+                Ok(())
+            }
             Self::Unavailable(message) => f.write_str(message),
         }
     }
 }
 
-pub async fn info(path: PathBuf) -> Info {
+pub async fn info(path: PathBuf) -> Option<Info> {
     let deadline = Instant::now() + Duration::from_secs(15);
     match tokio::time::timeout_at(deadline.into(), read_info(&path, deadline)).await {
         Ok(Ok(info)) => info,
-        Ok(Err(error)) => Info::Unavailable(error),
-        Err(_) => Info::Unavailable("Git status timed out; will retry automatically".into()),
+        Ok(Err(error)) => Some(Info::Unavailable(error)),
+        Err(_) => Some(Info::Unavailable(
+            "Git status timed out; will retry automatically".into(),
+        )),
     }
 }
 
 async fn git(path: &Path, args: &[&str]) -> Result<Output, String> {
     tokio::process::Command::new("git")
         .arg("--no-optional-locks")
+        .env("LC_ALL", "C")
         .args(args)
         .current_dir(path)
         .stdin(Stdio::null())
@@ -64,8 +73,18 @@ fn successful(output: Output) -> Result<Vec<u8>, String> {
         ))
     }
 }
-async fn read_info(path: &Path, deadline: Instant) -> Result<Info, String> {
-    let root = successful(git(path, &["rev-parse", "--show-toplevel"]).await?)?;
+async fn read_info(path: &Path, deadline: Instant) -> Result<Option<Info>, String> {
+    let root = git(path, &["rev-parse", "--show-toplevel"]).await?;
+    // Not being a repository is normal for a workspace. Keep other failures
+    // (permissions, unsafe ownership, missing Git, etc.) visible and retryable.
+    if !root.status.success()
+        && root
+            .stderr
+            .starts_with(b"fatal: not a git repository (or any")
+    {
+        return Ok(None);
+    }
+    let root = successful(root)?;
     let root = Path::new(OsStr::from_bytes(root.strip_suffix(b"\n").unwrap_or(&root)));
     let head = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).await?;
     let branch = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
@@ -108,11 +127,11 @@ async fn read_info(path: &Path, deadline: Instant) -> Result<Info, String> {
     added += tokio::task::spawn_blocking(move || untracked_lines(&root, &untracked, deadline))
         .await
         .map_err(|e| format!("Could not count untracked lines: {e}; will retry automatically"))??;
-    Ok(Info::Changes {
+    Ok(Some(Info::Changes {
         branch,
         added,
         removed,
-    })
+    }))
 }
 
 fn numstat(bytes: &[u8]) -> Result<(u64, u64), String> {
@@ -237,21 +256,44 @@ mod tests {
         std::fs::write(root.join("ignored"), "not\ncounted\n").unwrap();
         let result = info(root.join("subdir")).await;
         match result {
-            Info::Changes {
+            Some(Info::Changes {
                 branch,
                 added,
                 removed,
-            } => {
+            }) => {
                 assert_eq!(branch, "main");
                 assert_eq!(added, 7); // net tracked +1, replacement +2, staged +2, untracked +2
                 assert_eq!(removed, 3); // deleted file -2, replacement -1
             }
-            Info::Unavailable(error) => panic!("{error}"),
+            other => panic!("Expected Git changes, got {other:?}"),
         }
         command(root, &["checkout", "--detach", "-f", "HEAD"]);
         assert!(
-            matches!(info(root.to_owned()).await, Info::Changes { branch, .. } if branch.ends_with(" (detached)"))
+            matches!(info(root.to_owned()).await, Some(Info::Changes { branch, .. }) if branch.ends_with(" (detached)"))
         );
+    }
+
+    #[tokio::test]
+    async fn non_repository_is_absent_but_real_errors_remain_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(info(dir.path().to_owned()).await.is_none());
+
+        command(
+            dir.path(),
+            &["init", "--template=", "--initial-branch=main"],
+        );
+        command(dir.path(), &["commit", "--allow-empty", "-m", "initial"]);
+        let status = info(dir.path().to_owned()).await.unwrap();
+        assert!(matches!(
+            &status,
+            Info::Changes { branch, added: 0, removed: 0 } if branch == "main"
+        ));
+        assert_eq!(status.to_string(), "main");
+
+        assert!(matches!(
+            info(dir.path().join("missing")).await,
+            Some(Info::Unavailable(_))
+        ));
     }
 
     #[tokio::test]
@@ -262,20 +304,15 @@ mod tests {
         command(dir.path(), &["add", "staged"]);
         std::fs::write(dir.path().join("untracked"), "c").unwrap();
         match info(dir.path().to_owned()).await {
-            Info::Changes {
+            Some(Info::Changes {
                 branch,
                 added,
                 removed,
-            } => {
+            }) => {
                 assert_eq!(branch, "new");
                 assert_eq!((added, removed), (3, 0));
             }
-            Info::Unavailable(error) => panic!("{error}"),
+            other => panic!("Expected Git changes, got {other:?}"),
         }
-        let other = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            info(other.path().to_owned()).await,
-            Info::Unavailable(_)
-        ));
     }
 }

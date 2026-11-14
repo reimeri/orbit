@@ -267,7 +267,7 @@ pub enum Message {
     Account(Option<String>),
     CancelLogin,
     Logout,
-    Git(String, crate::git::Info, Duration),
+    Git(String, Option<crate::git::Info>, Duration),
     External(Result<(), String>),
     ErrorDismiss,
     ResizeStart(bool, iced::Point),
@@ -1833,7 +1833,7 @@ impl App {
                 self.git_cost = cost;
                 self.git_pending = false;
                 if self.current().is_some_and(|s| s.id == id) {
-                    self.git = Some(info);
+                    self.git = info;
                 }
             }
             Message::External(result) => self.fail(result),
@@ -3453,6 +3453,13 @@ impl App {
             && let Some(git) = &self.git
         {
             let view: Element<'_, Message> = match git {
+                crate::git::Info::Changes {
+                    branch,
+                    added: 0,
+                    removed: 0,
+                } => container(ellipsized_text(branch, 11., Some(MUTED)))
+                    .width(footer_text_width(branch, 11.).ceil().min(126.))
+                    .into(),
                 crate::git::Info::Changes {
                     branch,
                     added,
@@ -5913,6 +5920,70 @@ Then implement the fix.";
             text: None,
             repeat: false,
         }))
+    }
+
+    #[tokio::test]
+    async fn footer_omits_absent_git_and_zero_diff_counts() {
+        let mut app = app();
+        dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
+        let mut renderer = header_renderer();
+        for (status, expected_branch, expected_counts) in [
+            (None, false, None),
+            (
+                Some(crate::git::Info::Changes {
+                    branch: "main".into(),
+                    added: 0,
+                    removed: 0,
+                }),
+                true,
+                None,
+            ),
+            (
+                Some(crate::git::Info::Changes {
+                    branch: "main".into(),
+                    added: 0,
+                    removed: 3,
+                }),
+                true,
+                Some(("+0", "−3")),
+            ),
+        ] {
+            let expected_details = expected_counts.map_or("main", |_| "main  +0 −3");
+            if let Some(status) = &status {
+                assert_eq!(status.to_string(), expected_details);
+            }
+            // Apply refresh results so a non-repository result also clears old status.
+            let id = app.current().unwrap().id.clone();
+            let _ = app.update(Message::Git(id, status, Duration::ZERO));
+            let mut ui = iced_runtime::UserInterface::build(
+                app.footer_content(1400.),
+                iced::Size::new(1400., 36.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            assert_eq!(
+                bounds.labels.iter().any(|(label, _)| label == "main"),
+                expected_branch
+            );
+            let counts: Vec<_> = bounds
+                .labels
+                .iter()
+                .filter(|(label, _)| label.starts_with('+') || label.starts_with('−'))
+                .map(|(label, _)| label.as_str())
+                .collect();
+            assert_eq!(
+                counts,
+                expected_counts.map_or_else(Vec::new, |(added, removed)| vec![added, removed])
+            );
+        }
+        let id = app.current().unwrap().id.clone();
+        let _ = app.update(Message::Git(id, None, Duration::ZERO));
+        assert!(
+            app.git.is_none(),
+            "a non-repository refresh clears old Git status"
+        );
     }
 
     #[tokio::test]
