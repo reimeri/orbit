@@ -67,6 +67,7 @@ const ACCENT: Color = Color::from_rgb8(137, 175, 210);
 const SIDEBAR_CONTENT_PADDING: f32 = 8.;
 const RIGHT_PANEL_PADDING: f32 = 18.;
 const FAST_OPTION: &str = "Fast mode";
+const CHAT_OVERSCAN: f32 = 120.;
 
 struct Markdown {
     source: Arc<Entry>,
@@ -327,7 +328,7 @@ impl App {
             draft_session: None,
             new_draft,
             new_draft_dirty: false,
-            transcript: crate::virtual_list::List::default(),
+            transcript: crate::virtual_list::List::with_overscan(CHAT_OVERSCAN),
             activity: activity::Projection::default(),
             execution: HashSet::new(),
             sidebar_rows: vec![],
@@ -494,7 +495,7 @@ impl App {
         let h = self.harness.as_ref().expect("harness");
         let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
             if self.current_session.take().is_some() {
-                self.transcript = crate::virtual_list::List::default();
+                self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
                 self.activity = activity::Projection::default();
                 self.view_epoch = self.view_epoch.wrapping_add(1);
             }
@@ -524,7 +525,7 @@ impl App {
             self.markdown.clear();
             self.chat_selection.borrow_mut().clear();
             self.view_epoch = self.view_epoch.wrapping_add(1);
-            self.transcript = crate::virtual_list::List::default();
+            self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
             self.activity = activity::Projection::default();
         }
         // Persistent-tree diffs only visit changed leaves, not the full transcript.
@@ -1703,6 +1704,7 @@ impl App {
                 let spacing = self
                     .current()
                     .map_or(18., |s| ActivityRow::from_id(index).spacing(&s.entries));
+                let visible = self.transcript.visible();
                 let corrected = self.transcript.measure(index, height + spacing);
                 if self.auto_scroll {
                     self.transcript.end();
@@ -1718,6 +1720,11 @@ impl App {
                             y: self.transcript.offset + 20.,
                         },
                     );
+                }
+                // A shrinking measured row can expose uncached rows even when
+                // the scroll anchor stays put. Prepare exactly what we render.
+                if self.transcript.visible() != visible {
+                    self.prepare_visible();
                 }
             }
             Message::SidebarScroll(epoch, offset, height) => {
@@ -4013,6 +4020,10 @@ impl App {
                 h.insert(s);
                 self.select(Selection::Session(id));
                 let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
+                // Session loading is asynchronous, so ToggleEntry may run before
+                // its activity group is projected. Open the known fixture group
+                // explicitly so the later large-output frames really exercise it.
+                self.groups.insert("smoke-tool".into());
             }
             2 => {
                 // Render a cross-message selection through rich text and lists,
@@ -4171,7 +4182,7 @@ impl App {
             13 => {
                 // Force fresh equal-height measurements for a new list identity.
                 self.view_epoch = self.view_epoch.wrapping_add(1);
-                self.transcript = crate::virtual_list::List::default();
+                self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
                 self.activity = activity::Projection::default();
                 self.append_transcript();
                 self.transcript.end();
@@ -4510,7 +4521,7 @@ impl App {
                 self.expanded.clear();
                 self.execution.clear();
                 self.auto_scroll = false;
-                self.transcript = crate::virtual_list::List::default();
+                self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
                 self.activity = activity::Projection::default();
                 let mut session = Session::new(
                     self.smoke_dir.as_ref().unwrap().clone(),
@@ -7332,6 +7343,51 @@ Then implement the fix.";
         app.selected = Some(id);
         let (_, count) = build(&app, cache, 900.);
         assert_eq!(count, app.transcript.visible().len());
+    }
+
+    #[tokio::test]
+    async fn chat_measurements_prepare_newly_exposed_rows_without_a_scroll() {
+        let mut app = app();
+        let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+        for i in 0..30 {
+            session.entries.push(Entry::new(
+                EntryKind::Assistant,
+                format!("**Row {i}** with λ"),
+            ));
+        }
+        app.current_session = Some(session);
+        app.auto_scroll = false;
+        app.rebuild_transcript();
+        app.transcript.viewport = 240.;
+        app.prepare_visible();
+        let epoch = app.view_epoch;
+        dispatch(&mut app, Message::RowSize(epoch, 0, 1000.)).await;
+        assert_eq!(app.transcript.visible(), 0..1);
+        assert_eq!(app.markdown.len(), 1);
+        // Shrinking an entry at the viewport start does not move the anchor,
+        // but must still prepare Markdown for the rows that just became visible.
+        dispatch(&mut app, Message::RowSize(epoch, 0, 20.)).await;
+        assert_eq!(app.transcript.offset, 0.);
+        assert!(app.transcript.visible().end > 1);
+        assert_eq!(app.markdown.len(), app.transcript.visible().len());
+        for &i in &app.transcript.order[app.transcript.visible()] {
+            assert!(
+                app.markdown
+                    .contains_key(&app.current().unwrap().entries[i].id)
+            );
+        }
+        // A scrollbar jump refreshes the narrow window in one update, and end
+        // anchoring uses the actual small viewport rather than the 600px fallback.
+        dispatch(&mut app, Message::Scroll(epoch, 2020., 240., false)).await;
+        assert!(app.transcript.visible().start > 1);
+        assert_eq!(app.markdown.len(), app.transcript.visible().len());
+        app.transcript.end();
+        app.prepare_visible();
+        assert_eq!(app.transcript.visible().end, app.transcript.order.len());
+        assert!(
+            app.markdown
+                .contains_key(&app.current().unwrap().entries[29].id)
+        );
     }
 
     #[tokio::test]

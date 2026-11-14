@@ -40,6 +40,8 @@ Synthetic activity/execution/thinking headers have distinct identities from sour
 rows. The virtual list retains row measurements and scroll anchors by identity.
 Full Markdown/tool-detail caches are only prepared for visible source rows;
 collapsing a group releases its output caches without forgetting manual expansion.
+Chat prepares the actual viewport plus a 120px margin above and below, including
+prose and expanded details. The sidebar keeps its larger overscan margin.
 Display preview shortening never changes the stored inputs, output or Copy data.
 
 Updates use persistent-history diffs and reproject the affected block/tail, not

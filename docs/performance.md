@@ -202,6 +202,56 @@ to cover fit boundaries, combining marks, joined emoji, mixed RTL/LTR, retained
 widget caches and the ordinary measurement count; a deterministic width-change
 fixture exercises the contextual-overflow correction path.
 
+## Smaller chat overscan
+
+The chat now mounts rows intersecting its viewport plus **120 logical pixels on
+both sides**, rather than one extra viewport on each side. This applies to prose,
+activity rows and expanded details. The sidebar retains its original policy.
+Measured viewport heights below 600px are honored; 600px is only the chat's
+initial fallback. End anchoring uses that same height. If a row measurement
+exposes more rows without moving the scroll anchor, their Markdown/output caches
+are prepared before the next view is built.
+
+A debug comparison used the same private 37-tool-group snapshot and isolated
+UI-layout harness as above, with the glyph-based fitting optimization enabled in
+**both** versions. Medians of six openings (three fresh processes, two openings
+per process):
+
+| Expansion metric | Viewport-sized margin | 120px margin |
+|---|---:|---:|
+| Layout, 1280px window | 65.86 ms | 39.95 ms |
+| Layout, 1024px window | 63.22 ms | 38.09 ms |
+| Mounted transcript rows | 49 | 26 |
+| Mounted tool rows | 23 | 13 |
+| Text measurements | 61 | 37 |
+
+Expansion layout fell by about **39–40%**. Widget construction fell from about
+0.76 ms to 0.49 ms; update/index preparation remained about 0.13 ms. Shaping and
+cache policy were not changed; fewer offscreen rows are simply prepared.
+
+There is a scrolling tradeoff. An additional simulation traversed the group
+forward and back using fixed 30px, 120px and 600px moves, retaining widget state
+between moves. At 1280px window width:
+
+| Move size | Median layout before → after | 95th percentile before → after |
+|---|---:|---:|
+| 30px | 1.25 → 1.31 ms | 6.15 → 6.31 ms |
+| 120px | 3.89 → 6.40 ms | 14.28 → 11.98 ms |
+| 600px | 15.27 → 25.61 ms | 33.31 → 34.00 ms |
+
+Larger moves can shape more new rows during the move because fewer were prepared
+ahead of time. Thus this is **not an across-the-board scrolling speedup**. Mean
+layout totals for an opening plus a full forward/back traversal were lower
+(about 261 → 238 ms for 30px moves, 202 → 189 ms for 120px, and 185 → 177 ms for
+600px). The 1024px runs showed the same tradeoff.
+
+The scrolling simulation uses the same estimated row heights in both versions
+and excludes draw/present, real wheel-event cadence and subsequent measurement
+corrections. It does not establish end-to-end frame latency. Tests cover narrow
+viewport boundaries, large jumps, tall rows, scroll-anchor retention, cache
+refresh after shrinking measurements, and unchanged sidebar ranges. The rendered
+software/GPU smoke retains mixed activity/detail layouts and long-list reflow.
+
 ## Verification and remaining measurement limits
 
 Regression coverage includes incremental SQL writes and atomic rollback, failed

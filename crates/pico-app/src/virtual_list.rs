@@ -9,8 +9,24 @@ pub struct List {
     tree: Vec<f32>,
     pub offset: f32,
     pub viewport: f32,
+    overscan: Option<f32>,
 }
 impl List {
+    /// Fixed pixel margin for chat; the default keeps viewport-sized overscan.
+    pub fn with_overscan(pixels: f32) -> Self {
+        Self {
+            overscan: Some(pixels),
+            ..Self::default()
+        }
+    }
+    fn viewport_height(&self) -> f32 {
+        if self.overscan.is_some() && self.viewport > 0. {
+            self.viewport
+        } else {
+            self.viewport.max(600.)
+        }
+    }
+
     pub fn reset(&mut self, rows: impl IntoIterator<Item = (usize, f32)>) {
         let anchor_index = self.at(self.offset);
         let anchor = self
@@ -120,9 +136,10 @@ impl List {
         index.min(self.order.len())
     }
     pub fn visible(&self) -> Range<usize> {
-        let height = self.viewport.max(600.);
-        let start = self.at((self.offset - height).max(0.));
-        let end = (self.at(self.offset + 2. * height) + 1).min(self.order.len());
+        let height = self.viewport_height();
+        let margin = self.overscan.unwrap_or(height);
+        let start = self.at((self.offset - margin).max(0.));
+        let end = (self.at(self.offset + height + margin) + 1).min(self.order.len());
         start..end
     }
     /// Returns true when preserving the viewport anchor requires a scroll correction.
@@ -144,12 +161,62 @@ impl List {
         before
     }
     pub fn end(&mut self) {
-        self.offset = (self.total() - self.viewport.max(600.)).max(0.);
+        self.offset = (self.total() - self.viewport_height()).max(0.);
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixed_chat_margin_respects_small_viewports_edges_and_tail() {
+        let mut chat = List::with_overscan(120.);
+        chat.reset((0..200).map(|i| (i, 30.)));
+        chat.offset = 1500.;
+        // Unknown height uses 600px only until the scrollable reports its bounds.
+        assert_eq!(chat.visible(), 46..75);
+        chat.viewport = 240.;
+        assert_eq!(chat.visible(), 46..63);
+        // Both partially visible edge rows are mounted, including after a jump.
+        chat.offset = 1511.;
+        assert_eq!(chat.visible(), 46..63);
+        chat.offset = 4017.;
+        assert_eq!(chat.visible(), 129..146);
+        assert!(chat.prefix(chat.visible().start) <= chat.offset);
+        assert!(chat.prefix(chat.visible().end) >= chat.offset + chat.viewport);
+        chat.end();
+        assert_eq!(chat.offset, 5760.);
+        assert_eq!(chat.visible(), 188..200);
+        chat.offset = 0.;
+        assert_eq!(chat.visible(), 0..13);
+
+        let mut sidebar = List::default();
+        sidebar.reset((0..200).map(|i| (i, 30.)));
+        sidebar.viewport = 240.;
+        sidebar.offset = 1500.;
+        assert_eq!(
+            sidebar.visible(),
+            30..91,
+            "sidebar keeps its existing margin and viewport floor"
+        );
+    }
+
+    #[test]
+    fn fixed_margin_covers_tall_rows_and_preserves_anchor_when_rows_shrink() {
+        let mut list = List::with_overscan(120.);
+        list.reset([(0, 2000.), (1, 25.), (2, 900.), (3, 40.), (4, 1000.)]);
+        list.viewport = 300.;
+        list.offset = 800.;
+        assert_eq!(list.visible(), 0..1, "one tall detail row spans both edges");
+        list.offset = 2150.;
+        let inside = list.offset - list.prefix(2);
+        assert!(list.measure(0, 1000.));
+        assert_eq!(list.offset - list.prefix(2), inside);
+        assert!(list.visible().contains(&2));
+        assert!(list.prefix(list.visible().end) >= list.offset + list.viewport);
+        list.reset([]);
+        assert_eq!(list.visible(), 0..0);
+    }
+
     #[test]
     fn replacing_activity_tail_retains_measurements_and_scroll_anchor() {
         let mut list = List::default();
