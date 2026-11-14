@@ -2,11 +2,13 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
 use std::{
+    io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Source {
     File(PathBuf),
     Remote(Url),
@@ -36,10 +38,39 @@ impl Source {
             ),
         }
     }
-    pub async fn read(self) -> Result<Vec<u8>> {
+    /// Notify as soon as a bounded header probe finds display dimensions. The
+    /// source is read only once; no extra HTTP requests or full pixel decoding.
+    pub async fn read_with_dimensions(
+        self,
+        dimensions: impl Fn((u32, u32)) + Send + Sync + 'static,
+    ) -> Result<Vec<u8>> {
+        let dimensions = Arc::new(dimensions);
         match self {
             Self::File(path) => {
-                tokio::task::spawn_blocking(move || crate::media::read(&path)).await?
+                tokio::task::spawn_blocking(move || {
+                    let mut file = crate::media::open(&path)?;
+                    let mut bytes = Vec::new();
+                    let mut chunk = [0; 8192];
+                    let mut probe = Probe::default();
+                    loop {
+                        let count = file.read(&mut chunk)?;
+                        if count == 0 {
+                            break;
+                        }
+                        if bytes.len() + count > crate::media::MAX_BYTES {
+                            bail!("Image exceeds the {} byte limit", crate::media::MAX_BYTES);
+                        }
+                        bytes.extend_from_slice(&chunk[..count]);
+                        if probe.ready(bytes.len()) {
+                            probe.inspect(&bytes, &*dimensions);
+                        }
+                    }
+                    if !probe.found {
+                        probe.inspect(&bytes, &*dimensions);
+                    }
+                    Ok(bytes)
+                })
+                .await?
             }
             Self::Remote(url) => {
                 let client = reqwest::Client::builder()
@@ -72,15 +103,62 @@ impl Source {
                     bail!("Image exceeds the {} byte limit", crate::media::MAX_BYTES);
                 }
                 let mut bytes = Vec::new();
+                let mut probe = Probe::default();
                 while let Some(chunk) = response.chunk().await? {
                     if bytes.len() + chunk.len() > crate::media::MAX_BYTES {
                         bail!("Image exceeds the {} byte limit", crate::media::MAX_BYTES);
                     }
                     bytes.extend_from_slice(&chunk);
+                    if probe.ready(bytes.len()) {
+                        let prefix = bytes[..bytes.len().min(PROBE_LIMIT)].to_vec();
+                        let notify = dimensions.clone();
+                        probe = tokio::task::spawn_blocking(move || {
+                            probe.inspect(&prefix, &*notify);
+                            probe
+                        })
+                        .await?;
+                    }
                 }
-                Ok(bytes)
+                // Some formats put orientation metadata at the end. Wait for it
+                // rather than reserving a rectangle with the wrong orientation.
+                tokio::task::spawn_blocking(move || {
+                    if !probe.found {
+                        probe.inspect(&bytes, &*dimensions);
+                    }
+                    bytes
+                })
+                .await
+                .map_err(Into::into)
             }
         }
+    }
+}
+
+const PROBE_LIMIT: usize = 1024 * 1024;
+struct Probe {
+    next: usize,
+    found: bool,
+}
+impl Default for Probe {
+    fn default() -> Self {
+        Self {
+            next: 1024,
+            found: false,
+        }
+    }
+}
+impl Probe {
+    fn ready(&self, length: usize) -> bool {
+        !self.found && length >= self.next && self.next <= PROBE_LIMIT
+    }
+    fn inspect(&mut self, bytes: &[u8], notify: &impl Fn((u32, u32))) {
+        if let Ok(dimensions) = crate::media::image_dimensions(bytes) {
+            self.found = true;
+            notify(dimensions);
+        }
+        // Failed prefix probes are expected while metadata is incomplete.
+        // Exponential backoff bounds repeated parsing and prefix copies.
+        self.next = bytes.len().max(self.next).saturating_mul(2);
     }
 }
 
@@ -105,7 +183,10 @@ mod tests {
         ] {
             let source = Source::resolve(&workspace, &uri).unwrap();
             assert_eq!(source, Source::File(path.clone()));
-            assert_eq!(source.read().await.unwrap(), b"local image bytes");
+            assert_eq!(
+                source.read_with_dimensions(|_| {}).await.unwrap(),
+                b"local image bytes"
+            );
         }
         assert_eq!(
             Source::resolve(&workspace, "/tmp/image.png").unwrap(),
@@ -125,8 +206,18 @@ mod tests {
             assert!(Source::resolve(&workspace, uri).is_err(), "{uri}");
         }
         std::fs::remove_file(&path).unwrap();
-        assert!(Source::File(path).read().await.is_err());
-        assert!(Source::File(workspace).read().await.is_err());
+        assert!(
+            Source::File(path)
+                .read_with_dimensions(|_| {})
+                .await
+                .is_err()
+        );
+        assert!(
+            Source::File(workspace)
+                .read_with_dimensions(|_| {})
+                .await
+                .is_err()
+        );
     }
 
     async fn serve(headers: String, body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
@@ -145,7 +236,9 @@ mod tests {
         (url, job)
     }
     async fn fetch(url: &str) -> Result<Vec<u8>> {
-        Source::resolve(Path::new("/workspace"), url)?.read().await
+        Source::resolve(Path::new("/workspace"), url)?
+            .read_with_dimensions(|_| {})
+            .await
     }
     #[tokio::test]
     async fn remote_images_follow_redirects_preserve_bytes_and_report_http_errors() {
@@ -182,6 +275,66 @@ mod tests {
         assert!(fetch(&url).await.is_err());
         job.await.unwrap();
     }
+    #[tokio::test]
+    async fn remote_dimensions_arrive_while_pixel_download_is_still_blocked() {
+        let pixels = image::RgbImage::from_fn(257, 113, |x, y| {
+            image::Rgb([(x * 31 + y * 17) as u8, (x * y) as u8, (x ^ y) as u8])
+        });
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        pixels
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let png = encoded.into_inner();
+        assert!(png.len() > 1024);
+        assert!(crate::media::decode_image(&png[..1024]).is_err());
+        let expected = png.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/image", listener.local_addr().unwrap());
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            socket
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", png.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            // Send the headers and an incomplete prefix of the pixel data.
+            socket.write_all(&png[..1024]).await.unwrap();
+            blocked.await.unwrap();
+            socket.write_all(&png[1024..]).await.unwrap();
+        });
+        let (notify, mut dimensions) = tokio::sync::mpsc::unbounded_channel();
+        let reading = tokio::spawn(async move {
+            Source::resolve(Path::new("/workspace"), &url)
+                .unwrap()
+                .read_with_dimensions(move |size| {
+                    notify.send(size).unwrap();
+                })
+                .await
+        });
+        let size = tokio::time::timeout(Duration::from_secs(5), dimensions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(size, (257, 113));
+        assert!(
+            !reading.is_finished(),
+            "metadata must not wait for the whole download"
+        );
+        release.send(()).unwrap();
+        assert_eq!(reading.await.unwrap().unwrap(), expected);
+        assert!(
+            dimensions.recv().await.is_none(),
+            "one metadata event per source load"
+        );
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn remote_byte_limit_applies_with_and_without_content_length() {
         let (url, job) = serve(

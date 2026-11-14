@@ -192,7 +192,16 @@ Content-Length header. Embedded URL credentials and non-HTTP(S) redirects are re
 Previews fit the chat column and show the image's alt text beneath them. The optional
 title appears on hover. Click a preview for the existing full-size viewer, with
 fit/actual-size controls and GIF Play/Pause. Chat previews themselves remain static.
-Loading and error states preserve the alt text; failed images offer **Retry image**.
+Loading previews are rectangles sized from image metadata, including EXIF rotation,
+before pixel decoding starts. The rectangle, loaded preview and error/retry state
+share the same aspect-ratio layout, so decoding completion does not move the chat.
+Metadata is probed during source loading where the format permits it. A bounded
+in-memory cache remembers the last 256 resolved sources' dimensions across scrolling
+and session switches; source bytes and pixels are still reloaded. On the first load
+(or after that cache is evicted/restarted), a neutral rectangle can resize once the
+previously unknown dimensions arrive. Changed source dimensions can also resize it.
+Loading and error states preserve the alt text. Click a failed image rectangle to
+retry; hover it for the full error details (even for very thin images).
 Ordinary links to image files remain links, not embedded previews.
 
 Markdown images are **not saved with the conversation** and are not added to model

@@ -206,7 +206,7 @@ pub fn remove(root: &Path) -> Result<()> {
         Err(e) => Err(e.into()),
     }
 }
-pub fn read(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn open(path: &Path) -> Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = fs::OpenOptions::new()
         .read(true)
@@ -216,8 +216,13 @@ pub fn read(path: &Path) -> Result<Vec<u8>> {
     if !file.metadata()?.is_file() {
         bail!("{} is not a regular file", path.display());
     }
+    Ok(file)
+}
+pub fn read(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    file.take((MAX_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    open(path)?
+        .take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_BYTES {
         bail!("Media exceeds the {MAX_BYTES} byte limit; use a smaller file");
     }
@@ -248,28 +253,74 @@ pub fn parse_data_url(url: &str) -> Result<(String, Vec<u8>)> {
     }
     Ok((mime.into(), bytes))
 }
-pub fn decode_image(bytes: &[u8]) -> Result<(image::DynamicImage, ImageFormat)> {
+fn image_decoder(bytes: &[u8]) -> Result<(impl ImageDecoder + '_, ImageFormat)> {
     if bytes.len() > MAX_BYTES {
         bail!("Image exceeds {MAX_BYTES} bytes");
     }
-    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-    let format = reader
-        .format()
-        .context("Invalid image: expected PNG, JPEG, WebP or GIF")?;
+    let format =
+        image::guess_format(bytes).context("Invalid image: expected PNG, JPEG, WebP or GIF")?;
     if !matches!(
         format,
         ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Gif
     ) {
         bail!("Unsupported image format; use PNG, JPEG, WebP or GIF");
     }
+    let bytes = if format == ImageFormat::WebP {
+        // The upstream WebP EXIF reader allocates the declared chunk length
+        // before checking for EOF, without honoring image::Limits. Validate
+        // RIFF ranges first, also when probing an incomplete download.
+        let size = u32::from_le_bytes(bytes[4..8].try_into().expect("WebP signature"));
+        let end = u64::from(size) + 8;
+        if end > bytes.len() as u64 {
+            bail!("Incomplete WebP RIFF data");
+        }
+        let input = &bytes[..end as usize];
+        let mut chunks = input.get(12..).context("Invalid WebP RIFF size")?;
+        while !chunks.is_empty() {
+            let header = chunks.get(..8).context("Incomplete WebP chunk header")?;
+            let size = u64::from(u32::from_le_bytes(
+                header[4..8].try_into().expect("chunk header"),
+            ));
+            let end = 8 + size + size % 2;
+            if end > chunks.len() as u64 {
+                bail!("WebP chunk exceeds available RIFF data");
+            }
+            chunks = &chunks[end as usize..];
+        }
+        input
+    } else {
+        bytes
+    };
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(MAX_ANIMATION_BYTES as u64);
     reader.limits(limits);
-    let mut decoder = reader.into_decoder().context("Unable to decode image")?;
+    let decoder = reader.into_decoder().context("Unable to decode image")?;
     let (w, h) = decoder.dimensions();
+    if w == 0 || h == 0 {
+        bail!("Image dimensions must be nonzero");
+    }
     if u64::from(w) * u64::from(h) > MAX_PIXELS {
         bail!("Image exceeds {MAX_PIXELS} decoded pixels; resize it first");
     }
+    Ok((decoder, format))
+}
+/// Read display dimensions, including EXIF rotation, without decoding pixels.
+/// Incomplete input may fail; callers probing a download can retry with more bytes.
+pub fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    use image::metadata::Orientation;
+    let (mut decoder, _) = image_decoder(bytes)?;
+    let (width, height) = decoder.dimensions();
+    Ok(match decoder.orientation()? {
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH => (height, width),
+        _ => (width, height),
+    })
+}
+pub fn decode_image(bytes: &[u8]) -> Result<(image::DynamicImage, ImageFormat)> {
+    let (mut decoder, format) = image_decoder(bytes)?;
     let orientation = decoder.orientation()?;
     let mut img = image::DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
@@ -521,6 +572,55 @@ pub(crate) mod tests {
         }
         bytes
     }
+    #[test]
+    fn metadata_dimensions_do_not_require_pixels_and_respect_exif_rotation() {
+        let png = png();
+        let header_end = png.windows(4).position(|bytes| bytes == b"IDAT").unwrap() + 4;
+        assert_eq!(image_dimensions(&png[..header_end]).unwrap(), (7, 3));
+        assert!(
+            decode_image(&png[..header_end]).is_err(),
+            "header contains no complete pixel data"
+        );
+        assert_eq!(image_dimensions(&gif()).unwrap(), (7, 3));
+        let rgb = image::RgbImage::from_pixel(11, 5, image::Rgb([30, 70, 110]));
+        let mut webp = Cursor::new(Vec::new());
+        rgb.write_to(&mut webp, ImageFormat::WebP).unwrap();
+        assert_eq!(image_dimensions(webp.get_ref()).unwrap(), (11, 5));
+        let mut jpeg = Cursor::new(Vec::new());
+        rgb.write_to(&mut jpeg, ImageFormat::Jpeg).unwrap();
+        // APP1: Exif + little-endian TIFF, one SHORT Orientation=6 (90° CW).
+        let exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+        let mut oriented = vec![0xff, 0xd8, 0xff, 0xe1];
+        oriented.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        oriented.extend_from_slice(exif);
+        oriented.extend_from_slice(&jpeg.get_ref()[2..]);
+        assert_eq!(image_dimensions(&oriented).unwrap(), (5, 11));
+        let (decoded, _) = decode_image(&oriented).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (5, 11));
+    }
+
+    #[test]
+    fn webp_metadata_rejects_declared_chunk_sizes_before_decoder_allocation() {
+        // A 1×1 extended WebP with a minimal VP8L header and a malicious EXIF
+        // chunk declaring 2 GiB, despite the entire RIFF being only 52 bytes.
+        let mut body =
+            b"WEBPVP8X\x0a\0\0\0\x08\0\0\0\0\0\0\0\0\0VP8L\x05\0\0\0\x2f\0\0\0\0\0EXIF".to_vec();
+        body.extend_from_slice(&(1u32 << 31).to_le_bytes());
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        for error in [
+            image_dimensions(&bytes).unwrap_err(),
+            decode_image(&bytes).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("WebP chunk exceeds available RIFF data")
+            );
+        }
+    }
+
     #[test]
     fn snapshots_survive_source_changes_and_project_without_private_markers() {
         let dir = tempfile::tempdir().unwrap();

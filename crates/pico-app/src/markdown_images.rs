@@ -1,10 +1,10 @@
 //! Visible-only, ephemeral Markdown previews. Never writes to session media storage.
 use iced::{
-    Element, Task,
-    widget::{button, column, container, image, text},
+    Element, Length, Size, Task,
+    widget::{button, container, image, responsive, space, text, tooltip},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{Arc, LazyLock},
 };
@@ -22,13 +22,22 @@ pub struct Loaded {
     preview_bytes: usize,
 }
 #[derive(Clone, Debug)]
-pub struct Message {
-    url: String,
-    generation: u64,
-    result: Result<Arc<Loaded>, String>,
+pub enum Message {
+    Dimensions {
+        url: String,
+        generation: u64,
+        dimensions: (u32, u32),
+    },
+    Loaded {
+        url: String,
+        generation: u64,
+        result: Result<Arc<Loaded>, String>,
+    },
 }
 struct Slot {
     generation: u64,
+    source: Option<pico_core::markdown_image::Source>,
+    dimensions: Option<(u32, u32)>,
     result: Option<Result<Arc<Loaded>, String>>,
     _task: iced::task::Handle,
 }
@@ -37,6 +46,8 @@ pub struct Cache {
     session: Option<String>,
     generation: u64,
     slots: HashMap<String, Slot>,
+    // Only small geometry records survive viewport/session eviction, never pixels.
+    dimensions: VecDeque<(pico_core::markdown_image::Source, (u32, u32))>,
 }
 impl Cache {
     pub fn prepare(
@@ -62,23 +73,47 @@ impl Cache {
             let generation = self.generation;
             let source = pico_core::markdown_image::Source::resolve(workspace, &url)
                 .map_err(|e| format!("{e:#}"));
+            let dimensions = source.as_ref().ok().and_then(|key| {
+                let index = self
+                    .dimensions
+                    .iter()
+                    .position(|(source, _)| source == key)?;
+                let entry = self.dimensions.remove(index).expect("cached dimensions");
+                let dimensions = entry.1;
+                self.dimensions.push_back(entry);
+                Some(dimensions)
+            });
+            let key = source.as_ref().ok().cloned();
             let destination = url.clone();
-            let (task, handle) = Task::perform(
+            let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+            let notify_url = url.clone();
+            let loading = Task::perform(
                 async move {
-                    let result = load(destination.clone(), source).await;
-                    Message {
+                    let result = load(destination.clone(), source, move |dimensions| {
+                        // A dropped receiver means the preview left the viewport.
+                        let _ = sender.unbounded_send(Message::Dimensions {
+                            url: notify_url.clone(),
+                            generation,
+                            dimensions,
+                        });
+                    })
+                    .await;
+                    Message::Loaded {
                         url: destination,
                         generation,
                         result,
                     }
                 },
                 |message| message,
-            )
-            .abortable();
+            );
+            let (task, handle) =
+                Task::batch([Task::run(receiver, |message| message), loading]).abortable();
             self.slots.insert(
                 url,
                 Slot {
                     generation,
+                    source: key,
+                    dimensions,
                     result: None,
                     _task: handle.abort_on_drop(),
                 },
@@ -87,23 +122,57 @@ impl Cache {
         }
         Task::batch(tasks)
     }
-    pub fn update(&mut self, mut message: Message) {
-        let retained: usize = self
+    pub fn update(&mut self, message: Message) {
+        let (url, generation) = match &message {
+            Message::Dimensions {
+                url, generation, ..
+            }
+            | Message::Loaded {
+                url, generation, ..
+            } => (url, *generation),
+        };
+        if !self
             .slots
-            .values()
-            .filter_map(|slot| slot.result.as_ref()?.as_ref().ok())
-            .map(|loaded| loaded.bytes.len() + loaded.preview_bytes)
-            .sum();
-        if let Ok(loaded) = &message.result
-            && retained + loaded.bytes.len() + loaded.preview_bytes
-                > pico_core::media::MAX_ANIMATION_BYTES
+            .get(url)
+            .is_some_and(|slot| slot.generation == generation)
         {
-            message.result = Err("Visible Markdown images exceed the 256 MiB cache limit. Use fewer/smaller images, or scroll other image messages out of view and retry.".into());
+            return;
         }
-        if let Some(slot) = self.slots.get_mut(&message.url)
-            && slot.generation == message.generation
+        let dimensions = match &message {
+            Message::Dimensions { dimensions, .. } => Some(*dimensions),
+            Message::Loaded { result, .. } => result
+                .as_ref()
+                .ok()
+                .map(|loaded| (loaded.width, loaded.height)),
+        };
+        if let Some(dimensions) = dimensions {
+            let slot = self.slots.get_mut(url).expect("current slot");
+            slot.dimensions = Some(dimensions);
+            if let Some(source) = &slot.source {
+                self.dimensions.retain(|(key, _)| key != source);
+                self.dimensions.push_back((source.clone(), dimensions));
+                if self.dimensions.len() > 256 {
+                    self.dimensions.pop_front();
+                }
+            }
+        }
+        if let Message::Loaded {
+            url, mut result, ..
+        } = message
         {
-            slot.result = Some(message.result);
+            let retained: usize = self
+                .slots
+                .values()
+                .filter_map(|slot| slot.result.as_ref()?.as_ref().ok())
+                .map(|loaded| loaded.bytes.len() + loaded.preview_bytes)
+                .sum();
+            if let Ok(loaded) = &result
+                && retained + loaded.bytes.len() + loaded.preview_bytes
+                    > pico_core::media::MAX_ANIMATION_BYTES
+            {
+                result = Err("Visible Markdown images exceed the 256 MiB cache limit. Use fewer/smaller images, or scroll other image messages out of view and retry.".into());
+            }
+            self.slots.get_mut(&url).expect("current slot").result = Some(result);
         }
     }
     pub fn loaded(&self, url: &str) -> Option<Arc<Loaded>> {
@@ -113,34 +182,65 @@ impl Cache {
         self.slots.remove(url);
     }
     pub fn view(&self, url: &str) -> Element<'static, crate::ui::Message> {
-        match self.slots.get(url).and_then(|s| s.result.as_ref()) {
-            Some(Ok(loaded)) => button(
-                container(
+        let slot = self.slots.get(url);
+        let dimensions = slot.and_then(|s| s.dimensions).unwrap_or((640, 440));
+        let result = slot.and_then(|s| s.result.clone());
+        let url = url.to_owned();
+        // Resolve the same box in every state and at every chat width. Pixel
+        // upload, decoding, errors and retry never control the widget's size.
+        responsive(move |available| {
+            let (width, height) = (dimensions.0 as f32, dimensions.1 as f32);
+            let scale = (available.width.min(640.) / width).min(440. / height);
+            let size = Size::new(width * scale, height * scale);
+            let content: Element<'_, crate::ui::Message> = match &result {
+                Some(Ok(loaded)) => button(
                     image(loaded.preview.clone())
-                        .width(iced::Length::Fill)
-                        .height(iced::Length::Shrink)
+                        .width(size.width)
+                        .height(size.height)
                         .content_fit(iced::ContentFit::Contain),
                 )
-                .max_height(440),
-            )
-            .on_press(crate::ui::Message::OpenMarkdownImage(url.to_owned()))
-            .style(button::text)
-            .into(),
-            Some(Err(error)) => column![
-                text(format!("Image unavailable: {error}")).size(12),
-                button("Retry image")
-                    .on_press(crate::ui::Message::RetryMarkdownImage(url.to_owned()))
-                    .style(button::text),
-            ]
-            .spacing(4)
-            .into(),
-            None => text("Loading image…").size(12).into(),
-        }
+                .padding(0)
+                .on_press(crate::ui::Message::OpenMarkdownImage(url.clone()))
+                .style(button::text)
+                .into(),
+                // The whole rectangle retries, even if the aspect ratio leaves
+                // too little room for a separate padded button. Details live in
+                // an overlay, not in the chat flow.
+                Some(Err(error)) => tooltip(
+                    button(text("Image unavailable · Retry image").size(12))
+                        .padding(0)
+                        .width(size.width)
+                        .height(size.height)
+                        .on_press(crate::ui::Message::RetryMarkdownImage(url.clone()))
+                        .style(button::danger),
+                    container(
+                        text(format!(
+                            "Image unavailable: {error}\nClick the rectangle to retry."
+                        ))
+                        .size(12),
+                    )
+                    .max_width(360)
+                    .padding(8),
+                    tooltip::Position::FollowCursor,
+                )
+                .into(),
+                None => container(space())
+                    .width(size.width)
+                    .height(size.height)
+                    .style(container::rounded_box)
+                    .into(),
+            };
+            content
+        })
+        .height(Length::Shrink)
+        .into()
     }
 }
+
 async fn load(
     url: String,
     source: Result<pico_core::markdown_image::Source, String>,
+    dimensions: impl Fn((u32, u32)) + Send + Sync + 'static,
 ) -> Result<Arc<Loaded>, String> {
     let source = source?;
     // Slow HTTP requests must not occupy the modal/tool decoder workers.
@@ -149,7 +249,10 @@ async fn load(
         .acquire_owned()
         .await
         .expect("image loader semaphore");
-    let bytes = source.read().await.map_err(|e| format!("{e:#}"))?;
+    let bytes = source
+        .read_with_dimensions(dimensions)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
     let permit = crate::image_view::DECODERS
         .clone()
         .acquire_owned()
@@ -229,9 +332,37 @@ mod tests {
         let path = dir.path().join("image.gif");
         std::fs::write(&path, include_bytes!("fixtures/media.gif")).unwrap();
         let mut cache = Cache::default();
+        let decoders = crate::image_view::DECODERS
+            .clone()
+            .acquire_many_owned(2)
+            .await
+            .unwrap();
         let task = cache.prepare(Some(("first", dir.path())), one_url());
         let stale_generation = cache.slots["image.gif"].generation;
-        finish(&mut cache, task).await;
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let iced_runtime::Action::Output(message) = first else {
+            panic!("expected metadata output")
+        };
+        assert!(matches!(
+            &message,
+            Message::Dimensions {
+                dimensions: (96, 64),
+                ..
+            }
+        ));
+        cache.update(message);
+        assert!(cache.loaded("image.gif").is_none());
+        assert_eq!(cache.slots["image.gif"].dimensions, Some((96, 64)));
+        drop(decoders);
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                cache.update(message);
+            }
+        }
         let loaded = cache.slots["image.gif"]
             .result
             .as_ref()
@@ -252,7 +383,7 @@ mod tests {
         // A second session with the same relative URL must not inherit the image.
         std::fs::remove_file(&path).unwrap();
         let task = cache.prepare(Some(("second", dir.path())), one_url());
-        cache.update(Message {
+        cache.update(Message::Loaded {
             url: "image.gif".into(),
             generation: stale_generation,
             result: Ok(loaded),
@@ -272,6 +403,172 @@ mod tests {
         let _ = cache.prepare(None, HashSet::new());
         finish(&mut cache, task).await;
         assert!(cache.slots.is_empty());
+    }
+
+    fn layout(cache: &Cache, width: f32) -> (iced::Rectangle, f32) {
+        use iced::advanced::{layout, widget::Tree};
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let mut element: Element<'_, crate::ui::Message> =
+            iced::widget::column![cache.view("image.gif"), space().height(13)]
+                .spacing(7)
+                .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY)),
+        );
+        // The responsive wrapper fills the row; its child is the actual image rectangle.
+        (
+            node.children()[0].children()[0].bounds(),
+            node.children()[1].bounds().y,
+        )
+    }
+
+    #[test]
+    fn metadata_placeholder_loaded_error_and_retry_have_identical_layout_at_each_width() {
+        for (dimensions, wide, narrow_width, narrow) in [
+            (
+                (1200, 600),
+                Size::new(640., 320.),
+                240.,
+                Size::new(240., 120.),
+            ),
+            (
+                (300, 1200),
+                Size::new(110., 440.),
+                90.,
+                Size::new(90., 360.),
+            ),
+            (
+                (6000, 100),
+                Size::new(640., 640. / 60.),
+                180.,
+                Size::new(180., 3.),
+            ),
+        ] {
+            let mut cache = Cache::default();
+            let _task = cache.prepare(Some(("session", Path::new("/workspace"))), one_url());
+            let generation = cache.slots["image.gif"].generation;
+            cache.update(Message::Dimensions {
+                url: "image.gif".into(),
+                generation,
+                dimensions,
+            });
+            let loading = [layout(&cache, 700.), layout(&cache, narrow_width)];
+            for (actual, expected) in loading.iter().zip([wide, narrow]) {
+                assert!((actual.0.width - expected.width).abs() < 0.001);
+                assert!((actual.0.height - expected.height).abs() < 0.001);
+                assert!((actual.1 - expected.height - 7.).abs() < 0.001);
+            }
+            cache.update(Message::Loaded {
+                url: "image.gif".into(),
+                generation,
+                result: Ok(Arc::new(Loaded {
+                    url: "image.gif".into(),
+                    bytes: Arc::new(vec![]),
+                    width: dimensions.0,
+                    height: dimensions.1,
+                    preview: image::Handle::from_rgba(1, 1, vec![255; 4]),
+                    preview_bytes: 4,
+                })),
+            });
+            assert_eq!(
+                [layout(&cache, 700.), layout(&cache, narrow_width)],
+                loading
+            );
+            cache.update(Message::Loaded {
+                url: "image.gif".into(),
+                generation,
+                result: Err("Source disappeared".into()),
+            });
+            assert_eq!(
+                [layout(&cache, 700.), layout(&cache, narrow_width)],
+                loading
+            );
+            // Even a three-pixel-high failed panorama remains clickable;
+            // error details must not force a taller in-flow layout.
+            let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+                iced::Font::DEFAULT,
+                iced::Pixels(16.),
+            ));
+            let mut ui = iced_runtime::UserInterface::build(
+                cache.view("image.gif"),
+                Size::new(narrow_width, 800.),
+                iced_runtime::user_interface::Cache::default(),
+                &mut renderer,
+            );
+            let mut messages = Vec::new();
+            ui.update(
+                &[
+                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                        iced::mouse::Button::Left,
+                    )),
+                    iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                        iced::mouse::Button::Left,
+                    )),
+                ],
+                iced::mouse::Cursor::Available(iced::Point::new(
+                    narrow.width / 2.,
+                    narrow.height / 2.,
+                )),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(
+                matches!(messages.as_slice(), [crate::ui::Message::RetryMarkdownImage(url)] if url == "image.gif")
+            );
+            cache.retry("image.gif");
+            let _task = cache.prepare(Some(("session", Path::new("/workspace"))), one_url());
+            assert_eq!(
+                [layout(&cache, 700.), layout(&cache, narrow_width)],
+                loading
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_survives_session_eviction_without_reusing_pixels_or_other_workspaces() {
+        let mut cache = Cache::default();
+        let _task = cache.prepare(Some(("first", Path::new("/workspace/a"))), one_url());
+        let old = cache.slots["image.gif"].generation;
+        cache.update(Message::Dimensions {
+            url: "image.gif".into(),
+            generation: old,
+            dimensions: (900, 300),
+        });
+        let expected = layout(&cache, 500.);
+        let _task = cache.prepare(None, HashSet::new());
+        let _task = cache.prepare(Some(("second", Path::new("/workspace/a"))), one_url());
+        assert_eq!(layout(&cache, 500.), expected);
+        assert!(
+            cache.loaded("image.gif").is_none(),
+            "source must still be reloaded"
+        );
+        let _task = cache.prepare(Some(("third", Path::new("/workspace/b"))), one_url());
+        assert!(cache.slots["image.gif"].dimensions.is_none());
+        cache.update(Message::Dimensions {
+            url: "image.gif".into(),
+            generation: old,
+            dimensions: (300, 900),
+        });
+        assert!(
+            cache.slots["image.gif"].dimensions.is_none(),
+            "stale metadata cannot cross sessions"
+        );
+        let generation = cache.slots["image.gif"].generation;
+        cache.update(Message::Dimensions {
+            url: "image.gif".into(),
+            generation,
+            dimensions: (50, 150),
+        });
+        let _task = cache.prepare(None, HashSet::new());
+        let _task = cache.prepare(Some(("first", Path::new("/workspace/a"))), one_url());
+        assert_eq!(layout(&cache, 500.), expected);
     }
 
     #[test]
@@ -295,7 +592,7 @@ mod tests {
             })
         };
         for url in ["a", "b", "c", "d"] {
-            cache.update(Message {
+            cache.update(Message::Loaded {
                 url: url.into(),
                 generation: cache.slots[url].generation,
                 result: Ok(loaded(url)),
@@ -323,7 +620,7 @@ mod tests {
             Some(("session", Path::new("/workspace"))),
             ["b", "c", "d"].map(str::to_owned).into(),
         );
-        cache.update(Message {
+        cache.update(Message::Loaded {
             url: "d".into(),
             generation: cache.slots["d"].generation,
             result: Ok(loaded("d")),
