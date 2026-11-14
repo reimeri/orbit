@@ -73,10 +73,10 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - Review (`gpt-6.1-sol`, medium) and Explore (`gpt-6-luna`, high)
     - Both profiles are read-only by instruction, not filesystem sandboxing
   - Questionaires
-	- ask_user tool
-	- Should be very similar to how questionaires work in V1
+    - ask_user tool
+    - Should be very similar to how questionaires work in V1
   - Image viewing
-	- view_image tool for the agent.
+    - view_image tool for the agent.
   - Implement rest of the code mode helpers
     - image, audio, content, generatedImage 
   - Browser tools
