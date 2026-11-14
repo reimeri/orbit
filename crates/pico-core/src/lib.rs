@@ -6,6 +6,7 @@ pub mod agent;
 pub mod auth;
 pub mod code_mode;
 pub mod history;
+pub mod models;
 pub mod provider;
 pub mod shell;
 pub mod store;

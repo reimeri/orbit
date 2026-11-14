@@ -196,6 +196,12 @@ impl Provider {
         emit: &(dyn Fn(Delta) + Send + Sync),
     ) -> Result<Response> {
         let mut credentials = self.auth.token(None).await?;
+        // V1's advisory Codex routing hint must match the pinned request body,
+        // including retries and compaction. Normal mode has no tier hint.
+        let mut routing_hint = format!("model={}", body["model"].as_str().expect("request model"));
+        if let Some(tier) = body["service_tier"].as_str() {
+            routing_hint.push_str(&format!(";tier={tier}"));
+        }
         for attempt in 0..4 {
             let mut request = self
                 .client
@@ -204,6 +210,7 @@ impl Provider {
                 .header("originator", "pico-evo")
                 .header("OpenAI-Beta", "responses=experimental")
                 .header("session-id", session_id)
+                .header("x-codex-routing-hint", &routing_hint)
                 .json(&body);
             if let Some(account) = &credentials.account_id {
                 request = request.header("chatgpt-account-id", account);
@@ -299,6 +306,9 @@ fn request(session: &Session, instructions: &str, tools: bool) -> Value {
 }
 fn request_base(session: &Session, instructions: &str, tools: bool) -> Value {
     let mut body = json!({"model":session.model,"instructions":instructions,"stream":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":session.id});
+    if session.fast {
+        body["service_tier"] = json!("priority");
+    }
     body["reasoning"] = json!({"effort":session.effort,"summary":"auto"});
     if tools {
         body["tools"] = code_mode::tools();
@@ -451,6 +461,51 @@ mod tests {
         (dir, provider, requests, task)
     }
     #[tokio::test]
+    async fn fast_tier_and_routing_hint_match_across_retries_and_toggle_off() {
+        let reply = crate::test_support::completed(json!([]));
+        let (dir, provider, mut requests, server) = fixture(vec![
+            (503, "busy".into()),
+            (200, reply.clone()),
+            (200, reply),
+        ])
+        .await;
+        let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        session.fast = true;
+        session.effort = "max".into();
+        provider
+            .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap();
+        session.fast = false;
+        provider
+            .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap();
+        server.await.unwrap();
+        for fast in [true, true, false] {
+            let request = requests.recv().await.unwrap();
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            let body: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(body["model"], "gpt-6.1-sol");
+            assert_eq!(body["reasoning"]["effort"], "max");
+            let hint = headers
+                .lines()
+                .find(|line| line.starts_with("x-codex-routing-hint:"))
+                .unwrap();
+            if fast {
+                assert_eq!(body["service_tier"], "priority");
+                assert_eq!(
+                    hint,
+                    "x-codex-routing-hint: model=gpt-6.1-sol;tier=priority"
+                );
+            } else {
+                assert!(body.get("service_tier").is_none());
+                assert_eq!(hint, "x-codex-routing-hint: model=gpt-6.1-sol");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn responses_roundtrip_exec_output_and_retry_only_before_streaming() {
         let call = json!({"type":"custom_tool_call","id":"item-1","call_id":"call-1","name":"exec","input":"text(await tools.exec_command({cmd:'printf asymmetric',login:false}));","status":"completed"});
         let (dir,provider,mut requests,server)=fixture(vec![(503,"{}".into()),(200,crate::test_support::completed(json!([call]))),(200,crate::test_support::completed(json!([{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"Done."}]}])))]).await;
@@ -525,6 +580,7 @@ mod tests {
         ])
         .await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        session.fast = true;
         session.accept("λ".repeat(5000));
         session.consume_pending();
         // Force the oversized-history fallback without making a network-native-compaction attempt.
@@ -545,6 +601,8 @@ mod tests {
             let request = requests.recv().await.unwrap();
             let body: Value =
                 serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["service_tier"], "priority");
+            assert!(request.contains("x-codex-routing-hint: model=gpt-6.1-sol;tier=priority\r\n"));
             assert!(body["input"][0]["content"].as_str().unwrap().len() < 5000);
             assert_eq!(body["tools"], json!([]));
         }

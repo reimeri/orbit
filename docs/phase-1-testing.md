@@ -127,7 +127,7 @@ lose details; the original transcript remains the source of truth.
 ## UI regression checks
 
 - Open the footer model picker and leave it open: ordering must stay fixed across
-  redraws and status updates; the selected/default custom models appear once.
+  redraws and status updates; only the three models in the Models tab appear, once each.
 - There is no chat header, bottom-sidebar New session/shortcut label, composer
   hint, Send, Continue, Latest or Stop buttons. Enter still sends; Shift+Enter adds
   a line. Esc dismisses an open menu, dialog or Settings first; with those closed,
@@ -144,3 +144,25 @@ lose details; the original transcript remains the source of truth.
 - Leave a short session idle with the window visible. It should not refresh at
   20 Hz. Confirm a running session still streams and late background tool output
   appears without clicking or switching sessions.
+
+## Settings and model defaults
+
+- Verify Account, General, and Models tabs remain visible while scrolling their
+  content. Account owns sign-in/out; General owns the default-model dropdown,
+  context/compaction settings and appearance; Models owns all three model defaults.
+- Set Astra to Max/Fast on and Luna to None/Fast off, then Save. Choose
+  Astra as the default in General and apply. A new session starts with Astra,
+  Max and Fast. Switch to Luna in the footer: effort becomes None, Fast turns off.
+- Open the effort menu: Astra/Sol have low, medium, high, xhigh, max; Luna also
+  has none. Toggle Fast using the mouse and keyboard. The footer indicates Fast
+  when enabled. Model/effort/Fast changes are unavailable during an active turn.
+- Save an existing session with non-default effort/Fast, restart, and reopen it:
+  its selections persist. Changing model defaults does not overwrite it.
+- In isolated test state, open a saved session with a retired model. Expect the
+  configured default model and its defaults, an informational toast, unchanged
+  transcript/draft, and persistence across restart. Reopening it must not warn
+  again. The toast can be dismissed and otherwise expires after about 8 seconds.
+- With authorized live access, compare Fast on/off requests: Fast requests
+  priority service and the matching routing hint. Normal mode omits the tier
+  and uses a model-only routing hint. Local tests verify the wire contract, not
+  actual priority access or service latency.

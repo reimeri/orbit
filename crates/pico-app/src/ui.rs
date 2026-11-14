@@ -16,6 +16,7 @@ use pico_core::CancellationToken;
 use pico_core::{
     agent::Harness,
     auth::Login,
+    models::{MODELS, model},
     store::{
         Catalog, Entry, EntryKind, NewSessionDraft, Project, Session, SessionSummary, Settings,
         Store,
@@ -46,7 +47,7 @@ const PANEL: Color = Color::from_rgb8(29, 32, 37);
 const BORDER: Color = Color::from_rgb8(48, 53, 61);
 const ACCENT: Color = Color::from_rgb8(137, 175, 210);
 const SIDEBAR_CONTENT_PADDING: f32 = 8.;
-const EFFORTS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const FAST_OPTION: &str = "Fast mode";
 
 pub struct App {
     harness: Option<Arc<Harness>>,
@@ -83,6 +84,8 @@ pub struct App {
     expanded: HashSet<String>,
     groups: HashSet<String>,
     settings_open: bool,
+    settings_tab: SettingsTab,
+    notice: Option<(String, std::time::Instant)>,
     settings: Settings,
     context_text: String,
     threshold_text: String,
@@ -106,6 +109,12 @@ pub struct App {
     smoke_passed: Arc<AtomicBool>,
     smoke_dir: Option<PathBuf>,
     window_id: Option<window::Id>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTab {
+    Account,
+    General,
+    Models,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FooterControl {
@@ -134,7 +143,7 @@ pub enum Selection {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
-    Selected(Result<Selection, String>),
+    Selected(Result<(Selection, Option<String>), String>),
     NewDraftSaved(Result<(), String>),
     Sent(String, String, Result<(), String>),
     DraftSaved(String, String, Result<(), String>),
@@ -163,8 +172,14 @@ pub enum Message {
     Send,
     ToggleSettings,
     ApplySettings,
+    CatalogSaved(bool, Result<(), String>),
+    SettingsTab(SettingsTab),
     Model(String),
-    Effort(String),
+    ModelEffort(String, String),
+    ModelFast(String, bool),
+    ToggleSessionFast,
+    NoticeDismiss,
+    NoticeTick,
     SessionModel(String),
     SessionEffort(String),
     Context(String),
@@ -273,6 +288,8 @@ impl App {
             expanded: HashSet::new(),
             groups: HashSet::new(),
             settings_open: false,
+            settings_tab: SettingsTab::Account,
+            notice: None,
             context_text: settings.context_limit.to_string(),
             threshold_text: settings.compact_percent.to_string(),
             settings,
@@ -548,20 +565,22 @@ impl App {
             },
         ));
     }
-    fn save_catalog(&mut self) -> bool {
+    fn save_catalog(&mut self, close_settings: bool) {
         self.catalog.selected = self.selected.clone();
         if let Some(h) = &self.harness {
             let h = h.clone();
             let catalog = self.catalog.clone();
             self.tasks.push(self.io.run(move || {
-                Message::External(h.store.save_catalog(&catalog).map_err(|e| {
-                    format!(
-                        "Could not save settings: {e:#}. Fix storage and retry before quitting."
-                    )
-                }))
+                Message::CatalogSaved(
+                    close_settings,
+                    h.store.save_catalog(&catalog).map_err(|e| {
+                        format!(
+                            "Could not save settings: {e:#}. Fix storage and retry before quitting."
+                        )
+                    }),
+                )
             }));
         }
-        true
     }
     fn take_draft(&mut self) -> Option<(String, String)> {
         if !self.draft_dirty {
@@ -610,6 +629,7 @@ impl App {
             return;
         }
         let draft = self.take_draft();
+        let settings = self.catalog.settings.clone();
         let mut new_draft = self.new_draft.clone();
         match &selection {
             Selection::Picker => new_draft.project = None,
@@ -633,7 +653,11 @@ impl App {
                         };
                         h.store.save_new_draft(&new_draft)?;
                         h.evict_inactive(id)?;
-                        Ok::<_, pico_core::Error>(selection)
+                        // Recovery is the last fallible step: once saved, its notice
+                        // must reach the UI even if other selection work failed earlier.
+                        let retired = id.map(|id| h.reconcile_model(id, &settings)).transpose()?.flatten();
+                        let notice = retired.map(|retired| format!("{retired} is no longer in the model catalog. This session now uses {} with its default effort and Fast setting.", settings.model));
+                        Ok::<_, pico_core::Error>((selection, notice))
                     })()
                     .map_err(|e| {
                         format!("Could not switch sessions: {e:#}. Fix storage and retry.")
@@ -674,6 +698,7 @@ impl App {
                     | Message::SaveDraft
                     | Message::SessionModel(_)
                     | Message::SessionEffort(_)
+                    | Message::ToggleSessionFast
                     | Message::Favorite(_)
                     | Message::ApplySettings
                     | Message::Font(_)
@@ -688,7 +713,10 @@ impl App {
             Message::Selected(result) => {
                 self.io_busy = false;
                 match result {
-                    Ok(selection) => {
+                    Ok((selection, notice)) => {
+                        if let Some(notice) = notice {
+                            self.notice = Some((notice, std::time::Instant::now()));
+                        }
                         self.draft_session = None;
                         self.selected = None;
                         match selection {
@@ -707,7 +735,7 @@ impl App {
                         self.refresh();
                         self.restore_draft();
                         self.git.clear();
-                        self.save_catalog();
+                        self.save_catalog(false);
                         return bottom();
                     }
                     Err(error) => {
@@ -739,7 +767,7 @@ impl App {
                             self.new_draft = NewSessionDraft::default();
                             self.new_draft_dirty = false;
                             self.selected = Some(id.clone());
-                            self.save_catalog();
+                            self.save_catalog(false);
                         }
                         self.submissions.remove(&id);
                         if self.selected.as_ref() == Some(&id) && self.editor.text() == text {
@@ -848,13 +876,18 @@ impl App {
                     && let Some(session) = self.current()
                 {
                     let (options, selected) = match control {
-                        FooterControl::Model => (
-                            model_options(&session.model, &self.catalog.settings.model),
-                            &session.model,
+                        FooterControl::Model => (model_options(), &session.model),
+                        FooterControl::Effort => (
+                            model(&session.model)
+                                .expect("catalog model")
+                                .efforts
+                                .iter()
+                                .copied()
+                                .chain([FAST_OPTION])
+                                .map(str::to_owned)
+                                .collect(),
+                            &session.effort,
                         ),
-                        FooterControl::Effort => {
-                            (EFFORTS.map(str::to_owned).to_vec(), &session.effort)
-                        }
                     };
                     let focused = options
                         .iter()
@@ -904,7 +937,7 @@ impl App {
                 if let Some(p) = self.catalog.projects.iter_mut().find(|p| p.path == path) {
                     p.favorite = !p.favorite;
                 }
-                self.save_catalog();
+                self.save_catalog(false);
             }
             Message::Editor(_) | Message::DeletePreviousWord => {
                 if self.io_busy
@@ -1009,37 +1042,70 @@ impl App {
                     self.error = Some(e);
                 } else {
                     self.catalog.settings = self.settings.clone();
-                    self.save_catalog();
+                    self.save_catalog(true);
                 }
             }
+            Message::CatalogSaved(close_settings, result) => match result {
+                Ok(()) if close_settings && self.settings_open => {
+                    self.settings_open = false;
+                    self.view_epoch = self.view_epoch.wrapping_add(1);
+                }
+                Ok(()) => {}
+                Err(error) => self.error = Some(error),
+            },
             Message::Model(value) => self.settings.model = value,
-            Message::Effort(value) => self.settings.effort = value,
+            Message::SettingsTab(tab) => self.settings_tab = tab,
+            Message::ModelEffort(id, effort) => {
+                self.settings
+                    .models
+                    .get_mut(&id)
+                    .expect("catalog model")
+                    .effort = effort
+            }
+            Message::ModelFast(id, fast) => {
+                self.settings
+                    .models
+                    .get_mut(&id)
+                    .expect("catalog model")
+                    .fast = fast
+            }
+            Message::NoticeDismiss => self.notice = None,
+            Message::NoticeTick => {
+                if self
+                    .notice
+                    .as_ref()
+                    .is_some_and(|(_, since)| since.elapsed() >= Duration::from_secs(8))
+                {
+                    self.notice = None;
+                }
+            }
             Message::Context(value) => self.context_text = value,
             Message::Threshold(value) => self.threshold_text = value,
             Message::Font(value) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings.font_size = value;
                 self.catalog.settings.font_size = value;
-                self.save_catalog();
+                self.save_catalog(false);
             }
             Message::ChatWidth(value) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings.chat_width = value;
                 self.catalog.settings.chat_width = value;
-                self.save_catalog();
+                self.save_catalog(false);
             }
             Message::Resume(value) => {
                 self.settings.resume_last = value;
                 self.catalog.settings.resume_last = value;
-                self.save_catalog();
+                self.save_catalog(false);
             }
             Message::SessionModel(value) => {
                 self.footer_menu = None;
                 if self.io_busy {
                     return Task::none();
                 }
+                let settings = self.catalog.settings.clone();
                 if let Some(draft) = &mut self.draft_session {
-                    draft.model = value;
+                    draft.select_model(&value, &settings);
                 } else if !self.running()
                     && let (Some(h), Some(id)) = (&self.harness, &self.selected)
                 {
@@ -1047,7 +1113,7 @@ impl App {
                     let id = id.clone();
                     self.tasks.push(self.io.run(move || {
                         Message::Edited(
-                            h.edit(&id, |s| s.model = value)
+                            h.edit(&id, |s| s.select_model(&value, &settings))
                                 .map_err(|e| format!("{e:#}")),
                         )
                     }));
@@ -1068,6 +1134,24 @@ impl App {
                     self.tasks.push(self.io.run(move || {
                         Message::Edited(
                             h.edit(&id, |s| s.effort = value)
+                                .map_err(|e| format!("{e:#}")),
+                        )
+                    }));
+                }
+            }
+            Message::ToggleSessionFast => {
+                self.footer_menu = None;
+                if self.io_busy || self.running() {
+                    return Task::none();
+                }
+                if let Some(draft) = &mut self.draft_session {
+                    draft.fast = !draft.fast;
+                } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
+                    let h = h.clone();
+                    let id = id.clone();
+                    self.tasks.push(self.io.run(move || {
+                        Message::Edited(
+                            h.edit(&id, |s| s.fast = !s.fast)
                                 .map_err(|e| format!("{e:#}")),
                         )
                     }));
@@ -1293,7 +1377,7 @@ impl App {
                 }
                 iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                     if self.drag.take().is_some() {
-                        self.save_catalog();
+                        self.save_catalog(false);
                     }
                 }
                 iced::Event::Window(window::Event::Resized(size)) => {
@@ -1329,6 +1413,9 @@ impl App {
                                 let value = menu.options[menu.focused].clone();
                                 let message = match menu.control {
                                     FooterControl::Model => Message::SessionModel(value),
+                                    FooterControl::Effort if value == FAST_OPTION => {
+                                        Message::ToggleSessionFast
+                                    }
                                     FooterControl::Effort => Message::SessionEffort(value),
                                 };
                                 return self.update_inner(message);
@@ -1389,7 +1476,7 @@ impl App {
                             path,
                             favorite: false,
                         });
-                        self.save_catalog();
+                        self.save_catalog(false);
                     }
                     self.modal = None;
                 }
@@ -1514,6 +1601,10 @@ impl App {
                 .map(|_| Message::GitTick),
             );
         }
+        if self.notice.is_some() {
+            subscriptions
+                .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::NoticeTick));
+        }
         if self.draft_dirty || self.new_draft_dirty {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveDraft));
@@ -1525,6 +1616,22 @@ impl App {
     }
     fn content(&self) -> Element<'_, Message> {
         let mut center = column![self.center()].width(Fill).height(Fill);
+        if let Some((notice, _)) = &self.notice {
+            center = center.push(
+                container(
+                    row![
+                        text(format!("Info · {notice}")).size(13).width(Fill),
+                        button("×")
+                            .on_press(Message::NoticeDismiss)
+                            .style(button::text)
+                    ]
+                    .spacing(12)
+                    .align_y(iced::Center),
+                )
+                .padding(12)
+                .style(card),
+            );
+        }
         if let Some(error) = &self.error {
             center = center.push(
                 container(
@@ -2155,7 +2262,25 @@ impl App {
             .into()
     }
     fn settings_panel(&self) -> Element<'_, Message> {
-        let mut settings = column![
+        let mut tabs = row![].spacing(4);
+        for (tab, label) in [
+            (SettingsTab::Account, "Account"),
+            (SettingsTab::General, "General"),
+            (SettingsTab::Models, "Models"),
+        ] {
+            tabs = tabs.push(
+                button(text(label).size(13).width(Fill).align_x(iced::Center))
+                    .width(Fill)
+                    .padding([8, 4])
+                    .on_press(Message::SettingsTab(tab))
+                    .style(if self.settings_tab == tab {
+                        button::primary
+                    } else {
+                        button::text
+                    }),
+            );
+        }
+        let header = column![
             row![
                 text("Settings").size(22),
                 space().width(Fill),
@@ -2163,47 +2288,140 @@ impl App {
                     .on_press(Message::ToggleSettings)
                     .style(button::text)
             ],
-            text("ACCOUNT").size(10).color(MUTED)
+            tabs,
+            widget::rule::horizontal(1)
         ]
-        .spacing(14);
-        if let Some(account) = &self.account {
-            settings = settings.push(text(account).size(14)).push(
-                button("Sign out")
-                    .on_press(Message::Logout)
-                    .style(secondary),
-            );
-        } else if self.login_cancel.is_some() {
-            settings = settings.push(text("Finish sign-in in your browser.").size(14));
-            if let Some(url) = &self.login_url {
-                settings = settings.push(
-                    button("Copy login URL")
-                        .on_press(Message::Copy(url.clone()))
-                        .style(button::text),
-                );
+        .spacing(12);
+        let mut settings = column![].spacing(14);
+        match self.settings_tab {
+            SettingsTab::Account => {
+                if let Some(account) = &self.account {
+                    settings = settings.push(text(account).size(14)).push(
+                        button("Sign out")
+                            .on_press(Message::Logout)
+                            .style(secondary),
+                    );
+                } else if self.login_cancel.is_some() {
+                    settings = settings.push(text("Finish sign-in in your browser.").size(14));
+                    if let Some(url) = &self.login_url {
+                        settings = settings.push(
+                            button("Copy login URL")
+                                .on_press(Message::Copy(url.clone()))
+                                .style(button::text),
+                        );
+                    }
+                    settings = settings.push(
+                        button("Cancel login")
+                            .on_press(Message::CancelLogin)
+                            .style(secondary),
+                    );
+                } else {
+                    settings = settings
+                        .push(text("Use your ChatGPT subscription.").size(13).color(MUTED))
+                        .push(
+                            button("Sign in with ChatGPT")
+                                .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
+                                .padding(10),
+                        );
+                }
             }
-            settings = settings.push(
-                button("Cancel login")
-                    .on_press(Message::CancelLogin)
+            SettingsTab::General => {
+                settings = settings
+                    .push(text("Default model").size(12))
+                    .push(
+                        pick_list(
+                            model_options(),
+                            Some(self.settings.model.clone()),
+                            Message::Model,
+                        )
+                        .width(Fill),
+                    )
+                    .push(text("Context token limit").size(12))
+                    .push(
+                        text_input("272000", &self.context_text)
+                            .on_input(Message::Context)
+                            .padding(8),
+                    )
+                    .push(text("Auto-compact at (%)").size(12))
+                    .push(
+                        text_input("80", &self.threshold_text)
+                            .on_input(Message::Threshold)
+                            .padding(8),
+                    )
+                    .push(widget::rule::horizontal(1))
+                    .push(text("APPEARANCE").size(10).color(MUTED))
+                    .push(
+                        text(format!(
+                            "Chat text · {:.0}px",
+                            self.catalog.settings.font_size
+                        ))
+                        .size(12),
+                    )
+                    .push(
+                        slider(12.0..=24.0, self.catalog.settings.font_size, Message::Font)
+                            .step(1_f32),
+                    )
+                    .push(
+                        text(format!(
+                            "Chat width · {:.0}px",
+                            self.catalog.settings.chat_width
+                        ))
+                        .size(12),
+                    )
+                    .push(
+                        slider(
+                            480.0..=1600.0,
+                            self.catalog.settings.chat_width,
+                            Message::ChatWidth,
+                        )
+                        .step(20_f32),
+                    )
+                    .push(
+                        checkbox(self.catalog.settings.resume_last)
+                            .label("Restore last session")
+                            .on_toggle(Message::Resume),
+                    );
+            }
+            SettingsTab::Models => {
+                for model in MODELS {
+                    let defaults = &self.settings.models[model.id];
+                    settings = settings.push(
+                        container(
+                            column![
+                                text(model.name).size(16),
+                                text(model.id).size(11).color(MUTED),
+                                text("Default effort").size(12),
+                                pick_list(
+                                    model.efforts,
+                                    Some(defaults.effort.as_str()),
+                                    move |effort| Message::ModelEffort(
+                                        model.id.into(),
+                                        effort.into()
+                                    )
+                                )
+                                .width(Fill),
+                                checkbox(defaults.fast).label("Fast by default").on_toggle(
+                                    move |fast| Message::ModelFast(model.id.into(), fast)
+                                ),
+                            ]
+                            .spacing(10),
+                        )
+                        .padding(12)
+                        .width(Fill)
+                        .style(card),
+                    );
+                }
+            }
+        }
+        let mut panel_content = column![header, scrollable(settings).height(Fill)].spacing(14);
+        if self.settings_tab != SettingsTab::Account {
+            panel_content = panel_content.push(
+                button("Save")
+                    .on_press(Message::ApplySettings)
                     .style(secondary),
             );
-        } else {
-            settings = settings
-                .push(text("Use your ChatGPT subscription.").size(13).color(MUTED))
-                .push(
-                    button("Sign in with ChatGPT")
-                        .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
-                        .padding(10),
-                );
         }
-        settings=settings.push(widget::rule::horizontal(1)).push(text("DEFAULTS FOR NEW SESSIONS").size(10).color(MUTED)).push(text("Model").size(12)).push(text_input("e.g. gpt-5.6-sol",&self.settings.model).on_input(Message::Model).padding(8)).push(text("Reasoning effort").size(12)).push(pick_list(EFFORTS,Some(self.settings.effort.as_str()),|v|Message::Effort(v.into())).width(Fill)).push(text("Context token limit").size(12)).push(text_input("272000",&self.context_text).on_input(Message::Context).padding(8)).push(text("Auto-compact at (%)").size(12)).push(text_input("80",&self.threshold_text).on_input(Message::Threshold).padding(8)).push(text("Set the context limit to your model's usable input window. Compaction preserves the full transcript on disk.").size(11).color(MUTED)).push(button("Apply defaults").on_press(Message::ApplySettings).style(secondary)).push(widget::rule::horizontal(1)).push(text("APPEARANCE").size(10).color(MUTED)).push(text(format!("Chat text · {:.0}px",self.catalog.settings.font_size)).size(12)).push(slider(12.0..=24.0,self.catalog.settings.font_size,Message::Font).step(1_f32)).push(text(format!("Chat width · {:.0}px",self.catalog.settings.chat_width)).size(12)).push(slider(480.0..=1600.0,self.catalog.settings.chat_width,Message::ChatWidth).step(20_f32)).push(checkbox(self.catalog.settings.resume_last).label("Restore last session").on_toggle(Message::Resume)).push(widget::rule::horizontal(1)).push(text("EXECUTION").size(10).color(MUTED)).push(text("Unrestricted shell access\nNo sandbox or command approval prompts. Use projects and instructions you trust.").size(12).color(MUTED));
-        if let Some(h) = &self.harness {
-            settings = settings.push(
-                text(format!("Storage\n{}", h.store.root().display()))
-                    .size(11)
-                    .color(MUTED),
-            );
-        }
-        container(scrollable(settings))
+        container(panel_content)
             .padding(18)
             .width(
                 self.catalog
@@ -2212,7 +2430,10 @@ impl App {
                     .min(self.window_width * 0.4),
             )
             .height(Fill)
-            .style(panel)
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb8(24, 27, 31).into()),
+                ..Default::default()
+            })
             .into()
     }
     fn footer(&self) -> Element<'_, Message> {
@@ -2279,7 +2500,12 @@ impl App {
             "Cached input: {} tokens\nTotal input: {used} tokens",
             session.usage.cached
         );
-        let layout = FooterLayout::new(width, &session.model, &session.effort);
+        let effort_label = if session.fast {
+            format!("{} · Fast", session.effort)
+        } else {
+            session.effort.clone()
+        };
+        let layout = FooterLayout::new(width, &session.model, &effort_label);
         let mut hidden = Vec::new();
         if !layout.git && !self.git.is_empty() {
             hidden.push(self.git.clone());
@@ -2364,11 +2590,7 @@ impl App {
                     ),
                     control(FooterControl::Model, &session.model, controls_width * 0.65),
                     footer_separator(),
-                    control(
-                        FooterControl::Effort,
-                        &session.effort,
-                        controls_width * 0.35
-                    ),
+                    control(FooterControl::Effort, &effort_label, controls_width * 0.35),
                 ]
                 .spacing(2)
                 .align_y(iced::Center),
@@ -2439,7 +2661,7 @@ impl App {
             .push(footer_separator())
             .push(control(
                 FooterControl::Effort,
-                &session.effort,
+                &effort_label,
                 layout.effort_width,
             ));
         container(info)
@@ -2457,10 +2679,15 @@ impl App {
         };
         let mut options = column![].spacing(2);
         for (index, option) in menu.options.iter().enumerate() {
-            let chosen = option == selected;
+            let chosen = if option == FAST_OPTION {
+                session.fast
+            } else {
+                option == selected
+            };
             let focused = menu.focused == index;
             let message = match menu.control {
                 FooterControl::Model => Message::SessionModel(option.clone()),
+                FooterControl::Effort if option == FAST_OPTION => Message::ToggleSessionFast,
                 FooterControl::Effort => Message::SessionEffort(option.clone()),
             };
             let item = button(
@@ -2801,6 +3028,23 @@ impl App {
             18 => {
                 let _ = self.update_inner(Message::FooterMenu(FooterControl::Effort));
             }
+            19 => {
+                self.footer_menu = None;
+                self.settings_open = true;
+                self.settings_tab = SettingsTab::General;
+            }
+            20 => self.settings_tab = SettingsTab::Models,
+            21 => {
+                self.harness
+                    .as_ref()
+                    .expect("smoke harness")
+                    .edit(self.selected.as_ref().expect("smoke session"), |s| {
+                        s.fast = true
+                    })
+                    .expect("smoke fast");
+                self.refresh();
+                let _ = self.update_inner(Message::FooterMenu(FooterControl::Effort));
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
@@ -2840,7 +3084,7 @@ impl FooterLayout {
         let model_width =
             (footer_text_width(model, 11.).ceil() + 8.).min((width * 0.3).clamp(40., 180.));
         let effort_width =
-            (footer_text_width(effort, 11.).ceil() + 8.).min((width * 0.15).clamp(28., 64.));
+            (footer_text_width(effort, 11.).ceil() + 8.).min((width * 0.2).clamp(28., 110.));
         let available = width - model_width - effort_width - 88.;
         let usage = available >= 260.;
         let git = available >= 420.;
@@ -3106,13 +3350,8 @@ async fn git_info(path: PathBuf) -> String {
     }
 }
 
-fn model_options(current: &str, default: &str) -> Vec<String> {
-    let mut models = [current, default, "gpt-5.6-sol", "gpt-5.4", "gpt-5.3-codex"]
-        .map(str::to_owned)
-        .to_vec();
-    models.sort();
-    models.dedup();
-    models
+fn model_options() -> Vec<String> {
+    MODELS.iter().map(|m| m.id.to_owned()).collect()
 }
 fn shorten(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
@@ -3229,6 +3468,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_closes_settings_only_after_success_and_autosave_keeps_it_open() {
+        let mut app = app();
+        app.settings_open = true;
+        dispatch(&mut app, Message::Font(17.)).await;
+        assert!(app.settings_open);
+        dispatch(&mut app, Message::Context("invalid".into())).await;
+        dispatch(&mut app, Message::ApplySettings).await;
+        assert!(app.settings_open);
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("numeric context limit")
+        );
+        dispatch(&mut app, Message::Context("128000".into())).await;
+        let settings_path = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .store
+            .root()
+            .join("settings.json");
+        std::fs::remove_file(&settings_path).unwrap();
+        std::fs::create_dir(&settings_path).unwrap();
+        dispatch(&mut app, Message::ApplySettings).await;
+        assert!(app.settings_open);
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("Could not save settings")
+        );
+        std::fs::remove_dir(&settings_path).unwrap();
+        dispatch(&mut app, Message::ErrorDismiss).await;
+        let epoch = app.view_epoch;
+        let save = app.update(Message::ApplySettings);
+        assert!(app.settings_open, "wait for persistence before closing");
+        drain(&mut app, save).await;
+        assert!(!app.settings_open);
+        assert_ne!(app.view_epoch, epoch);
+        assert!(app.error.is_none());
+        assert_eq!(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .store
+                .load()
+                .unwrap()
+                .0
+                .settings
+                .context_limit,
+            128000
+        );
+    }
+
+    #[tokio::test]
+    async fn model_defaults_footer_fast_and_retired_session_recovery_persist() {
+        let mut app = app();
+        let h = app.harness.as_ref().unwrap().clone();
+        dispatch(
+            &mut app,
+            Message::ModelEffort("gpt-6-astra".into(), "max".into()),
+        )
+        .await;
+        dispatch(&mut app, Message::ModelFast("gpt-6-astra".into(), true)).await;
+        dispatch(&mut app, Message::Model("gpt-6-astra".into())).await;
+        dispatch(&mut app, Message::ApplySettings).await;
+        let (catalog, _, _) = h.store.load().unwrap();
+        assert_eq!(catalog.settings.model, "gpt-6-astra");
+        assert!(catalog.settings.models["gpt-6-astra"].fast);
+        dispatch(&mut app, Message::Create(PathBuf::from("/models"))).await;
+        assert_eq!(app.current().unwrap().effort, "max");
+        assert!(app.current().unwrap().fast);
+        dispatch(&mut app, Message::SessionModel("gpt-6-luna".into())).await;
+        assert_eq!(app.current().unwrap().effort, "medium");
+        assert!(!app.current().unwrap().fast);
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        assert!(
+            app.footer_menu
+                .as_ref()
+                .unwrap()
+                .options
+                .contains(&"none".into())
+        );
+        let fast_index = app
+            .footer_menu
+            .as_ref()
+            .unwrap()
+            .options
+            .iter()
+            .position(|s| s == FAST_OPTION)
+            .unwrap();
+        app.footer_menu.as_mut().unwrap().focused = fast_index;
+        dispatch(&mut app, footer_key(keyboard::key::Named::Enter)).await;
+        assert!(app.current().unwrap().fast);
+        assert_eq!(app.current().unwrap().effort, "medium");
+        // The persisted session uses a retired model and must recover without losing history.
+        let mut session = Session::new(PathBuf::from("/models"), &catalog.settings);
+        session.model = "retired-sol".into();
+        session.effort = "low".into();
+        session.fast = false;
+        session
+            .entries
+            .push(Entry::new(EntryKind::User, "Keep this transcript"));
+        session.draft = "Keep this draft".into();
+        let id = session.id.clone();
+        h.store.save_session(&session).unwrap();
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        let saved = h.store.load_session(&id).unwrap();
+        assert_eq!(saved.model, "gpt-6-astra");
+        assert_eq!(saved.effort, "max");
+        assert!(saved.fast);
+        assert_eq!(saved.entries[0].text, "Keep this transcript");
+        assert_eq!(app.editor.text(), "Keep this draft");
+        assert!(app.notice.as_ref().unwrap().0.contains("retired-sol"));
+        dispatch(&mut app, Message::SessionEffort("high".into())).await;
+        dispatch(&mut app, Message::ToggleSessionFast).await;
+        assert!(!h.store.load_session(&id).unwrap().fast);
+        dispatch(&mut app, Message::NoticeDismiss).await;
+        dispatch(&mut app, Message::New).await;
+        dispatch(&mut app, Message::Select(id)).await;
+        assert!(app.notice.is_none());
+        assert_eq!(app.current().unwrap().effort, "high");
+        assert!(!app.current().unwrap().fast);
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        assert!(
+            !app.footer_menu
+                .as_ref()
+                .unwrap()
+                .options
+                .contains(&"none".into())
+        );
+        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
+        assert_eq!(
+            app.footer_menu.as_ref().unwrap().options,
+            ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_model_recovery_retries_failed_selection_without_losing_notice() {
+        let mut app = app();
+        let h = app.harness.as_ref().unwrap().clone();
+        let mut session = Session::new(PathBuf::from("/recovery"), &app.catalog.settings);
+        session.model = "retired-model".into();
+        session.effort = "low".into();
+        session.fast = true;
+        let id = session.id.clone();
+        h.store.save_session(&session).unwrap();
+        let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
+        for (name, trigger) in [
+            ("fail_draft", "BEFORE INSERT ON new_session_draft"),
+            ("fail_model", "BEFORE UPDATE ON sessions"),
+        ] {
+            db.execute_batch(&format!(
+                "CREATE TRIGGER {name} {trigger} BEGIN SELECT RAISE(FAIL,'fixture failure'); END;"
+            ))
+            .unwrap();
+            dispatch(&mut app, Message::Select(id.clone())).await;
+            assert!(app.error.as_ref().unwrap().contains("fixture failure"));
+            assert!(app.selected.is_none());
+            assert!(app.notice.is_none());
+            assert_eq!(h.store.load_session(&id).unwrap().model, "retired-model");
+            assert_eq!(h.get(&id).unwrap().snapshot().model, "retired-model");
+            db.execute_batch(&format!("DROP TRIGGER {name};")).unwrap();
+        }
+        dispatch(&mut app, Message::ErrorDismiss).await;
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        assert_eq!(app.selected.as_ref(), Some(&id));
+        assert!(app.error.is_none());
+        assert!(app.notice.as_ref().unwrap().0.contains("retired-model"));
+        let saved = h.store.load_session(&id).unwrap();
+        assert_eq!(saved.model, "gpt-6.1-sol");
+        assert_eq!(saved.effort, "medium");
+        assert!(!saved.fast);
+        // Deterministic expiry, without sleeping or an always-on timer.
+        app.notice.as_mut().unwrap().1 = std::time::Instant::now() - Duration::from_secs(9);
+        dispatch(&mut app, Message::NoticeTick).await;
+        assert!(app.notice.is_none());
+    }
+
+    #[tokio::test]
     async fn new_session_draft_follows_projects_but_not_existing_sessions() {
         let mut app = app();
         let h = app.harness.as_ref().unwrap().clone();
@@ -3241,12 +3662,15 @@ mod tests {
         let message = "Investigate λ
 Then implement the fix.";
         type_message(&mut app, message).await;
-        dispatch(&mut app, Message::SessionModel("custom-model".into())).await;
+        dispatch(&mut app, Message::SessionModel("gpt-6-astra".into())).await;
         dispatch(&mut app, Message::SessionEffort("high".into())).await;
         dispatch(&mut app, Message::Create(PathBuf::from("/project-two"))).await;
         assert_eq!(app.editor.text(), message);
         assert_eq!(app.current().unwrap().model, app.catalog.settings.model);
-        assert_eq!(app.current().unwrap().effort, app.catalog.settings.effort);
+        assert_eq!(
+            app.current().unwrap().effort,
+            app.catalog.settings.models[&app.catalog.settings.model].effort
+        );
         assert!(h.summaries().is_empty());
         assert!(h.store.load().unwrap().1.is_empty());
 
@@ -3674,9 +4098,9 @@ Then implement the fix.";
             );
             let mut menu_bounds = UiBounds::default();
             ui.operate(&renderer, &mut menu_bounds);
-            let option = menu_bounds.label("gpt-5.3-codex");
+            let option = menu_bounds.label("gpt-6-luna");
             assert!(
-                option.width >= footer_text_width("gpt-5.3-codex", 12.),
+                option.width >= footer_text_width("gpt-6-luna", 12.),
                 "popup options must stay readable even with a narrow chat"
             );
             drop(ui);
@@ -4314,13 +4738,6 @@ Then implement the fix.";
         assert_eq!(app.transcript.total(), before + 120.);
         assert!(app.markdown.len() < 100);
         let _ = app.view();
-    }
-    #[test]
-    fn model_order_is_stable_unique_and_includes_custom_selection() {
-        let expected = vec!["gpt-5.3-codex", "gpt-5.4", "gpt-5.6-sol", "my-model"];
-        for _ in 0..10 {
-            assert_eq!(model_options("my-model", "gpt-5.4"), expected);
-        }
     }
     #[tokio::test]
     async fn session_menu_targets_the_clicked_session_and_releases_deleted_output() {

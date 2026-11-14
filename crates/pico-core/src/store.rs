@@ -1,9 +1,13 @@
 //! Durable V2 state. Provider context and the complete visible transcript are separate.
-use crate::history::{History, Record};
+use crate::{
+    history::{History, Record},
+    models::{DEFAULT_MODEL, MODELS, model},
+};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::{
     fs::{self, File, OpenOptions},
@@ -39,10 +43,31 @@ impl Project {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelDefaults {
+    pub effort: String,
+    pub fast: bool,
+}
+impl Default for ModelDefaults {
+    fn default() -> Self {
+        Self {
+            effort: "medium".into(),
+            fast: false,
+        }
+    }
+}
+fn model_defaults() -> BTreeMap<String, ModelDefaults> {
+    MODELS
+        .iter()
+        .map(|m| (m.id.into(), ModelDefaults::default()))
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub model: String,
-    pub effort: String,
+    #[serde(default = "model_defaults")]
+    pub models: BTreeMap<String, ModelDefaults>,
     pub context_limit: u64,
     pub compact_percent: u8,
     pub sidebar_width: f32,
@@ -54,8 +79,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            model: "gpt-5.6-sol".into(),
-            effort: "medium".into(),
+            model: DEFAULT_MODEL.into(),
+            models: model_defaults(),
             context_limit: 272_000,
             compact_percent: 80,
             sidebar_width: 240.,
@@ -67,12 +92,31 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    /// Catalog updates retire old IDs without retaining compatibility aliases.
+    fn refresh_models(&mut self) {
+        self.models.retain(|id, _| model(id).is_some());
+        for m in MODELS {
+            self.models.entry(m.id.into()).or_default();
+        }
+        if model(&self.model).is_none() {
+            self.model = DEFAULT_MODEL.into();
+        }
+    }
     pub fn validate(&self) -> Result<()> {
-        if self.model.trim().is_empty()
-            || !["none", "minimal", "low", "medium", "high", "xhigh"]
-                .contains(&self.effort.as_str())
-        {
-            bail!("Choose a model and a supported reasoning effort.");
+        if model(&self.model).is_none() {
+            bail!("Choose a default model from the Models tab.");
+        }
+        if self.models.len() != MODELS.len() {
+            bail!("Model preferences must match the app catalog.");
+        }
+        for m in MODELS {
+            let defaults = self
+                .models
+                .get(m.id)
+                .with_context(|| format!("Missing defaults for {}", m.name))?;
+            if !m.efforts.contains(&defaults.effort.as_str()) {
+                bail!("Choose a supported reasoning effort for {}.", m.name);
+            }
         }
         if !(8_000..=2_000_000).contains(&self.context_limit)
             || !(30..=95).contains(&self.compact_percent)
@@ -150,6 +194,8 @@ pub struct Session {
     pub updated: u64,
     pub model: String,
     pub effort: String,
+    #[serde(default)]
+    pub fast: bool,
     #[serde(skip)]
     pub entries: History<Entry>,
     #[serde(skip)]
@@ -173,7 +219,8 @@ impl Session {
             title: "New session".into(),
             updated: now(),
             model: settings.model.clone(),
-            effort: settings.effort.clone(),
+            effort: settings.models[&settings.model].effort.clone(),
+            fast: settings.models[&settings.model].fast,
             entries: History::default(),
             input: History::default(),
             summary: String::new(),
@@ -187,6 +234,21 @@ impl Session {
             needs_attention: false,
             context_account: None,
         }
+    }
+    pub fn select_model(&mut self, id: &str, settings: &Settings) {
+        let defaults = &settings.models[id];
+        self.model = id.into();
+        self.effort = defaults.effort.clone();
+        self.fast = defaults.fast;
+    }
+    /// Returns the retired model ID, for a user-facing informational notice.
+    pub fn reconcile_model(&mut self, settings: &Settings) -> Option<String> {
+        if model(&self.model).is_some() {
+            return None;
+        }
+        let retired = self.model.clone();
+        self.select_model(&settings.model, settings);
+        Some(retired)
     }
     pub fn accept(&mut self, message: String) {
         self.accept_submission(id(), message);
@@ -301,7 +363,8 @@ impl Store {
         &self.root
     }
     pub fn load(&self) -> Result<(Catalog, Vec<SessionSummary>, Vec<String>)> {
-        let catalog: Catalog = self.read_optional("settings.json")?.unwrap_or_default();
+        let mut catalog: Catalog = self.read_optional("settings.json")?.unwrap_or_default();
+        catalog.settings.refresh_models();
         catalog.settings.validate()?;
         let db = self.db.lock().expect("database lock");
         let mut query = db.prepare("SELECT id,summary FROM sessions ORDER BY updated DESC,id")?;
@@ -492,6 +555,63 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_capabilities_and_catalog_refresh_preserve_current_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut catalog = Catalog::default();
+        catalog
+            .settings
+            .models
+            .get_mut("gpt-6-luna")
+            .unwrap()
+            .effort = "none".into();
+        catalog.settings.models.get_mut("gpt-6-luna").unwrap().fast = true;
+        catalog
+            .settings
+            .models
+            .get_mut("gpt-6-astra")
+            .unwrap()
+            .effort = "max".into();
+        catalog.settings.validate().unwrap();
+        catalog
+            .settings
+            .models
+            .get_mut("gpt-6.1-sol")
+            .unwrap()
+            .effort = "none".into();
+        assert!(catalog.settings.validate().is_err());
+        catalog
+            .settings
+            .models
+            .get_mut("gpt-6.1-sol")
+            .unwrap()
+            .effort = "minimal".into();
+        assert!(catalog.settings.validate().is_err());
+        catalog.settings.models.remove("gpt-6.1-sol");
+        catalog.settings.model = "retired-sol".into();
+        catalog.settings.models.insert(
+            "retired-sol".into(),
+            ModelDefaults {
+                effort: "low".into(),
+                fast: true,
+            },
+        );
+        // Simulate settings saved by a previous catalog; normal writes reject retired IDs.
+        store.write("settings.json", &catalog).unwrap();
+        let (loaded, _, _) = store.load().unwrap();
+        assert_eq!(loaded.settings.model, "gpt-6.1-sol");
+        assert!(!loaded.settings.models.contains_key("retired-sol"));
+        assert_eq!(loaded.settings.models.len(), 3);
+        assert_eq!(
+            loaded.settings.models["gpt-6.1-sol"],
+            ModelDefaults::default()
+        );
+        assert_eq!(loaded.settings.models["gpt-6-luna"].effort, "none");
+        assert!(loaded.settings.models["gpt-6-luna"].fast);
+        assert_eq!(loaded.settings.models["gpt-6-astra"].effort, "max");
+    }
+
     #[test]
     fn shared_draft_survives_reopen_and_is_consumed_atomically_with_first_message() {
         let dir = tempfile::tempdir().unwrap();

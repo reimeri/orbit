@@ -22,11 +22,24 @@ just run
 Use a disposable project for initial testing. Selecting a project sets the command
 working directory; it does not restrict filesystem or network access.
 
-The default model is `gpt-5.6-sol`, following the V1 reference. Model availability
-is account-dependent. Settings accepts any model ID and reasoning effort; use
-**Apply defaults**, then create a session or select that default in an existing
-session's footer. Use a model that supports custom/freeform tools. Set its usable
-input context limit in Settings; the initial limit is 272,000 tokens.
+Settings has **Account**, **General**, and **Models** tabs. The fixed catalog is
+`gpt-6-astra`, `gpt-6.1-sol` (the default), and `gpt-6-luna`. Choose the app default
+from the dropdown in General. Models has per-model effort and Fast defaults;
+initially all use Medium with Fast off. Use **Save** to save these
+changes and close Settings. Appearance controls apply immediately.
+
+The footer selects a session's model and effort; its effort menu also toggles
+**Fast mode**. Switching models applies the new model's defaults. Saved sessions
+keep their selections; opening a session whose model has left the catalog
+replaces it with the app default and shows an informational toast. The replacement
+and its effort/Fast settings are saved without changing the transcript or draft.
+
+Fast requests priority service using `service_tier: "priority"` and a matching
+Codex routing hint. Model access, priority availability, and usage limits depend
+on your ChatGPT subscription. Set the usable input context limit in General;
+the initial limit is 272,000 tokens. The repo-local
+[model-update skill](.agents/skills/update-openai-models/SKILL.md) describes how to
+research and replace these families with newer versions.
 
 ## What works
 
@@ -34,7 +47,7 @@ input context limit in Settings; the initial limit is 272,000 tokens.
   titles, right-click Rename/Delete menus with confirmations, saved drafts, restored selection.
   Choosing a project opens a shared new-session draft; no session is created until
   the first message is sent. Its text follows project changes and survives restarts.
-  Switching projects resets model/effort to defaults; existing sessions retain
+  Switching projects resets model/effort/Fast to defaults; existing sessions retain
   their own separate unsent messages.
 - Dark three-column layout, resizable sidebar/settings panes, animated activity,
   Markdown and code blocks, link confirmation, copy actions, expandable reasoning,
