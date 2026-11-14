@@ -64,8 +64,21 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
 
 - Other tools
   - Subagents
+	- Async subagents run parallel to other work
+	- By default do not share context with the main agent
+	- Schema takes session_id which determines the agents session. So by giving the same session_id to agent it gets the context of that session.
+	- UI should provide a way to see what the agent is doing.
+	- I think we should have 3 tools for managing subagents: spawn_agent, wait_agent, and list_agents
+	- Agent types:
+		- Review (gpt-6.1-sol, medium): Reviews changes for issues
+		- Explore (gpt-6-luna, high): Fast project exploration
   - Questionaires
+	- ask_user tool
+	- Should be very similar to how questionaires work in V1
   - Image viewing
+	- view_image tool for the agent.
+  - Implement rest of the code mode helpers
+    - image, audio, content, generatedImage 
   - Browser tools
   - Use skill
   - Image generation
