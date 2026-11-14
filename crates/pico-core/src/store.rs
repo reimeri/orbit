@@ -218,6 +218,10 @@ pub enum EntryKind {
         input: String,
         output: String,
         complete: bool,
+        #[serde(default)]
+        failed: bool,
+        #[serde(default)]
+        cell_id: Option<String>,
         parent: Option<String>,
         #[serde(default)]
         media: Vec<crate::media::Media>,

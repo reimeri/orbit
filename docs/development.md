@@ -284,9 +284,9 @@ regressions. The software/GPU window smoke includes the Images settings tab, sta
 thumbnail, animated modal, pause and natural-size static views using deterministic local
 fixtures. See [images](images.md) for resource limits and paid live acceptance.
 
-The expanded rendered smoke sequence now includes 41 frames (including media and
+The expanded rendered smoke sequence now includes 45 frames (including media and
 Markdown image previews, missing-source errors and the byte-backed GIF modal).
-Its timeout is 60 seconds; a measured software debug run took ~33 seconds locally.
+Its timeout is 60 seconds; the earlier 41-frame software debug run took ~33 seconds locally.
 
 The Nix package supplies Git through `nativeCheckInputs` for Git fixture tests;
 this is separate from the installed wrapper's runtime PATH.
@@ -345,3 +345,9 @@ The composer regression tests exercise retained widget state, dragging (includin
 batched motion), wheel/keyboard scrolling, selection preservation, exact-boundary
 visibility, and single-logical-line wrapping/reflow. The final rendered smoke
 frame includes overflowing draft text and image attachments.
+
+## Compact chat activity
+
+See [chat activity](chat-activity.md) for grouping, execution-detail and reasoning
+contracts, status semantics, regression coverage and live acceptance steps. The
+rendered smoke includes collapsed/live groups and expanded/narrow activity details.

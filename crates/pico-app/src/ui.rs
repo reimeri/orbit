@@ -1,3 +1,4 @@
+use crate::activity::{self, Row as ActivityRow};
 use crate::{
     chat_selection::{self, Position},
     ellipsized_text::ellipsized_text,
@@ -41,7 +42,11 @@ use unicode_segmentation::UnicodeSegmentation;
 enum TranscriptKey {
     Top,
     Empty,
-    Entry { session: String, entry: String },
+    Entry {
+        session: String,
+        entry: String,
+        role: usize,
+    },
     Bottom,
 }
 
@@ -53,6 +58,8 @@ enum SidebarRow {
 
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
+const SUCCESS: Color = Color::from_rgb8(125, 192, 154);
+const DANGER: Color = Color::from_rgb8(224, 130, 130);
 const MUTED: Color = Color::from_rgb8(141, 149, 164);
 const PANEL: Color = Color::from_rgb8(29, 32, 37);
 const BORDER: Color = Color::from_rgb8(48, 53, 61);
@@ -76,8 +83,8 @@ pub struct App {
     new_draft: NewSessionDraft,
     new_draft_dirty: bool,
     transcript: crate::virtual_list::List,
-    transcript_count: usize,
-    child_counts: HashMap<String, usize>,
+    activity: activity::Projection,
+    execution: HashSet<String>,
     sidebar_rows: Vec<SidebarRow>,
     sidebar_list: crate::virtual_list::List,
     catalog_revision: u64,
@@ -255,6 +262,7 @@ pub enum Message {
     Delete(String),
     ToggleEntry(String),
     ToggleGroup(String),
+    ToggleExecution(String),
     Scroll(u64, f32, f32, bool),
     RowSize(u64, usize, f32),
     SidebarScroll(u64, f32, f32),
@@ -320,8 +328,8 @@ impl App {
             new_draft,
             new_draft_dirty: false,
             transcript: crate::virtual_list::List::default(),
-            transcript_count: 0,
-            child_counts: HashMap::new(),
+            activity: activity::Projection::default(),
+            execution: HashSet::new(),
             sidebar_rows: vec![],
             sidebar_list: crate::virtual_list::List::default(),
             catalog_revision: u64::MAX,
@@ -487,8 +495,7 @@ impl App {
         let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
             if self.current_session.take().is_some() {
                 self.transcript = crate::virtual_list::List::default();
-                self.transcript_count = 0;
-                self.child_counts.clear();
+                self.activity = activity::Projection::default();
                 self.view_epoch = self.view_epoch.wrapping_add(1);
             }
             self.outputs.clear();
@@ -518,8 +525,7 @@ impl App {
             self.chat_selection.borrow_mut().clear();
             self.view_epoch = self.view_epoch.wrapping_add(1);
             self.transcript = crate::virtual_list::List::default();
-            self.transcript_count = 0;
-            self.child_counts.clear();
+            self.activity = activity::Projection::default();
         }
         // Persistent-tree diffs only visit changed leaves, not the full transcript.
         let empty = pico_core::history::History::default();
@@ -564,52 +570,60 @@ impl App {
         let Some(session) = &self.current_session else {
             return;
         };
-        for (offset, entry) in session.entries.range(self.transcript_count).enumerate() {
-            if let EntryKind::Tool {
-                parent: Some(parent),
-                ..
-            } = &entry.kind
-            {
-                *self.child_counts.entry(parent.clone()).or_default() += 1;
-                if !self.groups.contains(parent) {
-                    continue;
-                }
-            }
-            let height = match &entry.kind {
-                EntryKind::Tool { .. } => 70.,
-                EntryKind::Reasoning if !self.expanded.contains(&entry.id) => 40.,
-                _ => 120.,
+        let Some(start) = self.activity.sync(&session.entries) else {
+            return;
+        };
+        let position = self
+            .transcript
+            .order
+            .partition_point(|&id| ActivityRow::from_id(id).source() < start);
+        let rows = self
+            .activity
+            .rows(start, &self.groups, &self.execution, &self.expanded);
+        let selection = self.chat_selection.borrow();
+        let selected = selection
+            .anchor
+            .zip(selection.focus)
+            .map(|(a, b)| a.entry.min(b.entry)..=a.entry.max(b.entry));
+        drop(selection);
+        if let Some(selected) = selected {
+            let selected_entry = |id| match ActivityRow::from_id(id) {
+                ActivityRow::Entry(i) if selected.contains(&i) => Some(i),
+                _ => None,
             };
-            self.transcript.push(self.transcript_count + offset, height);
+            if !self.transcript.order[position..]
+                .iter()
+                .copied()
+                .filter_map(selected_entry)
+                .eq(rows.iter().map(|(id, _)| *id).filter_map(selected_entry))
+            {
+                self.chat_selection.borrow_mut().clear();
+            }
         }
-        self.transcript_count = session.entries.len();
+        self.transcript.replace_tail(position, rows);
     }
     fn rebuild_transcript(&mut self) {
         self.chat_selection.borrow_mut().clear();
         let Some(session) = &self.current_session else {
             return;
         };
-        self.transcript_count = session.entries.len();
-        self.child_counts.clear();
-        for entry in session.entries.iter() {
-            if let EntryKind::Tool {
-                parent: Some(parent),
-                ..
-            } = &entry.kind
-            {
-                *self.child_counts.entry(parent.clone()).or_default() += 1;
-            }
-        }
-        self.transcript.reset(session.entries.iter().enumerate().filter(|(_,e)|!matches!(&e.kind,EntryKind::Tool {parent:Some(p),..} if !self.groups.contains(p))).map(|(i,e)| {
-            let height=match &e.kind {EntryKind::Tool {..}=>70.,EntryKind::Reasoning if !self.expanded.contains(&e.id)=>40.,_=>120.};
-            (i,height)
-        }));
+        self.activity.sync(&session.entries);
+        self.transcript.reset(
+            self.activity
+                .rows(0, &self.groups, &self.execution, &self.expanded),
+        );
     }
     fn prepare_visible(&mut self) {
         let mut visible_media = self.attachments.clone();
         let mut image_urls = HashSet::new();
         if let Some(session) = &self.current_session {
-            let visible = &self.transcript.order[self.transcript.visible()];
+            let visible: Vec<_> = self.transcript.order[self.transcript.visible()]
+                .iter()
+                .filter_map(|&id| match ActivityRow::from_id(id) {
+                    ActivityRow::Entry(i) => Some(i),
+                    _ => None,
+                })
+                .collect();
             let ids: HashSet<_> = visible
                 .iter()
                 .map(|&i| session.entries[i].id.as_str())
@@ -617,14 +631,13 @@ impl App {
             self.markdown.retain(|id, _| ids.contains(id.as_str()));
             self.outputs
                 .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
-            for &index in visible {
+            for &index in &visible {
                 let entry = &session.entries[index];
                 if let EntryKind::User { images } = &entry.kind {
                     visible_media.extend(images.iter().cloned());
                 }
                 if matches!(entry.kind, EntryKind::User { .. } | EntryKind::Assistant)
                     || matches!(entry.kind, EntryKind::Reasoning)
-                        && self.expanded.contains(&entry.id)
                 {
                     let markdown = self.markdown.entry(entry.id.clone()).or_insert_with(|| {
                         let content = markdown::Content::parse(&entry.text);
@@ -1647,8 +1660,23 @@ impl App {
                         self.outputs
                             .insert(id.clone(), tool_output::Output::new(input, output));
                     }
-                    self.expanded.insert(id);
+                    self.expanded.insert(id.clone());
                 }
+                if let Some(session) = &self.current_session
+                    && let Some(index) = session.entries.index_of(&id)
+                {
+                    let head = self.activity.block(index).range.start;
+                    self.groups.insert(session.entries[head].id.clone());
+                }
+                self.rebuild_transcript();
+                self.prepare_visible();
+            }
+            Message::ToggleExecution(id) => {
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+                if !self.execution.remove(&id) {
+                    self.execution.insert(id);
+                }
+                self.rebuild_transcript();
                 self.prepare_visible();
             }
             Message::ToggleGroup(id) => {
@@ -1672,7 +1700,10 @@ impl App {
                 if epoch != self.view_epoch {
                     return Task::none();
                 }
-                let corrected = self.transcript.measure(index, height + 18.);
+                let spacing = self
+                    .current()
+                    .map_or(18., |s| ActivityRow::from_id(index).spacing(&s.entries));
+                let corrected = self.transcript.measure(index, height + spacing);
                 if self.auto_scroll {
                     self.transcript.end();
                     self.prepare_visible();
@@ -1726,7 +1757,10 @@ impl App {
                         .transcript
                         .order
                         .iter()
-                        .copied()
+                        .filter_map(|&id| match ActivityRow::from_id(id) {
+                            ActivityRow::Entry(i) => Some(i),
+                            _ => None,
+                        })
                         .filter(|i| (start.entry..=end.entry).contains(i))
                         .map(|index| {
                             let entry = &session.entries[index];
@@ -1740,7 +1774,10 @@ impl App {
                                     }]
                                 }
                                 EntryKind::Tool { .. } => vec![],
-                                EntryKind::Reasoning if !self.expanded.contains(&entry.id) => {
+                                EntryKind::Notice
+                                    if activity::subagent_notice(entry).is_some()
+                                        && !self.expanded.contains(&entry.id) =>
+                                {
                                     vec![]
                                 }
                                 EntryKind::Notice => vec![chat_selection::Block {
@@ -2630,8 +2667,9 @@ impl App {
             ));
         }
         for &index in &self.transcript.order[range.clone()] {
-            let entry = &session.entries[index];
-            let row = widget::sensor(self.entry_view(entry, index))
+            let projected = ActivityRow::from_id(index);
+            let entry = &session.entries[projected.source()];
+            let row = widget::sensor(self.activity_row(projected))
                 .key((epoch, index))
                 .on_show(move |size| Message::RowSize(epoch, index, size.height))
                 .on_resize(move |size| Message::RowSize(epoch, index, size.height));
@@ -2639,8 +2677,9 @@ impl App {
                 TranscriptKey::Entry {
                     session: session.id.clone(),
                     entry: entry.id.clone(),
+                    role: index - projected.source(),
                 },
-                column![row, space().height(18.)].into(),
+                column![row, space().height(projected.spacing(&session.entries))].into(),
             ));
         }
         children.push((
@@ -2815,6 +2854,181 @@ impl App {
         )
     }
 
+    fn activity_row(&self, projected: ActivityRow) -> Element<'_, Message> {
+        let session = self.current().expect("visible transcript");
+        let index = projected.source();
+        let entry = &session.entries[index];
+        let chevron = |open| if open { "▾" } else { "▸" };
+        match projected {
+            ActivityRow::Entry(index) => self.entry_view(entry, index),
+            ActivityRow::Activity(_) => {
+                let block = self.activity.block(index);
+                let summary = block.summary.as_ref().expect("activity summary");
+                let active = block.range.end == session.entries.len() && self.running();
+                let failed_notices = block
+                    .notices
+                    .iter()
+                    .filter(|&&i| {
+                        self.subagent_notice_run(&session.entries[i])
+                            .is_some_and(|r| r.status.needs_attention())
+                    })
+                    .count();
+                let failures = summary.failed + summary.code_failures + failed_notices;
+                let mut header = row![
+                    text(chevron(self.groups.contains(&entry.id)))
+                        .size(12)
+                        .color(MUTED),
+                ]
+                .spacing(8)
+                .align_y(iced::Center);
+                if active || summary.running > 0 {
+                    header = header.push(text("◌").size(12).color(ACCENT));
+                }
+                header = header.push(ellipsized_text(&summary.label(active), 12., Some(MUTED)));
+                if (active || summary.running > 0) && summary.tools > 0 {
+                    let progress = if summary.running > 0 {
+                        format!(
+                            "{} completed · {} running",
+                            summary.completed, summary.running
+                        )
+                    } else {
+                        format!("{} completed", summary.completed)
+                    };
+                    header = header.push(text(progress).size(11).color(MUTED));
+                }
+                if failures > 0 {
+                    header = header.push(text(format!("{failures} failed")).size(12).color(DANGER));
+                }
+                button(header)
+                    .padding([6, 2])
+                    .width(Fill)
+                    .style(button::text)
+                    .on_press(Message::ToggleGroup(entry.id.clone()))
+                    .into()
+            }
+            ActivityRow::Execution(_) => {
+                let wrappers = self.activity.block(index).wrappers;
+                container(
+                    button(
+                        text(format!(
+                            "{} Execution details · {wrappers} code-mode call{}",
+                            chevron(self.execution.contains(&entry.id)),
+                            if wrappers == 1 { "" } else { "s" }
+                        ))
+                        .size(11)
+                        .color(MUTED),
+                    )
+                    .padding([4, 2])
+                    .style(button::text)
+                    .on_press(Message::ToggleExecution(entry.id.clone())),
+                )
+                .padding([0, 12])
+                .into()
+            }
+            ActivityRow::Thinking(_) => {
+                let range = &self.activity.block(index).thinking[&index];
+                let preview = range
+                    .clone()
+                    .rev()
+                    .map(|i| activity::reasoning_preview(&session.entries[i].text))
+                    .find(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Thinking".into());
+                container(
+                    button(
+                        row![
+                            text(chevron(self.expanded.contains(&entry.id)))
+                                .size(11)
+                                .color(MUTED),
+                            ellipsized_text(&preview, 12., Some(MUTED))
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Center),
+                    )
+                    .padding([4, 2])
+                    .width(Fill)
+                    .style(button::text)
+                    .on_press(Message::ToggleEntry(entry.id.clone())),
+                )
+                .padding([0, 12])
+                .width(Fill)
+                .into()
+            }
+        }
+    }
+    fn subagent_notice_run(&self, entry: &Entry) -> Option<pico_core::agent::subagents::RunInfo> {
+        self.harness
+            .as_ref()?
+            .subagent_run(&self.current()?.id, activity::subagent_notice(entry)?)
+    }
+    fn subagent_notice_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
+        let open = self.expanded.contains(&entry.id);
+        let run = self.subagent_notice_run(entry);
+        let (label, color) = match &run {
+            Some(run) => (
+                format!(
+                    "{} · {} · {}",
+                    run.profile.label(),
+                    run.title,
+                    run.status.label()
+                ),
+                if run.status.needs_attention() {
+                    DANGER
+                } else if run.status == pico_core::agent::subagents::RunStatus::Completed {
+                    SUCCESS
+                } else {
+                    MUTED
+                },
+            ),
+            None => ("Subagent update".into(), MUTED),
+        };
+        let mut block = column![
+            button(
+                row![
+                    text(if open { "▾" } else { "▸" }).size(11).color(MUTED),
+                    text("●").size(11).color(color),
+                    ellipsized_text(&label, 12., Some(MUTED))
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
+            )
+            .on_press(Message::ToggleEntry(entry.id.clone()))
+            .padding([4, 2])
+            .style(button::text)
+            .width(Fill)
+        ]
+        .spacing(6);
+        if open {
+            if let Some(run) = run {
+                block = block.push(
+                    button("Open subagent ↗")
+                        .style(button::text)
+                        .on_press(Message::Select(run.session_id)),
+                );
+            }
+            block = block.push(chat_selection::plain(
+                &entry.text,
+                12.,
+                Some(MUTED),
+                self.chat_selection.clone(),
+                Position {
+                    entry: index,
+                    block: 0,
+                    byte: 0,
+                },
+            ));
+            block = block.push(
+                button("Copy details")
+                    .on_press(Message::Copy(entry.id.clone()))
+                    .style(button::text),
+            );
+        }
+        container(block)
+            .padding(if open { [8, 12] } else { [0, 12] })
+            .width(Fill)
+            .style(if open { card } else { container::transparent })
+            .into()
+    }
+
     fn entry_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
         match &entry.kind {
             EntryKind::Tool {
@@ -2822,36 +3036,53 @@ impl App {
                 input,
                 complete,
                 parent,
+                failed,
                 media,
                 web,
                 ..
             } => {
                 let open = self.expanded.contains(&entry.id);
-                let children = self.child_counts.get(&entry.id).copied().unwrap_or(0);
-                let preview = input
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("")
-                    .chars()
-                    .take(100)
-                    .collect::<String>();
+                let preview = activity::tool_preview(name, input);
                 let mut block = column![
                     button(
                         row![
                             text(if open { "▾" } else { "▸" }).color(MUTED),
-                            text(if *complete { "✓" } else { "•" }).color(ACCENT),
-                            text(name).size(13),
-                            text(preview).size(11).color(MUTED).width(Fill)
+                            text(if *complete { "●" } else { "◌" })
+                                .size(11)
+                                .color(if *failed {
+                                    DANGER
+                                } else if *complete {
+                                    SUCCESS
+                                } else {
+                                    ACCENT
+                                }),
+                            text(activity::tool_name(name)).size(12).color(MUTED),
+                            ellipsized_text(&preview, 12., Some(MUTED)),
+                            text(if *failed {
+                                "failed"
+                            } else if !*complete {
+                                "running"
+                            } else {
+                                ""
+                            })
+                            .size(11)
+                            .color(if *failed {
+                                DANGER
+                            } else {
+                                MUTED
+                            })
                         ]
                         .spacing(9)
                         .align_y(iced::Center)
                     )
                     .on_press(Message::ToggleEntry(entry.id.clone()))
                     .style(button::text)
+                    .padding([4, 2])
                     .width(Fill)
                 ]
-                .spacing(8);
-                if name == "spawn_subagent"
+                .spacing(4);
+                if open
+                    && name == "spawn_subagent"
                     && let (Some(h), Some(session)) = (&self.harness, self.current())
                     && let Some(run) = h.subagent_for_request(&session.id, &entry.id)
                 {
@@ -2869,24 +3100,17 @@ impl App {
                         .style(button::text),
                     );
                 }
-                if children > 0 {
-                    block = block.push(
-                        button(
-                            text(format!(
-                                "{}  {children} nested tool calls",
-                                if self.groups.contains(&entry.id) {
-                                    "▾"
-                                } else {
-                                    "▸"
-                                }
-                            ))
-                            .size(11),
-                        )
-                        .on_press(Message::ToggleGroup(entry.id.clone()))
-                        .style(button::text),
-                    );
-                }
                 if open {
+                    if let Some(parent) = parent {
+                        block = block.push(
+                            text(format!("Code execution: {parent}"))
+                                .size(11)
+                                .color(MUTED),
+                        );
+                    } else {
+                        block =
+                            block.push(text(format!("Call: {}", entry.id)).size(11).color(MUTED));
+                    }
                     if let Some(metadata) = web {
                         block = block.push(
                             text(format!(
@@ -2926,10 +3150,13 @@ impl App {
                     );
                 }
                 container(block)
-                    .padding(if parent.is_some() { [10, 22] } else { [10, 12] })
+                    .padding(if open { [8, 12] } else { [0, 12] })
                     .width(Fill)
-                    .style(card)
+                    .style(if open { card } else { container::transparent })
                     .into()
+            }
+            EntryKind::Notice if activity::subagent_notice(entry).is_some() => {
+                self.subagent_notice_view(entry, index)
             }
             EntryKind::Notice => container(chat_selection::plain(
                 &entry.text,
@@ -2945,16 +3172,40 @@ impl App {
             .padding(12)
             .style(card)
             .into(),
-            EntryKind::Reasoning if !self.expanded.contains(&entry.id) => {
-                button(text("▸  Thinking").size(12).color(MUTED))
-                    .on_press(Message::ToggleEntry(entry.id.clone()))
-                    .style(button::text)
+            EntryKind::Reasoning => {
+                let content: Element<'_, Message> =
+                    if let Some(markdown) = self.markdown.get(&entry.id) {
+                        markdown::view_with(
+                            markdown.content.items(),
+                            markdown::Settings::with_text_size(
+                                12.,
+                                markdown::Style::from_palette(Theme::Dark.palette()),
+                            ),
+                            &chat_selection::Viewer::new(self.chat_selection.clone(), index)
+                                .with_images(&self.markdown_images),
+                        )
+                    } else {
+                        chat_selection::plain(
+                            &entry.text,
+                            12.,
+                            Some(MUTED),
+                            self.chat_selection.clone(),
+                            Position {
+                                entry: index,
+                                block: 0,
+                                byte: 0,
+                            },
+                        )
+                    };
+                container(content)
+                    .padding([6, 24])
+                    .style(card)
+                    .width(Fill)
                     .into()
             }
             _ => {
                 let name = match entry.kind {
                     EntryKind::User { .. } => "YOU",
-                    EntryKind::Reasoning => "THINKING",
                     _ => "PICO",
                 };
                 let mut content = column![
@@ -3001,13 +3252,6 @@ impl App {
                             byte: 0,
                         },
                     ));
-                }
-                if matches!(entry.kind, EntryKind::Reasoning) {
-                    content = content.push(
-                        button("▴ Collapse thinking")
-                            .on_press(Message::ToggleEntry(entry.id.clone()))
-                            .style(button::text),
-                    );
                 }
                 container(content)
                     .padding(12)
@@ -3757,6 +4001,8 @@ impl App {
                         input: "text(await tools.exec_command({cmd: 'cargo test'}));".into(),
                         output: "Script completed\n14 tests passed".into(),
                         complete: true,
+                        failed: false,
+                        cell_id: None,
                         parent: None,
                         media: vec![],
                         web: None,
@@ -3926,7 +4172,7 @@ impl App {
                 // Force fresh equal-height measurements for a new list identity.
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.transcript = crate::virtual_list::List::default();
-                self.transcript_count = 0;
+                self.activity = activity::Projection::default();
                 self.append_transcript();
                 self.transcript.end();
                 self.prepare_visible();
@@ -4132,6 +4378,8 @@ impl App {
                         input: "{path:example.png}".into(),
                         output: media.description(),
                         complete: true,
+                        failed: false,
+                        cell_id: None,
                         parent: None,
                         media: vec![media],
                         web: None,
@@ -4140,6 +4388,7 @@ impl App {
                 session.entries.push(entry);
                 self.current_session = Some(session);
                 self.expanded.insert("smoke-image".into());
+                self.groups.insert("smoke-image".into());
                 self.rebuild_transcript();
                 self.prepare_visible();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
@@ -4217,11 +4466,12 @@ impl App {
                 );
                 session.entries.push(Entry {id:"smoke-web".into(),text:String::new(),kind:EntryKind::Tool {
                     name:"web__run".into(),input:r#"{"search_query":[{"q":"Rust documentation","domains":["rust-lang.org"]}]}"#.into(),
-                    output:"Rust documentation (https://doc.rust-lang.org/book/)\nThe Rust Programming Language".into(),complete:true,parent:None,media:vec![],
+                    output:"Rust documentation (https://doc.rust-lang.org/book/)\nThe Rust Programming Language".into(),complete:true,failed:false, cell_id: None,parent:None,media:vec![],
                     web:Some(pico_core::web_search::Metadata{mode:pico_core::web_search::Mode::Live,searched_at:pico_core::store::now(),sources:vec![pico_core::web_search::Source{title:"The Rust Programming Language — a long source title that should fit in a constrained chat column".into(),url:"https://doc.rust-lang.org/book/".into()}],details:r#"[{"type":"text_result","url":"https://doc.rust-lang.org/book/"}]"#.into()})
                 }});
                 self.current_session = Some(session);
                 self.expanded.insert("smoke-web".into());
+                self.groups.insert("smoke-web".into());
                 self.rebuild_transcript();
                 self.prepare_visible();
             }
@@ -4251,10 +4501,82 @@ impl App {
                 self.prepare_visible();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
+            41 => {
+                self.settings_open = false;
+                self.agents_open = false;
+                self.attachments.clear();
+                self.editor = text_editor::Content::new();
+                self.groups.clear();
+                self.expanded.clear();
+                self.execution.clear();
+                self.auto_scroll = false;
+                self.transcript = crate::virtual_list::List::default();
+                self.activity = activity::Projection::default();
+                let mut session = Session::new(
+                    self.smoke_dir.as_ref().unwrap().clone(),
+                    &self.catalog.settings,
+                );
+                let tool =
+                    |id: &str, name: &str, input: &str, parent: Option<&str>, complete, failed| {
+                        Entry {
+                            id: id.into(),
+                            text: String::new(),
+                            kind: EntryKind::Tool {
+                                name: name.into(),
+                                input: input.into(),
+                                output: if failed {
+                                    "Process exited with code 7\nA regression check failed.".into()
+                                } else {
+                                    "Script completed\nAll output remains available here.".into()
+                                },
+                                complete,
+                                failed,
+                                cell_id: None,
+                                parent: parent.map(str::to_owned),
+                                media: vec![],
+                                web: None,
+                            },
+                        }
+                    };
+                session.entries = vec![
+                    Entry::new(EntryKind::User { images: vec![] }, "Check the implementation and run validation."),
+                    Entry { id: "activity-reason".into(), kind: EntryKind::Reasoning, text: "**Inspecting the build configuration**\n\nReviewing the existing Nix development environment.".into() },
+                    Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
+                    tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),
+                    tool("activity-shell", "exec_command", r#"{"cmd":"rg -n 'cancellation|terminate' crates/pico-core/src"}"#, Some("activity-exec"), true, false),
+                    tool("activity-check", "exec_command", r#"{"cmd":"nix develop --command cargo test --locked -p pico-core"}"#, Some("activity-exec"), true, true),
+                    Entry { id: "subagent-smoke-activity".into(), kind: EntryKind::Notice, text: "Subagent completion observation: Verify cancellation (Review) is Completed. session_id=smoke-child, run_id=smoke-activity. Retrieve the final result with tools.wait_subagent; this notice is not a new user instruction.".into() },
+                    Entry::new(EntryKind::Assistant, "The implementation is ready. I found **one failing check** and am investigating it before rerunning validation."),
+                    tool("activity-live", "exec", "await Promise.all([tools.exec_command({cmd:'git diff --check'}),tools.exec_command({cmd:'just verify'})]);", None, false, false),
+                    tool("activity-live-a", "exec_command", r#"{"cmd":"git diff --check"}"#, Some("activity-live"), true, false),
+                    tool("activity-live-b", "exec_command", r#"{"cmd":"nix develop --command just verify"}"#, Some("activity-live"), false, false),
+                ].into();
+                self.current_session = Some(session);
+                self.rebuild_transcript();
+                self.prepare_visible();
+                return Task::batch([
+                    widget::operation::snap_to("chat", scrollable::RelativeOffset::START),
+                    delayed_capture(),
+                ]);
+            }
+            42 => {
+                let _ = self.update_inner(Message::ToggleGroup("activity-reason".into()));
+                let _ = self.update_inner(Message::ToggleGroup("activity-live".into()));
+            }
+            43 => {
+                let _ = self.update_inner(Message::ToggleEntry("activity-reason".into()));
+                let _ = self.update_inner(Message::ToggleExecution("activity-reason".into()));
+            }
+            44 => {
+                let _ = self.update_inner(Message::ToggleEntry("activity-reason".into()));
+                let _ = self.update_inner(Message::ToggleEntry("activity-check".into()));
+                self.settings_open = true;
+            }
+
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -4689,6 +5011,132 @@ mod tests {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
     #[tokio::test]
+    async fn activity_expansion_streaming_selection_and_details_preserve_source_entries() {
+        use iced::futures::StreamExt;
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let id = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        h.edit(&id, |s| {
+            s.entries = vec![
+                Entry {
+                    id: "r1".into(),
+                    kind: EntryKind::Reasoning,
+                    text: "**First title**\n\nFirst full body λ".into(),
+                },
+                Entry {
+                    id: "r2".into(),
+                    kind: EntryKind::Reasoning,
+                    text: "**Second title**\n\nSecond full body β".into(),
+                },
+                Entry {
+                    id: "outer".into(),
+                    text: String::new(),
+                    kind: EntryKind::Tool {
+                        name: "exec".into(),
+                        input: "await tools.exec_command({cmd:'exit 7'})".into(),
+                        output: "Script completed".into(),
+                        complete: true,
+                        failed: false,
+                        cell_id: None,
+                        parent: None,
+                        media: vec![],
+                        web: None,
+                    },
+                },
+                Entry {
+                    id: "shell".into(),
+                    text: String::new(),
+                    kind: EntryKind::Tool {
+                        name: "exec_command".into(),
+                        input: r#"{"cmd":"exit 7"}"#.into(),
+                        output: String::new(),
+                        complete: false,
+                        failed: false,
+                        cell_id: None,
+                        parent: Some("outer".into()),
+                        media: vec![],
+                        web: None,
+                    },
+                },
+                Entry::new(EntryKind::Assistant, "I will examine the result."),
+            ]
+            .into();
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert_eq!(app.transcript.order, vec![ActivityRow::Activity(0).id(), 4]);
+        assert!(!app.markdown.contains_key("r1"));
+        dispatch(&mut app, Message::ToggleGroup("r1".into())).await;
+        dispatch(&mut app, Message::ToggleEntry("r1".into())).await;
+        assert!(app.markdown.contains_key("r1") && app.markdown.contains_key("r2"));
+        assert!(
+            !app.transcript.order.contains(&2),
+            "successful wrapper is secondary"
+        );
+        {
+            let mut selection = app.chat_selection.borrow_mut();
+            selection.anchor = Some(Position {
+                entry: 0,
+                block: 0,
+                byte: 0,
+            });
+            selection.focus = Some(Position {
+                entry: 1,
+                block: 1,
+                byte: "Second full body β".len(),
+            });
+        }
+        let mut actions =
+            iced_runtime::task::into_stream(app.update_inner(Message::CopySelection)).unwrap();
+        let copied = match actions.next().await.unwrap() {
+            iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
+                contents,
+                ..
+            }) => contents,
+            _ => panic!("expected clipboard write"),
+        };
+        assert!(copied.contains("First full body λ") && copied.contains("Second full body β"));
+        dispatch(&mut app, Message::ToggleEntry("shell".into())).await;
+        assert!(app.outputs.contains_key("shell"));
+        h.edit(&id, |s| {
+            if let EntryKind::Tool {
+                output,
+                complete,
+                failed,
+                ..
+            } = &mut s.entries[3].kind
+            {
+                *output = "Process exited with code 7\ncomplete output β".into();
+                *complete = true;
+                *failed = true;
+            }
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert!(app.groups.contains("r1") && app.expanded.contains("shell"));
+        assert_eq!(app.activity.block(0).summary.as_ref().unwrap().failed, 1);
+        dispatch(&mut app, Message::ToggleExecution("r1".into())).await;
+        assert!(app.transcript.order.contains(&2));
+        dispatch(&mut app, Message::ToggleGroup("r1".into())).await;
+        assert_eq!(app.transcript.order, vec![ActivityRow::Activity(0).id(), 4]);
+        assert!(app.outputs.is_empty());
+        assert!(app.chat_selection.borrow().range().is_none());
+        assert!(
+            app.expanded.contains("shell"),
+            "manual detail state survives group collapse"
+        );
+        dispatch(&mut app, Message::ToggleGroup("r1".into())).await;
+        assert!(app.outputs.contains_key("shell"));
+        let saved = h.store.load_session(&id).unwrap();
+        assert_eq!(saved.entries.len(), 5);
+        assert!(
+            matches!(&saved.entries[3].kind, EntryKind::Tool { failed: true, parent: Some(parent), output, .. } if parent == "outer" && output.ends_with("complete output β"))
+        );
+    }
+
+    #[tokio::test]
     async fn web_settings_and_transcript_details_survive_save_cancel_and_reopen() {
         use pico_core::web_search::{Metadata, Mode, Source};
         let mut app = app();
@@ -4734,6 +5182,8 @@ mod tests {
                     input: "{}".into(),
                     output: "Agent text".into(),
                     complete: true,
+                    failed: false,
+                    cell_id: None,
                     parent: None,
                     media: vec![],
                     web: Some(metadata.clone()),
@@ -4807,6 +5257,8 @@ mod tests {
                     input: "generate".into(),
                     output: media.description(),
                     complete: true,
+                    failed: false,
+                    cell_id: None,
                     parent: None,
                     media: vec![media.clone()],
                     web: None,
@@ -6770,6 +7222,21 @@ Then implement the fix.";
             selection.focus = Some(at);
             selection.dragging = true;
         }
+        h.edit(&id, |s| {
+            s.entries.push(Entry::new(
+                EntryKind::Reasoning,
+                "**Unrelated later activity**",
+            ));
+            s.entries
+                .push(Entry::new(EntryKind::Assistant, "Later response"));
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert_eq!(app.chat_selection.borrow().anchor, Some(at));
+        assert!(
+            app.chat_selection.borrow().dragging,
+            "appends must not interrupt selection of unchanged earlier content"
+        );
         h.edit(&id, |s| s.entries[0].text.push('*')).unwrap();
         dispatch(&mut app, Message::Changed).await;
         // The closing '*' reparses the block to just 'é'. Byte 1 is now inside
@@ -6916,6 +7383,8 @@ Then implement the fix.";
                     input: "code".into(),
                     output: "long output".repeat(10000),
                     complete: true,
+                    failed: false,
+                    cell_id: None,
                     parent: None,
                     media: vec![],
                     web: None,

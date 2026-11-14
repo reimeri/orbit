@@ -52,10 +52,15 @@ pub struct StdinArgs {
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,
 }
+pub struct CommandOutput {
+    pub text: String,
+    pub failed: bool,
+}
+
 #[derive(Default)]
 struct Output {
     buffer: OutputBuffer,
-    exit: Option<String>,
+    exit: Option<(String, bool)>,
     readers: usize,
 }
 struct Process {
@@ -79,7 +84,7 @@ impl Process {
         wait: u64,
         tokens: usize,
         cancel: &CancellationToken,
-    ) -> Result<(String, bool)> {
+    ) -> Result<(CommandOutput, bool)> {
         self.runtime.block_on(async {
             let deadline=tokio::time::Instant::now()+Duration::from_millis(wait.min(300_000));
             loop {
@@ -107,16 +112,19 @@ impl Process {
         let status = if complete {
             format!(
                 "Process exited with code {}",
-                exit.as_ref().expect("complete process")
+                exit.as_ref().expect("complete process").0
             )
         } else {
             format!("Process running with session ID {id}")
         };
         Ok((
-            format!(
-                "Wall time: {:.3} seconds\n{status}\nOutput:\n{body}",
-                self.started.elapsed().as_secs_f64()
-            ),
+            CommandOutput {
+                text: format!(
+                    "Wall time: {:.3} seconds\n{status}\nOutput:\n{body}",
+                    self.started.elapsed().as_secs_f64()
+                ),
+                failed: complete && exit.as_ref().is_some_and(|(_, failed)| *failed),
+            },
             complete,
         ))
     }
@@ -211,7 +219,7 @@ impl Shell {
     pub fn runtime(&self) -> &tokio::runtime::Handle {
         &self.runtime
     }
-    pub fn exec(&self, args: ExecArgs, cancel: &CancellationToken) -> Result<String> {
+    pub fn exec(&self, args: ExecArgs, cancel: &CancellationToken) -> Result<CommandOutput> {
         if cancel.is_cancelled() {
             bail!("Execution cancelled");
         }
@@ -286,8 +294,8 @@ impl Shell {
             thread::spawn(move || {
                 let status = child
                     .wait()
-                    .map(|s| s.exit_code().to_string())
-                    .unwrap_or_else(|e| format!("unknown ({e})"));
+                    .map(|s| (s.exit_code().to_string(), !s.success()))
+                    .unwrap_or_else(|e| (format!("unknown ({e})"), true));
                 state.0.lock().expect("output lock").exit = Some(status);
                 state.1.notify_waiters();
                 drop(pair.master);
@@ -325,11 +333,14 @@ impl Shell {
                     .wait()
                     .await
                     .map(|s| {
-                        s.code()
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "signal".into())
+                        (
+                            s.code()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "signal".into()),
+                            !s.success(),
+                        )
                     })
-                    .unwrap_or_else(|e| format!("unknown ({e})"));
+                    .unwrap_or_else(|e| (format!("unknown ({e})"), true));
                 state.0.lock().expect("output lock").exit = Some(status);
                 state.1.notify_waiters();
             });
@@ -370,7 +381,7 @@ impl Shell {
         }
         result.map(|(text, _)| text)
     }
-    pub fn write(&self, args: StdinArgs, cancel: &CancellationToken) -> Result<String> {
+    pub fn write(&self, args: StdinArgs, cancel: &CancellationToken) -> Result<CommandOutput> {
         let process = self
             .processes
             .lock()
@@ -460,8 +471,11 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-        assert!(first.contains("Process exited with code 0"));
-        assert_eq!(crate::test_support::saved_output(&first), text.as_bytes());
+        assert!(first.text.contains("Process exited with code 0"));
+        assert_eq!(
+            crate::test_support::saved_output(&first.text),
+            text.as_bytes()
+        );
 
         // Hold output until write_stdin, then exceed the old ring buffer with
         // asymmetric binary data, exercising both stdout and stderr capture paths.
@@ -479,7 +493,7 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-        let session_id = running_id(&initial);
+        let session_id = running_id(&initial.text);
         std::fs::write(dir.path().join("release"), "").unwrap();
         let result = shell
             .write(
@@ -492,11 +506,14 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-        assert!(result.contains("Process exited with code 7"));
+        assert!(result.text.contains("Process exited with code 7"));
         assert!(!shell.has_work());
         drop(shell);
-        assert_eq!(crate::test_support::saved_output(&result), bytes);
-        assert_eq!(crate::test_support::saved_output(&first), text.as_bytes());
+        assert_eq!(crate::test_support::saved_output(&result.text), bytes);
+        assert_eq!(
+            crate::test_support::saved_output(&first.text),
+            text.as_bytes()
+        );
     }
 
     #[test]
@@ -532,6 +549,7 @@ mod tests {
                     &CancellationToken::new()
                 )
                 .unwrap()
+                .text
                 .contains("usable")
         );
     }
@@ -539,14 +557,14 @@ mod tests {
     fn timeout_terminates_descendants_after_shell_leader_exits() {
         let shell = Shell::new(std::env::temp_dir());
         let out = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"sleep 10 &", "login":false,"timeout_ms":30,"yield_time_ms":1000})).unwrap(), &CancellationToken::new()).unwrap();
-        assert!(out.contains("Process exited"), "{out}");
+        assert!(out.text.contains("Process exited"), "{}", out.text);
     }
     #[test]
     fn blocked_pty_input_can_be_cancelled() {
         let shell = Arc::new(Shell::new(std::env::temp_dir()));
         let cancel = CancellationToken::new();
         let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"stty -echo -icanon; printf ready; sleep 20", "tty":true,"login":false,"yield_time_ms":30})).unwrap(), &cancel).unwrap();
-        let session_id = running_id(&first);
+        let session_id = running_id(&first.text);
         let worker = shell.clone();
         let token = cancel.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -573,8 +591,8 @@ mod tests {
         let shell = Shell::new(dir.path().into());
         let cancel = CancellationToken::new();
         let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"printf before; sleep 0.15; printf after >&2; exit 7","login":false,"yield_time_ms":20})).unwrap(), &cancel).unwrap();
-        let session_id = running_id(&first);
-        assert!(first.contains("before"));
+        let session_id = running_id(&first.text);
+        assert!(first.text.contains("before"));
         let second = shell
             .write(
                 StdinArgs {
@@ -586,9 +604,11 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-        assert!(second.contains("code 7"));
-        assert!(second.contains("after"));
-        assert!(!second.contains("before"));
+        assert!(second.failed);
+        assert!(!first.failed);
+        assert!(second.text.contains("code 7"));
+        assert!(second.text.contains("after"));
+        assert!(!second.text.contains("before"));
     }
     #[test]
     fn pty_accepts_input() {
@@ -596,7 +616,7 @@ mod tests {
         let shell = Shell::new(dir.path().into());
         let cancel = CancellationToken::new();
         let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"read value; printf 'received:%s' \"$value\"", "tty":true,"login":false,"yield_time_ms":10})).unwrap(), &cancel).unwrap();
-        let session_id = running_id(&first);
+        let session_id = running_id(&first.text);
         let out = shell
             .write(
                 StdinArgs {
@@ -608,7 +628,8 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-        assert!(out.contains("received:asymmetric"));
-        assert!(out.contains("code 0"));
+        assert!(out.text.contains("received:asymmetric"));
+        assert!(!out.failed);
+        assert!(out.text.contains("code 0"));
     }
 }

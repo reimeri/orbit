@@ -55,6 +55,7 @@ pub struct ToolEvent {
     pub name: String,
     pub input: String,
     pub output: Option<String>,
+    pub failed: bool,
     pub media: Vec<crate::media::Media>,
     pub web: Option<crate::web_search::Metadata>,
 }
@@ -305,7 +306,11 @@ impl CodeMode {
             text: format!("{status}\nOutput:"),
         }];
         parts.extend(pending);
-        Ok(Output { parts })
+        Ok(Output {
+            parts,
+            failed: state.error.is_some(),
+            cell_id: Some(id.to_owned()),
+        })
     }
     pub fn is_executing(&self) -> bool {
         self.active_cells.load(Ordering::Acquire) > 0 || self.workers.load(Ordering::Acquire) > 0
@@ -523,22 +528,24 @@ fn run_cell(
                                     name: name.clone(),
                                     input: args.clone(),
                                     output: None,
+                                    failed: false,
                                     media: vec![],
                                     web: None,
                                 }));
                                 let mut attachments=Vec::new();
                                 let mut web_metadata=None;
                                 let mut display=None;
+                                let mut command_failed=false;
                                 let structured=matches!(name.as_str(),"view_image"|"image_gen__imagegen");
                                 let result = started.and_then(|()| match name.as_str() {
                                     "web__run" => shell.runtime().block_on(web.as_ref().expect("validated web tool").call(&args,&cancellation)).map(|result| {web_metadata=Some(result.metadata);result.text}).inspect_err(|error| {if let Some(failure)=error.downcast_ref::<crate::web_search::Failure>() {web_metadata=Some(failure.metadata.clone());}}),
                                     "view_image"|"image_gen__imagegen" => shell.runtime().block_on(images.as_ref().expect("validated image tool").call(&name,&args,&request,&cancellation)).map(|result| {attachments.push(result.media);display=Some(result.text);result.value.to_string()}),
                                     "exec_command" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
-                                        .and_then(|a| shell.exec(a, &cancellation)),
+                                        .and_then(|a| shell.exec(a, &cancellation)).map(|result| {command_failed=result.failed;result.text}),
                                     "write_stdin" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
-                                        .and_then(|a| shell.write(a, &cancellation)),
+                                        .and_then(|a| shell.write(a, &cancellation)).map(|result| {command_failed=result.failed;result.text}),
                                     "ask_user" => shell.runtime().block_on(questionnaires.as_ref().expect("validated questionnaire tool").ask(&request, &args, &cancellation)),
                                     _ => delegation.as_ref().expect("validated delegation tool")(&name, &args, &request, &cancellation),
                                 });
@@ -551,6 +558,7 @@ fn run_cell(
                                     name,
                                     input: args,
                                     output: Some(display.clone().unwrap_or_else(||output.clone())),
+                                    failed: failed || command_failed,
                                     media: attachments,
                                     web: web_metadata,
                                 }));
@@ -633,6 +641,60 @@ fn exception(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transcript_outcomes_distinguish_native_command_and_script_failures() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let mode = CodeMode::new(
+            Arc::new(Shell::new(std::env::temp_dir())),
+            Arc::new(move |event| {
+                observed.lock().unwrap().push(event);
+                Ok(())
+            }),
+        );
+        let cancel = CancellationToken::new();
+        let result = mode.exec_output("try { await tools.exec_command({bad:true}); } catch(e) {} text(await tools.exec_command({cmd:'exit 7',login:false}));", "outer", &cancel).unwrap();
+        assert!(
+            !result.failed,
+            "caught native failure and nonzero shell exit do not change JS semantics"
+        );
+        let observed = events.lock().unwrap();
+        let finished: Vec<_> = observed
+            .iter()
+            .filter_map(|e| match e {
+                Event::Tool(e) if e.output.is_some() => Some(e),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), 2);
+        assert!(finished.iter().all(|e| e.failed));
+        drop(observed);
+        assert!(
+            mode.exec_output("throw new Error('before any tool');", "pure", &cancel)
+                .unwrap()
+                .failed
+        );
+        let result = mode
+            .exec_output(
+                "// @exec: {\"yield_time_ms\":1}\nawait new Promise(r => setTimeout(r, 100));",
+                "yield",
+                &cancel,
+            )
+            .unwrap();
+        assert!(!result.failed);
+        assert!(result.summary().starts_with("Script running"));
+        mode.stop_all();
+        let yielded = mode.exec_output("text(await tools.exec_command({cmd:'printf ready',login:false})); await yield_control(); await new Promise(r => setTimeout(r, 100));", "yielded-tools", &cancel).unwrap();
+        let cell = yielded.cell_id.as_ref().unwrap();
+        assert!(yielded.summary().starts_with("Script running"));
+        let waited = mode
+            .wait_output(&json!({"cell_id":cell}).to_string(), &cancel)
+            .unwrap();
+        assert_eq!(waited.cell_id.as_ref(), Some(cell));
+        assert!(!waited.failed);
+        assert!(waited.summary().starts_with("Script completed"));
+    }
+
     fn mode() -> CodeMode {
         CodeMode::new(
             Arc::new(Shell::new(std::env::temp_dir())),

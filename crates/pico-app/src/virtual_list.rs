@@ -47,6 +47,33 @@ impl List {
         }
         self.offset = self.offset.min((self.total() - self.viewport).max(0.));
     }
+    pub fn replace_tail(&mut self, start: usize, rows: impl IntoIterator<Item = (usize, f32)>) {
+        let anchor_index = self.at(self.offset);
+        let anchor = self
+            .order
+            .get(anchor_index)
+            .map(|&id| (id, self.offset - self.prefix(anchor_index)));
+        let known: HashMap<_, _> = self.order[start..]
+            .iter()
+            .copied()
+            .zip(self.heights[start..].iter().copied())
+            .collect();
+        for id in &self.order[start..] {
+            self.positions.remove(id);
+        }
+        self.order.truncate(start);
+        self.heights.truncate(start);
+        self.tree.truncate(start + 1);
+        for (id, estimate) in rows {
+            self.push(id, known.get(&id).copied().unwrap_or(estimate));
+        }
+        if let Some((id, inside)) = anchor
+            && let Some(&position) = self.positions.get(&id)
+        {
+            self.offset = self.prefix(position) + inside;
+        }
+        self.offset = self.offset.min((self.total() - self.viewport).max(0.));
+    }
     pub fn push(&mut self, id: usize, height: f32) {
         let index = self.order.len();
         let i = index + 1;
@@ -123,6 +150,29 @@ impl List {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacing_activity_tail_retains_measurements_and_scroll_anchor() {
+        let mut list = List::default();
+        list.reset([
+            (0, 120.),
+            (1, 32.),
+            (2, 24.),
+            (3, 24.),
+            (4, 120.),
+            (5, 900.),
+        ]);
+        list.viewport = 100.;
+        list.measure(3, 311.);
+        list.offset = list.prefix(3) + 11.;
+        list.replace_tail(1, [(1, 30.), (7, 30.), (3, 30.), (4, 120.), (5, 900.)]);
+        assert_eq!(list.offset, 120. + 32. + 30. + 11.);
+        assert_eq!(list.prefix(4) - list.prefix(3), 311.);
+        assert_eq!(list.total(), 120. + 32. + 30. + 311. + 120. + 900.);
+        list.replace_tail(1, [(1, 30.), (4, 120.), (5, 900.)]);
+        assert_eq!(list.order, vec![0, 1, 4, 5]);
+        assert_eq!(list.total(), 1172.);
+    }
+
     #[test]
     fn asymmetric_heights_bound_visible_work_and_preserve_anchor() {
         let mut list = List::default();

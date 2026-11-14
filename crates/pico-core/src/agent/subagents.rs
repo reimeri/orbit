@@ -183,6 +183,15 @@ impl Harness {
             .iter()
             .any(|r| r.status.needs_attention())
     }
+    pub fn subagent_run(&self, parent: &str, run_id: &str) -> Option<RunInfo> {
+        self.subagents
+            .lock()
+            .expect("subagent lock")
+            .runs
+            .get(run_id)
+            .filter(|run| run.parent_id == parent)
+            .cloned()
+    }
     pub fn subagent_for_request(&self, parent: &str, request: &str) -> Option<RunInfo> {
         self.subagents
             .lock()

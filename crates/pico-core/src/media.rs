@@ -51,12 +51,17 @@ pub enum Part {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Output {
+    /// Execution outcome for the transcript, never sent as model output.
+    pub failed: bool,
+    pub cell_id: Option<String>,
     pub parts: Vec<Part>,
 }
 impl Output {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             parts: vec![Part::InputText { text: text.into() }],
+            failed: false,
+            cell_id: None,
         }
     }
     pub fn summary(&self) -> String {

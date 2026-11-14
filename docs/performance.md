@@ -156,6 +156,52 @@ comparison explicitly on a machine with a GPU adapter:
 nix develop --command cargo test --locked -p pico-evo shared_paragraph_matches_rich_text_pixels_gpu -- --ignored
 ```
 
+## Activity-group label fitting
+
+Opening a 37-tool group exposed repeated shaping in `ellipsized_text.rs`: each
+new label measured its complete text, then shaped a binary search of candidate
+prefixes, then measured the winner. This was not eager tool-output rendering.
+
+Fitting now uses the full paragraph's glyph-cluster advances in **logical byte
+order** to choose a grapheme-safe prefix. It measures the ellipsis and verifies
+the final candidate, backing off only if contextual reshaping makes it too wide.
+A fitting label needs one measurement; ordinary truncation needs three instead of
+an unconditional series of binary-search probes. Ligatures/complex scripts may
+produce a slightly shorter cutoff. The final paragraph must fit, and full source
+text remains available to widget operations and tool details. Grouping, overscan,
+tool-output caching and compiler profiles are unchanged.
+
+A local **debug** before/after microbenchmark used a read-only snapshot of a real
+293-entry session with eight activity groups. The target group contained 37 tools
+and 33 reasoning entries. Both versions used the same snapshot, dependency
+artifacts, debug flags and software-renderer UI construction/layout path. Each
+width was tested in three fresh processes per version, with two group openings
+per process; the table reports medians of six openings. Closing unmounts rows, so
+these include reopening, not just a warm unchanged-layout measurement.
+
+| CPU-side operation | Before | After |
+|---|---:|---:|
+| Expansion layout, 1280px window | 181.39 ms | 65.46 ms |
+| Expansion layout, 1024px window | 157.80 ms | 63.36 ms |
+| Label fitting within layout, 1280px | 172.82 ms | 57.16 ms |
+| Label fitting within layout, 1024px | 149.48 ms | 55.12 ms |
+| Text measurements per opening, 1280px | 186 | 61 |
+| Text measurements per opening, 1024px | 184 | 61 |
+
+Expansion layout was **60–64% faster (2.5–2.8×)**. The harness mounted 49 transcript
+rows, including 23 tool rows, and **zero expanded tool-output caches**. Expansion
+handling/index preparation remained about 0.14 ms, widget construction about
+0.75–0.80 ms, and unchanged cached layout about 0.85 ms. Full-label and final-label
+shaping still cost time; this does not establish a sub-frame debug expansion.
+
+These are CPU microbenchmarks, not click-to-screen latency or release-build
+claims. They exclude draw/present and subsequent row-size/scroll events. The
+snapshot and instrumented harness stayed in private temporary files; no saved
+session was modified or added to the repository. Regression tests use real fonts
+to cover fit boundaries, combining marks, joined emoji, mixed RTL/LTR, retained
+widget caches and the ordinary measurement count; a deterministic width-change
+fixture exercises the contextual-overflow correction path.
+
 ## Verification and remaining measurement limits
 
 Regression coverage includes incremental SQL writes and atomic rollback, failed

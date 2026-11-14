@@ -194,6 +194,7 @@ impl Harness {
                                     && let EntryKind::Tool {
                                         output,
                                         complete,
+                                        failed,
                                         media,
                                         web,
                                         ..
@@ -203,6 +204,7 @@ impl Harness {
                                     *web = event.web;
                                     *output = result;
                                     *complete = true;
+                                    *failed = event.failed;
                                 }
                             } else {
                                 session.entries.push(Entry {
@@ -213,6 +215,8 @@ impl Harness {
                                         input: event.input,
                                         output: String::new(),
                                         complete: false,
+                                        failed: false,
+                                        cell_id: None,
                                         parent: Some(event.parent),
                                         media: vec![],
                                         web: None,
@@ -363,11 +367,13 @@ impl Harness {
                     if let EntryKind::Tool {
                         name,
                         complete,
+                        failed,
                         output,
                         ..
                     } = &mut state.entries[i].kind
                     {
                         *complete = true;
+                        *failed = true;
                         *output = if name == "web__run" {
                             "Web request interrupted by application restart. Remote work may have completed and consumed usage. It was not automatically replayed."
                         } else {
@@ -855,6 +861,8 @@ impl Harness {
                             input: input.clone(),
                             output: String::new(),
                             complete: false,
+                            failed: false,
+                            cell_id: None,
                             parent: None,
                             media: vec![],
                             web: None,
@@ -872,8 +880,11 @@ impl Harness {
                     _ => bail!("Unknown tool {name}; only exec and wait are top-level tools"),
                 })
                 .await?;
-                let output = result
-                    .unwrap_or_else(|e| crate::media::Output::text(format!("Tool error: {e:#}")));
+                let output = result.unwrap_or_else(|e| {
+                    let mut output = crate::media::Output::text(format!("Tool error: {e:#}"));
+                    output.failed = true;
+                    output
+                });
                 {
                     let mut s = conversation.state.lock().expect("session lock");
                     if let Some(entry) = s.entries.by_id_mut(&call_id)
@@ -881,9 +892,13 @@ impl Harness {
                             output: result,
                             media,
                             complete,
+                            failed,
+                            cell_id,
                             ..
                         } = &mut entry.kind
                     {
+                        *failed = output.failed;
+                        *cell_id = output.cell_id.clone();
                         *result = output.summary();
                         *media = output.media();
                         *complete = true;
@@ -1001,11 +1016,15 @@ fn repair_calls(session: &mut Session) {
     for index in incomplete {
         let entry = &mut session.entries[index];
         if let EntryKind::Tool {
-            complete, output, ..
+            complete,
+            output,
+            failed,
+            ..
         } = &mut entry.kind
             && !*complete
         {
             *complete = true;
+            *failed = true;
             *output = "Interrupted; inspect workspace before retrying.".into();
         }
     }
@@ -1097,6 +1116,8 @@ mod tests {
                 input: "{}".into(),
                 output: "completed text".into(),
                 complete: true,
+                failed: false,
+                cell_id: None,
                 parent: Some("outer".into()),
                 media: vec![],
                 web: Some(metadata.clone()),
@@ -1110,6 +1131,8 @@ mod tests {
                 input: "{}".into(),
                 output: String::new(),
                 complete: false,
+                failed: false,
+                cell_id: None,
                 parent: Some("outer".into()),
                 media: vec![],
                 web: None,
@@ -1124,7 +1147,7 @@ mod tests {
             matches!(&saved.entries.by_id("finished").unwrap().kind,EntryKind::Tool{output,web:Some(actual),..} if output=="completed text" && actual==&metadata)
         );
         assert!(
-            matches!(&saved.entries.by_id("abandoned").unwrap().kind,EntryKind::Tool{output,complete:true,..} if output.contains("not automatically replayed"))
+            matches!(&saved.entries.by_id("abandoned").unwrap().kind,EntryKind::Tool{output,complete:true,failed:true,..} if output.contains("not automatically replayed"))
         );
         assert!(
             !serde_json::to_string(&plaintext_context(&saved))
@@ -1226,6 +1249,8 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
                 input: "{}".into(),
                 output: String::new(),
                 complete: false,
+                failed: false,
+                cell_id: None,
                 parent: Some("yielded-exec".into()),
                 media: vec![],
                 web: None,

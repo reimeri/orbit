@@ -1,0 +1,677 @@
+//! A display-only projection. Source entries, parent links and full text stay intact.
+use pico_core::{
+    history::History,
+    store::{Entry, EntryKind},
+};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    ops::Range,
+};
+
+// Synthetic rows occupy separate identity domains; ordinary rows retain their
+// source index, including selection positions and measured-height identities.
+const SHIFT: u32 = usize::BITS - 2;
+const INDEX: usize = (1 << SHIFT) - 1;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Row {
+    Entry(usize),
+    Activity(usize),
+    Execution(usize),
+    Thinking(usize),
+}
+impl Row {
+    pub fn id(self) -> usize {
+        match self {
+            Self::Entry(i) => i,
+            Self::Activity(i) => i | (1 << SHIFT),
+            Self::Execution(i) => i | (2 << SHIFT),
+            Self::Thinking(i) => i | (3 << SHIFT),
+        }
+    }
+    pub fn from_id(id: usize) -> Self {
+        let i = id & INDEX;
+        match id >> SHIFT {
+            0 => Self::Entry(i),
+            1 => Self::Activity(i),
+            2 => Self::Execution(i),
+            3 => Self::Thinking(i),
+            _ => unreachable!(),
+        }
+    }
+    pub fn source(self) -> usize {
+        self.id() & INDEX
+    }
+    pub fn spacing(self, entries: &History<Entry>) -> f32 {
+        match self {
+            Self::Entry(i) if !is_activity(&entries[i]) => 18.,
+            Self::Activity(_) => 6.,
+            _ => 2.,
+        }
+    }
+    pub fn estimate(self, entries: &History<Entry>) -> f32 {
+        match self {
+            Self::Entry(i) if !is_activity(&entries[i]) => 120.,
+            _ => 30.,
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct Summary {
+    pub tools: usize,
+    pub completed: usize,
+    pub running: usize,
+    pub failed: usize,
+    pub code_failures: usize,
+    pub reviews: usize,
+    pub agents: usize,
+    pub current: String,
+    pub thinking: String,
+}
+impl Summary {
+    pub fn label(&self, active: bool) -> String {
+        let mut parts = Vec::new();
+        if self.running > 0 || active {
+            parts.push(if !self.current.is_empty() {
+                self.current.clone()
+            } else if !self.thinking.is_empty() {
+                self.thinking.clone()
+            } else {
+                "Working".into()
+            });
+        } else if self.tools > 0 {
+            parts.push(format!(
+                "{} tool call{}",
+                self.tools,
+                if self.tools == 1 { "" } else { "s" }
+            ));
+        } else if !self.thinking.is_empty() {
+            parts.push(self.thinking.clone());
+        } else {
+            parts.push("Activity".into());
+        }
+        if self.reviews > 0 {
+            parts.push(format!(
+                "{} review{}",
+                self.reviews,
+                if self.reviews == 1 { "" } else { "s" }
+            ));
+        }
+        if self.agents > 0 {
+            parts.push(format!(
+                "{} subagent{}",
+                self.agents,
+                if self.agents == 1 { "" } else { "s" }
+            ));
+        }
+        parts.join(" · ")
+    }
+}
+pub struct Block {
+    pub range: Range<usize>,
+    pub summary: Option<Summary>,
+    pub wrappers: usize,
+    pub thinking: BTreeMap<usize, Range<usize>>,
+    pub notices: Vec<usize>,
+}
+#[derive(Default)]
+pub struct Projection {
+    source: History<Entry>,
+    pub blocks: BTreeMap<usize, Block>,
+    children: HashMap<String, usize>,
+    cells: HashMap<String, String>,
+}
+pub fn is_activity(entry: &Entry) -> bool {
+    matches!(entry.kind, EntryKind::Tool { .. } | EntryKind::Reasoning)
+        || subagent_notice(entry).is_some()
+}
+pub fn subagent_notice(entry: &Entry) -> Option<&str> {
+    matches!(entry.kind, EntryKind::Notice)
+        .then(|| entry.id.strip_prefix("subagent-"))
+        .flatten()
+}
+fn wrapper(entry: &Entry) -> bool {
+    matches!(&entry.kind, EntryKind::Tool { name, parent: None, .. } if matches!(name.as_str(), "exec" | "wait"))
+}
+impl Projection {
+    /// Re-project only the changed tail, including an earlier parent if its first
+    /// nested call arrives after a yield. Streaming never scans old prose.
+    pub fn sync(&mut self, entries: &History<Entry>) -> Option<usize> {
+        let mut first = None;
+        for (i, next) in self.source.changes(entries) {
+            if i < self.source.len()
+                && let EntryKind::Tool {
+                    name,
+                    cell_id: Some(cell),
+                    ..
+                } = &self.source[i].kind
+                && name == "exec"
+            {
+                self.cells.remove(cell);
+            }
+            if let Some(Entry {
+                id,
+                kind:
+                    EntryKind::Tool {
+                        name,
+                        cell_id: Some(cell),
+                        ..
+                    },
+                ..
+            }) = next
+                && name == "exec"
+            {
+                self.cells.insert(cell.clone(), id.clone());
+            }
+            first = Some(first.map_or(i, |start: usize| start.min(i)));
+            let parent = |e: &Entry| match &e.kind {
+                EntryKind::Tool { parent, .. } => parent.clone(),
+                _ => None,
+            };
+            let old_parent = (i < self.source.len())
+                .then(|| parent(&self.source[i]))
+                .flatten();
+            let new_parent = next.and_then(parent);
+            if old_parent != new_parent {
+                for (p, add) in [(old_parent, false), (new_parent, true)] {
+                    if let Some(p) = p {
+                        let count = self.children.entry(p.clone()).or_default();
+                        if add {
+                            *count += 1;
+                        } else {
+                            *count -= 1;
+                        }
+                        if let Some(index) = entries.index_of(&p) {
+                            first = Some(first.unwrap().min(index));
+                        }
+                    }
+                }
+            }
+        }
+        let first = first?;
+        let start = self
+            .blocks
+            .range(..=first)
+            .next_back()
+            .map_or(first, |(&i, b)| {
+                if first < b.range.end || b.summary.is_some() && first == b.range.end {
+                    i
+                } else {
+                    first
+                }
+            });
+        self.blocks.split_off(&start);
+        let mut index = start;
+        while index < entries.len() {
+            let begin = index;
+            let activity = is_activity(&entries[index]);
+            index += 1;
+            if activity {
+                while index < entries.len() && is_activity(&entries[index]) {
+                    index += 1;
+                }
+            }
+            let mut block = Block {
+                range: begin..index,
+                summary: activity.then(Summary::default),
+                wrappers: 0,
+                thinking: BTreeMap::new(),
+                notices: Vec::new(),
+            };
+            if let Some(summary) = &mut block.summary {
+                let mut i = begin;
+                while i < index {
+                    let entry = &entries[i];
+                    match &entry.kind {
+                        EntryKind::Reasoning => {
+                            let head = i;
+                            while i < index && matches!(entries[i].kind, EntryKind::Reasoning) {
+                                let preview = reasoning_preview(&entries[i].text);
+                                if !preview.is_empty() {
+                                    summary.thinking = preview;
+                                }
+                                i += 1;
+                            }
+                            block.thinking.insert(head, head..i);
+                            continue;
+                        }
+                        EntryKind::Tool {
+                            name,
+                            input,
+                            complete,
+                            failed,
+                            ..
+                        } => {
+                            let hidden = self.hidden_wrapper(entry);
+                            if hidden {
+                                block.wrappers += 1;
+                                if *failed {
+                                    summary.code_failures += 1;
+                                }
+                            } else {
+                                summary.tools += 1;
+                                if *complete {
+                                    summary.completed += 1;
+                                } else {
+                                    summary.running += 1;
+                                }
+                                if *failed {
+                                    summary.failed += 1;
+                                }
+                                if name == "spawn_subagent" {
+                                    if serde_json::from_str::<serde_json::Value>(input)
+                                        .ok()
+                                        .is_some_and(|v| v["type"] == "review")
+                                    {
+                                        summary.reviews += 1;
+                                    } else {
+                                        summary.agents += 1;
+                                    }
+                                }
+                            }
+                            if !*complete && (!hidden || summary.current.is_empty()) {
+                                summary.current = if wrapper(entry) {
+                                    tool_name(name).into()
+                                } else {
+                                    if name == "exec_command" {
+                                        tool_preview(name, input)
+                                    } else {
+                                        format!(
+                                            "{} · {}",
+                                            tool_name(name),
+                                            tool_preview(name, input)
+                                        )
+                                    }
+                                };
+                            }
+                        }
+                        EntryKind::Notice => {
+                            block.notices.push(i);
+                            if summary.thinking.is_empty() {
+                                summary.thinking = "Subagent update".into();
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            self.blocks.insert(begin, block);
+        }
+        self.source = entries.clone();
+        Some(start)
+    }
+    fn hidden_wrapper(&self, entry: &Entry) -> bool {
+        if !wrapper(entry) {
+            return false;
+        }
+        let EntryKind::Tool { name, input, .. } = &entry.kind else {
+            unreachable!()
+        };
+        let execution = if name == "wait" {
+            let Ok(input) = serde_json::from_str::<serde_json::Value>(input) else {
+                return false;
+            };
+            let Some(parent) = input["cell_id"]
+                .as_str()
+                .and_then(|cell| self.cells.get(cell))
+            else {
+                return false;
+            };
+            parent
+        } else {
+            &entry.id
+        };
+        self.children.get(execution).copied().unwrap_or(0) > 0
+    }
+    pub fn block(&self, source: usize) -> &Block {
+        self.blocks
+            .range(..=source)
+            .next_back()
+            .expect("projected source")
+            .1
+    }
+    pub fn rows(
+        &self,
+        start: usize,
+        groups: &HashSet<String>,
+        execution: &HashSet<String>,
+        expanded: &HashSet<String>,
+    ) -> Vec<(usize, f32)> {
+        let mut rows = Vec::new();
+        let mut push = |r: Row| rows.push((r.id(), r.estimate(&self.source)));
+        for (&head, block) in self.blocks.range(start..) {
+            if block.summary.is_none() {
+                push(Row::Entry(head));
+                continue;
+            }
+            push(Row::Activity(head));
+            let id = &self.source[head].id;
+            if !groups.contains(id) {
+                continue;
+            }
+            if block.wrappers > 0 {
+                push(Row::Execution(head));
+            }
+            let mut i = head;
+            while i < block.range.end {
+                let entry = &self.source[i];
+                if let Some(range) = block.thinking.get(&i) {
+                    push(Row::Thinking(i));
+                    if expanded.contains(&entry.id) {
+                        for index in range.clone() {
+                            push(Row::Entry(index));
+                        }
+                    }
+                    i = range.end;
+                    continue;
+                }
+                let failed = matches!(entry.kind, EntryKind::Tool { failed: true, .. });
+                if !self.hidden_wrapper(entry) || failed || execution.contains(id) {
+                    push(Row::Entry(i));
+                }
+                i += 1;
+            }
+        }
+        rows
+    }
+}
+
+pub fn tool_name(name: &str) -> &str {
+    match name {
+        "exec" => "Code execution",
+        "wait" => "Wait for code",
+        _ => name,
+    }
+}
+pub fn reasoning_preview(text: &str) -> String {
+    // A provider can stream multiple summary sections into one reasoning item.
+    // Prefer its latest complete heading, not a generated paraphrase.
+    let mut heading = None;
+    let mut fence = None;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = &line[..3];
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let atx = line.trim_start_matches('#');
+        if atx.len() < line.len() && atx.starts_with(char::is_whitespace) && !atx.trim().is_empty()
+        {
+            heading = Some(atx.trim().trim_end_matches('#').trim());
+        } else if let Some(title) = line.strip_prefix("**").and_then(|s| s.strip_suffix("**"))
+            && !title.trim().is_empty()
+        {
+            heading = Some(title.trim());
+        }
+    }
+    heading
+        .unwrap_or_else(|| {
+            text.lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+        })
+        .chars()
+        .take(240)
+        .collect()
+}
+pub fn tool_preview(name: &str, input: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return input
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(500)
+            .collect();
+    };
+    let string = |key: &str| value[key].as_str().unwrap_or("");
+    let preview = match name {
+        "exec_command" => string("cmd").to_owned(),
+        "write_stdin" => {
+            let session = &value["session_id"];
+            if string("chars").is_empty() {
+                format!("session {session} · poll output")
+            } else {
+                format!("session {session} · input {:?}", string("chars"))
+            }
+        }
+        "spawn_subagent" => format!(
+            "{} · {}",
+            string("type"),
+            value["title"].as_str().unwrap_or_else(|| string("task"))
+        ),
+        "wait_subagent" => format!(
+            "{} assignment(s)",
+            value["run_ids"].as_array().map_or(0, Vec::len)
+        ),
+        "view_image" => string("path").to_owned(),
+        "image_gen__imagegen" => string("prompt").to_owned(),
+        _ => value.to_string(),
+    };
+    preview.chars().take(500).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn entry(id: &str, kind: EntryKind, text: &str) -> Entry {
+        Entry {
+            id: id.into(),
+            kind,
+            text: text.into(),
+        }
+    }
+    fn tool(id: &str, name: &str, parent: Option<&str>, complete: bool, failed: bool) -> Entry {
+        entry(
+            id,
+            EntryKind::Tool {
+                name: name.into(),
+                input: r#"{"cmd":"cargo test -p core"}"#.into(),
+                output: String::new(),
+                complete,
+                failed,
+                cell_id: None,
+                parent: parent.map(str::to_owned),
+                media: vec![],
+                web: None,
+            },
+            "",
+        )
+    }
+    fn rows(p: &Projection, groups: &[&str], execution: &[&str], expanded: &[&str]) -> Vec<Row> {
+        let set = |values: &[&str]| values.iter().map(|s| s.to_string()).collect();
+        p.rows(0, &set(groups), &set(execution), &set(expanded))
+            .into_iter()
+            .map(|(id, _)| Row::from_id(id))
+            .collect()
+    }
+    #[test]
+    fn flattening_preserves_boundaries_failures_reasoning_and_execution_details() {
+        let source: History<_> = vec![
+            entry("user", EntryKind::User { images: vec![] }, "Inspect it"),
+            entry(
+                "r1",
+                EntryKind::Reasoning,
+                "**Inspecting configuration**\nFull first body",
+            ),
+            entry(
+                "r2",
+                EntryKind::Reasoning,
+                "## Checking λ cancellation\nFull second body",
+            ),
+            tool("outer", "exec", None, true, false),
+            tool("child", "exec_command", Some("outer"), true, false),
+            tool("broken", "exec", None, true, true),
+            tool("child2", "exec_command", Some("broken"), true, false),
+            entry("subagent-run", EntryKind::Notice, "Full harness notice"),
+            entry("notice", EntryKind::Notice, "Storage failed; retry saving"),
+            tool("pure", "exec", None, true, false),
+            entry("answer", EntryKind::Assistant, "Done"),
+        ]
+        .into();
+        let mut p = Projection::default();
+        p.sync(&source);
+        assert_eq!(
+            rows(&p, &[], &[], &[]),
+            vec![
+                Row::Entry(0),
+                Row::Activity(1),
+                Row::Entry(8),
+                Row::Activity(9),
+                Row::Entry(10)
+            ]
+        );
+        assert_eq!(
+            rows(&p, &["r1", "pure"], &[], &["r1"]),
+            vec![
+                Row::Entry(0),
+                Row::Activity(1),
+                Row::Execution(1),
+                Row::Thinking(1),
+                Row::Entry(1),
+                Row::Entry(2),
+                Row::Entry(4),
+                Row::Entry(5),
+                Row::Entry(6),
+                Row::Entry(7),
+                Row::Entry(8),
+                Row::Activity(9),
+                Row::Entry(9),
+                Row::Entry(10)
+            ]
+        );
+        let raw = rows(&p, &["r1"], &["r1"], &[]);
+        assert!(raw.contains(&Row::Entry(3)));
+        assert_eq!(
+            raw.iter().filter(|r| **r == Row::Entry(5)).count(),
+            1,
+            "failed wrapper is not duplicated in execution details"
+        );
+        let summary = p.block(1).summary.as_ref().unwrap();
+        assert_eq!(
+            (summary.tools, summary.failed, summary.code_failures),
+            (2, 0, 1)
+        );
+        assert_eq!(summary.thinking, "Checking λ cancellation");
+        assert_eq!(
+            p.source[1].text,
+            "**Inspecting configuration**\nFull first body"
+        );
+    }
+    #[test]
+    fn yielded_children_reproject_their_parent_without_changing_group_identity() {
+        let mut source: History<_> = vec![
+            tool("outer", "exec", None, false, false),
+            entry("prose", EntryKind::Assistant, "I will check both"),
+            tool("a", "exec_command", Some("outer"), false, false),
+            tool("b", "exec_command", Some("outer"), false, false),
+        ]
+        .into();
+        let mut p = Projection::default();
+        p.sync(&source);
+        assert_eq!(p.block(2).summary.as_ref().unwrap().running, 2);
+        if let EntryKind::Tool {
+            complete, failed, ..
+        } = &mut source[2].kind
+        {
+            *complete = true;
+            *failed = true;
+        }
+        assert_eq!(p.sync(&source), Some(2));
+        let summary = p.block(2).summary.as_ref().unwrap();
+        assert_eq!(
+            (summary.completed, summary.running, summary.failed),
+            (1, 1, 1)
+        );
+        assert_eq!(summary.label(true), "cargo test -p core");
+        assert!(p.sync(&source).is_none());
+        source.push(entry("reason", EntryKind::Reasoning, "**Next step**"));
+        assert_eq!(p.sync(&source), Some(2));
+        assert_eq!(
+            rows(&p, &[], &[], &[]),
+            vec![Row::Activity(0), Row::Entry(1), Row::Activity(2)]
+        );
+        assert_eq!(p.block(0).wrappers, 1);
+    }
+    #[test]
+    fn waits_follow_the_originating_execution_but_failures_and_pure_code_stay_visible() {
+        let mut source: History<_> = vec![
+            tool("outer", "exec", None, true, false),
+            tool("child", "exec_command", Some("outer"), true, false),
+            entry("prose", EntryKind::Assistant, "Waiting for more output"),
+            tool("wait1", "wait", None, true, false),
+            tool("wait2", "wait", None, true, true),
+            tool("pure", "exec", None, true, false),
+            tool("pure-wait", "wait", None, true, false),
+        ]
+        .into();
+        for (i, cell) in [(0, "nested-cell"), (5, "pure-cell")] {
+            if let EntryKind::Tool { cell_id, .. } = &mut source[i].kind {
+                *cell_id = Some(cell.into());
+            }
+        }
+        for (i, cell) in [(3, "nested-cell"), (4, "nested-cell"), (6, "pure-cell")] {
+            if let EntryKind::Tool { input, .. } = &mut source[i].kind {
+                *input = serde_json::json!({"cell_id":cell}).to_string();
+            }
+        }
+        let mut p = Projection::default();
+        p.sync(&source);
+        let primary = rows(&p, &["outer", "wait1"], &[], &[]);
+        assert!(
+            !primary.contains(&Row::Entry(3)),
+            "successful wait is only execution detail"
+        );
+        assert!(
+            primary.contains(&Row::Entry(4)),
+            "failed wait remains visible"
+        );
+        assert!(
+            primary.contains(&Row::Entry(5)) && primary.contains(&Row::Entry(6)),
+            "pure JS and its observations remain inspectable"
+        );
+        assert!(rows(&p, &["wait1"], &["wait1"], &[]).contains(&Row::Entry(3)));
+        assert_eq!(p.block(3).summary.as_ref().unwrap().tools, 2);
+        assert_eq!(p.block(3).summary.as_ref().unwrap().code_failures, 1);
+    }
+
+    #[test]
+    fn previews_use_inputs_not_javascript_wrappers_or_generated_paraphrases() {
+        assert_eq!(
+            tool_preview(
+                "exec_command",
+                r#"{"cmd":"printf 'λ'\ncargo test --locked","yield_time_ms":10}"#
+            ),
+            "printf 'λ'\ncargo test --locked"
+        );
+        assert_eq!(
+            tool_preview(
+                "spawn_subagent",
+                r#"{"type":"review","title":"Check cancellation","task":"Long task"}"#
+            ),
+            "review · Check cancellation"
+        );
+        assert_eq!(
+            tool_preview("write_stdin", r#"{"session_id":42,"chars":""}"#),
+            "session 42 · poll output"
+        );
+        assert_eq!(tool_preview("exec_command", "{bad input"), "{bad input");
+        assert_eq!(
+            reasoning_preview("\n**Checking λ**\nThe complete original body."),
+            "Checking λ"
+        );
+        let mut streamed = "**First heading**\nBody\n\n## Latest heading\nSecond body".to_owned();
+        assert_eq!(reasoning_preview(&streamed), "Latest heading");
+        streamed.push_str("\n\n**Appended heading**\n```sh\n# Not a title\n```\nBody");
+        assert_eq!(reasoning_preview(&streamed), "Appended heading");
+    }
+}
