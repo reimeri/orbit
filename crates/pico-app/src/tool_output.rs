@@ -1,5 +1,5 @@
 //! Fixed-height visual rows: only the visible slice is handed to text shaping.
-//! The complete source remains available to scrolling and the chat's Copy action.
+//! The complete source remains available to scrolling and selection-copy.
 use crate::{
     chat_selection::{self, Position},
     ui::Message,

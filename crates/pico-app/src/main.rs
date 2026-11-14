@@ -2,6 +2,7 @@ mod activity;
 mod agent_icon;
 mod attachments;
 mod chat_selection;
+mod chevron_icon;
 mod ellipsized_text;
 mod git;
 mod growing_editor;

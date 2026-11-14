@@ -1,6 +1,7 @@
 use crate::activity::{self, Row as ActivityRow};
 use crate::{
     chat_selection::{self, Position},
+    chevron_icon::chevron_icon,
     ellipsized_text::ellipsized_text,
     pointer_input::{Press, pointer_input},
     tool_output,
@@ -221,8 +222,6 @@ pub enum Message {
     FooterMenu(FooterControl),
     CloseFooterMenu,
     ToolOutput(String, tool_output::Event),
-    CopyOutput(String),
-    CopyWebMetadata(String),
     CopySelection,
     New,
     Select(String),
@@ -1324,28 +1323,6 @@ impl App {
                     view.update(event);
                 }
             }
-            Message::CopyWebMetadata(id) => {
-                if let Some(Entry {
-                    kind:
-                        EntryKind::Tool {
-                            web: Some(metadata),
-                            ..
-                        },
-                    ..
-                }) = self.current().and_then(|s| s.entries.by_id(&id))
-                {
-                    return iced::clipboard::write(metadata.details.clone());
-                }
-            }
-            Message::CopyOutput(id) => {
-                if let Some(Entry {
-                    kind: EntryKind::Tool { output, .. },
-                    ..
-                }) = self.current().and_then(|s| s.entries.by_id(&id))
-                {
-                    return iced::clipboard::write(output.clone());
-                }
-            }
             Message::New => self.select(Selection::Picker),
             Message::Select(id) => {
                 self.select(Selection::Session(id));
@@ -1703,7 +1680,7 @@ impl App {
                 }
                 let spacing = self
                     .current()
-                    .map_or(18., |s| ActivityRow::from_id(index).spacing(&s.entries));
+                    .map_or(8., |s| ActivityRow::from_id(index).spacing(&s.entries));
                 let visible = self.transcript.visible();
                 let corrected = self.transcript.measure(index, height + spacing);
                 if self.auto_scroll {
@@ -1807,11 +1784,7 @@ impl App {
                     return iced::clipboard::write(value);
                 }
             }
-            Message::Copy(id) => {
-                if let Some(entry) = self.current().and_then(|s| s.entries.by_id(&id)) {
-                    return iced::clipboard::write(entry.text.clone());
-                }
-            }
+            Message::Copy(value) => return iced::clipboard::write(value),
             Message::Login => {
                 if self.login_cancel.is_none()
                     && let Some(h) = &self.harness
@@ -2865,7 +2838,6 @@ impl App {
         let session = self.current().expect("visible transcript");
         let index = projected.source();
         let entry = &session.entries[index];
-        let chevron = |open| if open { "▾" } else { "▸" };
         match projected {
             ActivityRow::Entry(index) => self.entry_view(entry, index),
             ActivityRow::Activity(_) => {
@@ -2881,13 +2853,9 @@ impl App {
                     })
                     .count();
                 let failures = summary.failed + summary.code_failures + failed_notices;
-                let mut header = row![
-                    text(chevron(self.groups.contains(&entry.id)))
-                        .size(12)
-                        .color(MUTED),
-                ]
-                .spacing(8)
-                .align_y(iced::Center);
+                let mut header = row![chevron_icon(self.groups.contains(&entry.id), MUTED),]
+                    .spacing(8)
+                    .align_y(iced::Center);
                 if active || summary.running > 0 {
                     header = header.push(text("◌").size(12).color(ACCENT));
                 }
@@ -2917,13 +2885,17 @@ impl App {
                 let wrappers = self.activity.block(index).wrappers;
                 container(
                     button(
-                        text(format!(
-                            "{} Execution details · {wrappers} code-mode call{}",
-                            chevron(self.execution.contains(&entry.id)),
-                            if wrappers == 1 { "" } else { "s" }
-                        ))
-                        .size(11)
-                        .color(MUTED),
+                        row![
+                            chevron_icon(self.execution.contains(&entry.id), MUTED),
+                            text(format!(
+                                "Execution details · {wrappers} code-mode call{}",
+                                if wrappers == 1 { "" } else { "s" }
+                            ))
+                            .size(11)
+                            .color(MUTED)
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Center),
                     )
                     .padding([4, 2])
                     .style(button::text)
@@ -2943,9 +2915,7 @@ impl App {
                 container(
                     button(
                         row![
-                            text(chevron(self.expanded.contains(&entry.id)))
-                                .size(11)
-                                .color(MUTED),
+                            chevron_icon(self.expanded.contains(&entry.id), MUTED),
                             ellipsized_text(&preview, 12., Some(MUTED))
                         ]
                         .spacing(8)
@@ -2991,7 +2961,7 @@ impl App {
         let mut block = column![
             button(
                 row![
-                    text(if open { "▾" } else { "▸" }).size(11).color(MUTED),
+                    chevron_icon(open, MUTED),
                     text("●").size(11).color(color),
                     ellipsized_text(&label, 12., Some(MUTED))
                 ]
@@ -3023,11 +2993,6 @@ impl App {
                     byte: 0,
                 },
             ));
-            block = block.push(
-                button("Copy details")
-                    .on_press(Message::Copy(entry.id.clone()))
-                    .style(button::text),
-            );
         }
         container(block)
             .padding(if open { [8, 12] } else { [0, 12] })
@@ -3053,7 +3018,7 @@ impl App {
                 let mut block = column![
                     button(
                         row![
-                            text(if open { "▾" } else { "▸" }).color(MUTED),
+                            chevron_icon(open, MUTED),
                             text(if *complete { "●" } else { "◌" })
                                 .size(11)
                                 .color(if *failed {
@@ -3135,11 +3100,6 @@ impl App {
                                     .style(button::text),
                             );
                         }
-                        block = block.push(
-                            button("Copy complete web details")
-                                .on_press(Message::CopyWebMetadata(entry.id.clone()))
-                                .style(button::text),
-                        );
                     }
                     for item in media {
                         if item.thumbnail.is_some() {
@@ -3150,11 +3110,6 @@ impl App {
                         block =
                             block.push(view.view(&entry.id, self.chat_selection.clone(), index));
                     }
-                    block = block.push(
-                        button("Copy output")
-                            .on_press(Message::CopyOutput(entry.id.clone()))
-                            .style(button::text),
-                    );
                 }
                 container(block)
                     .padding(if open { [8, 12] } else { [0, 12] })
@@ -3211,27 +3166,7 @@ impl App {
                     .into()
             }
             _ => {
-                let name = match entry.kind {
-                    EntryKind::User { .. } => "YOU",
-                    _ => "PICO",
-                };
-                let mut content = column![
-                    row![
-                        text(name).size(10).color(
-                            if matches!(entry.kind, EntryKind::User { .. }) {
-                                MUTED
-                            } else {
-                                ACCENT
-                            }
-                        ),
-                        space().width(Fill),
-                        button(text("Copy").size(10))
-                            .on_press(Message::Copy(entry.id.clone()))
-                            .style(button::text)
-                    ]
-                    .align_y(iced::Center)
-                ]
-                .spacing(8);
+                let mut content = column![].spacing(8);
                 if let EntryKind::User { images } = &entry.kind {
                     for media in images {
                         content = content.push(self.image_view.thumbnail(media));
@@ -3260,14 +3195,11 @@ impl App {
                         },
                     ));
                 }
+                let user = matches!(entry.kind, EntryKind::User { .. });
                 container(content)
-                    .padding(12)
+                    .padding([if user { 12 } else { 6 }, 12])
                     .width(Fill)
-                    .style(if matches!(entry.kind, EntryKind::User { .. }) {
-                        card
-                    } else {
-                        container::transparent
-                    })
+                    .style(if user { card } else { container::transparent })
                     .into()
             }
         }

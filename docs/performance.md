@@ -39,7 +39,7 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   The sidebar shares this implementation with optional widget-local animation.
   Selectable Markdown, notices and tool rows use one paragraph for drawing,
   selection and link hits, including inline-code backgrounds and decorations.
-  Copy messages carry entry IDs, not full message strings embedded in every tree.
+  Selection-copy resolves logical positions, without full message strings embedded in every tree.
 - Fallback compaction persists its plaintext summary and transcript checkpoint;
   later fallbacks summarize only subsequent records. It builds bounded chunks and
   does not copy the original provider input into each summary request. Native

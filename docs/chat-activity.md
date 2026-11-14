@@ -4,6 +4,13 @@ The transcript presents activity rather than the code-mode protocol. Consecutive
 reasoning, tools and subagent completion observations form a quiet activity group.
 Assistant prose, user messages and other harness notices remain boundaries.
 
+User and assistant messages have no sender header or Copy button. The user card
+border stays visible; messages use V1's 8px gap. User messages match V1's 12px
+vertical padding, while assistant messages use 6px vertical padding. All chat
+disclosures use font-independent right/down chevrons. Expanded tool, web and
+subagent sections also omit Copy buttons; select transcript text and use Ctrl+C.
+Settings and session-menu copy actions are unchanged.
+
 - Groups start collapsed, including during live work. Opening or closing a group
   is a user choice and remains stable as results arrive.
 - Completed groups summarize actual tool-call counts and delegation counts. Live
@@ -42,7 +49,7 @@ Full Markdown/tool-detail caches are only prepared for visible source rows;
 collapsing a group releases its output caches without forgetting manual expansion.
 Chat prepares the actual viewport plus a 120px margin above and below, including
 prose and expanded details. The sidebar keeps its larger overscan margin.
-Display preview shortening never changes the stored inputs, output or Copy data.
+Display preview shortening never changes the stored inputs, output or selection-copy data.
 
 Updates use persistent-history diffs and reproject the affected block/tail, not
 all prior prose. Exceptionally large individual activity groups still require

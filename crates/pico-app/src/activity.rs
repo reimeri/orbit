@@ -43,7 +43,7 @@ impl Row {
     }
     pub fn spacing(self, entries: &History<Entry>) -> f32 {
         match self {
-            Self::Entry(i) if !is_activity(&entries[i]) => 18.,
+            Self::Entry(i) if !is_activity(&entries[i]) => 8.,
             Self::Activity(_) => 6.,
             _ => 2.,
         }

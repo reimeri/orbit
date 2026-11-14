@@ -200,7 +200,7 @@ is active, without application messages or an idle animation timer.
 Large tool details use a
 fixed-row virtual viewport, including long single-line output and Unicode; only
 about 22 rows are passed to text shaping. Collapsing a tool or leaving its session
-releases its detail cache. The complete output remains available through Copy.
+releases its detail cache. The complete output remains scrollable and supports selection and Ctrl+C.
 
 Transcript and tool-row widget state now follows stable content identity, not
 viewport slots or measurement epochs. The shared keyed column remaps actual child
@@ -303,8 +303,8 @@ provider catalog and native invocation. No web capability is attached to childre
 Complete metadata/diagnostics live in SQLite (not disposable temporary files), while
 oversized agent text uses the established `/tmp` spill policy. The provider's fallback
 compaction archive omits web metadata but preserves all agent-facing tool output.
-The app renders source links and a complete-details Copy action only for expanded
-web entries. General settings and a web result are included in the window smoke.
+The app renders source links only for expanded web entries; complete metadata
+remains stored in SQLite. General settings and a web result are included in the window smoke.
 
 Run `cargo test --locked -p pico-core web` for focused regressions and see
 [web access](web-search.md) for the explicitly opt-in live acceptance command.

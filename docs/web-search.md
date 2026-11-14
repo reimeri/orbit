@@ -118,13 +118,13 @@ The usual nested tool row is persisted before dispatch. Completion stores:
 - The access mode and request timestamp.
 - Complete structured result metadata in SQLite, including unknown result fields.
 - Up to 20 HTTP(S) source links for the expanded UI. Complete details remain
-  available through **Copy complete web details**, including results beyond that
-  display-only link limit. URLs containing embedded credentials are not made clickable.
+  stored in SQLite, including results beyond that display-only link limit.
+  URLs containing embedded credentials are not made clickable.
 
 Metadata is not JavaScript output, provider history, or model-facing compaction data.
 Malformed/failed HTTP responses retain complete raw diagnostics in these UI-only
 web details, not in agent-visible errors. Non-UTF-8 diagnostics are base64 encoded.
-Copy copies complete durable details, not a temporary-file reference.
+The chat has no Copy buttons; displayed tool text supports selection and Ctrl+C.
 
 Agent-facing text over 40,000 Unicode characters is saved in full to a private
 `/tmp/pico-evo-output-*` file, with an absolute path and exact byte count. Outer
