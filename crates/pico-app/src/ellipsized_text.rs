@@ -84,7 +84,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Label {
                 ..Default::default()
             };
             let unlimited = layout::Limits::new(Size::ZERO, Size::INFINITE);
-            fit(state, &self.value, width, |paragraph, value| {
+            fit(state, &self.value, width, self.size, |paragraph, value| {
                 widget::text::layout::<iced::Renderer>(
                     paragraph, renderer, &unlimited, value, format,
                 )
@@ -140,12 +140,37 @@ fn fit(
     state: &mut State,
     value: &str,
     width: f32,
+    size: f32,
     mut measure: impl FnMut(&mut Plain, &str) -> f32,
 ) {
-    state.fitted_width = measure(&mut state.paragraph, value);
-    if state.fitted_width <= width {
+    if width == 0. {
+        state.fitted_width = measure(&mut state.paragraph, "");
         return;
     }
+
+    // Start with roughly three graphemes per em plus a little headroom. This is only
+    // a work estimate: actual glyph measurements decide whether more is needed.
+    // Double the prefix until it overflows or reaches the original end, rather
+    // than shaping a long suffix that cannot appear in this single-line label.
+    let mut count = ((width / size).ceil() as usize)
+        .saturating_mul(3)
+        .saturating_add(8)
+        .max(32);
+    let probe = loop {
+        let end = value
+            .grapheme_indices(true)
+            .nth(count)
+            .map_or(value.len(), |(byte, _)| byte);
+        let probe = &value[..end];
+        state.fitted_width = measure(&mut state.paragraph, probe);
+        if state.fitted_width > width {
+            break probe;
+        }
+        if end == value.len() {
+            return;
+        }
+        count = count.saturating_mul(2);
+    };
     let ellipsis_width = measure(&mut state.ellipsis, "…");
     if ellipsis_width > width {
         state.fitted_width = measure(&mut state.paragraph, "");
@@ -167,7 +192,7 @@ fn fit(
             start
         })
         .collect();
-    let mut advances = vec![0.; value.len() + 1];
+    let mut advances = vec![0.; probe.len() + 1];
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
             advances[offsets[run.line_i] + glyph.start + 1] += glyph.w;
@@ -176,9 +201,11 @@ fn fit(
     for i in 1..advances.len() {
         advances[i] += advances[i - 1];
     }
-    let prefixes: Vec<_> = value
+    let prefixes: Vec<_> = probe
         .grapheme_indices(true)
-        .map(|(byte, _)| (byte, advances[byte]))
+        .map(|(byte, _)| byte)
+        .chain((probe.len() < value.len()).then_some(probe.len()))
+        .map(|byte| (byte, advances[byte]))
         .collect();
     let mut index = prefixes
         .partition_point(|(_, advance)| *advance <= width - ellipsis_width)
@@ -238,11 +265,14 @@ mod tests {
         let value = "nix develop --command cargo test --locked -p pico-core";
         let mut state = State::default();
         let mut calls = 0;
-        fit(&mut state, value, 180., |paragraph, text| {
+        fit(&mut state, value, 180., 12., |paragraph, text| {
             calls += 1;
             measure(&renderer, paragraph, text)
         });
-        assert_eq!(calls, 3, "full label, ellipsis, and one verified candidate");
+        assert_eq!(
+            calls, 3,
+            "initial probe, ellipsis, and one verified candidate"
+        );
         assert!(state.paragraph.content().starts_with("nix develop"));
         assert!(state.paragraph.content().ends_with('…'));
         assert!(state.fitted_width <= 180.);
@@ -250,7 +280,7 @@ mod tests {
         let complete_width = measure(&renderer, &mut Plain::default(), value);
         for width in [complete_width, complete_width + 100.] {
             let mut calls = 0;
-            fit(&mut state, value, width, |paragraph, text| {
+            fit(&mut state, value, width, 12., |paragraph, text| {
                 calls += 1;
                 measure(&renderer, paragraph, text)
             });
@@ -260,13 +290,86 @@ mod tests {
     }
 
     #[test]
+    fn long_labels_only_shape_a_bounded_grapheme_safe_prefix() {
+        let renderer = renderer();
+        for unit in [
+            "cargo test --locked ",
+            "ae\u{301} 👩‍💻 路径/λ.rs ",
+            "abc שלום مرحبا ",
+        ] {
+            let value = unit.repeat(1000);
+            let mut state = State::default();
+            let mut measured_bytes = Vec::new();
+            fit(&mut state, &value, 180., 12., |p, text| {
+                measured_bytes.push(text.len());
+                if !text.ends_with('…') && !text.is_empty() {
+                    assert!(value.starts_with(text));
+                    assert!(
+                        value.grapheme_indices(true).any(|(i, _)| i == text.len()),
+                        "probe must end between graphemes"
+                    );
+                }
+                measure(&renderer, p, text)
+            });
+            assert!(
+                measured_bytes.iter().all(|&bytes| bytes < 1024),
+                "a narrow label must not shape its enormous suffix: {measured_bytes:?}"
+            );
+            assert!(measured_bytes.len() <= 4, "avoid a series of tiny probes");
+            let fitted = state.paragraph.content();
+            let prefix = fitted
+                .strip_suffix('…')
+                .expect("unshown suffix needs an ellipsis");
+            assert!(value.starts_with(prefix) && !prefix.is_empty());
+            assert!(value.grapheme_indices(true).any(|(i, _)| i == prefix.len()));
+            assert!(state.fitted_width <= 180.);
+        }
+    }
+
+    #[test]
+    fn fitting_thin_text_grows_probes_and_does_not_mistake_a_prefix_for_the_end() {
+        let renderer = renderer();
+        let value = "i".repeat(512);
+        let width = measure(&renderer, &mut Plain::default(), &value);
+        let mut state = State::default();
+        let mut lengths = Vec::new();
+        fit(&mut state, &value, width, 12., |p, text| {
+            lengths.push(text.len());
+            measure(&renderer, p, text)
+        });
+        assert!(
+            lengths.len() > 1 && lengths.len() <= 3,
+            "grow geometrically when thin glyphs fit: {lengths:?}"
+        );
+        assert!(
+            lengths
+                .windows(2)
+                .all(|w| w[1] == (2 * w[0]).min(value.len()))
+        );
+        assert_eq!(state.paragraph.content(), value);
+        assert_eq!(state.fitted_width, width);
+        let mut calls = 0;
+        fit(&mut state, &value, f32::INFINITY, 12., |p, text| {
+            calls += 1;
+            measure(&renderer, p, text)
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(state.paragraph.content(), value);
+        fit(&mut state, &value, 0., 12., |p, text| {
+            assert!(text.is_empty(), "zero width should not shape unseen text");
+            measure(&renderer, p, text)
+        });
+        assert_eq!(state.paragraph.content(), "");
+    }
+
+    #[test]
     fn final_candidate_overflow_backs_off_and_draws_the_verified_result() {
         let renderer = renderer();
         let value = "nix develop --command cargo test --locked -p pico-core";
         let mut state = State::default();
         let mut calls = 0;
         let mut first_candidate = None;
-        fit(&mut state, value, 180., |paragraph, text| {
+        fit(&mut state, value, 180., 12., |paragraph, text| {
             calls += 1;
             let width = measure(&renderer, paragraph, text);
             if text.ends_with('…') && text != "…" && first_candidate.is_none() {
@@ -298,15 +401,15 @@ mod tests {
         let renderer = renderer();
         let ellipsis_width = measure(&renderer, &mut Plain::default(), "…");
         let mut state = State::default();
-        fit(&mut state, "界long", ellipsis_width - 0.5, |p, s| {
+        fit(&mut state, "界long", ellipsis_width - 0.5, 12., |p, s| {
             measure(&renderer, p, s)
         });
         assert_eq!(state.paragraph.content(), "");
-        fit(&mut state, "WWWW", ellipsis_width, |p, s| {
+        fit(&mut state, "WWWW", ellipsis_width, 12., |p, s| {
             measure(&renderer, p, s)
         });
         assert_eq!(state.paragraph.content(), "…");
-        fit(&mut state, "", 0., |p, s| measure(&renderer, p, s));
+        fit(&mut state, "", 0., 12., |p, s| measure(&renderer, p, s));
         assert_eq!(state.paragraph.content(), "");
 
         for value in [
@@ -324,7 +427,9 @@ mod tests {
                 full_width - 0.5,
                 full_width,
             ] {
-                fit(&mut state, value, width, |p, s| measure(&renderer, p, s));
+                fit(&mut state, value, width, 12., |p, s| {
+                    measure(&renderer, p, s)
+                });
                 let fitted = state.paragraph.content();
                 assert!(
                     state.fitted_width <= width,

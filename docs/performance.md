@@ -252,6 +252,62 @@ viewport boundaries, large jumps, tall rows, scroll-anchor retention, cache
 refresh after shrinking measurements, and unchanged sidebar ranges. The rendered
 software/GPU smoke retains mixed activity/detail layouts and long-list reflow.
 
+## Width-aware prefix shaping
+
+After reducing overscan, measuring complete labels was still the largest opening
+cost. `ellipsized_text.rs` now initially shapes a grapheme-safe prefix estimated
+from available width and font size (roughly three graphemes per em plus headroom,
+minimum 32). If that prefix fits and the original source has more text, the probe
+doubles until it overflows or reaches the actual end. This avoids a series of tiny
+measurements while still allowing thin glyphs or wide rows to show more text.
+
+The overflowing probe feeds the existing glyph-advance ellipsis fitter, including
+final candidate verification and contextual-width backoff. Its advance arrays and
+grapheme boundaries are now limited to the probe rather than the whole label.
+Zero width shapes only an empty string; infinite width can still show the full
+label. Original label storage, widget operations, tool details, cache policy,
+120px overscan, and compiler settings are unchanged. This is a shaping-work
+optimization, not a new truncation limit or an ASCII-only renderer.
+
+The initial estimate is not a universal byte/time bound: a single grapheme can
+contain many code points, and zero-advance or unusually thin text may require
+larger probes. Labels that fit only after probe growth can take more measurements
+than a short label. Source copying/cache-key construction still uses the complete
+value. Complex-script cutoffs may differ slightly, as with the preceding fitter.
+
+The same isolated 37-tool-group snapshot, debug dependencies, window sizes and
+opening/scrolling harness were used before and after. Final paired runs had no
+concurrent builds. Medians of six openings per width (three fresh processes, two
+openings per process):
+
+| Expansion metric | Complete-label measurement | Width-aware prefix |
+|---|---:|---:|
+| Layout, 1280px window | 39.78 ms | 29.37 ms |
+| Layout, 1024px window | 38.78 ms | 26.37 ms |
+| Label fitting, 1280px | 34.23 ms | 23.72 ms |
+| Label fitting, 1024px | 33.09 ms | 20.43 ms |
+| Bytes passed to label measurements, 1280px | 4,203 | 2,717 |
+| Bytes passed to label measurements, 1024px | 3,990 | 2,210 |
+
+Expansion layout decreased by **26–32%**. Both versions mounted 26 transcript
+rows, including 13 tools, and made 37 label measurements per opening: the gain
+comes from shorter shaping inputs, not fewer mounted rows or measurement calls.
+
+The same forward/back scrolling simulation also improved larger moves (median
+CPU layout time):
+
+| Move size | 1280px before → after | 1024px before → after |
+|---|---:|---:|
+| 30px | 1.31 → 1.30 ms | 1.33 → 1.31 ms |
+| 120px | 6.48 → 4.61 ms | 6.37 → 4.15 ms |
+| 600px | 25.62 → 19.67 ms | 24.79 → 17.37 ms |
+
+These remain CPU microbenchmarks, not release or click-to-screen measurements;
+scrolling uses estimated row heights and excludes subsequent measurement events
+and draw/present. Regression tests cover long ASCII/Unicode prefixes without
+shaping their large suffixes, geometric growth for thin glyphs, zero/infinite
+width, grapheme integrity, actual fit, and existing cache/overflow behavior.
+
 ## Verification and remaining measurement limits
 
 Regression coverage includes incremental SQL writes and atomic rollback, failed
