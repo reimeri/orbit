@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Conversation {
     pub id: String,
+    pub questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     revision: Arc<AtomicU64>,
     changes: tokio::sync::watch::Sender<()>,
     pub state: Arc<Mutex<Session>>,
@@ -68,7 +69,13 @@ impl Conversation {
         tokio::task::spawn_blocking(move || conversation.save()).await?
     }
     pub fn is_executing(&self) -> bool {
-        self.is_running() || self.finishing.load(Ordering::Acquire) || self.code.is_executing()
+        self.is_running()
+            || self.finishing.load(Ordering::Acquire)
+            || self.code.is_executing()
+            || self
+                .questionnaires
+                .as_ref()
+                .is_some_and(|q| q.has_pending())
     }
     pub fn cancel(&self) {
         let _state = self.state.lock().expect("session lock");
@@ -208,12 +215,20 @@ impl Harness {
                 conversation.changed();
                 result
             });
+            let questionnaires = session.child.is_none().then(|| {
+                let target = weak.clone();
+                Arc::new(crate::questionnaire::Questionnaires::new(move || {
+                    if let Some(c) = target.upgrade() {
+                        c.changed();
+                    }
+                }))
+            });
             Conversation {
                 id: id.clone(),
                 revision: Arc::new(AtomicU64::new(0)),
                 changes: self.changes.clone(),
                 last_settings: Mutex::new(Settings::default()),
-                code: CodeMode::with_delegation(
+                code: CodeMode::with_tools(
                     Arc::new(Shell::with_runtime(
                         session.project.clone(),
                         self.runtime
@@ -238,7 +253,9 @@ impl Harness {
                             },
                         ) as crate::code_mode::Delegation
                     }),
+                    questionnaires.clone(),
                 ),
+                questionnaires,
                 state: Arc::new(Mutex::new(session)),
                 running: AtomicBool::new(false),
                 finishing: AtomicBool::new(false),
@@ -283,6 +300,26 @@ impl Harness {
         let session = self.store.load_session(id)?;
         let interrupted = session.interrupted;
         let conversation = self.make_conversation(session, true);
+        // Runtime cells and unfinished questionnaire drafts do not survive restart.
+        // This also covers a model turn that finished while its ask cell was pending.
+        let abandoned: Vec<_> = conversation.snapshot().entries.iter().enumerate().filter_map(|(i, entry)| matches!(&entry.kind, EntryKind::Tool { name, complete: false, .. } if name == "ask_user").then_some(i)).collect();
+        if !abandoned.is_empty() {
+            {
+                let mut state = conversation.state.lock().expect("session lock");
+                for i in abandoned {
+                    if let EntryKind::Tool {
+                        complete, output, ..
+                    } = &mut state.entries[i].kind
+                    {
+                        *complete = true;
+                        *output = "Questionnaire cancelled by application restart. Unsubmitted answers were not saved; ask again if still needed.".into();
+                    }
+                }
+                state.needs_attention = true;
+                state.entries.push(Entry::new(EntryKind::Notice, "An unanswered questionnaire was cancelled by the restart. Send a message to request it again; unfinished answers were not saved."));
+            }
+            conversation.save()?;
+        }
         if interrupted {
             conversation.state.lock().expect("session lock").entries.push(Entry::new(EntryKind::Notice,"Previous turn was interrupted. Send a new message to continue; commands already executed are not undone."));
         }
@@ -608,6 +645,8 @@ impl Harness {
             instructions.push_str(child.profile.instructions());
         } else {
             instructions.push_str(subagents::PARENT_INSTRUCTIONS);
+            instructions.push_str(crate::questionnaire::DESCRIPTION);
+            instructions.push_str(crate::questionnaire::INSTRUCTIONS);
         }
         let mut compacted_size = None;
         loop {
@@ -975,6 +1014,111 @@ impl Drop for Harness {
 mod tests {
     use super::*;
     use std::time::Instant;
+    #[test]
+    fn questionnaire_persistence_failures_and_restart_do_not_lose_or_reopen_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = Session::new(dir.path().into(), &Settings::default());
+        let id = session.id.clone();
+        store.save_session(&session).unwrap();
+        let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        let c = h.load(&id).unwrap();
+        let q = c.questionnaires.as_ref().unwrap();
+        let source = r#"// @exec: {"yield_time_ms": 1}
+text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text'}]}));"#;
+        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture disk failure'); END;").unwrap();
+        let result = c
+            .code
+            .exec(source, "failed-start", &CancellationToken::new())
+            .unwrap();
+        let cell = result
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Script running with cell ID ");
+        let result = cell.map_or(result.clone(), |id| {
+            c.code
+                .wait(
+                    &json!({"cell_id":id}).to_string(),
+                    &CancellationToken::new(),
+                )
+                .unwrap()
+        });
+        assert!(result.contains("fixture disk failure"), "{result}");
+        assert!(
+            !q.has_pending(),
+            "do not display a request before tool-start persistence succeeds"
+        );
+        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        let running = c
+            .code
+            .exec(source, "working-start", &CancellationToken::new())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !q.has_pending() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let pending = q.pending().pop().unwrap();
+        h.evict_inactive(None).unwrap();
+        assert!(h.get(&id).is_some());
+        let stored = store.load_session(&id).unwrap();
+        assert!(matches!(
+            &stored.entries.by_id(&pending.id).unwrap().kind,
+            EntryKind::Tool {
+                complete: false,
+                ..
+            }
+        ));
+        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture result failure'); END;").unwrap();
+        q.submit(&pending.id, vec!["Retain this answer λ".into()])
+            .unwrap();
+        let cell = running
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Script running with cell ID ")
+            .unwrap();
+        let output = c
+            .code
+            .wait(
+                &json!({"cell_id":cell}).to_string(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(output.contains("fixture result failure"), "{output}");
+        let snapshot = c.snapshot();
+        assert!(
+            matches!(&snapshot.entries.by_id(&pending.id).unwrap().kind, EntryKind::Tool { output, complete:true, .. } if output.contains("Retain this answer λ"))
+        );
+        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        h.flush().unwrap();
+        assert!(
+            matches!(&store.load_session(&id).unwrap().entries.by_id(&pending.id).unwrap().kind, EntryKind::Tool { output, complete:true, .. } if output.contains("Retain this answer λ"))
+        );
+        // Simulate the persisted state of an abrupt exit after the model finished.
+        let mut abandoned = Session::new(dir.path().into(), &Settings::default());
+        abandoned.entries.push(Entry {
+            id: "abandoned-ask".into(),
+            text: String::new(),
+            kind: EntryKind::Tool {
+                name: "ask_user".into(),
+                input: "{}".into(),
+                output: String::new(),
+                complete: false,
+                parent: Some("yielded-exec".into()),
+            },
+        });
+        let abandoned_id = abandoned.id.clone();
+        store.save_session(&abandoned).unwrap();
+        let recovered = h.load(&abandoned_id).unwrap();
+        assert!(!recovered.questionnaires.as_ref().unwrap().has_pending());
+        assert!(
+            matches!(&recovered.snapshot().entries.by_id("abandoned-ask").unwrap().kind, EntryKind::Tool { output, complete:true, .. } if output.contains("restart"))
+        );
+        assert!(store.load_session(&abandoned_id).unwrap().needs_attention);
+    }
     #[test]
     fn turn_usage_sums_only_response_streaming_time_and_resets_on_start() {
         let dir = tempfile::tempdir().unwrap();

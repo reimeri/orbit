@@ -4,7 +4,7 @@ use std::{
     io::{BufRead, Read},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::Output,
+    process::{Output, Stdio},
     time::{Duration, Instant},
 };
 
@@ -44,6 +44,7 @@ async fn git(path: &Path, args: &[&str]) -> Result<Output, String> {
         .arg("--no-optional-locks")
         .args(args)
         .current_dir(path)
+        .stdin(Stdio::null())
         .kill_on_drop(true)
         .output()
         .await

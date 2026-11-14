@@ -33,6 +33,7 @@ use std::{
     time::Duration,
 };
 
+use crate::questionnaire;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
@@ -82,6 +83,8 @@ pub struct App {
     search: String,
     search_active: bool,
     editor: text_editor::Content,
+    questionnaires: HashMap<String, questionnaire::Draft>,
+    active_questionnaire: Option<String>,
     chat_selection: chat_selection::Shared,
     markdown: HashMap<String, (Arc<Entry>, markdown::Content)>,
     expanded: HashSet<String>,
@@ -175,6 +178,7 @@ pub enum Message {
     Favorite(PathBuf),
     Editor(text_editor::Action),
     DeletePreviousWord,
+    Questionnaire(String, questionnaire::Message),
     Send,
     ToggleSettings,
     ToggleAgents,
@@ -292,6 +296,8 @@ impl App {
             search: String::new(),
             search_active: false,
             editor: text_editor::Content::new(),
+            questionnaires: HashMap::new(),
+            active_questionnaire: None,
             chat_selection: Default::default(),
             markdown: HashMap::new(),
             expanded: HashSet::new(),
@@ -354,7 +360,50 @@ impl App {
             .and_then(|id| self.harness.as_ref()?.get(id))
             .is_some_and(|c| c.is_running())
     }
+    fn sync_questionnaires(&mut self) {
+        let Some(h) = &self.harness else {
+            return;
+        };
+        let previous: HashSet<_> = self.questionnaires.keys().cloned().collect();
+        let mut live = HashSet::new();
+        let mut active = None;
+        for c in h.all() {
+            if let Some(questions) = &c.questionnaires {
+                for pending in questions.pending() {
+                    live.insert(pending.id.clone());
+                    if self.selected.as_deref() == Some(c.id.as_str()) && active.is_none() {
+                        active = Some(pending.id.clone());
+                    }
+                    self.questionnaires
+                        .entry(pending.id.clone())
+                        .or_insert_with(|| questionnaire::Draft::new(pending));
+                }
+            }
+        }
+        self.questionnaires.retain(|id, _| live.contains(id));
+        if active != self.active_questionnaire {
+            if let Some(id) = &active
+                && !self.settings_open
+                && !self.search_active
+                && self.modal.is_none()
+                && self.footer_menu.is_none()
+                && self.context_menu.is_none()
+            {
+                let id = id.clone();
+                self.tasks.push(
+                    self.questionnaires[&id]
+                        .focus()
+                        .map(move |m| Message::Questionnaire(id.clone(), m)),
+                );
+            }
+            self.active_questionnaire = active;
+        }
+        if previous != live {
+            self.prepare_sidebar();
+        }
+    }
     fn refresh(&mut self) -> bool {
+        self.sync_questionnaires();
         let Some(h) = &self.harness else {
             return false;
         };
@@ -531,7 +580,12 @@ impl App {
                 continue;
             }
             let c = self.harness.as_ref().and_then(|h| h.get(&s.id));
-            let category = if c.as_ref().is_some_and(|c| c.is_running())
+            let category = if c
+                .as_ref()
+                .is_some_and(|c| c.questionnaires.as_ref().is_some_and(|q| q.has_pending()))
+            {
+                1
+            } else if c.as_ref().is_some_and(|c| c.is_running())
                 || self
                     .harness
                     .as_ref()
@@ -723,6 +777,7 @@ impl App {
             && matches!(
                 message,
                 Message::Editor(_)
+                    | Message::Questionnaire(_, _)
                     | Message::DeletePreviousWord
                     | Message::Send
                     | Message::Select(_)
@@ -746,6 +801,7 @@ impl App {
             && matches!(
                 message,
                 Message::Editor(_)
+                    | Message::Questionnaire(_, _)
                     | Message::DeletePreviousWord
                     | Message::Send
                     | Message::SessionModel(_)
@@ -1006,8 +1062,39 @@ impl App {
                 }
                 self.save_catalog(false);
             }
-            Message::Editor(_) | Message::DeletePreviousWord => {
+            Message::Questionnaire(id, message) => {
                 if self.io_busy
+                    || self.modal.is_some()
+                    || self.context_menu.is_some()
+                    || self.footer_menu.is_some()
+                    || self.search_active
+                    || self.active_questionnaire.as_ref() != Some(&id)
+                {
+                    return Task::none();
+                }
+                if let Some(draft) = self.questionnaires.get_mut(&id) {
+                    let update = draft.update(message);
+                    if let Some(answers) = update.answers {
+                        let result = self
+                            .selected
+                            .as_ref()
+                            .and_then(|session| self.harness.as_ref()?.get(session))
+                            .and_then(|c| c.questionnaires.clone())
+                            .ok_or_else(|| "This questionnaire is no longer active".to_owned())
+                            .and_then(|q| q.submit(&id, answers).map_err(|e| format!("{e:#}")));
+                        match result {
+                            Ok(()) => self.sync_questionnaires(),
+                            Err(error) => draft.error = Some(error),
+                        }
+                    }
+                    return update
+                        .task
+                        .map(move |message| Message::Questionnaire(id.clone(), message));
+                }
+            }
+            Message::Editor(_) | Message::DeletePreviousWord => {
+                if self.active_questionnaire.is_some()
+                    || self.io_busy
                     || self.closing
                     || self.close_requested
                     || self.modal.is_some()
@@ -1015,38 +1102,18 @@ impl App {
                 {
                     return Task::none();
                 }
-                let action = if let Message::Editor(action) = message {
-                    action
-                } else {
-                    let cursor = self.editor.cursor();
-                    if cursor.selection.is_none() {
-                        let mut start = cursor.position;
-                        if start.column > 0 {
-                            let line = self.editor.line(start.line).expect("cursor line exists");
-                            // Match TextInput's Unicode word boundaries, in logical
-                            // order: visual WordLeft moves forward on RTL lines.
-                            start.column = line.text[..start.column]
-                                .split_word_bound_indices()
-                                .rfind(|(_, word)| !word.trim_start().is_empty())
-                                .map_or(0, |(index, _)| index);
-                        } else if start.line > 0 {
-                            start.line -= 1;
-                            start.column = self
-                                .editor
-                                .line(start.line)
-                                .expect("previous cursor line exists")
-                                .text
-                                .len();
-                        }
-                        self.editor.move_to(text_editor::Cursor {
-                            position: cursor.position,
-                            selection: Some(start),
-                        });
+                let edit = match message {
+                    Message::Editor(action) => {
+                        let edit = action.is_edit();
+                        self.editor.perform(action);
+                        edit
                     }
-                    text_editor::Action::Edit(text_editor::Edit::Backspace)
+                    Message::DeletePreviousWord => {
+                        questionnaire::delete_previous_word(&mut self.editor);
+                        true
+                    }
+                    _ => unreachable!("editor message"),
                 };
-                let edit = action.is_edit();
-                self.editor.perform(action);
                 if edit && self.draft_session.is_some() {
                     self.new_draft.message = self.editor.text();
                     self.new_draft_dirty = true;
@@ -1055,7 +1122,10 @@ impl App {
                 }
             }
             Message::Send => {
-                if self.modal.is_some() || self.context_menu.is_some() {
+                if self.active_questionnaire.is_some()
+                    || self.modal.is_some()
+                    || self.context_menu.is_some()
+                {
                     return Task::none();
                 }
                 if let (Some(h), Some(session)) = (&self.harness, self.current()) {
@@ -1564,7 +1634,7 @@ impl App {
                             self.agents_open = false;
                             self.view_epoch = self.view_epoch.wrapping_add(1);
                         } else if let (Some(h), Some(id)) = (&self.harness, &self.selected)
-                            && (h.get(id).is_some_and(|s| s.is_running())
+                            && (h.get(id).is_some_and(|s| s.is_executing())
                                 || h.active_children(id) > 0)
                         {
                             h.stop(id);
@@ -2128,10 +2198,12 @@ impl App {
                         .harness
                         .as_ref()
                         .map_or(0, |h| h.active_children(&session.id));
-                    let attention = self
-                        .harness
-                        .as_ref()
-                        .is_some_and(|h| h.children_need_attention(&session.id));
+                    let attention = self.harness.as_ref().is_some_and(|h| {
+                        h.children_need_attention(&session.id)
+                            || h.get(&session.id).is_some_and(|c| {
+                                c.questionnaires.as_ref().is_some_and(|q| q.has_pending())
+                            })
+                    });
                     let age = if children > 0 {
                         format!("● {children} · {}", age(session.updated))
                     } else if attention {
@@ -2331,6 +2403,41 @@ impl App {
             return column![container(header).padding(12).style(panel),chat,
                 container(text("Read-only profile instructions · Shell access is not sandboxed · Continue through the parent").size(11).color(MUTED)).padding(12)
             ].width(Fill).height(Fill).into();
+        }
+        if let Some(id) = &self.active_questionnaire
+            && let Some(draft) = self.questionnaires.get(id)
+        {
+            let id = id.clone();
+            let panel = draft
+                .view(
+                    self.catalog.settings.font_size,
+                    self.window_height * 0.65,
+                    !self.io_busy
+                        && !self.closing
+                        && self.modal.is_none()
+                        && self.context_menu.is_none()
+                        && self.footer_menu.is_none()
+                        && !self.search_active,
+                    !self.settings_open
+                        && !self.search_active
+                        && self.modal.is_none()
+                        && self.footer_menu.is_none()
+                        && self.context_menu.is_none(),
+                )
+                .map(move |message| Message::Questionnaire(id.clone(), message));
+            return column![
+                chat,
+                container(
+                    container(panel)
+                        .max_width(self.catalog.settings.chat_width)
+                        .width(Fill)
+                )
+                .center_x(Fill)
+                .padding([14, 24])
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into();
         }
         let editor = text_editor(&self.editor)
             .placeholder(if self.io_busy || self.closing {
@@ -3464,10 +3571,100 @@ impl App {
                     ]);
                 }
             }
+            25 => {
+                let parent = self
+                    .current()
+                    .and_then(|s| s.child.as_ref())
+                    .expect("smoke child")
+                    .parent_id
+                    .clone();
+                self.agents_open = false;
+                self.select(Selection::Session(parent));
+                if let Some(window) = self.window_id {
+                    return Task::batch([
+                        window::resize(window, iced::Size::new(1200., 800.)),
+                        delayed_capture(),
+                    ]);
+                }
+            }
+            26 => {
+                let request = pico_core::questionnaire::Request::parse(r#"{"questions":[{"id":"project","question":"Here’s a demo of a single-choice question. What kind of project would you like to build? You can also enter your own answer.","kind":"select","options":["A website","A mobile app","A command-line tool"]},{"id":"details","question":"Describe the constraints and any additional requirements.","kind":"text"}]}"#).expect("smoke questionnaire");
+                let id = "smoke-questionnaire".to_owned();
+                self.questionnaires.insert(
+                    id.clone(),
+                    questionnaire::Draft::new(pico_core::questionnaire::Pending {
+                        id: id.clone(),
+                        request: Arc::new(request),
+                    }),
+                );
+                self.active_questionnaire = Some(id);
+            }
+            27..=30 => {
+                let draft = self
+                    .questionnaires
+                    .get_mut("smoke-questionnaire")
+                    .expect("smoke questionnaire draft");
+                let action = match self.smoke_stage {
+                    27 => questionnaire::Action::Edit(1),
+                    28 => questionnaire::Action::Edit(0),
+                    29 => questionnaire::Action::Toggle,
+                    30 => {
+                        draft.update(questionnaire::Message {
+                            question: 0,
+                            action: questionnaire::Action::Toggle,
+                        });
+                        draft.update(questionnaire::Message {
+                            question: 0,
+                            action: questionnaire::Action::Replace(false),
+                        });
+                        draft.update(questionnaire::Message {
+                            question: 0,
+                            action: questionnaire::Action::Next,
+                        });
+                        questionnaire::Action::Editor(text_editor::Action::Edit(
+                            text_editor::Edit::Paste(Arc::new(
+                                "Long answer with Unicode λ界 and preserved newlines.\n"
+                                    .repeat(700),
+                            )),
+                        ))
+                    }
+                    _ => unreachable!(),
+                };
+                let task = draft
+                    .update(questionnaire::Message {
+                        question: draft.current,
+                        action,
+                    })
+                    .task
+                    .map(|message| Message::Questionnaire("smoke-questionnaire".into(), message));
+                return Task::batch([task, delayed_capture()]);
+            }
+            31 => {
+                let request = serde_json::json!({"questions":[{"id":"many","question":"A long question that wraps rather than overflowing the available space. Choose an option, scroll through the complete list, or provide a custom answer.","kind":"select","options":(1..=20).map(|i| format!("Option {i}: preserve this complete descriptive label even in a narrow window with settings open.")).collect::<Vec<_>>()}]});
+                let id = "smoke-questionnaire".to_owned();
+                self.questionnaires.insert(
+                    id.clone(),
+                    questionnaire::Draft::new(pico_core::questionnaire::Pending {
+                        id: id.clone(),
+                        request: Arc::new(
+                            pico_core::questionnaire::Request::parse(&request.to_string()).unwrap(),
+                        ),
+                    }),
+                );
+                self.active_questionnaire = Some(id);
+                self.settings_open = true;
+                self.settings_tab = SettingsTab::General;
+                if let Some(window) = self.window_id {
+                    return Task::batch([
+                        window::resize(window, iced::Size::new(860., 560.)),
+                        delayed_capture(),
+                    ]);
+                }
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -3910,6 +4107,108 @@ mod tests {
             ))),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn questionnaires_preserve_session_drafts_queue_and_modal_priority() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        type_message(&mut app, "Unsent composer draft").await;
+        let owner = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        let service = h.get(&owner).unwrap().questionnaires.clone().unwrap();
+        let mut tasks = vec![];
+        let cancel = CancellationToken::new();
+        for id in ["first-ask", "second-ask"] {
+            let service = service.clone();
+            let cancel = cancel.clone();
+            tasks.push(tokio::spawn(async move {
+                service
+                    .ask(
+                        id,
+                        r#"{"questions":[{"id":"q","question":"Required answer?","kind":"text"}]}"#,
+                        &cancel,
+                    )
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !app.questionnaires.contains_key(id) {
+                    dispatch(&mut app, Message::Changed).await;
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(app.active_questionnaire.as_deref(), Some("first-ask"));
+        assert!(
+            app.sidebar_rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::Heading("NEEDS ATTENTION", 1)))
+        );
+        let q = |id: &str, action| {
+            Message::Questionnaire(
+                id.into(),
+                questionnaire::Message {
+                    question: 0,
+                    action,
+                },
+            )
+        };
+        dispatch(
+            &mut app,
+            q(
+                "first-ask",
+                questionnaire::Action::Editor(text_editor::Action::Edit(text_editor::Edit::Paste(
+                    Arc::new("Answer draft λ".into()),
+                ))),
+            ),
+        )
+        .await;
+        dispatch(&mut app, q("first-ask", questionnaire::Action::Toggle)).await;
+        stored_session(&mut app, path).await;
+        assert!(app.active_questionnaire.is_none());
+        type_message(&mut app, "Another session's draft").await;
+        dispatch(&mut app, Message::Select(owner.clone())).await;
+        assert_eq!(app.editor.text(), "Unsent composer draft");
+        assert!(app.questionnaires["first-ask"].collapsed);
+        dispatch(&mut app, q("first-ask", questionnaire::Action::Toggle)).await;
+        // The ordinary composer must neither mutate nor submit while an ask is open.
+        type_message(&mut app, "Should not be pasted").await;
+        dispatch(&mut app, Message::Send).await;
+        assert_eq!(app.editor.text(), "Unsent composer draft");
+        app.modal = Some(Modal::Rename(owner.clone()));
+        dispatch(&mut app, q("first-ask", questionnaire::Action::Next)).await;
+        assert_eq!(service.pending().len(), 2);
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            })),
+        )
+        .await;
+        assert!(app.modal.is_none());
+        assert_eq!(service.pending().len(), 2);
+        dispatch(&mut app, q("first-ask", questionnaire::Action::Next)).await;
+        assert_eq!(app.active_questionnaire.as_deref(), Some("second-ask"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&tasks.remove(0).await.unwrap().unwrap())
+                .unwrap(),
+            serde_json::json!({"answers":[{"id":"q","answer":"Answer draft λ"}]})
+        );
+        cancel.cancel();
+        assert!(tasks.remove(0).await.unwrap().is_err());
+        dispatch(&mut app, Message::Changed).await;
+        assert!(app.active_questionnaire.is_none());
+        assert!(app.questionnaires.is_empty());
+        assert_eq!(app.editor.text(), "Unsent composer draft");
     }
 
     #[tokio::test]

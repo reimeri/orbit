@@ -9,6 +9,7 @@ pub mod history;
 pub mod models;
 mod output;
 pub mod provider;
+pub mod questionnaire;
 pub mod shell;
 pub mod store;
 

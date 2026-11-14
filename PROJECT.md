@@ -72,9 +72,11 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - Agents panel, live child transcript inspection, scoped Stop and family deletion
     - Review (`gpt-6.1-sol`, medium) and Explore (`gpt-6-luna`, high)
     - Both profiles are read-only by instruction, not filesystem sandboxing
-  - Questionaires
-    - ask_user tool
-    - Should be very similar to how questionaires work in V1
+  - [x] Questionnaires — see [tool contract and acceptance checks](docs/questionnaires.md)
+    - Built-in `tools.ask_user` for main conversations, with ordinary code-mode yielding
+    - V1-style select/text panel, editable options, custom answers and keyboard navigation
+    - Session-local drafts, Collapse/Resume, scoped cancellation; no clarification conversation
+    - Lossless large answers without V1's answer byte/line limits
   - Image viewing
     - view_image tool for the agent.
   - Implement rest of the code mode helpers

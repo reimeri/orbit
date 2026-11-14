@@ -239,3 +239,14 @@ continuation and wake-up/steering races without OpenAI credentials. Run
 regression `child_navigation_preserves_parent_draft_scroll_and_disables_child_edits`
 covers navigation, family deletion, disabled child controls and narrow layouts.
 See [subagents](subagents.md) for user-facing behavior and live acceptance checks.
+
+## Questionnaires
+
+`pico-core/src/questionnaire.rs` validates requests and owns the per-conversation,
+event-driven input queue. Code cells supply their cancellation tokens and persist
+nested tool events through the normal observer. `pico-app/src/questionnaire.rs`
+owns UI drafts, focus-aware keyboard routing, Unicode word deletion and the panel;
+no iced types enter the core. Pending state is in-memory only, and restart explicitly
+cancels unfinished asks. Run `cargo test --locked --workspace questionnaire` for
+focused coverage. Window smoke stages exercise questionnaire states and constrained
+layouts. See [questionnaires](questionnaires.md) for acceptance checks.

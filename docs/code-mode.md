@@ -1,6 +1,6 @@
 # Code-mode contract
 
-Only `exec` and `wait` are sent as top-level Responses tools. Shell and subagent tools are
+Only `exec` and `wait` are sent as top-level Responses tools. Shell, questionnaire and subagent tools are
 exposed on the JavaScript `tools` object, not duplicated in the top-level catalog.
 
 `exec` is an OpenAI **custom/freeform** tool using Codex's Lark source grammar.
@@ -109,3 +109,12 @@ contract, profile defaults, final-only results and completion/Stop lifecycle.
 A successful spawn creates an assignment independent of the JavaScript cell: it
 continues after the cell completes or is terminated. Use the returned persistent
 `run_id` with `wait_subagent`; it is not a process ID or a code-cell ID.
+
+## Questionnaires
+
+Main conversations expose `tools.ask_user` for required select/text questions.
+The promise waits for user input with normal code-mode yielding; use `wait` to
+retrieve its cell result. Unawaited calls end with the cell. Children do not have
+this capability. Answers are ordered JSON strings; large results use complete-file
+references. See [questionnaires](questionnaires.md) for the schema, limits, UI,
+cancellation/restart behavior and acceptance checklist.

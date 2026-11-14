@@ -82,6 +82,7 @@ struct Stored {
     bytes: usize,
 }
 pub struct CodeMode {
+    questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     delegation: Option<Delegation>,
     shell: Arc<Shell>,
     cells: Mutex<HashMap<String, Arc<Cell>>>,
@@ -92,14 +93,16 @@ pub struct CodeMode {
 }
 impl CodeMode {
     pub fn new(shell: Arc<Shell>, observer: Observer) -> Self {
-        Self::with_delegation(shell, observer, None)
+        Self::with_tools(shell, observer, None, None)
     }
-    pub fn with_delegation(
+    pub fn with_tools(
         shell: Arc<Shell>,
         observer: Observer,
         delegation: Option<Delegation>,
+        questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     ) -> Self {
         Self {
+            questionnaires,
             delegation,
             shell,
             cells: Mutex::new(HashMap::new()),
@@ -128,7 +131,11 @@ impl CodeMode {
         });
         cells.insert(cell_id.clone(), cell.clone());
         drop(cells);
-        let shell = (self.shell.clone(), self.delegation.clone());
+        let shell = (
+            self.shell.clone(),
+            self.delegation.clone(),
+            self.questionnaires.clone(),
+        );
         let stored = self.stored.clone();
         let observer = self.observer.clone();
         let parent = parent.to_owned();
@@ -257,7 +264,11 @@ fn parse(source: &str) -> Result<(Pragma, String)> {
 }
 fn run_cell(
     code: String,
-    (shell, delegation): (Arc<Shell>, Option<Delegation>),
+    (shell, delegation, questionnaires): (
+        Arc<Shell>,
+        Option<Delegation>,
+        Option<Arc<crate::questionnaire::Questionnaires>>,
+    ),
     stored: Arc<Mutex<Stored>>,
     observer: Observer,
     parent: String,
@@ -350,6 +361,7 @@ fn run_cell(
             )
             .map_err(js_error)?;
         ctx.globals().set("__delegation", delegation.is_some()).map_err(js_error)?;
+        ctx.globals().set("__questionnaires", questionnaires.is_some()).map_err(js_error)?;
         let cancellation = cell.cancel.clone();
         ctx.globals()
             .set(
@@ -357,7 +369,7 @@ fn run_cell(
                 Function::new(
                     ctx.clone(),
                     move |name: String, args: String| -> rquickjs::Result<String> {
-                        if !matches!(name.as_str(), "exec_command" | "write_stdin") && !(delegation.is_some() && matches!(name.as_str(), "spawn_subagent" | "wait_subagent" | "list_subagents")) {
+                        if !matches!(name.as_str(), "exec_command" | "write_stdin") && !(questionnaires.is_some() && name == "ask_user") && !(delegation.is_some() && matches!(name.as_str(), "spawn_subagent" | "wait_subagent" | "list_subagents")) {
                             return Err(rquickjs::Error::new_from_js_message(
                                 "name",
                                 "tool",
@@ -377,6 +389,7 @@ fn run_cell(
                         let request = id.clone();
                         let shell = shell.clone();
                         let delegation = delegation.clone();
+                        let questionnaires = questionnaires.clone();
                         let tx = tx.clone();
                         let observer = observer.clone();
                         let cancellation = cancellation.clone();
@@ -398,10 +411,12 @@ fn run_cell(
                                     "write_stdin" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|a| shell.write(a, &cancellation)),
+                                    "ask_user" => shell.runtime().block_on(questionnaires.as_ref().expect("validated questionnaire tool").ask(&request, &args, &cancellation)),
                                     _ => delegation.as_ref().expect("validated delegation tool")(&name, &args, &request, &cancellation),
                                 });
                                 let failed = result.is_err();
                                 let output = result.unwrap_or_else(|e| format!("{e:#}"));
+                                let name_for_output = name.clone();
                                 let saved = observer(Event::Tool(ToolEvent {
                                     id: request.clone(),
                                     parent,
@@ -410,6 +425,7 @@ fn run_cell(
                                     output: Some(output.clone()),
                                 }));
                                 let (output, failed) = match saved { Ok(()) => (output,failed), Err(e) => (format!("{output}\nCould not save tool result: {e:#}. Side effects may have occurred; do not blindly repeat the command."),true) };
+                                let output = if name_for_output == "ask_user" { crate::output::preserve_text(&output, 40_000) } else { output };
                                 let _ = tx.send((request, output, failed));
                             })
                             .map_err(|e| {
@@ -492,6 +508,101 @@ mod tests {
             Arc::new(Shell::new(std::env::temp_dir())),
             Arc::new(|_| Ok(())),
         )
+    }
+    #[test]
+    fn questionnaires_yield_preserve_full_results_and_follow_cell_lifetime() {
+        let (changed, changes) = std::sync::mpsc::channel();
+        let q = Arc::new(crate::questionnaire::Questionnaires::new(move || {
+            let _ = changed.send(());
+        }));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observer = events.clone();
+        let mode = CodeMode::with_tools(
+            Arc::new(Shell::new(std::env::temp_dir())),
+            Arc::new(move |event| {
+                observer.lock().unwrap().push(event);
+                Ok(())
+            }),
+            None,
+            Some(q.clone()),
+        );
+        let cancel = CancellationToken::new();
+        let source = r#"// @exec: {"yield_time_ms": 1}
+text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text"}]}));"#;
+        let running = mode.exec(source, "parent", &cancel).unwrap();
+        assert!(
+            running.starts_with("Script running with cell ID "),
+            "{running}"
+        );
+        changes.recv_timeout(Duration::from_secs(2)).unwrap();
+        let request = q.pending().pop().unwrap();
+        let text = "Important λ界\n".repeat(20_000);
+        q.submit(&request.id, vec![text.clone()]).unwrap();
+        let cell_id = running
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Script running with cell ID ")
+            .unwrap();
+        let result = mode
+            .wait(&json!({"cell_id":cell_id}).to_string(), &cancel)
+            .unwrap();
+        assert!(result.starts_with("Script completed"), "{result}");
+        let preserved: Value =
+            serde_json::from_slice(&crate::test_support::saved_output(&result)).unwrap();
+        assert_eq!(
+            preserved,
+            json!({"answers":[{"id":"target","answer":text}]})
+        );
+        assert!(!q.has_pending());
+        let persisted = events.lock().unwrap();
+        assert!(persisted.iter().any(|e| matches!(e, Event::Tool(t) if t.name == "ask_user" && t.output.as_ref().is_some_and(|v| serde_json::from_str::<Value>(v).unwrap() == preserved))));
+        drop(persisted);
+        assert!(
+            mode.wait(&json!({"cell_id":cell_id}).to_string(), &cancel)
+                .is_err()
+        );
+
+        // A detached promise cannot keep a completed cell's questionnaire alive.
+        let result = mode
+            .exec(
+                "tools.ask_user({questions:[{id:'q',question:'?',kind:'text'}]});",
+                "detached",
+                &cancel,
+            )
+            .unwrap();
+        assert!(result.starts_with("Script completed"));
+        assert!(!q.has_pending());
+        let running = mode.exec(source, "cancelled", &cancel).unwrap();
+        let cell_id = running
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Script running with cell ID ")
+            .unwrap();
+        mode.wait(
+            &json!({"cell_id":cell_id,"terminate":true}).to_string(),
+            &cancel,
+        )
+        .unwrap();
+        assert!(!q.has_pending());
+
+        // Capability omission is enforced in JS and the native dispatcher.
+        let child = self::mode();
+        for source in [
+            "text(ALL_TOOLS.some(t=>t.name==='ask_user'));",
+            "text(typeof tools.ask_user);",
+        ] {
+            let result = child.exec(source, "child", &cancel).unwrap();
+            assert!(
+                result.ends_with("false") || result.ends_with("undefined"),
+                "{result}"
+            );
+        }
+        let result = child
+            .exec("__call('ask_user','{}');", "child", &cancel)
+            .unwrap();
+        assert!(result.contains("Unknown nested tool"), "{result}");
     }
     #[test]
     fn cancelled_cell_remains_active_until_native_callback_exits() {

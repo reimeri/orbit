@@ -5,6 +5,7 @@ mod ellipsized_text;
 mod git;
 mod io_worker;
 mod pointer_input;
+mod questionnaire;
 mod search_icon;
 mod tool_output;
 mod ui;

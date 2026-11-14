@@ -15,8 +15,9 @@
     globalThis.__tick = () => { const now = Date.now(); const due = [...timers].filter(([, timer]) => now >= timer.at); for (const [id, timer] of due) if (timers.delete(id)) timer.callback(); };
     globalThis.__deliver = (id, output, failed) => { const p = pending.get(id); if (!p) return; pending.delete(id); failed ? p.reject(new Error(output)) : p.resolve(output); };
     const names = ['exec_command','write_stdin'];
+    if (__questionnaires) names.push('ask_user');
     if (__delegation) names.push('spawn_subagent','wait_subagent','list_subagents');
     globalThis.tools = Object.freeze(Object.fromEntries(names.map(name => [name, args => new Promise((resolve,reject) => { const id = __call(name, JSON.stringify(args ?? {})); pending.set(id, {resolve,reject}); })])));
-    const descriptions = {exec_command:'Run a shell command; returns output and exit code or session ID.',write_stdin:'Send PTY input or poll an existing command session.',spawn_subagent:'Start or resume an asynchronous read-only child. Returns session_id and run_id.',wait_subagent:'Wait for any requested run to finish. Returns only final response text and status, never intermediate messages.',list_subagents:'List this parent conversation’s children and their latest assignments.'};
+    const descriptions = {ask_user:'Ask required select/text questions. Await the ordered answers; custom answers are always available. See main instructions for schema and limits.',exec_command:'Run a shell command; returns output and exit code or session ID.',write_stdin:'Send PTY input or poll an existing command session.',spawn_subagent:'Start or resume an asynchronous read-only child. Returns session_id and run_id.',wait_subagent:'Wait for any requested run to finish. Returns only final response text and status, never intermediate messages.',list_subagents:'List this parent conversation’s children and their latest assignments.'};
     globalThis.ALL_TOOLS = Object.freeze(names.map(name => ({name, description:descriptions[name]})));
 })();
