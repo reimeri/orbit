@@ -1,5 +1,7 @@
-//! Keyed, viewport-sized layout transitions. Animation lives in the widget tree,
-//! so frames do not rebuild application views or install an idle timer.
+//! Identity-preserving, viewport-sized columns with optional row transitions.
+//! Unlike iced's splice-based keyed column, equal-length sliding windows and
+//! reorders move the actual child trees. Unmounted state is dropped immediately.
+//! Animation stays widget-local, without app messages or an idle timer.
 use iced::{
     Element, Event, Length, Rectangle, Size, Vector,
     advanced::{
@@ -10,24 +12,34 @@ use iced::{
     time::{Duration, Instant},
     window,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 const DURATION: Duration = Duration::from_millis(180);
 
+pub fn keyed_column<'a, Key: Clone + Eq + Hash + 'static, Message: 'a>(
+    rows: Vec<(Key, Element<'a, Message>)>,
+) -> Element<'a, Message> {
+    animated_column(
+        rows.into_iter()
+            .map(|(key, row)| (key, false, row))
+            .collect(),
+    )
+}
+
 /// Only rows marked `true` move. Headings and virtualization spacers snap.
-pub fn animated_column<'a, Message: 'a>(
-    rows: Vec<(usize, bool, Element<'a, Message>)>,
+pub fn animated_column<'a, Key: Clone + Eq + Hash + 'static, Message: 'a>(
+    rows: Vec<(Key, bool, Element<'a, Message>)>,
 ) -> Element<'a, Message> {
     let keys = rows
         .iter()
-        .map(|(key, animate, _)| (*key, *animate))
+        .map(|(key, animate, _)| (key.clone(), *animate))
         .collect();
     let children = rows.into_iter().map(|(_, _, row)| row).collect();
-    Element::new(AnimatedColumn { keys, children })
+    Element::new(KeyedColumn { keys, children })
 }
 
-struct AnimatedColumn<'a, Message> {
-    keys: Vec<(usize, bool)>,
+struct KeyedColumn<'a, Key, Message> {
+    keys: Vec<(Key, bool)>,
     children: Vec<Element<'a, Message>>,
 }
 
@@ -48,14 +60,14 @@ impl Motion {
     }
 }
 
-struct State {
+struct State<Key> {
     now: Instant,
-    rows: HashMap<usize, Motion>,
-    keys: Vec<usize>,
+    rows: HashMap<Key, Motion>,
+    keys: Vec<Key>,
     animating: bool,
 }
 
-impl Default for State {
+impl<Key> Default for State<Key> {
     fn default() -> Self {
         Self {
             now: Instant::now(),
@@ -66,8 +78,13 @@ impl Default for State {
     }
 }
 
-impl State {
-    fn layout(&mut self, keys: &[(usize, bool)], node: layout::Node) -> layout::Node {
+impl<Key: Clone + Eq + Hash> State<Key> {
+    fn layout(&mut self, keys: &[(Key, bool)], node: layout::Node) -> layout::Node {
+        if !keys.iter().any(|(_, animate)| *animate) {
+            self.rows.clear();
+            self.animating = false;
+            return node;
+        }
         // Keep only mounted rows: scrolling a large library must not accumulate
         // widget state, nor make a newly appearing row fly in from a stale position.
         let mut previous = std::mem::take(&mut self.rows);
@@ -75,12 +92,12 @@ impl State {
         let children = keys
             .iter()
             .zip(node.children())
-            .map(|(&(key, animate), child)| {
+            .map(|((key, animate), child)| {
                 if !animate {
                     return child.clone();
                 }
                 let target = child.bounds().y;
-                let mut motion = previous.remove(&key).unwrap_or(Motion {
+                let mut motion = previous.remove(key).unwrap_or(Motion {
                     from: target,
                     to: target,
                     started: self.now,
@@ -96,7 +113,7 @@ impl State {
                 }
                 let y = motion.y(self.now);
                 self.animating |= motion.active(self.now);
-                self.rows.insert(key, motion);
+                self.rows.insert(key.clone(), motion);
                 child.clone().translate(Vector::new(0., y - target))
             })
             .collect();
@@ -106,21 +123,23 @@ impl State {
     }
 }
 
-impl<Message> Widget<Message, iced::Theme, iced::Renderer> for AnimatedColumn<'_, Message> {
+impl<Key: Clone + Eq + Hash + 'static, Message> Widget<Message, iced::Theme, iced::Renderer>
+    for KeyedColumn<'_, Key, Message>
+{
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<State>()
+        tree::Tag::of::<State<Key>>()
     }
     fn state(&self) -> tree::State {
-        tree::State::new(State {
-            keys: self.keys.iter().map(|&(key, _)| key).collect(),
-            ..State::default()
+        tree::State::new(State::<Key> {
+            keys: self.keys.iter().map(|(key, _)| key.clone()).collect(),
+            ..State::<Key>::default()
         })
     }
     fn children(&self) -> Vec<Tree> {
         self.children.iter().map(Tree::new).collect()
     }
     fn diff(&self, tree: &mut Tree) {
-        let state = tree.state.downcast_mut::<State>();
+        let state = tree.state.downcast_mut::<State<Key>>();
         state.now = Instant::now();
         let mut previous: HashMap<_, _> = state
             .keys
@@ -131,13 +150,15 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for AnimatedColumn<'_
             .keys
             .iter()
             .zip(&self.children)
-            .map(|(&(key, _), child)| {
-                let mut tree = previous.remove(&key).unwrap_or_else(|| Tree::new(child));
+            .map(|((key, _), child)| {
+                let mut tree = previous.remove(key).unwrap_or_else(|| Tree::new(child));
                 tree.diff(child);
                 tree
             })
             .collect();
-        state.keys.extend(self.keys.iter().map(|&(key, _)| key));
+        state
+            .keys
+            .extend(self.keys.iter().map(|(key, _)| key.clone()));
     }
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fill, Length::Shrink)
@@ -160,7 +181,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for AnimatedColumn<'_
             &mut self.children,
             &mut tree.children,
         );
-        tree.state.downcast_mut::<State>().layout(&self.keys, node)
+        tree.state
+            .downcast_mut::<State<Key>>()
+            .layout(&self.keys, node)
     }
     fn operate(
         &mut self,
@@ -194,7 +217,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for AnimatedColumn<'_
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        let state = tree.state.downcast_mut::<State>();
+        let state = tree.state.downcast_mut::<State<Key>>();
         if let Event::Window(window::Event::RedrawRequested(now)) = event {
             if state.animating {
                 // iced may repeat this event after relayout. Advance only once
@@ -307,7 +330,7 @@ mod tests {
         )
     }
 
-    fn positions(state: &mut State, rows: &[(usize, bool, f32)]) -> Vec<f32> {
+    fn positions(state: &mut State<usize>, rows: &[(usize, bool, f32)]) -> Vec<f32> {
         let (keys, node) = targets(rows);
         state
             .layout(&keys, node)
@@ -430,13 +453,13 @@ mod tests {
         let viewport = Rectangle::with_size(Size::new(200., 400.));
         let mut content = buttons(&[(1, 80.), (2, 80.), (3, 40.)]);
         let mut tree = Tree::new(&content);
-        let start = tree.state.downcast_ref::<State>().now;
+        let start = tree.state.downcast_ref::<State<usize>>().now;
         content
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits);
         content = buttons(&[(3, 40.)]);
         content.as_widget().diff(&mut tree);
-        tree.state.downcast_mut::<State>().now = start;
+        tree.state.downcast_mut::<State<usize>>().now = start;
         let mut node = content
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits);
@@ -539,17 +562,17 @@ mod tests {
         let viewport = Rectangle::with_size(Size::new(200., 400.));
         let mut content = buttons(&[(1, 40.), (2, 40.)]);
         let mut tree = Tree::new(&content);
-        let start = tree.state.downcast_ref::<State>().now;
+        let start = tree.state.downcast_ref::<State<usize>>().now;
         content
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits);
         content = buttons(&[(2, 40.), (1, 40.)]);
         content.as_widget().diff(&mut tree);
-        tree.state.downcast_mut::<State>().now = start;
+        tree.state.downcast_mut::<State<usize>>().now = start;
         content
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits);
-        tree.state.downcast_mut::<State>().now = start + Duration::from_millis(90);
+        tree.state.downcast_mut::<State<usize>>().now = start + Duration::from_millis(90);
         let node = content
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits);

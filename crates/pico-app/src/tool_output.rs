@@ -5,8 +5,8 @@ use crate::{
     ui::Message,
 };
 use iced::{
-    Element, Fill,
-    widget::{column, scrollable, sensor, space},
+    Element,
+    widget::{scrollable, sensor, space},
 };
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
@@ -18,6 +18,13 @@ pub enum Event {
     Resize(f32),
     Scroll(f32),
 }
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Row {
+    Top,
+    Text(usize),
+    Bottom,
+}
+
 pub struct Output {
     input: String,
     output: String,
@@ -112,26 +119,37 @@ impl Output {
         entry: usize,
     ) -> Element<'_, Message> {
         let visible = self.visible();
-        let mut rows = column![space().height(visible.start as f32 * LINE_HEIGHT)]
-            .spacing(0)
-            .width(Fill);
+        let mut rows: Vec<(Row, Element<'_, Message>)> = vec![(
+            Row::Top,
+            space().height(visible.start as f32 * LINE_HEIGHT).into(),
+        )];
         for range in &self.rows[visible.clone()] {
-            rows = rows.push(chat_selection::tool_row(
-                &self.display[range.clone()],
-                selection.clone(),
-                Position {
-                    entry,
-                    block: 0,
-                    byte: range.start,
-                },
-                LINE_HEIGHT,
+            // Byte starts survive scrolling. Changed content/wrap bounds are
+            // compared by the text widget, not hidden behind a generation key.
+            rows.push((
+                Row::Text(range.start),
+                chat_selection::tool_row(
+                    &self.display[range.clone()],
+                    selection.clone(),
+                    Position {
+                        entry,
+                        block: 0,
+                        byte: range.start,
+                    },
+                    LINE_HEIGHT,
+                ),
             ));
         }
-        rows = rows.push(space().height((self.rows.len() - visible.end) as f32 * LINE_HEIGHT));
+        rows.push((
+            Row::Bottom,
+            space()
+                .height((self.rows.len() - visible.end) as f32 * LINE_HEIGHT)
+                .into(),
+        ));
         let scroll_id = id.to_owned();
         let resize_id = id.to_owned();
         sensor(
-            scrollable(rows)
+            scrollable(crate::keyed_column::keyed_column(rows))
                 .id(format!("tool-output-{id}"))
                 .height((self.rows.len() as f32 * LINE_HEIGHT).min(MAX_HEIGHT))
                 .on_scroll(move |v| {
@@ -145,6 +163,90 @@ impl Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolling_reuses_overlapping_paragraphs_and_reflows_changed_rows() {
+        use crate::chat_selection::tests::shaped_paragraphs;
+        use iced::{Font, Pixels, Size, advanced::widget::Operation};
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        #[derive(Default)]
+        struct Texts(Vec<String>);
+        impl Operation for Texts {
+            fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+                visit(self);
+            }
+            fn text(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                _: iced::Rectangle,
+                text: &str,
+            ) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let source: String = (0..200)
+            .map(|i| format!("row {i:03} with distinct Unicode λ界e\u{301} and a long suffix\n"))
+            .collect();
+        let mut output = Output::new("cmd", &source);
+        output.update(Event::Resize(700.));
+        let selection = chat_selection::Shared::default();
+        let mut renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.)));
+        let mut build = |output: &Output, cache, width| {
+            let before = shaped_paragraphs();
+            let mut ui = UserInterface::build(
+                output.view("tool", selection.clone(), 0),
+                Size::new(width, MAX_HEIGHT),
+                cache,
+                &mut renderer,
+            );
+            let mut texts = Texts::default();
+            ui.operate(&renderer, &mut texts);
+            let expected: Vec<_> = output.rows[output.visible()]
+                .iter()
+                .map(|range| &output.display[range.clone()])
+                .collect();
+            assert_eq!(
+                texts.0, expected,
+                "retained widget state must show current source rows"
+            );
+            (ui.into_cache(), shaped_paragraphs() - before)
+        };
+        let (mut cache, count) = build(&output, Cache::new(), 700.);
+        assert_eq!(count, 22);
+        let (next, count) = build(&output, cache, 700.);
+        cache = next;
+        assert_eq!(count, 0);
+        // Same-sized windows are the case iced's keyed column does not reconcile.
+        // Reverse movement must recreate only the row that was actually evicted.
+        for row in [1, 2, 3, 2, 1, 0] {
+            output.update(Event::Scroll(row as f32 * LINE_HEIGHT));
+            let (next, count) = build(&output, cache, 700.);
+            cache = next;
+            assert_eq!(count, 1, "only the entering row should be shaped");
+        }
+        output.set("cmd", &source.replacen("row 000", "ROW 000", 1));
+        let (next, count) = build(&output, cache, 700.);
+        cache = next;
+        assert_eq!(count, 1, "a retained row must invalidate changed spans");
+        output.update(Event::Resize(180.));
+        let (next, count) = build(&output, cache, 180.);
+        assert!(
+            (1..=22).contains(&count),
+            "wrapping must update visible text without shaping the whole output"
+        );
+        cache = next;
+        output.update(Event::Scroll(1000.));
+        let (next, count) = build(&output, cache, 180.);
+        cache = next;
+        assert!(count <= 22);
+        output.set("cmd", "shortened 界");
+        let (_, count) = build(&output, cache, 180.);
+        assert!(count <= output.visible().len());
+        assert_eq!(output.offset, 0., "shorter output clamps the visible slice");
+    }
+
     #[test]
     fn huge_single_line_and_unicode_keep_all_text_but_bound_layout_work() {
         let source = format!("{}\n\nlast λ界e\u{301}", "x".repeat(1_000_000));

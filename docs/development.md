@@ -194,10 +194,16 @@ fixed-row virtual viewport, including long single-line output and Unicode; only
 about 22 rows are passed to text shaping. Collapsing a tool or leaving its session
 releases its detail cache. The complete output remains available through Copy.
 
+Transcript and tool-row widget state now follows stable content identity, not
+viewport slots or measurement epochs. The shared keyed column remaps actual child
+trees for same-sized sliding windows and reorders; it retains only mounted rows.
+See [performance](performance.md#text-layout-cache-reuse) for measured text-layout
+costs and the cache-reuse regressions.
+
 Chat selection is stored as logical entry/block/UTF-8 positions outside the
 virtualized widget tree. A custom Markdown viewer preserves iced's layout and
-styles while selectable text uses the renderer's shaped paragraphs for hits and
-highlights. Ctrl+C reconstructs only the selected entries, including unmounted
+styles while selectable text shares a single renderer paragraph for painting,
+hits, links and highlights. Ctrl+C reconstructs only the selected entries, including unmounted
 tool rows; it does not depend on the visible widget slice. Selection is invalidated
 when selected entries change or the session/content visibility changes. Pointer
 motion and scroll-induced redraws update selection locally, without idle app

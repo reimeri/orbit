@@ -31,8 +31,15 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   Epoch-qualified measurements reject stale events after a switch/reflow.
 - Markdown is cached only around the viewport; visible streaming Markdown uses
   iced's incremental `Content::push_str`. Collapsed reasoning is not parsed.
-  Tool output retains its fixed-row shaping window. Copy messages carry entry IDs,
-  not full message strings embedded in every widget tree.
+  Tool output retains its fixed-row shaping window. Transcript entries and tool
+  rows use true key-to-widget-tree reconciliation: overlapping rows keep their
+  shaped paragraphs even when a same-sized viewport advances. Transcript identity
+  is session/entry ID, separate from measurement epochs; tool rows use source byte
+  starts and still invalidate changed text/wrapping. Unmounted trees are dropped.
+  The sidebar shares this implementation with optional widget-local animation.
+  Selectable Markdown, notices and tool rows use one paragraph for drawing,
+  selection and link hits, including inline-code backgrounds and decorations.
+  Copy messages carry entry IDs, not full message strings embedded in every tree.
 - Fallback compaction persists its plaintext summary and transcript checkpoint;
   later fallbacks summarize only subsequent records. It builds bounded chunks and
   does not copy the original provider input into each summary request. Native
@@ -111,6 +118,43 @@ Storage timings are particularly variable: an earlier run measured approximately
 38–50 ms for incremental saves. `fsync` latency, filesystem/storage activity and
 cache state remain relevant. Do not treat the table as a cross-machine guarantee
 or infer application frame rates from these microbenchmarks.
+
+## Text-layout cache reuse
+
+A local isolated measurement used a real ~33 KiB tool result, a 700px-wide tool
+viewport and 22 mounted rows. Each step advanced the viewport by one row, rebuilt
+iced's UI and retained its widget cache (100 updates, the first stationary).
+
+| CPU-side layout per update | Before | After |
+|---|---:|---:|
+| Debug: one-row advance | 88.06 ms | 2.15 ms |
+| Release: one-row advance | 7.84 ms | 0.19 ms |
+| Release: unchanged visible rows | 0.008 ms | 0.008 ms |
+
+Previously, positional widget reuse changed the text in almost every slot;
+painting and selection each shaped an independent paragraph. The measured phase
+constructed 2,154 selection paragraphs plus the independent painting paragraphs.
+Afterwards it constructed **99 total paragraphs**, one per newly entering row.
+The same identity fix applies to sliding transcript windows. Supplying keys to
+iced 0.14's `keyed_column` alone is insufficient: its splice heuristic still
+diffs equal-length lists positionally. `keyed_column.rs` remaps the actual trees.
+
+These are local microbenchmarks, not end-to-end frame times or an application CPU
+usage guarantee. They use the software renderer's shared CPU text-layout path,
+simulated offsets, no draw/present, and separately instrumented test builds.
+First-use font initialization also affects expansion; the change does not remove
+that cost. Normal full-output normalization/reflow remains linear in text size.
+
+Deterministic regressions count new paragraphs for forward/reverse tool and chat
+scrolling, changed text, width reflow, measurement epochs and session/entry identity.
+They also check eviction rather than an unbounded offscreen paragraph cache.
+Software and opt-in GPU pixel comparisons against iced Rich cover span styles,
+Unicode/bidi, wrapping, fractional scaling and scroll clipping. Run the GPU
+comparison explicitly on a machine with a GPU adapter:
+
+```sh
+nix develop --command cargo test --locked -p pico-evo shared_paragraph_matches_rich_text_pixels_gpu -- --ignored
+```
 
 ## Verification and remaining measurement limits
 

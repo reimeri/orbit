@@ -36,6 +36,15 @@ use std::{
 use crate::questionnaire;
 use unicode_segmentation::UnicodeSegmentation;
 
+// Measurement epochs reject stale sensor messages; they are not widget identity.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum TranscriptKey {
+    Top,
+    Empty,
+    Entry { session: String, entry: String },
+    Bottom,
+}
+
 #[derive(Clone)]
 enum SidebarRow {
     Heading(&'static str, usize),
@@ -2452,7 +2461,7 @@ impl App {
                 .into(),
             ));
         }
-        let rows = crate::animated_column::animated_column(rows);
+        let rows = crate::keyed_column::animated_column(rows);
         list = list.push(
             scrollable(rows)
                 .id("sessions")
@@ -2484,13 +2493,13 @@ impl App {
         };
         let epoch = self.view_epoch;
         let range = self.transcript.visible();
-        let mut children: Vec<((u64, usize), Element<'_, Message>)> = vec![(
-            (epoch, usize::MAX),
+        let mut children: Vec<(TranscriptKey, Element<'_, Message>)> = vec![(
+            TranscriptKey::Top,
             space().height(self.transcript.prefix(range.start)).into(),
         )];
         if session.entries.is_empty() {
             children.push((
-                (epoch, 0),
+                TranscriptKey::Empty,
                 container(
                     column![
                         text("What are we building?").size(28),
@@ -2511,15 +2520,21 @@ impl App {
                 .key((epoch, index))
                 .on_show(move |size| Message::RowSize(epoch, index, size.height))
                 .on_resize(move |size| Message::RowSize(epoch, index, size.height));
-            children.push(((epoch, index), column![row, space().height(18.)].into()));
+            children.push((
+                TranscriptKey::Entry {
+                    session: session.id.clone(),
+                    entry: entry.id.clone(),
+                },
+                column![row, space().height(18.)].into(),
+            ));
         }
         children.push((
-            (epoch, usize::MAX - 1),
+            TranscriptKey::Bottom,
             space()
                 .height((self.transcript.total() - self.transcript.prefix(range.end)).max(0.))
                 .into(),
         ));
-        let transcript = widget::keyed_column(children);
+        let transcript = crate::keyed_column::keyed_column(children);
         let transcript = container(transcript)
             .max_width(self.catalog.settings.chat_width)
             .width(Fill)
@@ -6298,6 +6313,96 @@ Then implement the fix.";
         assert!(app.chat_selection.borrow().anchor.is_none());
         assert!(!app.chat_selection.borrow().dragging);
     }
+    #[tokio::test]
+    async fn transcript_reuses_layout_by_session_and_entry_not_slot_or_epoch() {
+        use crate::chat_selection::tests::shaped_paragraphs;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+        for i in 0..64 {
+            session.entries.push(Entry::new(
+                EntryKind::Assistant,
+                format!("Message {i:03}: asymmetric café text."),
+            ));
+        }
+        app.selected = Some(session.id.clone());
+        app.current_session = Some(session);
+        app.rebuild_transcript();
+        app.transcript.viewport = 600.;
+        app.transcript.offset = 1200.;
+        app.prepare_visible();
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let mut build = |app: &App, cache, width| {
+            let before = shaped_paragraphs();
+            let ui = UserInterface::build(
+                app.view(),
+                iced::Size::new(width, 900.),
+                cache,
+                &mut renderer,
+            );
+            (ui.into_cache(), shaped_paragraphs() - before)
+        };
+        let (mut cache, count) = build(&app, Cache::new(), 1280.);
+        assert_eq!(count, app.transcript.visible().len());
+        let visible = app.transcript.visible();
+        app.transcript.offset += 120.;
+        app.prepare_visible();
+        assert_eq!(app.transcript.visible(), visible.start + 1..visible.end + 1);
+        let (next, count) = build(&app, cache, 1280.);
+        cache = next;
+        assert_eq!(
+            count, 1,
+            "overlapping Markdown entries must keep their paragraphs"
+        );
+        app.transcript.offset -= 120.;
+        app.prepare_visible();
+        let (next, count) = build(&app, cache, 1280.);
+        cache = next;
+        assert_eq!(
+            count, 1,
+            "unmounted entries are evicted, not kept in a growing cache"
+        );
+        app.view_epoch += 1;
+        let (next, count) = build(&app, cache, 1280.);
+        cache = next;
+        assert_eq!(
+            count, 0,
+            "measurement identity must not destroy text caches"
+        );
+        let (next, count) = build(&app, cache, 900.);
+        cache = next;
+        assert_eq!(count, 0, "width changes resize existing paragraphs");
+        // Keep the same session/slot but replace an entry with identical text and
+        // a new identity. It must not inherit the old entry's interaction state.
+        let index = app.transcript.order[app.transcript.visible().start];
+        let session = app.current_session.as_mut().unwrap();
+        session.entries = session
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                if i == index {
+                    Entry::new(entry.kind.clone(), entry.text.clone())
+                } else {
+                    entry.clone()
+                }
+            })
+            .collect();
+        app.prepare_visible();
+        let (next, count) = build(&app, cache, 900.);
+        cache = next;
+        assert_eq!(count, 1);
+        // Even identical entry IDs in a different session must start fresh.
+        let id = pico_core::store::id();
+        app.current_session.as_mut().unwrap().id = id.clone();
+        app.selected = Some(id);
+        let (_, count) = build(&app, cache, 900.);
+        assert_eq!(count, app.transcript.visible().len());
+    }
+
     #[tokio::test]
     async fn long_transcript_only_caches_viewport_and_appends_preserve_heights() {
         let mut app = app();

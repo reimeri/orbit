@@ -2,7 +2,7 @@
 //! Only mounted text is shaped; copy reconstructs the selected entries on demand.
 use crate::ui::Message;
 use iced::{
-    Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size,
+    Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Vector,
     advanced::{
         Clipboard, Layout, Renderer as _, Shell, Widget,
         graphics::text::cosmic_text,
@@ -11,7 +11,7 @@ use iced::{
         widget::{Operation, Tree, tree},
     },
     mouse,
-    widget::{column, container, markdown, rich_text, scrollable},
+    widget::{column, container, markdown, scrollable},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -348,18 +348,8 @@ fn selectable(
     } else {
         text::Wrapping::default()
     };
-    let child = rich_text(spans.clone())
-        .size(size)
-        .font(font)
-        .line_height(line_height)
-        .wrapping(wrapping);
-    let child = if let Some(height) = row_height {
-        child.height(height)
-    } else {
-        child
-    };
     Element::new(Selectable {
-        child: child.into(),
+        height: row_height.map_or(Length::Shrink, Length::Fixed),
         spans,
         content,
         size,
@@ -372,7 +362,7 @@ fn selectable(
 }
 
 struct Selectable {
-    child: Element<'static, Message>,
+    height: Length,
     spans: Arc<[Span<'static, String>]>,
     content: String,
     size: Pixels,
@@ -422,12 +412,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
     fn state(&self) -> tree::State {
         tree::State::new(State::default())
     }
-    fn children(&self) -> Vec<Tree> {
-        vec![Tree::new(&self.child)]
-    }
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(std::slice::from_ref(&self.child));
-    }
     fn operate(
         &mut self,
         _tree: &mut Tree,
@@ -438,39 +422,41 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         operation.text(None, layout.bounds(), &self.content);
     }
     fn size(&self) -> Size<Length> {
-        self.child.as_widget().size()
+        Size::new(Length::Shrink, self.height)
     }
     fn layout(
         &mut self,
         tree: &mut Tree,
-        renderer: &iced::Renderer,
+        _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let node = self
-            .child
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits);
-        let state = tree.state.downcast_mut::<State>();
-        let text = iced::advanced::Text {
-            content: self.spans.as_ref(),
-            bounds: limits.max(),
-            size: self.size,
-            font: self.font,
-            line_height: self.line_height,
-            align_x: text::Alignment::Default,
-            align_y: iced::alignment::Vertical::Top,
-            shaping: text::Shaping::Advanced,
-            wrapping: self.wrapping,
-        };
-        if state.spans != self.spans
-            || state.paragraph.compare(text.with_content(())) == text::Difference::Shape
-        {
-            state.paragraph = Paragraph::with_spans(text);
-            state.spans = self.spans.clone();
-        } else if state.paragraph.bounds() != text.bounds {
-            state.paragraph.resize(text.bounds);
-        }
-        node
+        // Match iced Rich's sizing, but own the only shaped paragraph. Paint,
+        // hits, links and selection must all use the same bounds and glyphs.
+        layout::sized(limits, Length::Shrink, self.height, |limits| {
+            let state = tree.state.downcast_mut::<State>();
+            let text = iced::advanced::Text {
+                content: self.spans.as_ref(),
+                bounds: limits.max(),
+                size: self.size,
+                font: self.font,
+                line_height: self.line_height,
+                align_x: text::Alignment::Default,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: text::Shaping::Advanced,
+                wrapping: self.wrapping,
+            };
+            if state.spans != self.spans
+                || state.paragraph.compare(text.with_content(())) == text::Difference::Shape
+            {
+                state.paragraph = Paragraph::with_spans(text);
+                state.spans = self.spans.clone();
+                #[cfg(test)]
+                tests::SHAPED.with(|count| count.set(count.get() + 1));
+            } else if state.paragraph.bounds() != text.bounds {
+                state.paragraph.resize(text.bounds);
+            }
+            state.paragraph.min_bounds()
+        })
     }
     fn update(
         &mut self,
@@ -550,23 +536,79 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         &self,
         tree: &Tree,
         renderer: &mut iced::Renderer,
-        theme: &iced::Theme,
+        _theme: &iced::Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
         let Some(clip) = layout.bounds().intersection(viewport) else {
             return;
         };
-        // Let Rich paint Markdown's inline code backgrounds, decorations and text.
-        self.child.as_widget().draw(
-            &tree.children[0],
+        let paragraph = &tree.state.downcast_ref::<State>().paragraph;
+        // Preserve Rich's span decorations (not just the glyphs). Default/top
+        // alignment anchors both the paragraph and these regions at layout.position().
+        let translation = layout.position() - Point::ORIGIN;
+        for (index, span) in self.spans.iter().enumerate() {
+            if span.highlight.is_none() && !span.underline && !span.strikethrough {
+                continue;
+            }
+            let regions = paragraph.span_bounds(index);
+            if let Some(highlight) = span.highlight {
+                for bounds in &regions {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: bounds.expand(span.padding) + translation,
+                            border: highlight.border,
+                            ..Default::default()
+                        },
+                        highlight.background,
+                    );
+                }
+            }
+            if span.underline || span.strikethrough {
+                let size = span.size.unwrap_or(self.size);
+                let line_height = span
+                    .line_height
+                    .unwrap_or(self.line_height)
+                    .to_absolute(size);
+                let color = span.color.unwrap_or(style.text_color);
+                let baseline =
+                    translation + Vector::new(0., size.0 + (line_height.0 - size.0) / 2.);
+                for bounds in &regions {
+                    if span.underline {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    bounds.position() + baseline - Vector::new(0., size.0 * 0.08),
+                                    Size::new(bounds.width, 1.),
+                                ),
+                                ..Default::default()
+                            },
+                            color,
+                        );
+                    }
+                    if span.strikethrough {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    bounds.position() + baseline - Vector::new(0., size.0 / 2.),
+                                    Size::new(bounds.width, 1.),
+                                ),
+                                ..Default::default()
+                            },
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+        iced::widget::text::draw(
             renderer,
-            theme,
             style,
-            layout,
-            cursor,
+            layout.bounds(),
+            paragraph,
+            iced::widget::text::Style::default(),
             viewport,
         );
         let range = self.selection.borrow().local_range(
@@ -577,7 +619,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         if range.is_empty() {
             return;
         }
-        let paragraph = &tree.state.downcast_ref::<State>().paragraph;
         let buffer = paragraph.buffer();
         let to_cursor = |byte: usize| {
             let mut offset = 0;
@@ -638,7 +679,15 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    thread_local! {
+        pub(super) static SHAPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(crate) fn shaped_paragraphs() -> usize {
+        SHAPED.with(std::cell::Cell::get)
+    }
+
     use super::*;
     use crate::pointer_input::pointer_input;
     use iced::{
@@ -702,6 +751,157 @@ mod tests {
         ) {
             self.0.push((text.to_owned(), bounds));
         }
+    }
+
+    async fn shared_paragraph_matches_rich_text_pixels(backend: &str) {
+        use iced::advanced::renderer::Headless;
+        use iced::widget::rich_text;
+        let mut renderer = iced::Renderer::new(Font::DEFAULT, Pixels(16.), Some(backend))
+            .await
+            .expect("requested renderer is available");
+        let spans: Arc<[Span<'static, String>]> = Arc::from([
+            Span::new("Bold café ").font(Font {
+                weight: iced::font::Weight::Bold,
+                ..Font::DEFAULT
+            }),
+            Span::new("code 界")
+                .font(Font::MONOSPACE)
+                .color(Color::from_rgb8(240, 200, 80))
+                .background(Color::from_rgb8(60, 40, 20))
+                .border(iced::Border {
+                    color: Color::from_rgb8(180, 100, 50),
+                    width: 1.,
+                    radius: 3.into(),
+                })
+                .padding([2, 4]),
+            Span::new(" struck ").strikethrough(true),
+            Span::new("link")
+                .underline(true)
+                .link("https://example.com".to_owned())
+                .color(Color::from_rgb8(110, 180, 240))
+                .size(21),
+            Span::new("\nHard break e\u{301} 👩‍💻 אבג mixed and a wrapping suffix."),
+        ]);
+        for (width, scroll) in [(420., 0.), (160., 0.), (160., 15.)] {
+            let size = Size::new(width, 240.);
+            for scale in [1., 1.25] {
+                let mut frames = Vec::new();
+                for reference in [true, false] {
+                    let text: Element<'_, Message> = if reference {
+                        rich_text(spans.clone()).size(18).font(Font::DEFAULT).into()
+                    } else {
+                        selectable(
+                            spans.clone(),
+                            Pixels(18.),
+                            Font::DEFAULT,
+                            Shared::default(),
+                            Position {
+                                entry: 0,
+                                block: 0,
+                                byte: 0,
+                            },
+                            None,
+                        )
+                    };
+                    let mut ui = UserInterface::build(
+                        scrollable(container(text).padding(8)).height(100),
+                        size,
+                        user_interface::Cache::new(),
+                        &mut renderer,
+                    );
+                    if scroll > 0. {
+                        send(
+                            &mut ui,
+                            &mut renderer,
+                            Event::Mouse(mouse::Event::WheelScrolled {
+                                delta: mouse::ScrollDelta::Pixels { x: 0., y: -scroll },
+                            }),
+                            Point::new(20., 30.),
+                        );
+                    }
+                    renderer.reset(Rectangle::with_size(size));
+                    ui.draw(
+                        &mut renderer,
+                        &iced::Theme::Dark,
+                        &renderer::Style {
+                            text_color: Color::WHITE,
+                        },
+                        mouse::Cursor::Unavailable,
+                    );
+                    frames.push(renderer.screenshot(
+                        Size::new((width * scale) as u32, (240. * scale) as u32),
+                        scale,
+                        Color::BLACK,
+                    ));
+                }
+                assert!(
+                    frames[0]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|p| p[0] > 200 && p[1] > 200 && p[2] > 200),
+                    "the reference must actually render text"
+                );
+                assert!(
+                    frames[0] == frames[1],
+                    "glyphs, inline-code backgrounds/borders, decorations and wrapping differ at width {width}, scale {scale}, scroll {scroll}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_paragraph_matches_rich_text_pixels_software() {
+        shared_paragraph_matches_rich_text_pixels("tiny-skia").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a GPU adapter"]
+    async fn shared_paragraph_matches_rich_text_pixels_gpu() {
+        shared_paragraph_matches_rich_text_pixels("wgpu").await;
+    }
+
+    #[test]
+    fn right_to_left_hits_follow_the_painted_shrink_width() {
+        let selection = Shared::default();
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            pointer_input(
+                plain(
+                    "אבג",
+                    20.,
+                    None,
+                    selection.clone(),
+                    Position {
+                        entry: 0,
+                        block: 0,
+                        byte: 0,
+                    },
+                ),
+                false,
+                selection.clone(),
+            ),
+            Size::new(300., 80.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = TextBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let bounds = bounds.0[0].1;
+        send(
+            &mut ui,
+            &mut renderer,
+            press(),
+            Point::new(bounds.x + 0.1, bounds.y + 10.),
+        );
+        assert_eq!(selection.borrow().anchor.unwrap().byte, "אבג".len());
+        send(
+            &mut ui,
+            &mut renderer,
+            press(),
+            Point::new(bounds.x + bounds.width - 0.1, bounds.y + 10.),
+        );
+        assert_eq!(selection.borrow().anchor.unwrap().byte, 0);
     }
 
     #[test]
