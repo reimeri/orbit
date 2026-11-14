@@ -48,6 +48,7 @@ const PANEL: Color = Color::from_rgb8(29, 32, 37);
 const BORDER: Color = Color::from_rgb8(48, 53, 61);
 const ACCENT: Color = Color::from_rgb8(137, 175, 210);
 const SIDEBAR_CONTENT_PADDING: f32 = 8.;
+const RIGHT_PANEL_PADDING: f32 = 18.;
 const FAST_OPTION: &str = "Fast mode";
 
 pub struct App {
@@ -2015,12 +2016,7 @@ impl App {
     }
     fn agents_panel(&self) -> Element<'_, Message> {
         let mut content = column![
-            row![
-                text("Agents").size(20).width(Fill),
-                button("×")
-                    .on_press(Message::ToggleAgents)
-                    .style(button::text)
-            ],
+            right_panel_header("Agents", Message::ToggleAgents),
             text(format!("{} running", self.agent_count()))
                 .size(12)
                 .color(MUTED)
@@ -2103,7 +2099,7 @@ impl App {
             );
         }
         container(content)
-            .padding(16)
+            .padding(RIGHT_PANEL_PADDING)
             .width(
                 self.catalog
                     .settings
@@ -2633,13 +2629,7 @@ impl App {
             );
         }
         let header = column![
-            row![
-                text("Settings").size(22),
-                space().width(Fill),
-                button("×")
-                    .on_press(Message::ToggleSettings)
-                    .style(button::text)
-            ],
+            right_panel_header("Settings", Message::ToggleSettings),
             tabs,
             widget::rule::horizontal(1)
         ]
@@ -2774,7 +2764,7 @@ impl App {
             );
         }
         container(panel_content)
-            .padding(18)
+            .padding(RIGHT_PANEL_PADDING)
             .width(
                 self.catalog
                     .settings
@@ -3662,6 +3652,15 @@ fn secondary(theme: &Theme, status: button::Status) -> button::Style {
     };
     style
 }
+fn right_panel_header(title: &str, on_close: Message) -> Element<'_, Message> {
+    row![
+        text(title).size(22).width(Fill),
+        button("×").on_press(on_close).style(button::text),
+    ]
+    .align_y(iced::Center)
+    .into()
+}
+
 fn right_panel(_: &Theme) -> container::Style {
     container::Style {
         background: Some(Color::from_rgb8(24, 27, 31).into()),
@@ -4628,6 +4627,55 @@ Then implement the fix.";
                 .1
         }
     }
+    #[tokio::test]
+    async fn right_panel_headers_match_and_close_their_own_panel() {
+        let mut app = app();
+        let mut renderer = header_renderer();
+        for width in [1200., 860.] {
+            app.window_width = width;
+            let mut headers = Vec::new();
+            for agents in [false, true] {
+                let (title, panel) = if agents {
+                    ("Agents", app.agents_panel())
+                } else {
+                    ("Settings", app.settings_panel())
+                };
+                let mut ui = iced_runtime::UserInterface::build(
+                    panel,
+                    iced::Size::new(width, 560.),
+                    iced_runtime::user_interface::Cache::new(),
+                    &mut renderer,
+                );
+                let mut bounds = UiBounds::default();
+                ui.operate(&renderer, &mut bounds);
+                let title = bounds.label(title);
+                let close = bounds.label("×");
+                assert_eq!(title.x, 18.);
+                // The title is centered within the taller close-button row.
+                assert!(title.y >= 18.);
+                assert_eq!(title.center_y(), close.center_y());
+                headers.push((title, close));
+
+                let mut messages = Vec::new();
+                ui.update(
+                    &[
+                        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                        iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                    ],
+                    mouse::Cursor::Available(close.center()),
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(matches!(
+                    (agents, messages.as_slice()),
+                    (true, [Message::ToggleAgents]) | (false, [Message::ToggleSettings])
+                ));
+            }
+            assert_eq!(headers[0], headers[1], "headers differ at width {width}");
+        }
+    }
+
     fn footer_key(key: keyboard::key::Named) -> Message {
         Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(key),
