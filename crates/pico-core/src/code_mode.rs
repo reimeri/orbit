@@ -23,8 +23,8 @@ pub const GRAMMAR: &str = "\nstart: pragma_source | plain_source\npragma_source:
 mod catalog;
 use catalog::Capabilities;
 
-pub fn tools(child: bool) -> Value {
-    let definitions = catalog::definitions(Capabilities::conversation(child));
+pub fn tools(child: bool, web: bool) -> Value {
+    let definitions = catalog::definitions(Capabilities::conversation(child, web));
     let description = catalog::description(DESCRIPTION, &definitions);
     json!([
         {"type":"custom","name":"exec","description":description,"format":{"type":"grammar","syntax":"lark","definition":GRAMMAR}},
@@ -56,6 +56,7 @@ pub struct ToolEvent {
     pub input: String,
     pub output: Option<String>,
     pub media: Vec<crate::media::Media>,
+    pub web: Option<crate::web_search::Metadata>,
 }
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -102,6 +103,7 @@ struct Stored {
 }
 pub struct CodeMode {
     images: Option<Arc<ImageTools>>,
+    web: Option<Arc<crate::web_search::WebSearch>>,
     questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     delegation: Option<Delegation>,
     shell: Arc<Shell>,
@@ -123,6 +125,7 @@ impl CodeMode {
     ) -> Self {
         Self {
             images: None,
+            web: None,
             questionnaires,
             delegation,
             shell,
@@ -135,6 +138,10 @@ impl CodeMode {
     }
     pub fn with_images(mut self, images: Arc<ImageTools>) -> Self {
         self.images = Some(images);
+        self
+    }
+    pub(crate) fn with_web(mut self, web: Option<Arc<crate::web_search::WebSearch>>) -> Self {
+        self.web = web;
         self
     }
     pub(crate) fn media_lifecycle(&self) -> Option<std::sync::MutexGuard<'_, bool>> {
@@ -180,6 +187,7 @@ impl CodeMode {
             delegation: self.delegation.clone(),
             questionnaires: self.questionnaires.clone(),
             images: self.images.clone(),
+            web: self.web.clone(),
         };
         let stored = self.stored.clone();
         let observer = self.observer.clone();
@@ -338,6 +346,7 @@ struct Services {
     delegation: Option<Delegation>,
     questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     images: Option<Arc<ImageTools>>,
+    web: Option<Arc<crate::web_search::WebSearch>>,
 }
 fn run_cell(
     code: String,
@@ -346,6 +355,7 @@ fn run_cell(
         delegation,
         questionnaires,
         images,
+        web,
     }: Services,
     stored: Arc<Mutex<Stored>>,
     observer: Observer,
@@ -464,6 +474,7 @@ fn run_cell(
             .map_err(js_error)?;
         let definitions = catalog::definitions(Capabilities {
             delegation: delegation.is_some(),
+            web: web.as_ref().map(|web| web.enabled()).transpose()?.unwrap_or(false),
             questionnaires: questionnaires.is_some(),
             images: images.is_some(),
             image_generation: images.as_ref().is_some_and(|i| i.generation),
@@ -498,6 +509,7 @@ fn run_cell(
                         let delegation = delegation.clone();
                         let questionnaires = questionnaires.clone();
                         let images = images.clone();
+                        let web = web.clone();
                         let tx = tx.clone();
                         let observer = observer.clone();
                         let cancellation = cancellation.clone();
@@ -512,11 +524,14 @@ fn run_cell(
                                     input: args.clone(),
                                     output: None,
                                     media: vec![],
+                                    web: None,
                                 }));
                                 let mut attachments=Vec::new();
+                                let mut web_metadata=None;
                                 let mut display=None;
                                 let structured=matches!(name.as_str(),"view_image"|"image_gen__imagegen");
                                 let result = started.and_then(|()| match name.as_str() {
+                                    "web__run" => shell.runtime().block_on(web.as_ref().expect("validated web tool").call(&args,&cancellation)).map(|result| {web_metadata=Some(result.metadata);result.text}).inspect_err(|error| {if let Some(failure)=error.downcast_ref::<crate::web_search::Failure>() {web_metadata=Some(failure.metadata.clone());}}),
                                     "view_image"|"image_gen__imagegen" => shell.runtime().block_on(images.as_ref().expect("validated image tool").call(&name,&args,&request,&cancellation)).map(|result| {attachments.push(result.media);display=Some(result.text);result.value.to_string()}),
                                     "exec_command" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
@@ -537,6 +552,7 @@ fn run_cell(
                                     input: args,
                                     output: Some(display.clone().unwrap_or_else(||output.clone())),
                                     media: attachments,
+                                    web: web_metadata,
                                 }));
                                 let (output, failed) = match saved { Ok(()) => (output,failed), Err(e) => (format!("{}\nCould not save tool result: {e:#}. Side effects may have occurred; do not blindly repeat the command.",display.unwrap_or_else(||output.clone())),true) };
                                 let output = if name_for_output == "ask_user" { crate::output::preserve_text(&output, 40_000) } else { output };
@@ -1037,12 +1053,18 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
     fn yielding_and_waiting_consume_output_once() {
         let mode = mode();
         let cancel = CancellationToken::new();
-        let out = mode.exec("// @exec: {\"yield_time_ms\": 5}\ntext('first'); await new Promise(r=>setTimeout(r,100)); text('last');", "p", &cancel).unwrap();
+        // Explicitly hand off the first batch; a five-millisecond deadline can
+        // elapse before the JS worker even starts on a busy test runner.
+        let out = mode.exec("text('first'); await yield_control(); while (!load('resume')) await new Promise(r=>setTimeout(r,1)); text('last');", "p", &cancel).unwrap();
+        assert!(out.contains("first"));
+        assert!(!out.contains("last"));
         let id = out
             .lines()
             .next()
             .unwrap()
             .strip_prefix("Script running with cell ID ")
+            .unwrap();
+        mode.exec("store('resume', true);", "resume", &cancel)
             .unwrap();
         let last = mode
             .wait(

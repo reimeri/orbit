@@ -270,9 +270,27 @@ regressions. The software/GPU window smoke includes the Images settings tab, sta
 thumbnail, animated modal, pause and natural-size static views using deterministic local
 fixtures. See [images](images.md) for resource limits and paid live acceptance.
 
-The expanded rendered smoke sequence now includes 39 frames (including media and
+The expanded rendered smoke sequence now includes 40 frames (including media and
 Markdown image previews, missing-source errors and the byte-backed GIF modal).
 Its timeout is 60 seconds; a measured software debug run took ~33 seconds locally.
 
 The Nix package supplies Git through `nativeCheckInputs` for Git fixture tests;
 this is separate from the installed wrapper's runtime PATH.
+
+## Standalone web access
+
+`web_search.rs` owns Codex `alpha/search` authentication/transport and UI-only result
+metadata. `web_search/commands.rs` owns typed operation inputs; `schema.rs` supplies
+the shared code-mode catalog. The main conversation supplies its stable ID and
+current model via a weak-conversation callback. Saved policy is read for every
+provider catalog and native invocation. No web capability is attached to children.
+
+`ToolEvent` and `EntryKind::Tool` carry optional web metadata separately from output.
+Complete metadata/diagnostics live in SQLite (not disposable temporary files), while
+oversized agent text uses the established `/tmp` spill policy. The provider's fallback
+compaction archive omits web metadata but preserves all agent-facing tool output.
+The app renders source links and a complete-details Copy action only for expanded
+web entries. General settings and a web result are included in the window smoke.
+
+Run `cargo test --locked -p pico-core web` for focused regressions and see
+[web access](web-search.md) for the explicitly opt-in live acceptance command.

@@ -66,6 +66,8 @@ fn model_defaults() -> BTreeMap<String, ModelDefaults> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
+    pub web_search: crate::web_search::Mode,
+    #[serde(default)]
     pub images: crate::image_tools::Settings,
     pub model: String,
     #[serde(default = "model_defaults")]
@@ -82,6 +84,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             images: crate::image_tools::Settings::default(),
+            web_search: crate::web_search::Mode::Live,
             model: DEFAULT_MODEL.into(),
             models: model_defaults(),
             context_limit: 272_000,
@@ -163,6 +166,8 @@ pub enum EntryKind {
         parent: Option<String>,
         #[serde(default)]
         media: Vec<crate::media::Media>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        web: Option<crate::web_search::Metadata>,
     },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

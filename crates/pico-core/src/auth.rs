@@ -48,6 +48,12 @@ impl Auth {
             client: Client::builder().timeout(Duration::from_secs(60)).build()?,
         }))
     }
+    #[cfg(test)]
+    pub(crate) fn fixture(store: Store, issuer: String) -> Arc<Self> {
+        let mut auth = Self::new(store).unwrap();
+        Arc::get_mut(&mut auth).unwrap().issuer = issuer;
+        auth
+    }
     pub async fn status(&self) -> Option<String> {
         self.credentials
             .lock()

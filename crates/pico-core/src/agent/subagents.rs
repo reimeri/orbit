@@ -814,6 +814,7 @@ mod tests {
         for name in [
             "exec_command",
             "write_stdin",
+            "web__run",
             "view_image",
             "image_gen__imagegen",
             "ask_user",
@@ -927,6 +928,7 @@ mod tests {
             &[
                 "exec_command",
                 "write_stdin",
+                "web__run",
                 "view_image",
                 "image_gen__imagegen",
                 "ask_user",

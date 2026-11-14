@@ -88,6 +88,11 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
   - [x] Remaining code-mode helpers: `image`, `audio`, `content`, `generatedImage`
     - Ordered typed media through yielding, persistence, replay and compaction
     - Explicit unsupported-audio capability errors; no audio recording/playback tools
+  - [x] Web access — see [contract, settings and acceptance](docs/web-search.md)
+    - Main-only `tools.web__run` with all ten Codex standalone operations
+    - ChatGPT subscription auth; Live/Cached/Disabled policy, no billing fallback
+    - Text to JavaScript; durable metadata/source links for transcript UI only
+    - Live Rust/QuickJS acceptance and local failure/lifecycle regression coverage
   - Browser tools
   - Use skill
 - UI

@@ -1,13 +1,13 @@
 # Code-mode contract
 
-Only `exec` and `wait` are sent as top-level Responses tools. Shell, questionnaire and subagent tools are
+Only `exec` and `wait` are sent as top-level Responses tools. Shell, web, media, questionnaire and subagent tools are
 exposed on the JavaScript `tools` object, not duplicated in the top-level catalog.
 
 Nested tool documentation lives in `exec.description`, not the system instructions.
 Each entry has a one-line purpose and a TypeScript declaration generated from its
 input and output JSON schemas in `crates/pico-core/src/code_mode/catalog.rs`.
 The same catalog supplies JavaScript `tools`, `ALL_TOOLS` (including both schemas),
-and nested-call availability checks. Main requests include all eight tools; child
+and nested-call availability checks. Main requests include nine tools when web access is enabled; child
 requests include only shell tools and `view_image`. Text-returning tools are
 correctly declared as `Promise<string>`, even when the string contains JSON.
 General assistant/project policies remain in system instructions.
@@ -139,3 +139,12 @@ retrieve its cell result. Unawaited calls end with the cell. Children do not hav
 this capability. Answers are ordered JSON strings; large results use complete-file
 references. See [questionnaires](questionnaires.md) for the schema, limits, UI,
 cancellation/restart behavior and acceptance checklist.
+
+## Web access
+
+Main conversations expose `tools.web__run` when global web access is enabled.
+It returns `Promise<string>` and supports search, image search, open, click, find,
+PDF screenshot requests, finance, weather, sports and time. Structured backend
+metadata is persisted for the UI, never returned to JS or included in model-facing
+compaction archives. See [web access](web-search.md) for the complete contract,
+Live/Cached/Disabled policy, text-only screenshot limitation and acceptance results.

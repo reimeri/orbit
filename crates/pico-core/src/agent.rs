@@ -113,6 +113,7 @@ pub struct Harness {
     pub auth: Arc<Auth>,
     provider: Arc<Provider>,
     image_client: reqwest::Client,
+    web_client: reqwest::Client,
     runtime: Option<tokio::runtime::Runtime>,
     conversations: Mutex<HashMap<String, Arc<Conversation>>>,
     summaries: Mutex<HashMap<String, SessionSummary>>,
@@ -124,7 +125,7 @@ pub struct Harness {
 impl Harness {
     pub fn new(store: Store, sessions: Vec<SessionSummary>) -> Result<Arc<Self>> {
         let auth = Auth::new(store.clone())?;
-        let provider = Provider::new(auth)?;
+        let provider = Provider::new(auth, store.clone())?;
         Self::with_provider(store, sessions, provider)
     }
     fn with_provider(
@@ -139,8 +140,10 @@ impl Harness {
             .enable_all()
             .build()?;
         let image_client = crate::image_tools::ImageTools::client()?;
+        let web_client = crate::web_search::WebSearch::client()?;
         let harness = Arc::new_cyclic(|weak| Self {
             image_client,
+            web_client,
             weak: weak.clone(),
             loading: Mutex::new(()),
             subagents: Mutex::new(subagents),
@@ -192,10 +195,12 @@ impl Harness {
                                         output,
                                         complete,
                                         media,
+                                        web,
                                         ..
                                     } = &mut entry.kind
                                 {
                                     *media = event.media;
+                                    *web = event.web;
                                     *output = result;
                                     *complete = true;
                                 }
@@ -210,6 +215,7 @@ impl Harness {
                                         complete: false,
                                         parent: Some(event.parent),
                                         media: vec![],
+                                        web: None,
                                     },
                                 });
                             }
@@ -247,6 +253,27 @@ impl Harness {
                 }),
                 self.image_client.clone(),
             ));
+            let web = session.child.is_none().then(|| {
+                let target = weak.clone();
+                Arc::new(crate::web_search::WebSearch::new(
+                    self.store.clone(),
+                    self.auth.clone(),
+                    id.clone(),
+                    Arc::new(move || {
+                        let conversation = target.upgrade().context("Session closed")?;
+                        if conversation.deleted.load(Ordering::Acquire) {
+                            bail!("Session deleted");
+                        }
+                        Ok(conversation
+                            .state
+                            .lock()
+                            .expect("session lock")
+                            .model
+                            .clone())
+                    }),
+                    self.web_client.clone(),
+                ))
+            });
             Conversation {
                 id: id.clone(),
                 revision: Arc::new(AtomicU64::new(0)),
@@ -279,7 +306,8 @@ impl Harness {
                     }),
                     questionnaires.clone(),
                 )
-                .with_images(images),
+                .with_images(images)
+                .with_web(web),
                 questionnaires,
                 state: Arc::new(Mutex::new(session)),
                 running: AtomicBool::new(false),
@@ -325,23 +353,30 @@ impl Harness {
         let session = self.store.load_session(id)?;
         let interrupted = session.interrupted;
         let conversation = self.make_conversation(session, true);
-        // Runtime cells and unfinished questionnaire drafts do not survive restart.
+        // Runtime cells, remote web requests and questionnaire drafts do not survive restart.
         // This also covers a model turn that finished while its ask cell was pending.
-        let abandoned: Vec<_> = conversation.snapshot().entries.iter().enumerate().filter_map(|(i, entry)| matches!(&entry.kind, EntryKind::Tool { name, complete: false, .. } if name == "ask_user").then_some(i)).collect();
+        let abandoned: Vec<_> = conversation.snapshot().entries.iter().enumerate().filter_map(|(i, entry)| matches!(&entry.kind, EntryKind::Tool { name, complete: false, .. } if matches!(name.as_str(), "ask_user" | "web__run")).then_some(i)).collect();
         if !abandoned.is_empty() {
             {
                 let mut state = conversation.state.lock().expect("session lock");
                 for i in abandoned {
                     if let EntryKind::Tool {
-                        complete, output, ..
+                        name,
+                        complete,
+                        output,
+                        ..
                     } = &mut state.entries[i].kind
                     {
                         *complete = true;
-                        *output = "Questionnaire cancelled by application restart. Unsubmitted answers were not saved; ask again if still needed.".into();
+                        *output = if name == "web__run" {
+                            "Web request interrupted by application restart. Remote work may have completed and consumed usage. It was not automatically replayed."
+                        } else {
+                            "Questionnaire cancelled by application restart. Unsubmitted answers were not saved; ask again if still needed."
+                        }.into();
                     }
                 }
                 state.needs_attention = true;
-                state.entries.push(Entry::new(EntryKind::Notice, "An unanswered questionnaire was cancelled by the restart. Send a message to request it again; unfinished answers were not saved."));
+                state.entries.push(Entry::new(EntryKind::Notice, "Unfinished tools were interrupted by the restart. See tool details; no requests were automatically replayed."));
             }
             conversation.save()?;
         }
@@ -822,6 +857,7 @@ impl Harness {
                             complete: false,
                             parent: None,
                             media: vec![],
+                            web: None,
                         },
                     });
                     conversation.changed();
@@ -1042,6 +1078,62 @@ mod tests {
     use super::*;
     use std::time::Instant;
     #[test]
+    fn restart_finishes_abandoned_web_calls_without_replay_or_metadata_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut session = Session::new(dir.path().into(), &Settings::default());
+        let id = session.id.clone();
+        let metadata = crate::web_search::Metadata {
+            mode: crate::web_search::Mode::Live,
+            searched_at: 123,
+            sources: vec![],
+            details: "UI-only metadata".into(),
+        };
+        session.entries.push(Entry {
+            id: "finished".into(),
+            text: String::new(),
+            kind: EntryKind::Tool {
+                name: "web__run".into(),
+                input: "{}".into(),
+                output: "completed text".into(),
+                complete: true,
+                parent: Some("outer".into()),
+                media: vec![],
+                web: Some(metadata.clone()),
+            },
+        });
+        session.entries.push(Entry {
+            id: "abandoned".into(),
+            text: String::new(),
+            kind: EntryKind::Tool {
+                name: "web__run".into(),
+                input: "{}".into(),
+                output: String::new(),
+                complete: false,
+                parent: Some("outer".into()),
+                media: vec![],
+                web: None,
+            },
+        });
+        store.save_session(&session).unwrap();
+        let harness = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        let conversation = harness.load(&id).unwrap();
+        assert!(!conversation.is_executing());
+        let saved = store.load_session(&id).unwrap();
+        assert!(
+            matches!(&saved.entries.by_id("finished").unwrap().kind,EntryKind::Tool{output,web:Some(actual),..} if output=="completed text" && actual==&metadata)
+        );
+        assert!(
+            matches!(&saved.entries.by_id("abandoned").unwrap().kind,EntryKind::Tool{output,complete:true,..} if output.contains("not automatically replayed"))
+        );
+        assert!(
+            !serde_json::to_string(&plaintext_context(&saved))
+                .unwrap()
+                .contains("UI-only metadata")
+        );
+    }
+
+    #[test]
     fn questionnaire_persistence_failures_and_restart_do_not_lose_or_reopen_answers() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
@@ -1136,6 +1228,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
                 complete: false,
                 parent: Some("yielded-exec".into()),
                 media: vec![],
+                web: None,
             },
         });
         let abandoned_id = abandoned.id.clone();
@@ -1536,3 +1629,6 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         assert_eq!(s.input.len(), 4);
     }
 }
+
+#[cfg(test)]
+mod web_acceptance;

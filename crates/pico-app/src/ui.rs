@@ -170,6 +170,7 @@ pub enum Message {
     OpenMarkdownImage(String),
     RetryMarkdownImage(String),
     ImageBackend(pico_core::image_tools::Backend),
+    WebMode(pico_core::web_search::Mode),
     ImageModel(String),
     ImageQuality(String),
     ResetImageModel,
@@ -197,6 +198,7 @@ pub enum Message {
     CloseFooterMenu,
     ToolOutput(String, tool_output::Event),
     CopyOutput(String),
+    CopyWebMetadata(String),
     CopySelection,
     New,
     Select(String),
@@ -918,6 +920,7 @@ impl App {
                 self.modal = Some(Modal::Image(media));
                 return task;
             }
+            Message::WebMode(mode) => self.settings.web_search = mode,
             Message::ImageBackend(backend) => self.settings.images.backend = backend,
             Message::ImageModel(model) => self.settings.images.model = model,
             Message::ImageQuality(quality) => self.settings.images.quality = quality,
@@ -1177,6 +1180,19 @@ impl App {
             Message::ToolOutput(id, event) => {
                 if let Some(view) = self.outputs.get_mut(&id) {
                     view.update(event);
+                }
+            }
+            Message::CopyWebMetadata(id) => {
+                if let Some(Entry {
+                    kind:
+                        EntryKind::Tool {
+                            web: Some(metadata),
+                            ..
+                        },
+                    ..
+                }) = self.current().and_then(|s| s.entries.by_id(&id))
+                {
+                    return iced::clipboard::write(metadata.details.clone());
                 }
             }
             Message::CopyOutput(id) => {
@@ -2641,6 +2657,7 @@ impl App {
                 complete,
                 parent,
                 media,
+                web,
                 ..
             } => {
                 let open = self.expanded.contains(&entry.id);
@@ -2704,6 +2721,29 @@ impl App {
                     );
                 }
                 if open {
+                    if let Some(metadata) = web {
+                        block = block.push(
+                            text(format!(
+                                "{} web access · {}",
+                                metadata.mode,
+                                age(metadata.searched_at)
+                            ))
+                            .size(11)
+                            .color(MUTED),
+                        );
+                        for source in &metadata.sources {
+                            block = block.push(
+                                button(ellipsized_text(&source.title, 12., Some(ACCENT)))
+                                    .on_press(Message::Link(source.url.clone()))
+                                    .style(button::text),
+                            );
+                        }
+                        block = block.push(
+                            button("Copy complete web details")
+                                .on_press(Message::CopyWebMetadata(entry.id.clone()))
+                                .style(button::text),
+                        );
+                    }
                     for item in media {
                         if item.thumbnail.is_some() {
                             block = block.push(self.image_view.thumbnail(item));
@@ -2951,7 +2991,12 @@ impl App {
                 }
             }
             SettingsTab::General => {
+                use pico_core::web_search::Mode;
                 settings = settings
+                    .push(text("Web access · main agent").size(12))
+                    .push(pick_list([Mode::Live, Mode::Cached, Mode::Disabled], Some(self.settings.web_search), Message::WebMode).width(Fill))
+                    .push(text("Uses your ChatGPT subscription. Live permits external access; Cached requests cache-only access and may limit operations. Disabled prevents new web calls. No API billing or automatic fallback.").size(12).color(MUTED))
+                    .push(widget::rule::horizontal(1))
                     .push(text("Default model").size(12))
                     .push(
                         pick_list(
@@ -3536,6 +3581,7 @@ impl App {
                         complete: true,
                         parent: None,
                         media: vec![],
+                        web: None,
                     },
                 };
                 s.entries.push(tool);
@@ -3910,6 +3956,7 @@ impl App {
                         complete: true,
                         parent: None,
                         media: vec![media],
+                        web: None,
                     },
                 };
                 session.entries.push(entry);
@@ -3981,10 +4028,29 @@ impl App {
                 self.modal = Some(Modal::MarkdownImage(image));
                 return Task::batch([task, delayed_capture()]);
             }
+            39 => {
+                self.modal = None;
+                self.image_view.close();
+                self.settings_open = true;
+                self.settings_tab = SettingsTab::General;
+                let mut session = Session::new(
+                    self.smoke_dir.as_ref().unwrap().clone(),
+                    &self.catalog.settings,
+                );
+                session.entries.push(Entry {id:"smoke-web".into(),text:String::new(),kind:EntryKind::Tool {
+                    name:"web__run".into(),input:r#"{"search_query":[{"q":"Rust documentation","domains":["rust-lang.org"]}]}"#.into(),
+                    output:"Rust documentation (https://doc.rust-lang.org/book/)\nThe Rust Programming Language".into(),complete:true,parent:None,media:vec![],
+                    web:Some(pico_core::web_search::Metadata{mode:pico_core::web_search::Mode::Live,searched_at:pico_core::store::now(),sources:vec![pico_core::web_search::Source{title:"The Rust Programming Language — a long source title that should fit in a constrained chat column".into(),url:"https://doc.rust-lang.org/book/".into()}],details:r#"[{"type":"text_result","url":"https://doc.rust-lang.org/book/"}]"#.into()})
+                }});
+                self.current_session = Some(session);
+                self.expanded.insert("smoke-web".into());
+                self.rebuild_transcript();
+                self.prepare_visible();
+            }
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -4395,6 +4461,73 @@ mod tests {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
     #[tokio::test]
+    async fn web_settings_and_transcript_details_survive_save_cancel_and_reopen() {
+        use pico_core::web_search::{Metadata, Mode, Source};
+        let mut app = app();
+        dispatch(&mut app, Message::ToggleSettings).await;
+        dispatch(&mut app, Message::SettingsTab(SettingsTab::General)).await;
+        assert_eq!(app.settings.web_search, Mode::Live);
+        dispatch(&mut app, Message::WebMode(Mode::Cached)).await;
+        dispatch(&mut app, Message::ApplySettings).await;
+        assert_eq!(
+            app.harness
+                .as_ref()
+                .unwrap()
+                .store
+                .load()
+                .unwrap()
+                .0
+                .settings
+                .web_search,
+            Mode::Cached
+        );
+        dispatch(&mut app, Message::WebMode(Mode::Disabled)).await;
+        dispatch(&mut app, Message::CancelSettings).await;
+        assert_eq!(app.settings.web_search, Mode::Cached);
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root).await;
+        let id = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        let metadata = Metadata {
+            mode: Mode::Cached,
+            searched_at: 123,
+            sources: vec![Source {
+                title: "Official source".into(),
+                url: "https://example.org/docs".into(),
+            }],
+            details: r#"[{"new_field":"complete UI-only metadata"}]"#.into(),
+        };
+        h.edit(&id, |s| {
+            s.entries.push(Entry {
+                id: "web-result".into(),
+                text: String::new(),
+                kind: EntryKind::Tool {
+                    name: "web__run".into(),
+                    input: "{}".into(),
+                    output: "Agent text".into(),
+                    complete: true,
+                    parent: None,
+                    media: vec![],
+                    web: Some(metadata.clone()),
+                },
+            })
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        dispatch(&mut app, Message::ToggleEntry("web-result".into())).await;
+        let _ = app.view();
+        let loaded = h.store.load_session(&id).unwrap();
+        assert!(
+            matches!(&loaded.entries[0].kind,EntryKind::Tool{web:Some(actual),output,..} if actual==&metadata && output=="Agent text")
+        );
+        dispatch(&mut app, Message::Link(metadata.sources[0].url.clone())).await;
+        assert!(matches!(&app.modal,Some(Modal::Link(url)) if url=="https://example.org/docs"));
+        dispatch(&mut app, Message::Dismiss).await;
+        dispatch(&mut app, Message::ToggleEntry("web-result".into())).await;
+        assert!(!app.outputs.contains_key("web-result"));
+    }
+
+    #[tokio::test]
     async fn image_settings_credentials_and_modal_survive_real_ui_updates() {
         let mut app = app();
         dispatch(&mut app, Message::ToggleSettings).await;
@@ -4448,6 +4581,7 @@ mod tests {
                     complete: true,
                     parent: None,
                     media: vec![media.clone()],
+                    web: None,
                 },
             })
         })
@@ -6206,6 +6340,7 @@ Then implement the fix.";
                     complete: true,
                     parent: None,
                     media: vec![],
+                    web: None,
                 },
             })
         })

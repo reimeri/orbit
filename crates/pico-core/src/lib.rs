@@ -15,6 +15,7 @@ pub mod provider;
 pub mod questionnaire;
 pub mod shell;
 pub mod store;
+pub mod web_search;
 
 use std::path::{Path, PathBuf};
 

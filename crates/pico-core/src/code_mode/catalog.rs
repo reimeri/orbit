@@ -5,14 +5,16 @@ use serde_json::{Value, json};
 #[derive(Clone, Copy)]
 pub(super) struct Capabilities {
     pub delegation: bool,
+    pub web: bool,
     pub questionnaires: bool,
     pub images: bool,
     pub image_generation: bool,
 }
 impl Capabilities {
-    pub fn conversation(child: bool) -> Self {
+    pub fn conversation(child: bool, web: bool) -> Self {
         Self {
             delegation: !child,
+            web: !child && web,
             questionnaires: !child,
             images: true,
             image_generation: !child,
@@ -57,6 +59,14 @@ pub(super) fn definitions(capabilities: Capabilities) -> Vec<Tool> {
             output_schema: json!({"type":"string"}),
         },
     ];
+    if capabilities.web {
+        tools.push(Tool {
+            name: "web__run",
+            description: crate::web_search::DESCRIPTION,
+            input_schema: crate::web_search::input_schema(),
+            output_schema: json!({"type":"string"}),
+        });
+    }
     if capabilities.images {
         tools.push(Tool {
             name: "view_image",
@@ -229,10 +239,10 @@ mod tests {
             "Run JavaScript.\n\n### `fixture`\nExercise schema rendering.\n\n```ts\ndeclare const tools: { fixture(args: {\n  commands: Array<{\n    // Command to run.\n    cmd: string;\n    mode: \"fast\" | \"careful\";\n    retries?: number;\n  }>;\n  verbose?: boolean;\n}): Promise<{\n  output: string;\n  session_id?: number;\n}>; };\n```"
         );
 
-        let tools = definitions(Capabilities::conversation(false));
+        let tools = definitions(Capabilities::conversation(false, true));
         let rendered = description("", &tools);
         // Text tools return strings, not the objects sometimes encoded in them.
-        assert_eq!(rendered.matches("): Promise<string>").count(), 6);
+        assert_eq!(rendered.matches("): Promise<string>").count(), 7);
         assert!(rendered.contains("list_subagents(args: Record<string, never>)"));
         assert!(rendered.contains("gif?: {"));
         assert!(rendered.contains("output_hint: string;"));
