@@ -598,6 +598,7 @@ impl App {
             }
         }
         self.current_session = Some(snapshot);
+        self.acknowledge_focused_completion();
         self.append_transcript();
         if self.auto_scroll {
             self.transcript.end();
@@ -963,6 +964,21 @@ impl App {
                         format!("Could not switch sessions: {e:#}. Fix storage and retry.")
                     }),
                 )
+            }));
+        }
+    }
+    fn acknowledge_focused_completion(&mut self) {
+        if self.window_focused
+            && !self.closing
+            && let (Some(h), Some(session)) = (&self.harness, &self.current_session)
+            && session.unchecked_completion
+        {
+            let h = h.clone();
+            let id = session.id.clone();
+            self.tasks.push(self.io.run(move || {
+                Message::Edited(h.edit(&id, |s| s.unchecked_completion = false).map_err(|e| {
+                    format!("Could not save completion acknowledgement: {e:#}. Keep Pico open, fix storage, then retry saving or revisit the session.")
+                }))
             }));
         }
     }
@@ -2014,7 +2030,10 @@ impl App {
                 ));
             }
             Message::Event(event) => match event {
-                iced::Event::Window(window::Event::Focused) => self.window_focused = true,
+                iced::Event::Window(window::Event::Focused) => {
+                    self.window_focused = true;
+                    self.acknowledge_focused_completion();
+                }
                 iced::Event::Window(window::Event::Unfocused) => self.window_focused = false,
                 iced::Event::Window(window::Event::FileDropped(path)) => self.import_file(path),
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
@@ -6010,7 +6029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_dot_clears_only_when_its_session_is_opened() {
+    async fn completion_dot_preserves_background_sessions_and_clears_on_open() {
         use iced_runtime::{UserInterface, user_interface::Cache};
         use pico_core::agent::subagents::{Child, Profile};
         let mut renderer = header_renderer();
@@ -6035,15 +6054,10 @@ mod tests {
         let h = app.harness.as_ref().unwrap().clone();
         h.edit(&parent, |s| s.unchecked_completion = true).unwrap();
         dispatch(&mut app, Message::Changed).await;
-        dispatch(
-            &mut app,
-            Message::Event(iced::Event::Window(window::Event::Focused)),
-        )
-        .await;
         assert_eq!(
             app.session_status(&app.sessions[0]),
             SessionStatus::Unchecked,
-            "refresh/focus is not opening a session"
+            "refresh while unfocused must retain the completion flag"
         );
 
         assert!(
@@ -6060,9 +6074,14 @@ mod tests {
         h.store.save_session(&child).unwrap();
         h.insert(child);
         dispatch(&mut app, Message::Select(child_id)).await;
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::Focused)),
+        )
+        .await;
         assert!(
             h.store.load_session(&parent).unwrap().unchecked_completion,
-            "opening a child does not check its parent"
+            "opening or focusing a child does not check its parent"
         );
         dispatch(
             &mut app,
@@ -6086,6 +6105,76 @@ mod tests {
                 .load(&parent)
                 .unwrap()
                 .snapshot()
+                .unchecked_completion
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_dot_clears_on_focus_and_when_completing_while_focused() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let background = app.selected.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let selected = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        for id in [&background, &selected] {
+            h.edit(id, |s| s.unchecked_completion = true).unwrap();
+        }
+        dispatch(&mut app, Message::Changed).await;
+        assert!(app.current().unwrap().unchecked_completion);
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::Focused)),
+        )
+        .await;
+        assert!(!app.current().unwrap().unchecked_completion);
+        assert!(
+            !h.store
+                .load_session(&selected)
+                .unwrap()
+                .unchecked_completion
+        );
+        assert!(
+            h.store
+                .load_session(&background)
+                .unwrap()
+                .unchecked_completion
+        );
+
+        // A new completion while focused needs no further focus or selection event.
+        h.edit(&selected, |s| s.unchecked_completion = true)
+            .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert!(!app.current().unwrap().unchecked_completion);
+        assert!(
+            !h.store
+                .load_session(&selected)
+                .unwrap()
+                .unchecked_completion
+        );
+        assert!(
+            h.store
+                .load_session(&background)
+                .unwrap()
+                .unchecked_completion
+        );
+        let summary = app.sessions.iter().find(|s| s.id == selected).unwrap();
+        assert_eq!(app.session_status(summary), SessionStatus::Idle);
+
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::Unfocused)),
+        )
+        .await;
+        h.edit(&selected, |s| s.unchecked_completion = true)
+            .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert!(app.current().unwrap().unchecked_completion);
+        assert!(
+            h.store
+                .load_session(&selected)
+                .unwrap()
                 .unchecked_completion
         );
     }

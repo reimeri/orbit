@@ -429,7 +429,7 @@ or child work. The wave retains its 12-second cycle; questionnaire/error states
 remain frozen. Interaction/streaming redraws may update the wave more frequently.
 The final smoke frame renders working, questionnaire, error, unchecked-completion
 and idle rows. See [notifications](notifications.md#sidebar-status-and-unchecked-completion)
-for completion-dot persistence and open-to-clear behavior.
+for completion-dot persistence and focus/open-to-clear behavior.
 
 All rendering tests now use wgpu, including the formerly GPU-only pixel checks.
 A shared test engine reuses one Vulkan device and its pipelines per test process;

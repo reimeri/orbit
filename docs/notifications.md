@@ -64,17 +64,20 @@ red once work stops. Opening an error session or the existing Escape acknowledge
 clears error attention; questions remain yellow until answered or cancelled.
 
 Successful main-turn completion replaces the row's age label with a blue circle
-until that conversation is opened again. Opening it clears and saves the flag,
-regardless of keyboard focus; opening a child does not check its parent. Refreshing
-or focusing an already-open conversation does not clear the dot. New work also
-clears it. Stop, errors, pending questions and turns waiting on children do not
-create completion circles.
+until that conversation is viewed. The selected conversation's flag clears and
+is saved when the window gains keyboard focus, or immediately on completion if
+the window is already focused. Opening a conversation also clears and saves its
+flag regardless of keyboard focus. Background conversations retain their dots;
+opening or focusing a child does not check its parent. New work also clears it.
+Stop, errors, pending questions and turns waiting on children do not create
+completion circles.
 
 The flag lives in session metadata and sidebar summaries, independent of desktop
 notification delivery, dismissal and DND. Ordinary session saves (including eviction
 and shutdown) persist it across restarts; it is a sidebar hint, not a separate
 completion transaction or a guarantee against a crash before the next save.
-Opening a session uses the existing edit/save path and its storage-error recovery.
+Both opening and focus-based acknowledgement use the existing edit/save path
+and its storage-error recovery.
 Waves use widget-local redraws only for visible working rows, retain their displayed
 phase when paused, and use a wgpu triangle mesh with shared theme colors.
 
@@ -111,8 +114,9 @@ Manual desktop acceptance (use isolated Pico state):
 7. Dismiss a notification; refresh/switch/restart Pico: no historical replay.
 8. Complete a background session: its blue sidebar circle replaces the age. Close
    Pico normally and restart before opening it: the circle remains. Open it: the
-   age returns and remains after another restart. Focusing an already-open completed
-   conversation does not clear its dot; opening its child does not clear it either.
+   age returns and remains after another restart. Complete the selected conversation
+   while unfocused: its dot remains until Pico gains focus. Complete it while focused:
+   no dot remains. Opening or focusing its child does not clear the parent's dot.
 9. Observe working, questionnaire and error rows: blue waves move; yellow/red waves
    stay frozen, including during other animations. Answering resumes the wave.
    Scroll/reorder/filter rows and check selection, hover and context-menu targets.
