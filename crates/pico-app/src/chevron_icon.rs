@@ -106,14 +106,14 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Chevron {
 
 /// An overlay spanning the group header so hovering anywhere on the button
 /// reveals its disclosure. The base header reserves the 12 px icon slot.
-pub fn activity_disclosure<'a, Message: 'a>(open: bool, working: bool) -> Element<'a, Message> {
+pub fn activity_disclosure<'a, Message: 'a>(
+    open: bool,
+    working: bool,
+    tick: u64,
+) -> Element<'a, Message> {
     Element::new(ActivityDisclosure {
         chevron: chevron_icon(open, crate::theme::MUTED),
-        indicator: iced::widget::container(
-            iced::widget::text("◌").size(12).color(crate::theme::ACCENT),
-        )
-        .center_x(12.)
-        .into(),
+        indicator: crate::status_circle::status_circle(working, tick),
         working,
     })
 }

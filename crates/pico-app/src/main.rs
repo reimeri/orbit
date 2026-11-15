@@ -15,6 +15,7 @@ mod pointer_input;
 mod questionnaire;
 mod scrollbar;
 mod search_icon;
+mod status_circle;
 mod theme;
 mod tool_output;
 mod transcript_viewport;

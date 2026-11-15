@@ -3053,6 +3053,7 @@ impl App {
                     crate::chevron_icon::activity_disclosure(
                         self.groups.contains(&entry.id),
                         working,
+                        self.tick,
                     ),
                 ])
                 .padding(0)
@@ -3792,18 +3793,8 @@ impl App {
                 chip.into()
             }
         };
-        let dot = if running {
-            ["◦", "○", "●", "○"][(self.tick as usize / 2) % 4]
-        } else {
-            "●"
-        };
         let mut info = row![footer_tip(
-            container(
-                text(dot)
-                    .size(11)
-                    .color(if running { ACCENT } else { MUTED })
-            )
-            .width(12),
+            crate::status_circle::status_circle(running, self.tick),
             status.clone(),
         )]
         .spacing(4)
@@ -3829,9 +3820,7 @@ impl App {
             return container(
                 row![
                     footer_tip(
-                        text(dot)
-                            .size(11)
-                            .color(if running { ACCENT } else { MUTED }),
+                        crate::status_circle::status_circle(running, self.tick),
                         details
                     ),
                     control(FooterControl::Model, &session.model, controls_width * 0.65),
@@ -5219,101 +5208,121 @@ mod tests {
         let harness = app.harness.as_ref().unwrap().clone();
         let mut renderer = header_renderer();
         for width in [360., 860.] {
-            let mut icons = Vec::new();
+            let mut frames = Vec::new();
             let mut cache = Cache::new();
-            for open in [false, true] {
-                for complete in [false, true] {
-                    harness
-                        .edit(&id, |s| {
-                            s.entries = vec![Entry {
-                                id: "group".into(),
-                                text: String::new(),
-                                kind: EntryKind::Tool {
-                                    name: "exec_command".into(),
-                                    input: r#"{"cmd":"sleep 1"}"#.into(),
-                                    output: String::new(),
-                                    complete,
-                                    failed: false,
-                                    cell_id: None,
-                                    parent: None,
-                                    media: vec![],
-                                    web: None,
+            for tick in [0, 2, 4, 6, 8] {
+                app.tick = tick;
+                let mut icons = Vec::new();
+                for open in [false, true] {
+                    for complete in [false, true] {
+                        harness
+                            .edit(&id, |s| {
+                                s.entries = vec![Entry {
+                                    id: "group".into(),
+                                    text: String::new(),
+                                    kind: EntryKind::Tool {
+                                        name: "exec_command".into(),
+                                        input: r#"{"cmd":"sleep 1"}"#.into(),
+                                        output: String::new(),
+                                        complete,
+                                        failed: false,
+                                        cell_id: None,
+                                        parent: None,
+                                        media: vec![],
+                                        web: None,
+                                    },
+                                }]
+                                .into();
+                            })
+                            .unwrap();
+                        dispatch(&mut app, Message::Changed).await;
+                        if open {
+                            app.groups.insert("group".into());
+                        } else {
+                            app.groups.remove("group");
+                        }
+                        let size = iced::Size::new(width, 40.);
+                        let mut ui = UserInterface::build(
+                            app.activity_row(ActivityRow::Activity(0)),
+                            size,
+                            cache,
+                            &mut renderer,
+                        );
+                        for cursor in [
+                            mouse::Cursor::Unavailable,
+                            // Hover the far edge, including the header's padding, not the icon.
+                            mouse::Cursor::Available(iced::Point::new(width - 1., 1.)),
+                            mouse::Cursor::Unavailable,
+                        ] {
+                            let mut messages = Vec::new();
+                            ui.update(
+                                &[iced::Event::Mouse(mouse::Event::CursorMoved {
+                                    position: cursor
+                                        .position()
+                                        .unwrap_or(iced::Point::new(width + 1., 1.)),
+                                })],
+                                cursor,
+                                &mut renderer,
+                                &mut iced::advanced::clipboard::Null,
+                                &mut messages,
+                            );
+                            assert!(messages.is_empty(), "hover must remain widget-local");
+                            renderer.reset(iced::Rectangle::with_size(size));
+                            ui.draw(
+                                &mut renderer,
+                                &theme::app(),
+                                &iced::advanced::renderer::Style {
+                                    text_color: theme::TEXT,
                                 },
-                            }]
-                            .into();
-                        })
-                        .unwrap();
-                    dispatch(&mut app, Message::Changed).await;
-                    if open {
-                        app.groups.insert("group".into());
-                    } else {
-                        app.groups.remove("group");
+                                cursor,
+                            );
+                            let pixels = renderer.screenshot(
+                                iced::Size::new(width as u32, 40),
+                                1.,
+                                theme::BACKGROUND,
+                            );
+                            icons.push(
+                                pixels
+                                    .chunks_exact(width as usize * 4)
+                                    .flat_map(|row| row[..16 * 4].iter().copied())
+                                    .collect::<Vec<_>>(),
+                            );
+                        }
+                        assert!(matches!(
+                            click_header(&mut ui, &mut renderer, width - 1.).as_slice(),
+                            [Message::ToggleGroup(id)] if id == "group"
+                        ));
+                        cache = ui.into_cache();
                     }
-                    let size = iced::Size::new(width, 40.);
-                    let mut ui = UserInterface::build(
-                        app.activity_row(ActivityRow::Activity(0)),
-                        size,
-                        cache,
-                        &mut renderer,
-                    );
-                    for cursor in [
-                        mouse::Cursor::Unavailable,
-                        // Hover the far edge, including the header's padding, not the icon.
-                        mouse::Cursor::Available(iced::Point::new(width - 1., 1.)),
-                        mouse::Cursor::Unavailable,
-                    ] {
-                        let mut messages = Vec::new();
-                        ui.update(
-                            &[iced::Event::Mouse(mouse::Event::CursorMoved {
-                                position: cursor
-                                    .position()
-                                    .unwrap_or(iced::Point::new(width + 1., 1.)),
-                            })],
-                            cursor,
-                            &mut renderer,
-                            &mut iced::advanced::clipboard::Null,
-                            &mut messages,
-                        );
-                        assert!(messages.is_empty(), "hover must remain widget-local");
-                        renderer.reset(iced::Rectangle::with_size(size));
-                        ui.draw(
-                            &mut renderer,
-                            &theme::app(),
-                            &iced::advanced::renderer::Style {
-                                text_color: theme::TEXT,
-                            },
-                            cursor,
-                        );
-                        let pixels = renderer.screenshot(
-                            iced::Size::new(width as u32, 40),
-                            1.,
-                            theme::BACKGROUND,
-                        );
-                        icons.push(
-                            pixels
-                                .chunks_exact(width as usize * 4)
-                                .flat_map(|row| row[..16 * 4].iter().copied())
-                                .collect::<Vec<_>>(),
-                        );
-                    }
-                    assert!(matches!(
-                        click_header(&mut ui, &mut renderer, width - 1.).as_slice(),
-                        [Message::ToggleGroup(id)] if id == "group"
-                    ));
-                    cache = ui.into_cache();
                 }
+                for states in icons.as_chunks::<6>().0 {
+                    assert_ne!(states[0], states[1], "working circle must become a chevron");
+                    assert_eq!(states[0], states[2], "leaving restores the circle");
+                    assert_eq!(states[1], states[3], "completion shows the same chevron");
+                    assert_eq!(
+                        states[3], states[4],
+                        "completed hover does not change the icon"
+                    );
+                    assert_eq!(states[3], states[5]);
+                }
+                assert_ne!(icons[3], icons[9], "open and closed chevrons differ");
+                frames.push(icons);
             }
-            for states in icons.as_chunks::<6>().0 {
-                assert_ne!(states[0], states[1], "working circle must become a chevron");
-                assert_eq!(states[0], states[2], "leaving restores the circle");
-                assert_eq!(states[1], states[3], "completion shows the same chevron");
-                assert_eq!(
-                    states[3], states[4],
-                    "completed hover does not change the icon"
+            for index in [0, 2, 6, 8] {
+                assert_ne!(
+                    frames[0][index], frames[1][index],
+                    "working circle animates"
                 );
-                assert_eq!(states[3], states[5]);
+                assert_ne!(frames[1][index], frames[2][index], "working circle fills");
+                assert_eq!(frames[1][index], frames[3][index], "circle pulses back");
+                assert_eq!(frames[0][index], frames[4][index], "animation repeats");
             }
-            assert_ne!(icons[3], icons[9], "open and closed chevrons differ");
+            for index in [1, 3, 4, 5, 7, 9, 10, 11] {
+                assert!(
+                    frames.iter().all(|frame| frame[index] == frames[0][index]),
+                    "hovered and completed chevrons must not animate"
+                );
+            }
         }
     }
 
