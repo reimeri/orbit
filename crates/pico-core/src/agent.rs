@@ -781,11 +781,10 @@ impl Harness {
                 s.clone()
             };
             conversation.save_async().await?;
-            let estimated =
-                (serde_json::to_vec(&snapshot.input)?.len() + instructions.len() + 8_000) as u64
-                    / 3;
-            let context = snapshot.usage.input.max(estimated);
-            if context > settings.context_limit * u64::from(settings.compact_percent) / 100
+            // Serialized provider context includes opaque encrypted payloads, whose byte
+            // size does not represent model tokens. Use the provider's reported usage.
+            if snapshot.usage.input
+                > settings.context_limit * u64::from(settings.compact_percent) / 100
                 && compacted_size != Some(snapshot.input.len())
             {
                 *conversation.status.lock().expect("status lock") = "Compacting context…".into();
