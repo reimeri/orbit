@@ -656,9 +656,8 @@ impl App {
                 if let EntryKind::User { images } = &entry.kind {
                     visible_media.extend(images.iter().cloned());
                 }
-                if matches!(entry.kind, EntryKind::User { .. } | EntryKind::Assistant)
-                    || matches!(entry.kind, EntryKind::Reasoning)
-                {
+                // User text is literal, including newlines and Markdown syntax.
+                if matches!(entry.kind, EntryKind::Assistant | EntryKind::Reasoning) {
                     let markdown = self.markdown.entry(entry.id.clone()).or_insert_with(|| {
                         let content = markdown::Content::parse(&entry.text);
                         Markdown {
@@ -1769,10 +1768,12 @@ impl App {
                                 {
                                     vec![]
                                 }
-                                EntryKind::Notice => vec![chat_selection::Block {
-                                    text: entry.text.clone(),
-                                    separator: "\n\n",
-                                }],
+                                EntryKind::User { .. } | EntryKind::Notice => {
+                                    vec![chat_selection::Block {
+                                        text: entry.text.clone(),
+                                        separator: "\n\n",
+                                    }]
+                                }
                                 _ => {
                                     let content = markdown::Content::parse(&entry.text);
                                     let viewer = chat_selection::Viewer::new(
@@ -4864,6 +4865,114 @@ mod tests {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
     #[tokio::test]
+    async fn user_messages_render_and_copy_literally_after_newline_and_paste() {
+        use iced::advanced::widget::Operation;
+        use iced::futures::StreamExt;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        #[derive(Default)]
+        struct TextContent(Vec<String>);
+        impl Operation for TextContent {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                _: iced::Rectangle,
+                text: &str,
+            ) {
+                self.0.push(text.to_owned());
+            }
+        }
+
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root).await;
+        type_message(&mut app, "First line λ").await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Enter)),
+        )
+        .await;
+        // Deliver text through the native clipboard completion path.
+        app.importing = 1;
+        app.io_busy = true;
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Ok(crate::attachments::Input::Text(
+                "**literal**\n\n  indented\n![not an image](missing.png)".into(),
+            ))),
+        )
+        .await;
+        let expected = "First line λ\n**literal**\n\n  indented\n![not an image](missing.png)";
+        assert_eq!(app.editor.text(), expected);
+        dispatch(&mut app, Message::Send).await;
+        let id = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        h.edit(&id, |s| {
+            s.entries
+                .push(Entry::new(EntryKind::Assistant, "**Still Markdown**"));
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        let saved = h.store.load_session(&id).unwrap();
+        assert_eq!(saved.entries[0].text, expected);
+
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let assistant = saved
+            .entries
+            .iter()
+            .position(|e| matches!(e.kind, EntryKind::Assistant))
+            .unwrap();
+        for (index, expected_text) in [(0, expected), (assistant, "Still Markdown")] {
+            let mut ui = UserInterface::build(
+                app.entry_view(&saved.entries[index], index),
+                iced::Size::new(800., 600.),
+                Cache::new(),
+                &mut renderer,
+            );
+            let mut text = TextContent::default();
+            ui.operate(&renderer, &mut text);
+            assert_eq!(text.0, [expected_text]);
+        }
+
+        // Copy must match the literal display, even after its row is unmounted.
+        app.transcript.viewport = 1.;
+        app.transcript.measure(assistant, 2000.);
+        app.transcript.end();
+        app.prepare_visible();
+        assert!(!app.transcript.order[app.transcript.visible()].contains(&0));
+        {
+            let mut selection = app.chat_selection.borrow_mut();
+            selection.anchor = Some(Position {
+                entry: 0,
+                block: 0,
+                byte: 0,
+            });
+            selection.focus = Some(Position {
+                entry: 0,
+                block: 0,
+                byte: expected.len(),
+            });
+        }
+        let mut actions =
+            iced_runtime::task::into_stream(app.update_inner(Message::CopySelection)).unwrap();
+        match actions.next().await.unwrap() {
+            iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
+                contents,
+                ..
+            }) => {
+                assert_eq!(contents, expected);
+            }
+            _ => panic!("expected clipboard write"),
+        }
+    }
+
+    #[tokio::test]
     async fn activity_expansion_streaming_selection_and_details_preserve_source_entries() {
         use iced::futures::StreamExt;
         let mut app = app();
@@ -7412,9 +7521,10 @@ Then implement the fix.";
             assert_eq!(app.transcript.visible(), 0..app.transcript.order.len());
             for &index in &prose {
                 assert!(app.transcript.order[app.transcript.visible()].contains(&index));
-                assert!(
-                    app.markdown
-                        .contains_key(&app.current().unwrap().entries[index].id)
+                let entry = &app.current().unwrap().entries[index];
+                assert_eq!(
+                    app.markdown.contains_key(&entry.id),
+                    matches!(entry.kind, EntryKind::Assistant)
                 );
             }
             // Reflow into overflow, then back to a fitting pane without scrolling.
