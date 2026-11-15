@@ -37,10 +37,10 @@ pub const RADIUS_CONTROL: f32 = 8.;
 pub const RADIUS_SURFACE: f32 = 12.;
 pub const BORDER_WIDTH: f32 = 1.;
 pub const BADGE_ALPHA: f32 = 0.18;
-pub const SCROLLBAR_WIDTH: f32 = 10.;
-pub const SCROLLBAR_GAP: f32 = 4.;
-pub const SCROLLBAR_EDGE_INSET: f32 = 4.;
-pub const SCROLLBAR_THUMB_WIDTH: f32 = 6.;
+pub const SCROLLBAR_WIDTH: f32 = 5.;
+pub const SCROLLBAR_GAP: f32 = 2.;
+pub const SCROLLBAR_EDGE_INSET: f32 = 2.;
+pub const SCROLLBAR_THUMB_WIDTH: f32 = 3.;
 pub const SCROLLBAR_ALPHA: f32 = 0.25;
 pub const SCROLLBAR_ACTIVE_ALPHA: f32 = 0.4;
 

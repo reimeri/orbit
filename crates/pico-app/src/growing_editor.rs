@@ -860,10 +860,10 @@ mod tests {
             let text_width = editor
                 .content
                 .with_editor(|editor| editor.buffer().size().0.unwrap());
-            assert_eq!(text_width, 270.); // 12 px left + 18 px gutter/inset on the right.
+            assert_eq!(text_width, 279.); // 12 px left + 9 px gutter/inset on the right.
             if let Some(bar) = editor.bar(&node) {
-                assert_eq!(bar.track.x - (12. + text_width), 4.);
-                assert_eq!(300. - (bar.track.x + bar.track.width), 4.);
+                assert_eq!(bar.track.x - (12. + text_width), 2.);
+                assert_eq!(300. - (bar.track.x + bar.track.width), 2.);
             }
         }
     }

@@ -142,7 +142,7 @@ mod tests {
                 ui.operate(&renderer, &mut bounds);
                 let content = bounds.0.unwrap();
                 assert_eq!(content.x, 0.);
-                assert_eq!(content.width, width - 14.);
+                assert_eq!(content.width, width - 7.);
 
                 let theme = theme::app();
                 ui.draw(
@@ -166,12 +166,13 @@ mod tests {
                     .collect();
                 assert_eq!(thumbs.len(), usize::from(height > 100.));
                 if let Some(thumb) = thumbs.first() {
-                    assert_eq!(thumb.x - (content.x + content.width), 6.);
+                    assert_eq!(thumb.width, 3.);
+                    assert_eq!(thumb.x - (content.x + content.width), 3.);
                 }
 
                 // Both the gap and scrollbar hit area stay outside the row;
                 // contrast with an actual click on its rightmost pixel.
-                for (x, expected) in [(width - 12., 0), (width - 5., 0), (width - 15., 1)] {
+                for (x, expected) in [(width - 6., 0), (width - 2., 0), (width - 8., 1)] {
                     let mut messages = Vec::new();
                     ui.update(
                         &[
@@ -249,7 +250,7 @@ mod tests {
                 .map(|(quad, _)| quad.bounds)
                 .collect();
             assert_eq!(selected.len(), 1);
-            assert_eq!(selected[0].width, 180. - 14. - 2. * style.border.width);
+            assert_eq!(selected[0].width, 180. - 7. - 2. * style.border.width);
         }
     }
 

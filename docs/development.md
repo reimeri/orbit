@@ -381,8 +381,8 @@ cards, editors and dialogs use 12 px. Tiny badges, checkboxes and inline code us
 icon geometry intentionally stay independent of card rounding. Layout dimensions
 and user-configurable text sizes remain in their owning views.
 
-Vertical scroll areas use `scrollbar::scroll`, which always reserves a 10 px
-rail plus a 4 px content gap, including when content fits. Keep row backgrounds
+Vertical scroll areas use `scrollbar::scroll`, which always reserves a 5 px
+rail plus a 2 px content gap, including when content fits. Keep row backgrounds
 and hit targets outside this gutter. Where possible, let it replace existing
 right-side panel padding rather than stacking extra insets. Use
 `scrollbar::horizontal` for horizontal scrolls; changing the direction of the

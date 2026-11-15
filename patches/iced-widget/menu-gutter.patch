@@ -1,6 +1,6 @@
 --- a/src/overlay/menu.rs
 +++ b/src/overlay/menu.rs
-@@ -207,18 +207,22 @@
+@@ -207,18 +207,27 @@
              class,
          } = menu;
  
@@ -30,12 +30,17 @@
 +                    padding,
 +                    class,
 +                })
-+                .padding(Padding::ZERO.right(14.0)),
++                .padding(Padding::ZERO.right(7.0)),
 +        )
++        .direction(scrollable::Direction::Vertical(
++            scrollable::Scrollbar::new()
++                .width(5.0)
++                .scroller_width(3.0),
++        ))
          .height(menu_height);
  
          state.tree.diff(&list as &dyn Widget<_, _, _>);
-@@ -515,6 +519,9 @@
+@@ -515,6 +524,9 @@
      ) {
          let style = Catalog::style(theme, self.class);
          let bounds = layout.bounds();
@@ -45,7 +50,7 @@
  
          let text_size =
              self.text_size.unwrap_or_else(|| renderer.default_size());
-@@ -572,7 +579,7 @@
+@@ -572,7 +584,7 @@
                  } else {
                      style.text_color
                  },
