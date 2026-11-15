@@ -288,7 +288,7 @@ regressions. The software/GPU window smoke includes the Images settings tab, sta
 thumbnail, animated modal, pause and natural-size static views using deterministic local
 fixtures. See [images](images.md) for resource limits and paid live acceptance.
 
-The expanded rendered smoke sequence now includes 45 frames (including media and
+The expanded rendered smoke sequence now includes 46 frames (including media and
 Markdown image previews, missing-source errors and the byte-backed GIF modal).
 Its timeout is 60 seconds; the earlier 41-frame software debug run took ~33 seconds locally.
 

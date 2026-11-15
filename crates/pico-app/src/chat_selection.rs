@@ -318,11 +318,21 @@ pub fn tool_row(
     selection: Shared,
     at: Position,
     height: f32,
+    heading: bool,
 ) -> Element<'static, Message> {
+    let mut span = Span::new(value.to_owned());
+    span.color = heading.then_some(crate::theme::MUTED);
     selectable(
-        Arc::from([Span::new(value.to_owned())]),
+        Arc::from([span]),
         12.into(),
-        Font::MONOSPACE,
+        if heading {
+            Font {
+                weight: iced::font::Weight::Semibold,
+                ..Font::DEFAULT
+            }
+        } else {
+            Font::MONOSPACE
+        },
         selection,
         at,
         Some(height),
@@ -1137,6 +1147,7 @@ pub(crate) mod tests {
                     byte: offset,
                 },
                 17.,
+                false,
             ),
             false,
             selection.clone(),
@@ -1185,10 +1196,83 @@ pub(crate) mod tests {
         );
     }
     #[test]
+    fn tool_whitespace_selection_draws_and_copies_original_line_endings_and_tabs() {
+        let selection = Shared::default();
+        let source = "α\r\nβ\t\t\tEND";
+        let expected = "Input\ncmd\n\nOutput\nα\r\nβ\t\t\tEND";
+        let mut output = crate::tool_output::Output::new("test", "cmd", source, false);
+        output.update(crate::tool_output::Event::Resize(160.));
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            pointer_input(
+                output.view("tool", selection.clone(), 0),
+                false,
+                selection.clone(),
+            ),
+            Size::new(160., 340.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = TextBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let end = bounds
+            .0
+            .iter()
+            .find(|(text, _)| text.ends_with("END"))
+            .unwrap()
+            .1;
+        // A tab-heavy row's final glyph must actually fit and be pointer-selectable.
+        send(
+            &mut ui,
+            &mut renderer,
+            press(),
+            Point::new(end.x + end.width - 0.1, end.center_y()),
+        );
+        assert_eq!(selection.borrow().anchor.unwrap().byte, expected.len());
+        send(&mut ui, &mut renderer, release(), end.center());
+        {
+            let mut selection = selection.borrow_mut();
+            selection.anchor = Some(Position {
+                entry: 0,
+                block: 0,
+                byte: 0,
+            });
+            selection.focus = Some(Position {
+                entry: 0,
+                block: 0,
+                byte: expected.len(),
+            });
+        }
+        // Previously the trailing CR was stripped by shaping but included in the
+        // highlight range, causing drawing a cross-line selection to panic.
+        ui.draw(
+            &mut renderer,
+            &crate::theme::app(),
+            &renderer::Style {
+                text_color: Color::WHITE,
+            },
+            mouse::Cursor::Unavailable,
+        );
+        assert_eq!(
+            copy_blocks(
+                &selection.borrow(),
+                [(
+                    0,
+                    vec![Block {
+                        text: crate::tool_output::display("test", "cmd", source, false),
+                        separator: "\n\n",
+                    }]
+                )]
+            ),
+            expected
+        );
+    }
+
+    #[test]
     fn wheel_drag_rehits_virtual_tool_rows_without_pointer_motion() {
         let selection = Shared::default();
         let source: String = (0..120).map(|i| format!("line {i:03}\n")).collect();
-        let mut output = crate::tool_output::Output::new("cmd", &source);
+        let mut output = crate::tool_output::Output::new("test", "cmd", &source, false);
         let mut renderer = renderer();
         let view = pointer_input(
             output.view("tool", selection.clone(), 0),
@@ -1231,7 +1315,7 @@ pub(crate) mod tests {
             )),
             at,
         );
-        let display = crate::tool_output::display("cmd", &source);
+        let display = crate::tool_output::display("test", "cmd", &source, false);
         let expected_end = display.find("line 036").unwrap();
         assert_eq!(selection.borrow().focus.unwrap().byte, expected_end);
         send(&mut ui, &mut renderer, release(), at);

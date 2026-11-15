@@ -27,6 +27,9 @@ enum Row {
 }
 
 pub struct Output {
+    name: String,
+    raw: bool,
+    headings: Vec<Range<usize>>,
     input: String,
     output: String,
     display: String,
@@ -34,22 +37,75 @@ pub struct Output {
     columns: usize,
     offset: f32,
 }
-pub fn display(input: &str, output: &str) -> String {
-    format!(
-        "Input\n{}\n\nOutput\n{}",
-        input,
+/// One logical selection document, with semantic heading ranges independent of wrapping.
+/// This same projection is used by clipboard reconstruction after viewport eviction.
+fn document(name: &str, input: &str, output: &str, raw: bool) -> (String, Vec<Range<usize>>) {
+    let mut text = String::new();
+    let mut headings = Vec::new();
+    let mut section = |title: &str, body: &str| {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        let start = text.len();
+        text.push_str(title);
+        headings.push(start..text.len());
+        text.push('\n');
+        text.push_str(body);
+    };
+    // Keep raw first when disclosed, so even a huge command cannot hide it.
+    if raw {
+        section("Raw input", input);
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(input).ok();
+    if name == "exec_command"
+        && let Some(serde_json::Value::Object(args)) = &parsed
+        && let Some(serde_json::Value::String(command)) = args.get("cmd")
+    {
+        section("Command", command);
+        let mut arguments = String::new();
+        for (key, value) in args.iter().filter(|(key, _)| key.as_str() != "cmd") {
+            if !arguments.is_empty() {
+                arguments.push('\n');
+            }
+            arguments.push_str(key);
+            arguments.push_str(": ");
+            match value {
+                serde_json::Value::String(value) => arguments.push_str(value),
+                value => {
+                    arguments.push_str(&serde_json::to_string_pretty(value).expect("JSON value"))
+                }
+            }
+        }
+        if !arguments.is_empty() {
+            section("Arguments", &arguments);
+        }
+    } else {
+        let formatted = parsed
+            .as_ref()
+            .map(|value| serde_json::to_string_pretty(value).expect("JSON value"));
+        section("Input", formatted.as_deref().unwrap_or(input));
+    }
+    section(
+        "Output",
         if output.is_empty() {
             "Waiting for output…"
         } else {
             output
-        }
-    )
-    .replace('\t', "    ")
-    .replace("\r\n", "\n")
+        },
+    );
+    (text, headings)
 }
+
+pub fn display(name: &str, input: &str, output: &str, raw: bool) -> String {
+    document(name, input, output, raw).0
+}
+
 impl Output {
-    pub fn new(input: &str, output: &str) -> Self {
+    pub fn new(name: &str, input: &str, output: &str, raw: bool) -> Self {
         let mut view = Self {
+            name: name.into(),
+            raw,
+            headings: vec![],
             input: input.into(),
             output: output.into(),
             display: String::new(),
@@ -67,22 +123,43 @@ impl Output {
             self.rebuild();
         }
     }
+    pub fn set_raw(&mut self, raw: bool) {
+        self.raw = raw;
+        self.offset = 0.;
+        self.rebuild();
+    }
     fn rebuild(&mut self) {
-        self.display = display(&self.input, &self.output);
+        (self.display, self.headings) = document(&self.name, &self.input, &self.output, self.raw);
         self.reflow();
     }
     fn reflow(&mut self) {
         self.rows.clear();
         let mut start = 0;
         let mut width = 0;
-        for (offset, ch) in self.display.char_indices() {
-            if ch == '\n' {
+        let mut chars = self.display.char_indices().peekable();
+        while let Some((offset, ch)) = chars.next() {
+            // Paragraph separators must not enter a shaped row: Cosmic Text strips
+            // them, which would desynchronize selection offsets. Keep their exact
+            // bytes between row ranges in the logical clipboard document instead.
+            if matches!(
+                ch,
+                '\n' | '\r' | '\u{1c}'..='\u{1e}' | '\u{85}' | '\u{2029}'
+            ) {
                 self.rows.push(start..offset);
-                start = offset + 1;
+                start = offset + ch.len_utf8();
+                if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') {
+                    chars.next();
+                    start += 1;
+                }
                 width = 0;
                 continue;
             }
-            let cells = ch.width().unwrap_or(0);
+            // Cosmic text uses eight-cell tab stops; budget the widest advance.
+            let cells = if ch == '\t' {
+                8
+            } else {
+                ch.width().unwrap_or(0)
+            };
             if width + cells > self.columns && offset > start {
                 self.rows.push(start..offset);
                 start = offset;
@@ -138,6 +215,9 @@ impl Output {
                         byte: range.start,
                     },
                     LINE_HEIGHT,
+                    self.headings
+                        .iter()
+                        .any(|heading| heading.contains(&range.start)),
                 ),
             ));
         }
@@ -166,6 +246,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn details_decode_commands_format_other_tools_and_preserve_raw_bytes() {
+        let input = r#"{ "cmd": "python3 - <<'PY'\n\tprint(\"λ\")\nPY", "workdir": "/tmp/a b", "max_output_tokens": 1500 }"#;
+        let output = "  indented\tresult λ\r\nOutput\n";
+        let formatted = "Command\npython3 - <<'PY'\n\tprint(\"λ\")\nPY\n\nArguments\nmax_output_tokens: 1500\nworkdir: /tmp/a b\n\nOutput\n  indented\tresult λ\r\nOutput\n";
+        assert_eq!(display("exec_command", input, output, false), formatted);
+        assert_eq!(
+            display("exec_command", input, output, true),
+            format!("Raw input\n{input}\n\n{formatted}"),
+        );
+        assert_eq!(
+            display(
+                "other_tool",
+                r#"{"query":"λ","options":{"limit":3}}"#,
+                "done",
+                false
+            ),
+            "Input\n{\n  \"options\": {\n    \"limit\": 3\n  },\n  \"query\": \"λ\"\n}\n\nOutput\ndone",
+        );
+        // Streaming/incomplete JSON is readable as-is, never dropped or replaced.
+        assert_eq!(
+            display("exec_command", "{\"cmd\":", "", false),
+            "Input\n{\"cmd\":\n\nOutput\nWaiting for output…"
+        );
+    }
+
+    #[test]
     fn scrolling_reuses_overlapping_paragraphs_and_reflows_changed_rows() {
         use crate::chat_selection::tests::shaped_paragraphs;
         use iced::{Font, Pixels, Size, advanced::widget::Operation};
@@ -189,7 +295,7 @@ mod tests {
         let source: String = (0..200)
             .map(|i| format!("row {i:03} with distinct Unicode λ界e\u{301} and a long suffix\n"))
             .collect();
-        let mut output = Output::new("cmd", &source);
+        let mut output = Output::new("test", "cmd", &source, false);
         output.update(Event::Resize(700.));
         let selection = chat_selection::Shared::default();
         let mut renderer =
@@ -251,7 +357,7 @@ mod tests {
     #[test]
     fn huge_single_line_and_unicode_keep_all_text_but_bound_layout_work() {
         let source = format!("{}\n\nlast λ界e\u{301}", "x".repeat(1_000_000));
-        let mut output = Output::new("cmd", &source);
+        let mut output = Output::new("test", "cmd", &source, false);
         output.update(Event::Resize(360.));
         assert!(output.visible().len() <= 22);
         assert!(output.rows.iter().all(|range| range.len() < 200));

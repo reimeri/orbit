@@ -102,6 +102,7 @@ pub struct App {
     submissions: HashMap<String, (UserMessage, String)>,
     revisions: HashMap<String, u64>,
     outputs: HashMap<String, tool_output::Output>,
+    raw_tool_inputs: HashSet<String>,
     image_view: crate::image_view::Viewer,
     markdown_images: crate::markdown_images::Cache,
     api_key_draft: String,
@@ -261,6 +262,7 @@ pub enum Message {
     Rename(String),
     Delete(String),
     ToggleEntry(String),
+    ToggleToolRaw(String),
     ToggleGroup(String),
     ToggleExecution(String),
     Scroll(u64, f32, f32, bool),
@@ -346,6 +348,7 @@ impl App {
             importing: 0,
             revisions: HashMap::new(),
             outputs: HashMap::new(),
+            raw_tool_inputs: HashSet::new(),
             image_view: Default::default(),
             markdown_images: Default::default(),
             api_key_draft: String::new(),
@@ -669,6 +672,7 @@ impl App {
                     image_urls.extend(markdown.images.iter().cloned());
                 }
                 if let EntryKind::Tool {
+                    name,
                     input,
                     output,
                     media,
@@ -677,9 +681,14 @@ impl App {
                     && self.expanded.contains(&entry.id)
                 {
                     visible_media.extend(media.iter().cloned());
-                    self.outputs
-                        .entry(entry.id.clone())
-                        .or_insert_with(|| tool_output::Output::new(input, output));
+                    self.outputs.entry(entry.id.clone()).or_insert_with(|| {
+                        tool_output::Output::new(
+                            name,
+                            input,
+                            output,
+                            self.raw_tool_inputs.contains(&entry.id),
+                        )
+                    });
                 }
             }
         }
@@ -1634,18 +1643,47 @@ impl App {
                 self.context_menu = None;
                 self.modal = Some(Modal::Delete(id));
             }
+            Message::ToggleToolRaw(id) => {
+                if !self.raw_tool_inputs.remove(&id) {
+                    self.raw_tool_inputs.insert(id.clone());
+                }
+                if let Some(view) = self.outputs.get_mut(&id) {
+                    view.set_raw(self.raw_tool_inputs.contains(&id));
+                }
+                if let Some(index) = self.current().and_then(|s| s.entries.index_of(&id)) {
+                    self.chat_selection.borrow_mut().invalidate_entry(index);
+                }
+                self.view_epoch = self.view_epoch.wrapping_add(1);
+                return widget::operation::snap_to(
+                    format!("tool-output-{id}"),
+                    scrollable::RelativeOffset::START,
+                );
+            }
             Message::ToggleEntry(id) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 if self.expanded.remove(&id) {
                     self.outputs.remove(&id);
                 } else {
                     if let Some(Entry {
-                        kind: EntryKind::Tool { input, output, .. },
+                        kind:
+                            EntryKind::Tool {
+                                name,
+                                input,
+                                output,
+                                ..
+                            },
                         ..
                     }) = self.current().and_then(|s| s.entries.by_id(&id))
                     {
-                        self.outputs
-                            .insert(id.clone(), tool_output::Output::new(input, output));
+                        self.outputs.insert(
+                            id.clone(),
+                            tool_output::Output::new(
+                                name,
+                                input,
+                                output,
+                                self.raw_tool_inputs.contains(&id),
+                            ),
+                        );
                     }
                     self.expanded.insert(id.clone());
                 }
@@ -1758,13 +1796,28 @@ impl App {
                         .map(|index| {
                             let entry = &session.entries[index];
                             let blocks = match &entry.kind {
-                                EntryKind::Tool { input, output, .. }
-                                    if self.expanded.contains(&entry.id) =>
-                                {
-                                    vec![chat_selection::Block {
-                                        text: tool_output::display(input, output),
-                                        separator: "\n\n",
-                                    }]
+                                EntryKind::Tool {
+                                    name,
+                                    input,
+                                    output,
+                                    parent,
+                                    ..
+                                } if self.expanded.contains(&entry.id) => {
+                                    vec![
+                                        chat_selection::Block {
+                                            text: tool_output::display(
+                                                name,
+                                                input,
+                                                output,
+                                                self.raw_tool_inputs.contains(&entry.id),
+                                            ),
+                                            separator: "\n\n",
+                                        },
+                                        chat_selection::Block {
+                                            text: tool_reference(&entry.id, parent.as_deref()),
+                                            separator: "\n\n",
+                                        },
+                                    ]
                                 }
                                 EntryKind::Tool { .. } => vec![],
                                 EntryKind::Notice
@@ -3057,7 +3110,7 @@ impl App {
                                 } else {
                                     ACCENT
                                 }),
-                            text(activity::tool_name(name)).size(12).color(MUTED),
+                            text(activity::tool_name(name)).size(12).color(theme::TEXT),
                             ellipsized_text(&preview, 12., Some(MUTED)),
                             text(if *failed {
                                 "failed"
@@ -3082,12 +3135,13 @@ impl App {
                     .width(Fill)
                 ]
                 .spacing(4);
+                let mut details = column![].spacing(8);
                 if open
                     && name == "spawn_subagent"
                     && let (Some(h), Some(session)) = (&self.harness, self.current())
                     && let Some(run) = h.subagent_for_request(&session.id, &entry.id)
                 {
-                    block = block.push(
+                    details = details.push(
                         theme::button(
                             text(format!(
                                 "{} · {} · {} ↗",
@@ -3102,18 +3156,22 @@ impl App {
                     );
                 }
                 if open {
-                    if let Some(parent) = parent {
-                        block = block.push(
-                            text(format!("Code execution: {parent}"))
-                                .size(11)
-                                .color(MUTED),
-                        );
-                    } else {
-                        block =
-                            block.push(text(format!("Call: {}", entry.id)).size(11).color(MUTED));
-                    }
+                    let raw = self.raw_tool_inputs.contains(&entry.id);
+                    details = details.push(
+                        theme::button(
+                            row![
+                                chevron_icon(raw, MUTED),
+                                text("Raw input").size(11).color(MUTED)
+                            ]
+                            .spacing(6)
+                            .align_y(iced::Center),
+                        )
+                        .padding([2, 0])
+                        .style(theme::text_button)
+                        .on_press(Message::ToggleToolRaw(entry.id.clone())),
+                    );
                     if let Some(metadata) = web {
-                        block = block.push(
+                        details = details.push(
                             text(format!(
                                 "{} web access · {}",
                                 metadata.mode,
@@ -3123,7 +3181,7 @@ impl App {
                             .color(MUTED),
                         );
                         for source in &metadata.sources {
-                            block = block.push(
+                            details = details.push(
                                 theme::button(ellipsized_text(&source.title, 12., Some(ACCENT)))
                                     .on_press(Message::Link(source.url.clone()))
                                     .style(theme::text_button),
@@ -3132,19 +3190,38 @@ impl App {
                     }
                     for item in media {
                         if item.thumbnail.is_some() {
-                            block = block.push(self.image_view.thumbnail(item));
+                            details = details.push(self.image_view.thumbnail(item));
                         }
                     }
                     if let Some(view) = self.outputs.get(&entry.id) {
-                        block =
-                            block.push(view.view(&entry.id, self.chat_selection.clone(), index));
+                        details = details.push(
+                            container(view.view(&entry.id, self.chat_selection.clone(), index))
+                                .padding(8)
+                                .width(Fill)
+                                .style(theme::tool_code),
+                        );
                     }
+                    details = details.push(chat_selection::plain(
+                        &tool_reference(&entry.id, parent.as_deref()),
+                        11.,
+                        Some(MUTED),
+                        self.chat_selection.clone(),
+                        Position {
+                            entry: index,
+                            block: 1,
+                            byte: 0,
+                        },
+                    ));
+                    block = block.push(
+                        container(container(details).padding(12).width(Fill).style(card))
+                            .padding(iced::Padding {
+                                left: 20.,
+                                ..iced::Padding::ZERO
+                            })
+                            .width(Fill),
+                    );
                 }
-                container(block)
-                    .padding(if open { [8, 12] } else { [0, 12] })
-                    .width(Fill)
-                    .style(if open { card } else { container::transparent })
-                    .into()
+                container(block).padding([0, 12]).width(Fill).into()
             }
             EntryKind::Notice if activity::subagent_notice(entry).is_some() => {
                 self.subagent_notice_view(entry, index)
@@ -4516,7 +4593,7 @@ impl App {
                     Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
                     tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),
                     tool("activity-shell", "exec_command", r#"{"cmd":"rg -n 'cancellation|terminate' crates/pico-core/src"}"#, Some("activity-exec"), true, false),
-                    tool("activity-check", "exec_command", r#"{"cmd":"nix develop --command cargo test --locked -p pico-core"}"#, Some("activity-exec"), true, true),
+                    tool("activity-check", "exec_command", r#"{"cmd":"nix develop --command cargo test --locked -p pico-core\nprintf 'validation finished\\n'","workdir":"/workspace/pico-evo","max_output_tokens":1500}"#, Some("activity-exec"), true, true),
                     Entry { id: "subagent-smoke-activity".into(), kind: EntryKind::Notice, text: "Subagent completion observation: Verify cancellation (Review) is Completed. session_id=smoke-child, run_id=smoke-activity. Retrieve the final result with tools.wait_subagent; this notice is not a new user instruction.".into() },
                     Entry::new(EntryKind::Assistant, "The implementation is ready. I found **one failing check** and am investigating it before rerunning validation."),
                     tool("activity-live", "exec", "await Promise.all([tools.exec_command({cmd:'git diff --check'}),tools.exec_command({cmd:'just verify'})]);", None, false, false),
@@ -4544,11 +4621,17 @@ impl App {
                 let _ = self.update_inner(Message::ToggleEntry("activity-check".into()));
                 self.settings_open = true;
             }
+            45 => {
+                return Task::batch([
+                    self.update_inner(Message::ToggleToolRaw("activity-check".into())),
+                    delayed_capture(),
+                ]);
+            }
 
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -4854,6 +4937,13 @@ fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Bin
     text_editor::Binding::from_key_press(event)
 }
 
+fn tool_reference(id: &str, parent: Option<&str>) -> String {
+    match parent {
+        Some(parent) => format!("Code execution: {parent}"),
+        None => format!("Call: {id}"),
+    }
+}
+
 // Filter before producing application messages: even a no-op update rebuilds the UI.
 fn window_events() -> Subscription<Message> {
     iced::event::listen_with(|event, _, _| match event {
@@ -5009,6 +5099,168 @@ mod tests {
             }
             _ => panic!("expected clipboard write"),
         }
+    }
+
+    #[test]
+    fn tool_header_stays_fixed_above_padded_details_when_toggled() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        let entry = Entry {
+            id: "stationary-tool".into(),
+            text: String::new(),
+            kind: EntryKind::Tool {
+                name: "exec_command".into(),
+                input: r#"{"cmd":"printf 'λ'"}"#.into(),
+                output: "λ".into(),
+                complete: true,
+                failed: false,
+                cell_id: None,
+                parent: Some("parent-call".into()),
+                media: vec![],
+                web: None,
+            },
+        };
+        let mut renderer = header_renderer();
+        for width in [360., 860.] {
+            let mut cache = Cache::new();
+            let mut header = None;
+            for open in [false, true, false] {
+                if open {
+                    app.expanded.insert(entry.id.clone());
+                    app.outputs.insert(
+                        entry.id.clone(),
+                        tool_output::Output::new(
+                            "exec_command",
+                            r#"{"cmd":"printf 'λ'"}"#,
+                            "λ",
+                            false,
+                        ),
+                    );
+                } else {
+                    app.expanded.remove(&entry.id);
+                    app.outputs.remove(&entry.id);
+                }
+                let mut ui = UserInterface::build(
+                    app.entry_view(&entry, 0),
+                    iced::Size::new(width, 600.),
+                    cache,
+                    &mut renderer,
+                );
+                let mut bounds = UiBounds::default();
+                ui.operate(&renderer, &mut bounds);
+                let current = (bounds.label("exec_command"), bounds.label("●"));
+                if let Some(header) = header {
+                    assert_eq!(
+                        current, header,
+                        "expansion must not shift or resize the header"
+                    );
+                } else {
+                    header = Some(current);
+                }
+                if open {
+                    assert!(bounds.label("Command").y > current.0.y + current.0.height + 8.);
+                    assert!(
+                        bounds.label("Code execution: parent-call").y > bounds.label("Output").y
+                    );
+                } else {
+                    assert!(!bounds.labels.iter().any(|(label, _)| label == "Command"));
+                }
+                // The original header remains the collapse/expand hit target.
+                assert!(
+                    matches!(click_header(&mut ui, &mut renderer, current.0.center_x()).as_slice(), [Message::ToggleEntry(id)] if id == &entry.id)
+                );
+                cache = ui.into_cache();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn formatted_tool_copy_and_raw_disclosure_survive_viewport_eviction() {
+        use iced::futures::StreamExt;
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let id = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        let input = r#"{ "cmd": "printf 'λ\n'", "workdir": "/tmp/a b" }"#;
+        let output = "  result β\tend\r\n";
+        h.edit(&id, |s| {
+            s.entries = vec![
+                Entry {
+                    id: "formatted-tool".into(),
+                    text: String::new(),
+                    kind: EntryKind::Tool {
+                        name: "exec_command".into(),
+                        input: input.into(),
+                        output: output.into(),
+                        complete: true,
+                        failed: false,
+                        cell_id: None,
+                        parent: Some("outer-call".into()),
+                        media: vec![],
+                        web: None,
+                    },
+                },
+                Entry::new(EntryKind::Assistant, "After the tool."),
+            ]
+            .into();
+        })
+        .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        dispatch(&mut app, Message::ToggleEntry("formatted-tool".into())).await;
+        let formatted =
+            "Command\nprintf 'λ\n'\n\nArguments\nworkdir: /tmp/a b\n\nOutput\n  result β\tend\r\n";
+        for raw in [false, true, false] {
+            if app.raw_tool_inputs.contains("formatted-tool") != raw {
+                dispatch(&mut app, Message::ToggleToolRaw("formatted-tool".into())).await;
+                assert!(
+                    app.chat_selection.borrow().range().is_none(),
+                    "format changes invalidate old byte positions"
+                );
+            }
+            let expected = if raw {
+                format!("Raw input\n{input}\n\n{formatted}")
+            } else {
+                formatted.into()
+            };
+            // Evict the rendered tool cache: Copy must reconstruct the same document.
+            app.transcript.viewport = 1.;
+            app.transcript.measure(1, 2000.);
+            app.transcript.end();
+            app.prepare_visible();
+            assert!(!app.outputs.contains_key("formatted-tool"));
+            {
+                let mut selection = app.chat_selection.borrow_mut();
+                selection.anchor = Some(Position {
+                    entry: 0,
+                    block: 0,
+                    byte: 0,
+                });
+                selection.focus = Some(Position {
+                    entry: 0,
+                    block: 1,
+                    byte: "Code execution: outer-call".len(),
+                });
+            }
+            let mut actions =
+                iced_runtime::task::into_stream(app.update_inner(Message::CopySelection)).unwrap();
+            match actions.next().await.unwrap() {
+                iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
+                    contents,
+                    ..
+                }) => {
+                    assert_eq!(
+                        contents,
+                        format!("{expected}\n\nCode execution: outer-call")
+                    );
+                }
+                _ => panic!("expected clipboard write"),
+            }
+        }
+        let saved = h.store.load_session(&id).unwrap();
+        assert!(
+            matches!(&saved.entries[0].kind, EntryKind::Tool { input: original, output: result, .. } if original == input && result == output)
+        );
     }
 
     #[tokio::test]

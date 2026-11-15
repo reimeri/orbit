@@ -308,3 +308,12 @@ pub const PROJECT_COLORS: [Color; 8] = [
     Color::from_rgb8(221, 158, 122),
     Color::from_rgb8(199, 181, 137),
 ];
+
+/// Quiet inset for tool code; the enclosing detail panel owns the only border.
+pub fn tool_code(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BACKGROUND.into()),
+        border: iced::border::rounded(RADIUS_SMALL),
+        ..Default::default()
+    }
+}
