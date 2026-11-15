@@ -2679,11 +2679,7 @@ impl App {
         let chat = container(chat).padding(iced::Padding::ZERO.right(6));
         let running = self.running();
         if let Some(child) = &session.child {
-            let parent_title = self
-                .sessions
-                .iter()
-                .find(|s| s.id == child.parent_id)
-                .map_or("Parent", |s| s.title.as_str());
+            use pico_core::agent::subagents::RunStatus;
             let status = self
                 .harness
                 .as_ref()
@@ -2692,37 +2688,75 @@ impl App {
                         .into_iter()
                         .find(|r| r.session_id == session.id)
                 })
-                .map_or("Ready", |r| r.status.label());
-            let header = column![
-                row![
-                    theme::button(ellipsized_text(
-                        &format!("← Back to {parent_title}"),
-                        12.,
-                        None
+                .map(|r| r.status);
+            let status_color = match status {
+                Some(RunStatus::Running) => ACCENT,
+                Some(RunStatus::Completed) => SUCCESS,
+                Some(RunStatus::Failed | RunStatus::Interrupted) => DANGER,
+                Some(RunStatus::Cancelled) => WARNING,
+                None => MUTED,
+            };
+            let header = widget::responsive(move |size| {
+                let compact = size.width < 640.;
+                let mut back = row![crate::chevron_icon::back_arrow_icon(theme::TEXT)]
+                    .spacing(8)
+                    .align_y(iced::Center);
+                if !compact {
+                    back = back.push(text("Back to main agent").size(12));
+                }
+                let back = tooltip(
+                    theme::button(container(back).center_y(32))
+                        .padding([0, 8])
+                        .on_press(Message::Select(child.parent_id.clone()))
+                        .style(theme::text_button),
+                    text("Back to main agent").size(12),
+                    tooltip::Position::Bottom,
+                )
+                .style(card);
+                let title: Element<'_, Message> = if compact {
+                    space().width(Fill).into()
+                } else {
+                    let title = format!("{} · {}", child.profile.label(), session.title);
+                    container(crate::ellipsized_text::shrinking_ellipsized_text(
+                        &title, 13., None,
                     ))
-                    .width(Fill)
-                    .on_press(Message::Select(child.parent_id.clone()))
-                    .style(theme::text_button),
-                    theme::button("Stop")
+                    .center_x(Fill)
+                    .into()
+                };
+                let status = tooltip(
+                    container(text("●").size(12).color(status_color))
+                        .center_x(24)
+                        .center_y(32),
+                    text(status.map_or("Ready", RunStatus::label)).size(12),
+                    tooltip::Position::Bottom,
+                )
+                .style(card);
+                let stop = tooltip(
+                    theme::button(container(text("■").size(16)).center_x(32).center_y(32))
+                        .padding(0)
                         .on_press_maybe(running.then(|| Message::StopAgent(session.id.clone())))
-                        .style(theme::text_button)
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
+                        .style(theme::text_button),
+                    text("Stop").size(12),
+                    tooltip::Position::Bottom,
+                )
+                .style(card);
+                // Equal side widths keep the title at the actual header center.
+                let side_width = if compact { 60. } else { 170. };
                 row![
-                    ellipsized_text(
-                        &format!("{} · {}", child.profile.label(), session.title),
-                        13.,
-                        None
-                    ),
-                    text(status).size(11).color(MUTED)
+                    container(back).width(side_width),
+                    title,
+                    container(row![status, stop].spacing(4).align_y(iced::Center))
+                        .align_right(side_width),
                 ]
                 .spacing(8)
-            ]
-            .spacing(8);
-            return column![container(header).padding(12).style(panel),chat,
-                container(text("Read-only profile instructions · Shell access is not sandboxed · Continue through the parent").size(11).color(MUTED)).padding(12)
-            ].width(Fill).height(Fill).into();
+                .align_y(iced::Center)
+                .into()
+            })
+            .height(32);
+            return column![container(header).padding(12).style(panel), chat]
+                .width(Fill)
+                .height(Fill)
+                .into();
         }
         if let Some(id) = &self.active_questionnaire
             && let Some(draft) = self.questionnaires.get(id)
@@ -4161,6 +4195,7 @@ impl App {
                 self.agents_open = true;
             }
             23 => {
+                self.agents_open = false;
                 let parent = self.selected.clone().expect("smoke parent");
                 let mut child = Session::new(
                     self.smoke_dir.clone().expect("smoke path"),
@@ -4183,6 +4218,7 @@ impl App {
                 self.select(Selection::Session(id));
             }
             24 => {
+                self.agents_open = true;
                 self.window_width = 860.;
                 self.window_height = 560.;
                 self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -6025,7 +6061,7 @@ Then implement the fix.";
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
-            for label in ["Agents", "Completed", "Open", "Stop"] {
+            for label in ["Agents", "Completed", "Open", "■"] {
                 let rect = bounds.label(label);
                 assert!(
                     rect.x >= 0. && rect.x + rect.width <= width,
@@ -6037,6 +6073,67 @@ Then implement the fix.";
                 );
             }
         }
+        // Measure the actual available center width, independently of side panels.
+        let conversation = app.harness.as_ref().unwrap().get(&child_id).unwrap();
+        for (width, running) in [(1000., false), (664., true), (663., true), (320., false)] {
+            conversation.running.store(running, Ordering::Release);
+            let mut ui = iced_runtime::UserInterface::build(
+                app.center(),
+                iced::Size::new(width, 560.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let stop = bounds.label("■");
+            let status = bounds.label("●");
+            assert_eq!(status.center_y(), stop.center_y());
+            assert!(status.x + status.width < stop.x);
+            assert!(stop.x + stop.width <= width);
+            let title = "Explore · Inspect cancellation";
+            let wide = width >= 664.;
+            for label in [title, "Back to main agent"] {
+                assert_eq!(bounds.labels.iter().any(|(s, _)| s == label), wide);
+            }
+            if wide {
+                let title = bounds.label(title);
+                let back = bounds.label("Back to main agent");
+                assert!((title.center_x() - width / 2.).abs() < 1.);
+                assert!((title.center_y() - stop.center_y()).abs() < 1.);
+                assert!((back.center_y() - stop.center_y()).abs() < 1.);
+                assert!(back.x + back.width < title.x);
+                assert!(title.x + title.width < status.x);
+            }
+            assert!(!bounds.labels.iter().any(|(s, _)| {
+                s == "Completed"
+                    || s == "Stop"
+                    || s.contains("Read-only profile instructions")
+                    || s.contains("Parent task")
+            }));
+            for (point, back) in [(iced::Point::new(26., 28.), true), (stop.center(), false)] {
+                let mut messages = Vec::new();
+                ui.update(
+                    &[
+                        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                        iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                    ],
+                    mouse::Cursor::Available(point),
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                if back {
+                    assert!(matches!(messages.as_slice(), [Message::Select(id)] if id == &parent));
+                } else if running {
+                    assert!(
+                        matches!(messages.as_slice(), [Message::StopAgent(id)] if id == &child_id)
+                    );
+                } else {
+                    assert!(messages.is_empty(), "completed child must not be stoppable");
+                }
+            }
+        }
+        conversation.running.store(false, Ordering::Release);
         dispatch(&mut app, Message::Select(parent.clone())).await;
         assert_eq!(app.editor.text(), "Keep this unsent parent draft λ");
         assert!(!app.auto_scroll);
