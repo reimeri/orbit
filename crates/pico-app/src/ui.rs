@@ -2475,16 +2475,11 @@ impl App {
                 .iter()
                 .filter(|p| p.favorite)
                 .map(|p| {
-                    tooltip(
-                        theme::button(project_badge(&p.path))
-                            .padding(0)
-                            .on_press(Message::Create(p.path.clone()))
-                            .style(theme::text_button),
-                        text(format!("New session in {}\n{}", p.name(), p.path.display())).size(12),
-                        tooltip::Position::Bottom,
-                    )
-                    .style(card)
-                    .into()
+                    theme::button(project_badge(&p.path))
+                        .padding(0)
+                        .on_press(Message::Create(p.path.clone()))
+                        .style(theme::text_button)
+                        .into()
                 }))
             .spacing(6)
             .align_y(iced::Center);
@@ -2863,15 +2858,10 @@ impl App {
                 if !compact {
                     back = back.push(text("Back to main agent").size(12));
                 }
-                let back = tooltip(
-                    theme::button(container(back).center_y(32))
-                        .padding([0, 8])
-                        .on_press(Message::Select(child.parent_id.clone()))
-                        .style(theme::text_button),
-                    text("Back to main agent").size(12),
-                    tooltip::Position::Bottom,
-                )
-                .style(card);
+                let back = theme::button(container(back).center_y(32))
+                    .padding([0, 8])
+                    .on_press(Message::Select(child.parent_id.clone()))
+                    .style(theme::text_button);
                 let title: Element<'_, Message> = if compact {
                     space().width(Fill).into()
                 } else {
