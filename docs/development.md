@@ -27,6 +27,10 @@ Cargo's registry cache. Re-enter the shell after changing `patches/winit/`.
 The composer also uses a checksum-pinned iced widget patch to read native editor
 scroll metrics; see [its maintenance notes](../patches/iced-widget/README.md).
 The shell prepares `.build-deps/iced-widget` alongside winit.
+Caret positioning and selection highlighting inside ligatures use a
+checksum-pinned iced graphics patch;
+see [its maintenance notes](../patches/iced-graphics/README.md). The shell also
+prepares `.build-deps/iced-graphics`, shared by development and packaged builds.
 The package and formatting checks prepare their own links, independent of the
 working tree. See [patch maintenance](../patches/winit/README.md).
 

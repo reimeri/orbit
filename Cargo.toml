@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/pico-app", "crates/pico-core"]
 default-members = ["crates/pico-app"]
-exclude = [".build-deps/winit", ".build-deps/iced-widget"]
+exclude = [".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-graphics"]
 resolver = "3"
 
 [workspace.package]
@@ -25,3 +25,4 @@ incremental = true
 # Prepared by nix develop and the package build; see patches/*/README.md.
 winit = { path = ".build-deps/winit" }
 iced_widget = { path = ".build-deps/iced-widget" }
+iced_graphics = { path = ".build-deps/iced-graphics" }

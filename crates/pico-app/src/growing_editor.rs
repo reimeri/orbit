@@ -453,6 +453,400 @@ mod tests {
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
     }
 
+    fn shaped_editor(value: &str, width: f32, height: f32) -> graphics_text::Editor {
+        use iced::advanced::text::Editor as _;
+        let mut editor = graphics_text::Editor::with_text(value);
+        layout_shaped_editor(&mut editor, width, height);
+        editor
+    }
+
+    fn layout_shaped_editor(editor: &mut graphics_text::Editor, width: f32, height: f32) {
+        use iced::advanced::text::Editor as _;
+        editor.update(
+            Size::new(width, height),
+            iced::Font::with_name("DejaVu Sans"),
+            iced::Pixels(15.),
+            iced::widget::text::LineHeight::Absolute(19.5.into()),
+            iced::advanced::text::Wrapping::default(),
+            &mut PlainText,
+        );
+    }
+
+    fn caret(editor: &graphics_text::Editor) -> Point {
+        use iced::advanced::text::{Editor as _, editor::Selection};
+        let Selection::Caret(point) = editor.selection() else {
+            panic!("expected an unselected caret");
+        };
+        point
+    }
+
+    #[test]
+    fn ligature_carets_follow_graphemes_in_both_directions() {
+        use iced::advanced::text::Editor as _;
+        // Explicit byte positions distinguish graphemes from bytes/code points.
+        // Lam-alef is an RTL ligature; the accented a is one grapheme.
+        for (value, start, middle, end, forward, backward) in [
+            (
+                "Let's implement the fix",
+                20,
+                21,
+                22,
+                Motion::Right,
+                Motion::Left,
+            ),
+            ("a\u{301}fix", 3, 4, 5, Motion::Right, Motion::Left),
+            ("لا", 0, 2, 4, Motion::Left, Motion::Right),
+        ] {
+            let mut editor = shaped_editor(value, 400., 100.);
+            let (x, width, rtl) = {
+                let glyph = editor
+                    .buffer()
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs)
+                    .find(|glyph| glyph.start == start && glyph.end == end)
+                    .expect("fixture must shape into a two-grapheme ligature");
+                (glyph.x, glyph.w, glyph.level.is_rtl())
+            };
+            editor.perform(Action::Move(Motion::DocumentStart));
+            while editor.cursor().position.column < start {
+                editor.perform(Action::Move(forward));
+            }
+            let mut positions = Vec::new();
+            for (column, fraction) in [(start, 0.), (middle, 0.5), (end, 1.)] {
+                assert_eq!(editor.cursor().position.column, column, "{value:?}");
+                let point = caret(&editor);
+                let expected_x = x + width * if rtl { 1. - fraction } else { fraction };
+                assert!(
+                    (point.x - expected_x).abs() < 0.01,
+                    "{value:?}: {point:?}, expected x={expected_x}"
+                );
+                positions.push(point);
+                if column != end {
+                    editor.perform(Action::Move(forward));
+                }
+            }
+            for (column, point) in [(middle, positions[1]), (start, positions[0])] {
+                editor.perform(Action::Move(backward));
+                assert_eq!(editor.cursor().position.column, column);
+                assert_eq!(caret(&editor), point);
+            }
+            if start == 3 {
+                editor.perform(Action::Move(backward));
+                assert_eq!(
+                    editor.cursor().position.column,
+                    0,
+                    "do not split combining marks"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ligature_carets_preserve_wrapping_affinity_and_scroll_coordinates() {
+        use iced::advanced::text::Editor as _;
+        let value = "prefix words repeated\nLet's implement the fix";
+        let mut editor = shaped_editor(value, 105., 39.);
+        editor.perform(Action::Move(Motion::DocumentEnd));
+        layout_shaped_editor(&mut editor, 105., 39.);
+        editor.perform(Action::Move(Motion::Left)); // after i
+        let after = caret(&editor);
+        editor.perform(Action::Move(Motion::Left)); // between f and i
+        let middle = caret(&editor);
+        editor.perform(Action::Move(Motion::Left)); // before f
+        let before = caret(&editor);
+        assert!(before.x < middle.x && middle.x < after.x);
+        assert_eq!(before.y, middle.y);
+        assert_eq!(middle.y, after.y);
+        assert!(before.y >= 0. && before.y < 39.);
+        assert!(editor.buffer().scroll().line > 0 || editor.buffer().scroll().vertical > 0.);
+        let run_top = editor
+            .buffer()
+            .layout_runs()
+            .find(|run| run.line_i == 1 && run.glyphs.iter().any(|glyph| glyph.start == 20))
+            .expect("ligature should be visible")
+            .line_top;
+        assert!((middle.y - run_top).abs() < 0.01);
+
+        // Wheel scrolling can leave the caret outside the visible runs.
+        layout_shaped_editor(&mut editor, 105., 39.);
+        editor.perform(Action::Scroll { lines: -100 });
+        layout_shaped_editor(&mut editor, 105., 39.);
+        assert_eq!(caret(&editor).x, before.x);
+        assert!(caret(&editor).y >= 39.);
+
+        // A forced wrap has two visual positions at the same logical boundary.
+        let mut editor = shaped_editor("fifi", 12., 100.);
+        editor.update(
+            Size::new(12., 100.),
+            iced::Font::with_name("DejaVu Sans"),
+            iced::Pixels(15.),
+            iced::widget::text::LineHeight::Absolute(19.5.into()),
+            iced::advanced::text::Wrapping::Glyph,
+            &mut PlainText,
+        );
+        assert_eq!(editor.buffer().layout_runs().count(), 2);
+        editor.perform(Action::Move(Motion::Right));
+        editor.perform(Action::Move(Motion::Right));
+        assert_eq!(editor.cursor().position.column, 2);
+        let previous_row_end = caret(&editor);
+        editor.perform(Action::Move(Motion::Right));
+        editor.perform(Action::Move(Motion::Left));
+        assert_eq!(editor.cursor().position.column, 2);
+        let next_row_start = caret(&editor);
+        assert!(previous_row_end.x > next_row_start.x);
+        assert!((next_row_start.y - previous_row_end.y - 19.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn caret_affinity_handles_direction_changes_and_wrapped_spaces() {
+        use iced::advanced::text::Editor as _;
+        let mut editor = shaped_editor("fi אב fi", 100., 100.);
+        let (after_space, before_alef) = {
+            let glyphs = editor.buffer().layout_runs().next().unwrap().glyphs;
+            let space = glyphs.iter().find(|glyph| glyph.start == 2).unwrap();
+            let alef = glyphs.iter().find(|glyph| glyph.start == 3).unwrap();
+            assert!(alef.level.is_rtl());
+            (space.x + space.w, alef.x + alef.w)
+        };
+        assert!(after_space < before_alef);
+        for _ in 0..3 {
+            editor.perform(Action::Move(Motion::Right));
+        }
+        assert_eq!(editor.cursor().position.column, 3);
+        assert_eq!(caret(&editor).x, after_space);
+        editor.perform(Action::Move(Motion::Right));
+        editor.perform(Action::Move(Motion::Left));
+        assert_eq!(editor.cursor().position.column, 3);
+        assert_eq!(caret(&editor).x, before_alef);
+
+        // An LTR prefix makes the zero-advance mark precede the advancing
+        // lam-alef glyph. Using only the first glyph collapses every caret.
+        let mut editor = shaped_editor("x لَا", 100., 100.);
+        let (left, right) = {
+            let cluster: Vec<_> = editor
+                .buffer()
+                .layout_runs()
+                .flat_map(|run| run.glyphs)
+                .filter(|glyph| glyph.start == 2 && glyph.end == 8)
+                .collect();
+            assert_eq!(cluster.len(), 2);
+            assert_eq!(cluster[0].w, 0.);
+            assert!(cluster[1].w > 0.);
+            (cluster[1].x, cluster[1].x + cluster[1].w)
+        };
+        editor.perform(Action::Move(Motion::DocumentEnd));
+        for (motion, column, expected_x) in [
+            (Motion::Left, 6, (left + right) / 2.),
+            (Motion::Left, 2, right),
+            (Motion::Right, 6, (left + right) / 2.),
+            (Motion::Right, 8, left),
+        ] {
+            editor.perform(Action::Move(motion));
+            assert_eq!(editor.cursor().position.column, column);
+            assert!((caret(&editor).x - expected_x).abs() < 0.01);
+        }
+
+        let mut editor = shaped_editor("fi   fi", 15., 100.);
+        assert_eq!(editor.buffer().layout_runs().count(), 2);
+        // The first space fits on row one; the remaining spaces are omitted.
+        let first_row_end = editor
+            .buffer()
+            .layout_runs()
+            .next()
+            .unwrap()
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.end)
+            .max()
+            .unwrap();
+        assert_eq!(first_row_end, 3);
+        for _ in 0..3 {
+            editor.perform(Action::Move(Motion::Right));
+        }
+        let row_end = caret(&editor);
+        editor.perform(Action::Move(Motion::Right));
+        assert_eq!(editor.cursor().position.column, 4);
+        assert_eq!(
+            caret(&editor),
+            row_end,
+            "wrapped-away space stays at the row end"
+        );
+        editor.perform(Action::Move(Motion::Right));
+        let row_start = caret(&editor);
+        assert_eq!(row_start.x, 0.);
+        assert!((row_start.y - row_end.y - 19.5).abs() < 0.01);
+        for column in (3..=4).rev() {
+            editor.perform(Action::Move(Motion::Left));
+            assert_eq!(editor.cursor().position.column, column);
+            assert_eq!(caret(&editor), row_end);
+        }
+    }
+
+    fn selection_rectangles(editor: &graphics_text::Editor) -> Vec<Rectangle> {
+        use iced::advanced::text::{Editor as _, editor::Selection};
+        let Selection::Range(rectangles) = editor.selection() else {
+            panic!("expected a selection range");
+        };
+        rectangles
+    }
+
+    #[test]
+    fn ligature_selection_matches_individual_graphemes_and_copied_text() {
+        use iced::advanced::text::{
+            Editor as _,
+            editor::{Cursor, Position},
+        };
+        for (value, start, middle, end, forward, backward) in [
+            (
+                "Let's implement the fix",
+                20,
+                21,
+                22,
+                Motion::Right,
+                Motion::Left,
+            ),
+            ("لا", 0, 2, 4, Motion::Left, Motion::Right),
+            ("x لَا", 2, 6, 8, Motion::Right, Motion::Left),
+        ] {
+            let mut editor = shaped_editor(value, 400., 100.);
+            let cluster: Vec<_> = editor
+                .buffer()
+                .layout_runs()
+                .flat_map(|run| run.glyphs)
+                .filter(|glyph| glyph.start == start && glyph.end == end)
+                .collect();
+            assert!(!cluster.is_empty(), "fixture must form a ligature");
+            let left = cluster
+                .iter()
+                .map(|glyph| glyph.x)
+                .reduce(f32::min)
+                .unwrap();
+            let right = cluster
+                .iter()
+                .map(|glyph| glyph.x + glyph.w)
+                .reduce(f32::max)
+                .unwrap();
+            let half = (right - left) / 2.;
+            let rtl = cluster[0].level.is_rtl();
+            for (anchor, motion, from, to) in [
+                (start, forward, start, middle),
+                (middle, forward, middle, end),
+                (end, backward, middle, end),
+                (middle, backward, start, middle),
+            ] {
+                editor.perform(Action::Move(Motion::DocumentStart));
+                editor.move_to(Cursor {
+                    position: Position {
+                        line: 0,
+                        column: anchor,
+                    },
+                    selection: None,
+                });
+                editor.perform(Action::Select(motion));
+                assert_eq!(editor.copy().as_deref(), Some(&value[from..to]));
+                let rectangles = selection_rectangles(&editor);
+                assert_eq!(rectangles.len(), 1, "{value:?} {from}..{to}");
+                let expected_x = if (from == start) != rtl {
+                    left
+                } else {
+                    left + half
+                };
+                assert!(
+                    (rectangles[0].x - expected_x).abs() < 0.01,
+                    "{value:?}: {rectangles:?}"
+                );
+                assert!(
+                    (rectangles[0].width - half).abs() < 0.01,
+                    "{value:?}: {rectangles:?}"
+                );
+                assert_eq!(rectangles[0].y, 0.);
+                assert_eq!(rectangles[0].height, 19.5);
+            }
+            // The ordinary click/drag path must select and highlight f or i,
+            // not just keyboard-created logical ranges.
+            if start == 20 {
+                for (a, b, expected) in [
+                    (left, left + half, "f"),
+                    (left + half, right, "i"),
+                    (left + half, left, "f"),
+                    (right, left + half, "i"),
+                ] {
+                    editor.perform(Action::Click(Point::new(a, 9.)));
+                    editor.perform(Action::Drag(Point::new(b, 9.)));
+                    assert_eq!(editor.copy().as_deref(), Some(expected));
+                    let rectangles = selection_rectangles(&editor);
+                    assert_eq!(rectangles.len(), 1);
+                    assert!((rectangles[0].x - a.min(b)).abs() < 0.01);
+                    assert!((rectangles[0].width - half).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ligature_selection_keeps_disjoint_bidi_regions_and_visual_row_offsets() {
+        use iced::advanced::text::{
+            Editor as _,
+            editor::{Cursor, Position},
+        };
+        let mut editor = shaped_editor("fi אב fi", 100., 100.);
+        let glyphs = editor.buffer().layout_runs().next().unwrap().glyphs;
+        let fi = glyphs.iter().find(|glyph| glyph.start == 0).unwrap();
+        let space = glyphs.iter().find(|glyph| glyph.start == 2).unwrap();
+        let alef = glyphs.iter().find(|glyph| glyph.start == 3).unwrap();
+        let expected = [
+            (fi.x + fi.w / 2., space.x + space.w),
+            (alef.x, alef.x + alef.w),
+        ];
+        editor.move_to(Cursor {
+            position: Position { line: 0, column: 5 },
+            selection: Some(Position { line: 0, column: 1 }),
+        });
+        assert_eq!(editor.copy().as_deref(), Some("i א"));
+        let rectangles = selection_rectangles(&editor);
+        assert_eq!(
+            rectangles.len(),
+            2,
+            "do not highlight the unselected bet between the spans"
+        );
+        for (rectangle, (left, right)) in rectangles.iter().zip(expected) {
+            assert!((rectangle.x - left).abs() < 0.01);
+            assert!((rectangle.width - (right - left)).abs() < 0.01);
+            assert_eq!(rectangle.y, 0.);
+        }
+
+        let mut editor = shaped_editor("prefix\nfi fi\n\nfi", 20., 100.);
+        assert_eq!(
+            editor
+                .buffer()
+                .layout_runs()
+                .map(|run| run.line_i)
+                .collect::<Vec<_>>(),
+            [0, 1, 1, 2, 3]
+        );
+        let half = editor.buffer().layout_runs().last().unwrap().glyphs[0].w / 2.;
+        editor.move_to(Cursor {
+            position: Position { line: 3, column: 1 },
+            selection: Some(Position { line: 1, column: 4 }),
+        });
+        assert_eq!(editor.copy().as_deref(), Some("i\n\nf"));
+        let rectangles = selection_rectangles(&editor);
+        assert_eq!(rectangles.len(), 2);
+        for (rectangle, (x, y)) in rectangles.iter().zip([(half, 39.), (0., 78.)]) {
+            assert!((rectangle.x - x).abs() < 0.01);
+            assert!((rectangle.width - half).abs() < 0.01);
+            assert_eq!(rectangle.y, y);
+        }
+        layout_shaped_editor(&mut editor, 20., 39.);
+        let scrolled = selection_rectangles(&editor);
+        assert_eq!(scrolled.len(), 2);
+        for (before, after) in rectangles.iter().zip(scrolled) {
+            assert_eq!(after.x, before.x);
+            assert_eq!(after.width, before.width);
+            assert_eq!(after.y, before.y - 58.5);
+        }
+    }
+
     #[test]
     fn editor_reserves_the_same_gutter_before_and_after_overflow() {
         let mut editor = Editor::new("Short draft");

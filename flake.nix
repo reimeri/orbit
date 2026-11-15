@@ -12,6 +12,7 @@
       runtimePath = lib.makeLibraryPath runtimeLibraries;
       fontConfig = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
       patchedWinit = import ./patches/winit { inherit pkgs; };
+      patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
       patchedIcedWidget = import ./patches/iced-widget { inherit pkgs; };
       # Never copy the reference implementation, target/, or session assets into Nix builds.
       projectSrc = lib.fileset.toSource {
@@ -28,6 +29,7 @@
         mkdir "$out/.build-deps"
         ln -s ${patchedWinit} "$out/.build-deps/winit"
         ln -s ${patchedIcedWidget} "$out/.build-deps/iced-widget"
+        ln -s ${patchedIcedGraphics} "$out/.build-deps/iced-graphics"
       '';
       desktopItem = pkgs.makeDesktopItem {
         name = "pico-evo";
@@ -111,7 +113,8 @@
           done
           mkdir -p "$root/.build-deps" &&
             ln -sfnT ${patchedWinit} "$root/.build-deps/winit" &&
-            ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" || {
+            ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" &&
+            ln -sfnT ${patchedIcedGraphics} "$root/.build-deps/iced-graphics" || {
               echo "Could not prepare .build-deps. Check checkout permissions and re-enter nix develop." >&2
               exit 1
             }

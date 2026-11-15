@@ -1,0 +1,273 @@
+--- a/src/text/editor.rs
++++ b/src/text/editor.rs
+@@ -7,8 +7,9 @@
+ use crate::core::{Font, Pixels, Point, Rectangle, Size};
+ use crate::text;
+ 
+ use cosmic_text::Edit as _;
++use unicode_segmentation::UnicodeSegmentation;
+ 
+ use std::borrow::Cow;
+ use std::fmt;
+ use std::sync::{self, Arc, RwLock};
+@@ -173,22 +174,17 @@
+                             },
+                         )
+                     })
+                     .enumerate()
+-                    .filter_map(|(visual_line, (x, width))| {
+-                        if width > 0.0 {
+-                            Some(Rectangle {
+-                                x,
+-                                width,
+-                                y: (visual_line as i32 + visual_lines_offset)
+-                                    as f32
+-                                    * line_height
+-                                    - buffer.scroll().vertical,
+-                                height: line_height,
+-                            })
+-                        } else {
+-                            None
+-                        }
++                    .flat_map(|(visual_line, spans)| {
++                        spans.into_iter().map(move |(x, width)| Rectangle {
++                            x,
++                            width,
++                            y: (visual_line as i32 + visual_lines_offset) as f32
++                                * line_height
++                                - buffer.scroll().vertical,
++                            height: line_height,
++                        })
+                     })
+                     .collect();
+ 
+                 Selection::Range(regions)
+@@ -208,19 +204,21 @@
+                     line.layout_opt().expect("Line layout should be cached");
+ 
+                 let mut lines = layout.iter().enumerate();
+ 
+-                let (visual_line, offset) = lines
++                let visual_line = lines
+                     .find_map(|(i, line)| {
+                         let start = line
+                             .glyphs
+-                            .first()
++                            .iter()
+                             .map(|glyph| glyph.start)
++                            .min()
+                             .unwrap_or(0);
+                         let end = line
+                             .glyphs
+-                            .last()
++                            .iter()
+                             .map(|glyph| glyph.end)
++                            .max()
+                             .unwrap_or(0);
+ 
+                         let is_cursor_before_start = start > cursor.index;
+ 
+@@ -239,26 +237,21 @@
+                             // end of the previous line.
+                             // i is guaranteed to be > 0 because `start` is always
+                             // 0 for the first line, so there is no way for the
+                             // cursor to be before it.
+-                            Some((i - 1, layout[i - 1].w))
++                            Some(i - 1)
+                         } else if is_cursor_before_end {
+-                            let offset = line
+-                                .glyphs
+-                                .iter()
+-                                .take_while(|glyph| cursor.index > glyph.start)
+-                                .map(|glyph| glyph.w)
+-                                .sum();
+-
+-                            Some((i, offset))
++                            Some(i)
+                         } else {
+                             None
+                         }
+                     })
+-                    .unwrap_or((
+-                        layout.len().saturating_sub(1),
+-                        layout.last().map(|line| line.w).unwrap_or(0.0),
+-                    ));
++                    .unwrap_or(layout.len().saturating_sub(1));
++
++                let offset = layout
++                    .get(visual_line)
++                    .map(|layout| caret_x(layout, line.text(), cursor))
++                    .unwrap_or(0.0);
+ 
+                 Selection::Caret(Point::new(
+                     offset,
+                     (visual_lines_offset + visual_line as i32) as f32
+@@ -777,52 +770,133 @@
+         }
+     }
+ }
+ 
++// Like cosmic-text's cursor_glyph_opt, distribute a ligature's advance over
++// its graphemes. Keep iced's float coordinates and affinity-aware row choice:
++// cosmic-text's cursor_position rounds to integers and searches visible runs
++// without considering affinity at a wrap boundary.
++fn caret_x(
++    line: &cosmic_text::LayoutLine,
++    text: &str,
++    cursor: cosmic_text::Cursor,
++) -> f32 {
++    let Some(start) = line.glyphs.iter().map(|glyph| glyph.start).min() else {
++        return 0.0;
++    };
++    let end = line.glyphs.iter().map(|glyph| glyph.end).max().unwrap();
++    // A wrapped-away space belongs visually to the preceding row's end.
++    let index = cursor.index.clamp(start, end);
++    let clusters = || {
++        line.glyphs
++            .chunk_by(|a, b| a.start == b.start && a.end == b.end)
++    };
++    let cluster = clusters()
++        .find(|cluster| {
++            let glyph = &cluster[0];
++            match cursor.affinity {
++                cosmic_text::Affinity::Before => {
++                    glyph.start < index && index <= glyph.end
++                }
++                cosmic_text::Affinity::After => {
++                    glyph.start <= index && index < glyph.end
++                }
++            }
++        })
++        .or_else(|| {
++            clusters().find(|cluster| {
++                let glyph = &cluster[0];
++                glyph.start <= index && index <= glyph.end
++            })
++        })
++        .expect("Cursor should intersect a cluster in its visual line");
++
++    cluster_x(cluster, text, index)
++}
++
++// Shared by the caret and selection endpoints, so both use the same grapheme
++// boundaries even when a shaping cluster contains several glyphs.
++fn cluster_x(
++    cluster: &[cosmic_text::LayoutGlyph],
++    text: &str,
++    index: usize,
++) -> f32 {
++    let glyph = &cluster[0];
++    // A shaping cluster can contain several glyphs (for example, a ligature
++    // plus a combining mark). Use the whole cluster's advance, not whichever
++    // glyph happened to be found first.
++    let (left, right) = cluster.iter().fold(
++        (glyph.x, glyph.x + glyph.w),
++        |(left, right), other| {
++            (left.min(other.x), right.max(other.x + other.w))
++        },
++    );
++    let width = right - left;
++
++    let offset = if index == glyph.start {
++        0.0
++    } else if index == glyph.end {
++        width
++    } else {
++        let cluster = &text[glyph.start..glyph.end];
++        let total = cluster.graphemes(true).count();
++        let before = cluster
++            .grapheme_indices(true)
++            .take_while(|(i, _)| glyph.start + i < index)
++            .count();
++
++        width * before as f32 / total as f32
++    };
++
++    if glyph.level.is_rtl() {
++        right - offset
++    } else {
++        left + offset
++    }
++}
++
+ fn highlight_line(
+     line: &cosmic_text::BufferLine,
+     from: usize,
+     to: usize,
+-) -> impl Iterator<Item = (f32, f32)> + '_ {
++) -> impl Iterator<Item = Vec<(f32, f32)>> + '_ {
+     let layout = line.layout_opt().map(Vec::as_slice).unwrap_or_default();
+ 
++    // Keep one item per visual row, including empty/unselected rows. A logical
++    // selection can cover multiple disjoint spans on a bidirectional row.
+     layout.iter().map(move |visual_line| {
+-        let start = visual_line
++        let mut spans = Vec::new();
++        for cluster in visual_line
+             .glyphs
+-            .first()
+-            .map(|glyph| glyph.start)
+-            .unwrap_or(0);
+-        let end = visual_line
+-            .glyphs
+-            .last()
+-            .map(|glyph| glyph.end)
+-            .unwrap_or(0);
+-
+-        let range = start.max(from)..end.min(to);
+-
+-        if range.is_empty() {
+-            (0.0, 0.0)
+-        } else if range.start == start && range.end == end {
+-            (0.0, visual_line.w)
+-        } else {
+-            let first_glyph = visual_line
+-                .glyphs
+-                .iter()
+-                .position(|glyph| range.start <= glyph.start)
+-                .unwrap_or(0);
+-
+-            let mut glyphs = visual_line.glyphs.iter();
+-
+-            let x =
+-                glyphs.by_ref().take(first_glyph).map(|glyph| glyph.w).sum();
+-
+-            let width: f32 = glyphs
+-                .take_while(|glyph| range.end > glyph.start)
+-                .map(|glyph| glyph.w)
+-                .sum();
+-
+-            (x, width)
++            .chunk_by(|a, b| a.start == b.start && a.end == b.end)
++        {
++            let glyph = &cluster[0];
++            let start = from.max(glyph.start);
++            let end = to.min(glyph.end);
++            if start < end {
++                let a = cluster_x(cluster, line.text(), start);
++                let b = cluster_x(cluster, line.text(), end);
++                if a != b {
++                    spans.push((a.min(b), a.max(b)));
++                }
++            }
+         }
++
++        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
++        let mut merged: Vec<(f32, f32)> = Vec::new();
++        for (left, right) in spans {
++            if let Some((_, previous_right)) = merged.last_mut()
++                && left <= *previous_right
++            {
++                *previous_right = previous_right.max(right);
++            } else {
++                merged.push((left, right));
++            }
++        }
++        merged
++            .into_iter()
++            .map(|(left, right)| (left, right - left))
++            .collect()
+     })
+ }
+ 
+ fn visual_lines_offset(line: usize, buffer: &cosmic_text::Buffer) -> i32 {
