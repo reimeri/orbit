@@ -140,6 +140,7 @@ pub struct App {
     window_height: f32,
     drag: Option<(bool, f32, f32)>,
     auto_scroll: bool,
+    sidebar_follow_top: bool,
     git: HashMap<PathBuf, crate::git::Info>,
     git_pending: HashSet<PathBuf>,
     draft_dirty: bool,
@@ -388,6 +389,7 @@ impl App {
             window_height: 800.,
             drag: None,
             auto_scroll: true,
+            sidebar_follow_top: true,
             git: HashMap::new(),
             git_pending: HashSet::new(),
             draft_dirty: false,
@@ -786,6 +788,11 @@ impl App {
                     )
                 }
             }));
+        // Reset normally preserves the visible row, but at the top new rows
+        // and sections should remain visible instead of pushing us down.
+        if self.sidebar_follow_top {
+            self.sidebar_list.offset = 0.;
+        }
         self.tasks.push(widget::operation::scroll_to(
             "sessions",
             scrollable::AbsoluteOffset {
@@ -1401,6 +1408,7 @@ impl App {
             Message::Create(path) => self.select(Selection::Draft(path)),
             Message::Search(search) => {
                 self.search = search;
+                self.sidebar_follow_top = true;
                 self.sidebar_list.offset = 0.;
                 self.prepare_sidebar();
                 return widget::operation::snap_to("sessions", scrollable::RelativeOffset::START);
@@ -1812,6 +1820,7 @@ impl App {
                 if epoch != self.sidebar_epoch {
                     return Task::none();
                 }
+                self.sidebar_follow_top = offset <= 1.;
                 self.sidebar_list.offset = offset;
                 self.sidebar_list.viewport = height;
             }
@@ -1819,7 +1828,15 @@ impl App {
                 if epoch != self.sidebar_epoch {
                     return Task::none();
                 }
-                if self.sidebar_list.measure(index, height + 5.) {
+                let corrected = self.sidebar_list.measure(index, height + 5.);
+                if self.sidebar_follow_top {
+                    self.sidebar_list.offset = 0.;
+                    return widget::operation::snap_to(
+                        "sessions",
+                        scrollable::RelativeOffset::START,
+                    );
+                }
+                if corrected {
                     return widget::operation::scroll_to(
                         "sessions",
                         scrollable::AbsoluteOffset {
@@ -7623,6 +7640,124 @@ Then implement the fix.";
     }
 
     #[tokio::test]
+    async fn sidebar_follows_top_but_preserves_browsing_anchor() {
+        use iced::advanced::widget::{Id, Operation, operation::Scrollable};
+        use iced::futures::StreamExt;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        #[derive(Default)]
+        struct Offset(Option<f32>);
+        impl Operation for Offset {
+            fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+                visit(self);
+            }
+            fn scrollable(
+                &mut self,
+                id: Option<&Id>,
+                _: iced::Rectangle,
+                _: iced::Rectangle,
+                translation: iced::Vector,
+                _: &mut dyn Scrollable,
+            ) {
+                if id == Some(&Id::new("sessions")) {
+                    self.0 = Some(translation.y);
+                }
+            }
+        }
+
+        // Check the real scroll widget as well as the virtual list, retaining
+        // widget state so a missing scroll correction cannot pass unnoticed.
+        async fn check(app: &mut App, task: Task<Message>, cache: Cache, expected: f32) -> Cache {
+            assert_eq!(app.sidebar_list.offset, expected);
+            let task = Task::batch(std::iter::once(task).chain(app.tasks.drain(..)));
+            let mut renderer = header_renderer();
+            let mut ui = UserInterface::build(
+                app.sidebar(),
+                iced::Size::new(346., 340.),
+                cache,
+                &mut renderer,
+            );
+            if let Some(mut actions) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = actions.next().await {
+                    if let iced_runtime::Action::Widget(mut operation) = action {
+                        ui.operate(&renderer, operation.as_mut());
+                    }
+                }
+            }
+            let mut offset = Offset::default();
+            ui.operate(&renderer, &mut offset);
+            assert_eq!(offset.0, Some(expected));
+            ui.into_cache()
+        }
+
+        let mut app = app();
+        app.tasks.clear();
+        app.sessions = (0..40)
+            .map(|i| SessionSummary {
+                child: None,
+                id: format!("sticky-session-{i}"),
+                title: format!("Session {i}"),
+                project: PathBuf::from("/project"),
+                updated: 0,
+                interrupted: false,
+                needs_attention: false,
+            })
+            .collect();
+        app.prepare_sidebar();
+        let mut cache = check(&mut app, Task::none(), Cache::new(), 0.).await;
+
+        // Inserting a new section used to anchor the old SESSIONS heading,
+        // hiding the new top row even though the user had not scrolled.
+        let mut new = app.sessions[0].clone();
+        new.id = "new-session".into();
+        new.needs_attention = true;
+        app.sessions.insert(0, new);
+        app.prepare_sidebar();
+        cache = check(&mut app, Task::none(), cache, 0.).await;
+
+        let offset = app.sidebar_list.prefix(12) + 7.;
+        let anchor = app.sidebar_list.order[12];
+        let epoch = app.sidebar_epoch;
+        let _ = app.update(Message::SidebarScroll(epoch, offset, 300.));
+        assert!(!app.sidebar_follow_top);
+        let task = widget::operation::scroll_to(
+            "sessions",
+            scrollable::AbsoluteOffset { x: 0., y: offset },
+        );
+        cache = check(&mut app, task, cache, offset).await;
+
+        // Move an existing session above the viewport while browsing.
+        let mut moved = app.sessions.pop().unwrap();
+        moved.needs_attention = true;
+        app.sessions.insert(0, moved);
+        app.prepare_sidebar();
+        assert_eq!(app.sidebar_list.order[13], anchor);
+        cache = check(&mut app, Task::none(), cache, offset + 53.).await;
+
+        // Late scroll notifications from the old layout must not re-enable
+        // following. A measured height above the anchor still corrects it.
+        let _ = app.update(Message::SidebarScroll(epoch, 0., 300.));
+        assert!(!app.sidebar_follow_top);
+        let task = app.update(Message::SidebarSize(app.sidebar_epoch, 1, 48.));
+        cache = check(&mut app, task, cache, offset + 53. + 17.).await;
+
+        // Returning within one pixel of the top resumes following. Removing
+        // the first section and later moving a session back into it stay pinned.
+        let _ = app.update(Message::SidebarScroll(app.sidebar_epoch, 0.5, 300.));
+        assert!(app.sidebar_follow_top);
+        for session in &mut app.sessions {
+            session.needs_attention = false;
+        }
+        app.prepare_sidebar();
+        cache = check(&mut app, Task::none(), cache, 0.).await;
+        app.sessions.last_mut().unwrap().needs_attention = true;
+        app.prepare_sidebar();
+        cache = check(&mut app, Task::none(), cache, 0.).await;
+        let task = app.update(Message::SidebarSize(app.sidebar_epoch, 1, 63.));
+        let _ = check(&mut app, task, cache, 0.).await;
+    }
+
+    #[tokio::test]
     async fn sidebar_search_focuses_filters_and_clears_on_close() {
         use iced::futures::StreamExt;
         let mut app = app();
@@ -7686,11 +7821,14 @@ Then implement the fix.";
             })
             .collect();
         assert_eq!(visible, ["Zulu notes"]);
-        app.sidebar_list.offset = 100.;
+        let epoch = app.sidebar_epoch;
+        dispatch(&mut app, Message::SidebarScroll(epoch, 100., 300.)).await;
+        assert!(!app.sidebar_follow_top);
         dispatch(&mut app, Message::ToggleSearch).await;
         assert!(!app.search_active);
         assert!(app.search.is_empty());
         assert_eq!(app.sidebar_list.offset, 0.);
+        assert!(app.sidebar_follow_top);
         assert_eq!(
             app.sidebar_rows
                 .iter()
