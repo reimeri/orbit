@@ -139,9 +139,8 @@ pub struct App {
     window_height: f32,
     drag: Option<(bool, f32, f32)>,
     auto_scroll: bool,
-    git: Option<crate::git::Info>,
-    git_pending: bool,
-    git_cost: Duration,
+    git: HashMap<PathBuf, crate::git::Info>,
+    git_pending: HashSet<PathBuf>,
     draft_dirty: bool,
     smoke: bool,
     smoke_stage: usize,
@@ -276,7 +275,7 @@ pub enum Message {
     Account(Option<String>),
     CancelLogin,
     Logout,
-    Git(String, Option<crate::git::Info>, Duration),
+    Git(PathBuf, Option<crate::git::Info>),
     External(Result<(), String>),
     ErrorDismiss,
     ResizeStart(bool, iced::Point),
@@ -382,9 +381,8 @@ impl App {
             window_height: 800.,
             drag: None,
             auto_scroll: true,
-            git: None,
-            git_pending: false,
-            git_cost: Duration::ZERO,
+            git: HashMap::new(),
+            git_pending: HashSet::new(),
             draft_dirty: false,
             smoke,
             smoke_stage: 0,
@@ -425,6 +423,27 @@ impl App {
         self.current_session
             .as_ref()
             .or(self.draft_session.as_ref())
+    }
+    fn git_info(&self) -> Option<&crate::git::Info> {
+        self.git.get(&self.current()?.project)
+    }
+    fn refresh_git(&mut self) -> Task<Message> {
+        let Some(session) = self.current() else {
+            return Task::none();
+        };
+        let path = session.project.clone();
+        // A slow capture must not overlap another for the same project, but
+        // must not delay a newly selected project's initial refresh either.
+        if !self.git_pending.insert(path.clone()) {
+            return Task::none();
+        }
+        Task::perform(
+            async move {
+                let info = crate::git::info(path.clone()).await;
+                (path, info)
+            },
+            |(path, info)| Message::Git(path, info),
+        )
     }
     fn running(&self) -> bool {
         self.selected
@@ -1129,7 +1148,8 @@ impl App {
                         self.auto_scroll = true;
                         self.refresh();
                         self.restore_draft();
-                        self.git = None;
+                        let git = self.refresh_git();
+                        self.tasks.push(git);
                         self.save_catalog(false);
                         if let Some((offset, follow)) = self
                             .selected
@@ -1258,23 +1278,7 @@ impl App {
                     return bottom();
                 }
             }
-            Message::GitTick => {
-                if !self.git_pending
-                    && let Some(s) = self.current()
-                {
-                    let id = s.id.clone();
-                    let path = s.project.clone();
-                    self.git_pending = true;
-                    return Task::perform(
-                        async move {
-                            let start = std::time::Instant::now();
-                            let result = crate::git::info(path).await;
-                            (id, result, start.elapsed())
-                        },
-                        |(id, info, cost)| Message::Git(id, info, cost),
-                    );
-                }
-            }
+            Message::GitTick => return self.refresh_git(),
             Message::SessionMenu(id, position) => {
                 self.context_menu = Some((id, position));
             }
@@ -1847,11 +1851,12 @@ impl App {
                 self.login_url = None;
             }
             Message::Logout => self.modal = Some(Modal::Logout),
-            Message::Git(id, info, cost) => {
-                self.git_cost = cost;
-                self.git_pending = false;
-                if self.current().is_some_and(|s| s.id == id) {
-                    self.git = info;
+            Message::Git(path, info) => {
+                self.git_pending.remove(&path);
+                if let Some(info) = info {
+                    self.git.insert(path, info);
+                } else {
+                    self.git.remove(&path);
                 }
             }
             Message::External(result) => self.fail(result),
@@ -2109,15 +2114,7 @@ impl App {
             }
         }
         if self.current().is_some() {
-            subscriptions.push(
-                iced::time::every(
-                    self.git_cost
-                        .saturating_mul(10)
-                        .max(Duration::from_secs(if self.running() { 5 } else { 60 }))
-                        .min(Duration::from_secs(300)),
-                )
-                .map(|_| Message::GitTick),
-            );
+            subscriptions.push(iced::time::every(Duration::from_secs(5)).map(|_| Message::GitTick));
         }
         if self.notice.is_some() {
             subscriptions
@@ -3535,7 +3532,7 @@ impl App {
         let layout = FooterLayout::new(width, &session.model, &effort_label);
         let mut hidden = Vec::new();
         if !layout.git
-            && let Some(git) = &self.git
+            && let Some(git) = self.git_info()
         {
             hidden.push(git.to_string());
         }
@@ -3647,7 +3644,7 @@ impl App {
             },
         );
         if layout.git
-            && let Some(git) = &self.git
+            && let Some(git) = self.git_info()
         {
             let view: Element<'_, Message> = match git {
                 crate::git::Info::Changes {
@@ -3962,11 +3959,14 @@ impl App {
                         byte: 7,
                     });
                 }
-                self.git = Some(crate::git::Info::Changes {
-                    branch: "main".into(),
-                    added: 123,
-                    removed: 45,
-                });
+                self.git.insert(
+                    self.current().unwrap().project.clone(),
+                    crate::git::Info::Changes {
+                        branch: "main".into(),
+                        added: 123,
+                        removed: 45,
+                    },
+                );
                 self.settings_open = true;
                 return Task::batch([
                     self.update_inner(Message::ToggleSearch),
@@ -6299,6 +6299,105 @@ Then implement the fix.";
     }
 
     #[tokio::test]
+    async fn git_refreshes_on_selection_and_idle_ticks() {
+        let mut app = app();
+        let repo = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--template=", "--initial-branch=main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let file = repo.path().join("new.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+
+        // Selection must fetch without waiting for a timer or an agent turn.
+        dispatch(&mut app, Message::Create(repo.path().to_owned())).await;
+        assert!(!app.running());
+        assert!(matches!(
+            app.git_info(),
+            Some(crate::git::Info::Changes {
+                added: 2,
+                removed: 0,
+                ..
+            })
+        ));
+
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        dispatch(&mut app, Message::GitTick).await;
+        assert!(matches!(
+            app.git_info(),
+            Some(crate::git::Info::Changes {
+                added: 3,
+                removed: 0,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn git_cache_follows_projects_and_retains_background_results() {
+        let mut app = app();
+        let a = PathBuf::from("/project-a");
+        let b = PathBuf::from("/project-b");
+        let changes = |added| {
+            Some(crate::git::Info::Changes {
+                branch: "main".into(),
+                added,
+                removed: 0,
+            })
+        };
+
+        // Drop capture tasks and deliver their results explicitly to model
+        // switching projects while Git is still running, without timing races.
+        let _ = app.update(Message::Selected(Ok((Selection::Draft(a.clone()), None))));
+        assert!(app.git_pending.contains(&a));
+        assert!(app.git_info().is_none());
+        let _ = app.update(Message::Git(a.clone(), changes(2)));
+        let _ = app.update(Message::GitTick);
+        assert!(app.git_pending.contains(&a));
+        dispatch(&mut app, Message::GitTick).await;
+        assert!(
+            app.git_pending.contains(&a),
+            "a pending capture must not be duplicated"
+        );
+        assert_eq!(app.git_info().unwrap().to_string(), "main  +2 −0");
+
+        let _ = app.update(Message::Selected(Ok((Selection::Draft(b.clone()), None))));
+        assert!(
+            app.git_pending.contains(&b),
+            "project A must not block B's refresh"
+        );
+        assert!(
+            app.git_info().is_none(),
+            "never display another project's counts"
+        );
+        let _ = app.update(Message::Git(b.clone(), changes(7)));
+        let _ = app.update(Message::Git(a.clone(), changes(3)));
+        assert_eq!(app.git_info().unwrap().to_string(), "main  +7 −0");
+
+        let _ = app.update(Message::Selected(Ok((Selection::Draft(a.clone()), None))));
+        assert_eq!(
+            app.git_info().unwrap().to_string(),
+            "main  +3 −0",
+            "returning to a project immediately uses its latest cached result"
+        );
+        assert!(
+            app.git_pending.contains(&a),
+            "cached projects also refresh on selection"
+        );
+        let _ = app.update(Message::Selected(Ok((Selection::Draft(a.clone()), None))));
+        assert_eq!(app.git_info().unwrap().to_string(), "main  +3 −0");
+        let _ = app.update(Message::Git(a, None));
+        assert!(
+            app.git_info().is_none(),
+            "a non-repository result clears the cache"
+        );
+        let _ = app.update(Message::Selected(Ok((Selection::Draft(b), None))));
+        assert_eq!(app.git_info().unwrap().to_string(), "main  +7 −0");
+    }
+
+    #[tokio::test]
     async fn footer_omits_absent_git_and_zero_diff_counts() {
         let mut app = app();
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
@@ -6329,8 +6428,8 @@ Then implement the fix.";
                 assert_eq!(status.to_string(), expected_details);
             }
             // Apply refresh results so a non-repository result also clears old status.
-            let id = app.current().unwrap().id.clone();
-            let _ = app.update(Message::Git(id, status, Duration::ZERO));
+            let path = app.current().unwrap().project.clone();
+            let _ = app.update(Message::Git(path, status));
             let mut ui = iced_runtime::UserInterface::build(
                 app.footer_content(1400.),
                 iced::Size::new(1400., 36.),
@@ -6354,10 +6453,10 @@ Then implement the fix.";
                 expected_counts.map_or_else(Vec::new, |(added, removed)| vec![added, removed])
             );
         }
-        let id = app.current().unwrap().id.clone();
-        let _ = app.update(Message::Git(id, None, Duration::ZERO));
+        let path = app.current().unwrap().project.clone();
+        let _ = app.update(Message::Git(path, None));
         assert!(
-            app.git.is_none(),
+            app.git_info().is_none(),
             "a non-repository refresh clears old Git status"
         );
     }
@@ -6366,11 +6465,14 @@ Then implement the fix.";
     async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
         let mut app = app();
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
-        app.git = Some(crate::git::Info::Changes {
-            branch: "long-feature-branch-name".into(),
-            added: 12345,
-            removed: 678,
-        });
+        app.git.insert(
+            app.current().unwrap().project.clone(),
+            crate::git::Info::Changes {
+                branch: "long-feature-branch-name".into(),
+                added: 12345,
+                removed: 678,
+            },
+        );
         app.settings_open = true;
         let mut renderer = header_renderer();
         for (width, height, left, right) in [(1600., 800., 260., 320.), (860., 560., 344., 344.)] {

@@ -186,6 +186,10 @@ The UI uses coalesced core change notifications and per-conversation revisions,
 not a permanent 50 ms session-snapshot timer. Only changed conversations are
 cloned. Activity animation runs while a foreground turn is active; draft saving,
 Git refresh and session age labels have independent low-frequency timers.
+The selected project refreshes Git every five seconds, both idle and running,
+and immediately on selection (including startup restoration). Results are cached
+per project for the lifetime of the app, so switching sessions does not blank
+previously loaded status; in-flight captures are coalesced per project.
 Redraw events are not fed back into the update loop. Idle pointer motion is not
 published as application messages either: a root widget resolves click positions
 in window coordinates and forwards motion only during an active panel resize.
