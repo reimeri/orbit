@@ -68,18 +68,51 @@ pub fn button<'a, Message: 'a>(
 
 pub fn primary(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let mut style = button_widget::primary(theme, status);
+    // Iced's strong accent is darker: use it at rest, not on hover.
+    let palette = theme.extended_palette().primary;
+    match status {
+        button_widget::Status::Active | button_widget::Status::Pressed => {
+            style.background = Some(palette.strong.color.into());
+            style.text_color = palette.strong.text;
+        }
+        button_widget::Status::Hovered => {
+            style.background = Some(palette.base.color.into());
+            style.text_color = palette.base.text;
+        }
+        button_widget::Status::Disabled => {}
+    }
     style.border.radius = RADIUS_CONTROL.into();
     style
 }
 
 pub fn danger(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let mut style = button_widget::danger(theme, status);
+    // Iced's strong accent is darker: use it at rest, not on hover.
+    let palette = theme.extended_palette().danger;
+    match status {
+        button_widget::Status::Active | button_widget::Status::Pressed => {
+            style.background = Some(palette.strong.color.into());
+            style.text_color = palette.strong.text;
+        }
+        button_widget::Status::Hovered => {
+            style.background = Some(palette.base.color.into());
+            style.text_color = palette.base.text;
+        }
+        button_widget::Status::Disabled => {}
+    }
     style.border.radius = RADIUS_CONTROL.into();
     style
 }
 
 pub fn text_button(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let mut style = button_widget::text(theme, status);
+    style.text_color = match status {
+        button_widget::Status::Active | button_widget::Status::Pressed => {
+            theme.palette().text.scale_alpha(0.8)
+        }
+        button_widget::Status::Hovered => theme.palette().text,
+        button_widget::Status::Disabled => style.text_color,
+    };
     style.border.radius = RADIUS_CONTROL.into();
     style
 }
@@ -133,6 +166,16 @@ pub fn pick_list_menu(theme: &Theme) -> menu::Style {
 }
 
 pub fn checkbox(theme: &Theme, status: checkbox_widget::Status) -> checkbox_widget::Style {
+    // Reverse only the checked accent; unchecked boxes already brighten on hover.
+    let status = match status {
+        checkbox_widget::Status::Active { is_checked: true } => {
+            checkbox_widget::Status::Hovered { is_checked: true }
+        }
+        checkbox_widget::Status::Hovered { is_checked: true } => {
+            checkbox_widget::Status::Active { is_checked: true }
+        }
+        status => status,
+    };
     let mut style = checkbox_widget::primary(theme, status);
     style.border.radius = RADIUS_SMALL.into();
     style
