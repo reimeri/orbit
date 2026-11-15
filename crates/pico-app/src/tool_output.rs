@@ -176,7 +176,7 @@ impl Output {
         match event {
             Event::Resize(width) => {
                 // Conservative cell width for the 12px monospace font, including wide Unicode glyphs.
-                let columns = ((width - 18.).max(8.) / 8.) as usize;
+                let columns = ((width - crate::scrollbar::GUTTER - 4.).max(8.) / 8.) as usize;
                 if columns != self.columns {
                     self.columns = columns;
                     self.reflow();

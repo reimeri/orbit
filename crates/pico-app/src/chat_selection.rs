@@ -1,6 +1,6 @@
 //! Logical transcript positions survive virtualized widgets being unmounted.
 //! Only mounted text is shaped; copy reconstructs the selected entries on demand.
-use crate::scrollbar::scroll;
+use crate::scrollbar::horizontal;
 use crate::ui::Message;
 use iced::{
     Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Vector,
@@ -12,7 +12,7 @@ use iced::{
         widget::{Operation, Tree, tree},
     },
     mouse,
-    widget::{column, container, markdown, scrollable},
+    widget::{column, container, markdown},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -240,20 +240,17 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
         _code: &'a str,
         lines: &'a [markdown::Text],
     ) -> Element<'a, Message> {
-        container(
-            scroll(
-                container(column(lines.iter().enumerate().map(|(i, line)| {
-                    self.block(
-                        line.spans(settings.style),
-                        settings.code_size,
-                        settings.style.code_block_font,
-                        if i == 0 { "\n\n" } else { "\n" },
-                    )
-                })))
-                .padding(settings.code_size),
-            )
-            .direction(scrollable::Direction::Horizontal(crate::scrollbar::rail())),
-        )
+        container(horizontal(
+            container(column(lines.iter().enumerate().map(|(i, line)| {
+                self.block(
+                    line.spans(settings.style),
+                    settings.code_size,
+                    settings.style.code_block_font,
+                    if i == 0 { "\n\n" } else { "\n" },
+                )
+            })))
+            .padding(settings.code_size),
+        ))
         .width(Length::Fill)
         .padding(settings.code_size / 4)
         .style(crate::theme::code_block)

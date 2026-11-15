@@ -19,6 +19,15 @@ pick-list-f32.patch removes the obsolete std::f32 import so f32::INFINITY
 resolves to the primitive type’s associated constant instead of the deprecated
 module constant. This does not change pick-list behavior.
 
+menu-gutter.patch reserves a permanent 14 px right gutter (the default 10 px
+scrollbar hit area plus a 4 px gap) in built-in pick-list menus. These menus
+construct their own Scrollable and do not expose content layout to the app.
+The padded row keeps option text, backgrounds and hit targets out of the rail
+without adding a container-theme bound. Menu text is clipped to the list bounds
+so long labels cannot paint into that gutter. Keep this width in sync with Pico's
+scrollbar::GUTTER. Like the app's scroll wrapper, it deliberately does not use
+Scrollable::spacing, which changes the available width when overflow changes.
+
 When updating iced, regenerate the patch against the official release, update
 the version/hash and root lockfile, and re-enter nix develop. Never edit the
 generated symlink or registry source. Remove the patch when upstream provides

@@ -388,9 +388,8 @@ impl Draft {
                     .id(self.editor_id())
                     .placeholder("Your answer…")
                     .size(font_size)
-                    .padding(12)
                     // Keep the answer field fixed-height while sharing the
-                    // composer's overflow scrollbar (12 px padding per side).
+                    // composer's overflow gutter and 12 px vertical padding.
                     .min_height(editor_height - 24.)
                     .on_action(move |action| message(Action::Editor(action)))
                     .key_binding(move |event| {

@@ -1,4 +1,5 @@
 //! A bounded, growing editor with a scrollbar driven by its actual shaped text.
+use crate::{scrollbar, theme};
 use iced::{
     Element, Event, Length, Rectangle, Size, Theme,
     advanced::{
@@ -20,7 +21,10 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
     scroll_lines: fn(&Message) -> Option<i32>,
 ) -> Element<'a, Message> {
     Element::new(GrowingEditor {
-        editor: editor.height(Length::Shrink).max_height(max_height),
+        editor: editor
+            .padding(iced::Padding::new(12.).right(scrollbar::GUTTER + theme::SCROLLBAR_EDGE_INSET))
+            .height(Length::Shrink)
+            .max_height(max_height),
         content,
         max_height,
         on_action: Box::new(on_action),
@@ -103,9 +107,9 @@ impl State {
 
     fn scrollbar(&self, bounds: Rectangle) -> Option<Scrollbar> {
         let track = Rectangle {
-            x: bounds.x + bounds.width - 12.,
+            x: bounds.x + bounds.width - theme::SCROLLBAR_EDGE_INSET - theme::SCROLLBAR_WIDTH,
             y: bounds.y + 12.,
-            width: 12.,
+            width: theme::SCROLLBAR_WIDTH,
             height: (bounds.height - 24.).max(0.),
         };
         let max_offset = self.content_height - track.height;
@@ -119,9 +123,9 @@ impl State {
         Some(Scrollbar {
             track,
             thumb: Rectangle {
-                x: track.x + 3.,
+                x: track.x + (theme::SCROLLBAR_WIDTH - theme::SCROLLBAR_THUMB_WIDTH) / 2.,
                 y: track.y + (track.height - height) * (self.offset / max_offset).clamp(0., 1.),
-                width: 6.,
+                width: theme::SCROLLBAR_THUMB_WIDTH,
                 height,
             },
             max_offset,
@@ -356,7 +360,6 @@ mod tests {
                 .size(15)
                 .line_height(iced::widget::text::LineHeight::Absolute(19.5.into()))
                 .min_height(39)
-                .padding(12)
                 .on_action(|action| action),
             content,
             219.,
@@ -448,6 +451,27 @@ mod tests {
     }
     fn release() -> Event {
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+    }
+
+    #[test]
+    fn editor_reserves_the_same_gutter_before_and_after_overflow() {
+        let mut editor = Editor::new("Short draft");
+        for value in [
+            "Short draft".to_owned(),
+            "Wrapped draft words. ".repeat(200),
+            "Short again".to_owned(),
+        ] {
+            editor.content = Content::with_text(&value);
+            let node = editor.layout(300.);
+            let text_width = editor
+                .content
+                .with_editor(|editor| editor.buffer().size().0.unwrap());
+            assert_eq!(text_width, 270.); // 12 px left + 18 px gutter/inset on the right.
+            if let Some(bar) = editor.bar(&node) {
+                assert_eq!(bar.track.x - (12. + text_width), 4.);
+                assert_eq!(300. - (bar.track.x + bar.track.width), 4.);
+            }
+        }
     }
 
     #[test]

@@ -94,7 +94,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Viewport<'_, Mess
                 shell.publish((self.on_change)(
                     viewport.y - bounds.y,
                     viewport.height,
-                    bounds.height,
+                    // The gutter container may be taller than fitting content;
+                    // scroll extent still includes at least the whole viewport.
+                    bounds.height.max(viewport.height),
                 ));
             }
         }

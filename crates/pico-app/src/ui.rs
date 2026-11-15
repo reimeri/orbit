@@ -2400,7 +2400,7 @@ impl App {
             .spacing(6)
             .align_y(iced::Center);
             container(
-                scroll(badges)
+                crate::scrollbar::horizontal(badges)
                     .id("favorite-projects")
                     .direction(scrollable::Direction::Horizontal(
                         scrollable::Scrollbar::hidden(),
@@ -2455,7 +2455,8 @@ impl App {
     }
     fn agents_panel(&self) -> Element<'_, Message> {
         let mut content = column![
-            right_panel_header("Agents", Message::ToggleAgents),
+            container(right_panel_header("Agents", Message::ToggleAgents))
+                .padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER)),
             text(format!("{} running", self.agent_count()))
                 .size(12)
                 .color(MUTED)
@@ -2522,7 +2523,7 @@ impl App {
         }
         content = content.push(scroll(cards).height(Fill));
         container(content)
-            .padding(RIGHT_PANEL_PADDING)
+            .padding(iced::Padding::new(RIGHT_PANEL_PADDING).right(theme::SCROLLBAR_EDGE_INSET))
             .width(
                 self.catalog
                     .settings
@@ -2535,9 +2536,14 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let mut list =
-            column![container(self.sidebar_header()).padding([0., SIDEBAR_CONTENT_PADDING])]
-                .spacing(8);
+        let mut list = column![
+            container(self.sidebar_header()).padding(
+                iced::Padding::ZERO
+                    .left(SIDEBAR_CONTENT_PADDING)
+                    .right(SIDEBAR_CONTENT_PADDING + 8. - theme::SCROLLBAR_EDGE_INSET),
+            )
+        ]
+        .spacing(8);
         let epoch = self.sidebar_epoch;
         let range = self.sidebar_list.visible();
         let mut rows: Vec<(usize, bool, Element<'_, Message>)> = vec![(
@@ -2651,7 +2657,7 @@ impl App {
         container(list)
             .padding(iced::Padding {
                 top: 4.,
-                right: 8.,
+                right: theme::SCROLLBAR_EDGE_INSET,
                 bottom: 14.,
                 left: 8.,
             })
@@ -2715,10 +2721,17 @@ impl App {
                 .into(),
         ));
         let transcript = crate::keyed_column::keyed_column(children);
+        // The shared gutter replaces part of the existing transcript padding;
+        // keep the text width and centered alignment unchanged.
         let transcript = container(transcript)
-            .max_width(self.catalog.settings.chat_width)
+            .max_width(self.catalog.settings.chat_width - crate::scrollbar::GUTTER)
             .width(Fill)
-            .padding([20, 26]);
+            .padding(iced::Padding {
+                top: 20.,
+                bottom: 20.,
+                left: 26.,
+                right: 26. - crate::scrollbar::GUTTER,
+            });
         let content = crate::transcript_viewport::observe(
             container(transcript).center_x(Fill),
             epoch,
@@ -2857,10 +2870,7 @@ impl App {
                 .enumerate()
                 .map(|(index, media)| self.image_view.attachment(media, index)))
             .spacing(8);
-            compose = compose.push(
-                scroll(images)
-                    .direction(scrollable::Direction::Horizontal(crate::scrollbar::rail())),
-            );
+            compose = compose.push(crate::scrollbar::horizontal(images));
         }
         compose = compose.push(self.composer_editor(running));
         if !session.pending.is_empty() && running {
@@ -2902,7 +2912,6 @@ impl App {
             .key_binding(composer_key_binding)
             .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
             .min_height(2. * line_height)
-            .padding(12)
             .size(self.catalog.settings.font_size);
         crate::growing_editor::growing_editor(
             editor,
@@ -3354,12 +3363,16 @@ impl App {
         if self.account.is_none() {
             content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).color(MUTED),theme::button("Open Settings →").on_press(Message::ToggleSettings).style(theme::text_button)].spacing(10)).padding(18).style(card));
         }
-        container(scroll(container(content).max_width(650).padding(36)))
-            .center_x(Fill)
-            .center_y(Fill)
-            .height(Fill)
-            .width(Fill)
-            .into()
+        container(scroll(
+            container(content)
+                .max_width(650. - crate::scrollbar::GUTTER)
+                .padding(iced::Padding::new(36.).right(36. - crate::scrollbar::GUTTER)),
+        ))
+        .center_x(Fill)
+        .center_y(Fill)
+        .height(Fill)
+        .width(Fill)
+        .into()
     }
     fn settings_panel(&self) -> Element<'_, Message> {
         let mut tabs = row![].spacing(4);
@@ -3387,6 +3400,7 @@ impl App {
             widget::rule::horizontal(1)
         ]
         .spacing(12);
+        let header = container(header).padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER));
         let mut settings = column![].spacing(14);
         match self.settings_tab {
             SettingsTab::Account => {
@@ -3561,7 +3575,7 @@ impl App {
             );
         }
         container(panel_content)
-            .padding(RIGHT_PANEL_PADDING)
+            .padding(iced::Padding::new(RIGHT_PANEL_PADDING).right(theme::SCROLLBAR_EDGE_INSET))
             .width(
                 self.catalog
                     .settings
@@ -3881,11 +3895,13 @@ impl App {
             .padding([6, 8])
             .on_press(message)
             .style(move |theme, status| theme::menu_button(theme, status, focused || chosen));
-            options = options.push(if footer_text_width(option, 12.) > 228. {
-                footer_tip(item, option.clone())
-            } else {
-                item.into()
-            });
+            options = options.push(
+                if footer_text_width(option, 12.) > 228. - crate::scrollbar::GUTTER {
+                    footer_tip(item, option.clone())
+                } else {
+                    item.into()
+                },
+            );
         }
         opaque(
             container(scroll(options).height((menu.options.len() as f32 * 32. - 2.).min(240.)))

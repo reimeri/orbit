@@ -1,0 +1,56 @@
+--- a/src/overlay/menu.rs
++++ b/src/overlay/menu.rs
+@@ -207,18 +207,22 @@
+             class,
+         } = menu;
+ 
+-        let list = Scrollable::new(List {
+-            options,
+-            hovered_option,
+-            on_selected,
+-            on_option_hovered,
+-            font,
+-            text_size,
+-            text_line_height,
+-            text_shaping,
+-            padding,
+-            class,
+-        })
++        let list = Scrollable::new(
++            crate::Row::new()
++                .push(List {
++                    options,
++                    hovered_option,
++                    on_selected,
++                    on_option_hovered,
++                    font,
++                    text_size,
++                    text_line_height,
++                    text_shaping,
++                    padding,
++                    class,
++                })
++                .padding(Padding::ZERO.right(14.0)),
++        )
+         .height(menu_height);
+ 
+         state.tree.diff(&list as &dyn Widget<_, _, _>);
+@@ -515,6 +519,9 @@
+     ) {
+         let style = Catalog::style(theme, self.class);
+         let bounds = layout.bounds();
++        let Some(viewport) = viewport.intersection(&bounds) else {
++            return;
++        };
+ 
+         let text_size =
+             self.text_size.unwrap_or_else(|| renderer.default_size());
+@@ -572,7 +579,7 @@
+                 } else {
+                     style.text_color
+                 },
+-                *viewport,
++                viewport,
+             );
+         }
+     }
