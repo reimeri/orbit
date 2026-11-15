@@ -256,15 +256,19 @@ pub struct Usage {
     pub cached: u64,
     #[serde(default)]
     pub total_input: u64,
+    #[serde(default)]
+    pub total_cached: u64,
     pub total_output: u64,
 }
 impl Usage {
     pub(crate) fn record_response(&mut self, response: Self) {
         let total_input = self.total_input + response.input;
         let total_output = self.total_output + response.output;
+        let total_cached = self.total_cached + response.cached;
         *self = response;
         self.total_input = total_input;
         self.total_output = total_output;
+        self.total_cached = total_cached;
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -751,6 +755,7 @@ mod tests {
         let mut restored = store.load_session(&session.id).unwrap();
         assert_eq!(restored.usage.total_input, 3546);
         assert_eq!(restored.usage.total_output, 60);
+        assert_eq!(restored.usage.total_cached, 3200);
         assert_eq!(restored.usage.input, 2345);
         assert_eq!(restored.usage.cached, 2200);
         // Compaction resets the context estimate, not session-wide totals.
@@ -763,6 +768,8 @@ mod tests {
         });
         assert_eq!(restored.usage.total_input, 3646);
         assert_eq!(restored.usage.total_output, 69);
+        assert_eq!(restored.usage.total_cached, 3200);
+        assert_eq!(restored.usage.cached, 0);
         let existing: Usage = serde_json::from_value(serde_json::json!({
             "input":1234,"output":12,"cached":1000,"total_output":57
         }))

@@ -932,6 +932,7 @@ impl Harness {
             .compact(snapshot, instructions, limit, cancel, &|response| {
                 let mut session = conversation.state.lock().expect("session lock");
                 session.usage.total_input += response.usage.input;
+                session.usage.total_cached += response.usage.cached;
                 session.usage.total_output += response.usage.output;
                 conversation
                     .turn_usage

@@ -3505,7 +3505,9 @@ impl App {
             0.
         };
         let used = session.usage.input;
-        let cache = (session.usage.cached as f64 * 100. / used.max(1) as f64).round();
+        let cache = (session.usage.total_cached as f64 * 100.
+            / session.usage.total_input.max(1) as f64)
+            .round();
         let tokens = format!(
             "{} / {} tokens",
             compact_tokens(used),
@@ -3521,9 +3523,9 @@ impl App {
             compact_tokens(output),
         );
         let cache_details = format!(
-            "Cached input: {}\nTotal input: {}",
-            compact_tokens(session.usage.cached),
-            compact_tokens(used),
+            "Session cached input: {}\nSession total input: {}",
+            compact_tokens(session.usage.total_cached),
+            compact_tokens(session.usage.total_input),
         );
         let effort_label = if session.fast {
             format!("{} · Fast", session.effort)
@@ -3910,6 +3912,7 @@ impl App {
                 s.usage.input = 60_721;
                 s.usage.total_input = 160_721;
                 s.usage.cached = 56_470;
+                s.usage.total_cached = 126_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
                     Entry::new(EntryKind::User { images: vec![] }, "Inspect this project and run its tests."),

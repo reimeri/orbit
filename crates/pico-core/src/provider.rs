@@ -527,6 +527,7 @@ impl ResponseStream {
                             .as_u64()
                             .unwrap_or(0),
                         total_input: 0,
+                        total_cached: 0,
                         total_output: 0,
                     },
                 }));
