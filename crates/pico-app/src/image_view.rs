@@ -108,10 +108,9 @@ impl Viewer {
             .and_then(|p| self.thumbnails.get(p))
         {
             Some(Ok(handle)) => theme::button(
-                image(handle.clone())
-                    .width(320)
-                    .height(220)
-                    .content_fit(iced::ContentFit::Contain),
+                container(image(handle.clone()).content_fit(iced::ContentFit::Contain))
+                    .max_width(320)
+                    .max_height(220),
             )
             .on_press(crate::ui::Message::OpenImage(media.clone()))
             .style(theme::text_button)
@@ -449,6 +448,46 @@ impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn thumbnails_shrink_wrap_within_maximum_and_available_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = pico_core::media::MediaStore::new(dir.path().into())
+            .image(include_bytes!("fixtures/media.png"))
+            .unwrap();
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        for (width, height, available_width, expected_image) in [
+            (640, 60, 800., Size::new(320., 30.)),
+            (100, 400, 800., Size::new(55., 220.)),
+            (320, 30, 180., Size::new(160., 15.)),
+        ] {
+            let mut viewer = Viewer::default();
+            viewer.thumbnails.insert(
+                media.thumbnail.clone().unwrap(),
+                Ok(image::Handle::from_rgba(
+                    width,
+                    height,
+                    vec![255; (width * height * 4) as usize],
+                )),
+            );
+            let mut view = viewer.thumbnail(&media);
+            let mut tree = Tree::new(view.as_widget());
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(available_width, 1000.)),
+            );
+            // Only the button's normal padding should surround the fitted image.
+            assert_eq!(
+                node.size(),
+                Size::new(expected_image.width + 20., expected_image.height + 10.),
+                "{width}×{height} thumbnail in {available_width}px available width",
+            );
+        }
+    }
+
     #[test]
     fn attachment_remove_is_hover_only_and_does_not_open_modal() {
         use iced::{Point, Size, advanced::Renderer as _};
