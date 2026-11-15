@@ -383,25 +383,35 @@ impl Draft {
                     .max_height((max_height - reserved).max(60.)),
             );
             if editor_open {
-                panel = panel.push(
-                    text_editor(&a.editor)
-                        .style(theme::editor)
-                        .id(self.editor_id())
-                        .placeholder("Your answer…")
-                        .size(font_size)
-                        .padding(10)
-                        .height(editor_height)
-                        .on_action(move |action| message(Action::Editor(action)))
-                        .key_binding(move |event| {
-                            if matches!(event.status, text_editor::Status::Focused { .. })
-                                && word_delete(&event.key, event.modifiers)
-                            {
-                                Some(text_editor::Binding::Custom(message(Action::DeleteWord)))
-                            } else {
-                                text_editor::Binding::from_key_press(event)
-                            }
-                        }),
-                );
+                let editor = text_editor(&a.editor)
+                    .style(theme::editor)
+                    .id(self.editor_id())
+                    .placeholder("Your answer…")
+                    .size(font_size)
+                    .padding(12)
+                    // Keep the answer field fixed-height while sharing the
+                    // composer's overflow scrollbar (12 px padding per side).
+                    .min_height(editor_height - 24.)
+                    .on_action(move |action| message(Action::Editor(action)))
+                    .key_binding(move |event| {
+                        if matches!(event.status, text_editor::Status::Focused { .. })
+                            && word_delete(&event.key, event.modifiers)
+                        {
+                            Some(text_editor::Binding::Custom(message(Action::DeleteWord)))
+                        } else {
+                            text_editor::Binding::from_key_press(event)
+                        }
+                    });
+                panel = panel.push(crate::growing_editor::growing_editor(
+                    editor,
+                    &a.editor,
+                    editor_height,
+                    move |action| message(Action::Editor(action)),
+                    |message| match &message.action {
+                        Action::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
+                        _ => None,
+                    },
+                ));
             }
             if a.replace.is_none() {
                 panel = panel.push(
@@ -949,6 +959,93 @@ mod tests {
                 (&messages[0].action, editing),
                 (Action::Edit(0), true) | (Action::Select(0), false)
             ));
+        }
+    }
+
+    #[test]
+    fn questionnaire_answer_scrollbar_handles_overflow_without_editing_the_answer() {
+        let mut draft = draft();
+        apply(&mut draft, Action::Select(3));
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(14.),
+        ));
+        let theme = theme::app();
+        let thumb_backgrounds =
+            [false, true].map(|active| crate::scrollbar::thumb(&theme, active).background);
+        let mut cache = user_interface::Cache::new();
+
+        // Exercise both custom select answers and text-only questions, including
+        // wrapped overflow and shrinking again with retained widget state.
+        for question in [0, 1] {
+            draft.current = question;
+            for value in [
+                "Short answer".to_owned(),
+                "A line of text λ\n".repeat(40),
+                "A long wrapped answer with Unicode λ and words. ".repeat(100),
+                "Short again".to_owned(),
+            ] {
+                draft.answers[question].editor = text_editor::Content::with_text(&value);
+                let cursor = draft.answers[question].editor.cursor();
+                let mut ui = UserInterface::build(
+                    draft.view(14., 600., true, true),
+                    Size::new(600., 700.),
+                    cache,
+                    &mut renderer,
+                );
+                ui.draw(
+                    &mut renderer,
+                    &theme,
+                    &renderer::Style {
+                        text_color: theme::TEXT,
+                    },
+                    mouse::Cursor::Unavailable,
+                );
+                let iced::Renderer::Secondary(painted) = &mut renderer else {
+                    unreachable!()
+                };
+                let thumbs: Vec<_> = painted
+                    .layers()
+                    .iter()
+                    .flat_map(|layer| &layer.quads)
+                    .filter(|(_, background)| thumb_backgrounds.contains(background))
+                    .map(|(quad, _)| quad.bounds)
+                    .collect();
+                let overflowing = value.len() > 100;
+                assert_eq!(
+                    thumbs.len(),
+                    usize::from(overflowing),
+                    "question {question}, answer length {}",
+                    value.len()
+                );
+                let mut messages = Vec::new();
+                if overflowing {
+                    // Click the track below the thumb. It must route a scroll
+                    // to this question, not move the caret or advance the form.
+                    let point = iced::Point::new(thumbs[0].center_x(), thumbs[0].y + 80.);
+                    ui.update(
+                        &[
+                            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                        ],
+                        mouse::Cursor::Available(point),
+                        &mut renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut messages,
+                    );
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(messages[0].question, question);
+                    assert!(matches!(messages[0].action,
+                        Action::Editor(text_editor::Action::Scroll { lines }) if lines > 0));
+                }
+                cache = ui.into_cache();
+                for message in messages {
+                    draft.update(message);
+                }
+                assert_eq!(draft.current, question);
+                assert_eq!(draft.answers[question].editor.cursor(), cursor);
+                assert_eq!(draft.value(question).as_deref(), Some(value.as_str()));
+            }
         }
     }
 

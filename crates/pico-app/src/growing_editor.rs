@@ -16,14 +16,14 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
     max_height: f32,
-    on_action: fn(text_editor::Action) -> Message,
+    on_action: impl Fn(text_editor::Action) -> Message + 'a,
     scroll_lines: fn(&Message) -> Option<i32>,
 ) -> Element<'a, Message> {
     Element::new(GrowingEditor {
         editor: editor.height(Length::Shrink).max_height(max_height),
         content,
         max_height,
-        on_action,
+        on_action: Box::new(on_action),
         scroll_lines,
     })
 }
@@ -32,7 +32,7 @@ struct GrowingEditor<'a, Message> {
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
     max_height: f32,
-    on_action: fn(text_editor::Action) -> Message,
+    on_action: Box<dyn Fn(text_editor::Action) -> Message + 'a>,
     scroll_lines: fn(&Message) -> Option<i32>,
 }
 

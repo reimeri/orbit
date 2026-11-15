@@ -87,7 +87,9 @@ with pending questions appear under **Needs attention**, ahead of Working.
   vertically centered alongside their labels.
 - Switching sessions preserves questionnaire drafts and the ordinary composer draft.
 - Long prompts/options scroll in a bounded body; the multiline editor, keyboard hints
-  and navigation remain accessible outside it. The editor scrolls independently.
+  and navigation remain accessible outside it. The editor scrolls independently, with
+  a scrollbar when text overflows (including wrapped lines). Drag the thumb or click
+  the track to scroll without changing the text selection.
 - Submitted answers appear in the existing tool result, with no synthetic user message
   or separate answer-summary entry.
 - There is deliberately **no Ask about this button or clarification conversation**.
