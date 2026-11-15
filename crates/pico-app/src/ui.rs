@@ -1456,12 +1456,17 @@ impl App {
             }
             Message::ToggleAgents => {
                 self.agents_open = !self.agents_open;
-                self.settings_open = false;
+                if self.settings_open {
+                    return self.update_inner(Message::CancelSettings);
+                }
                 self.view_epoch = self.view_epoch.wrapping_add(1);
             }
             Message::ToggleSettings => {
+                if self.settings_open {
+                    return self.update_inner(Message::CancelSettings);
+                }
                 self.view_epoch = self.view_epoch.wrapping_add(1);
-                self.settings_open = !self.settings_open;
+                self.settings_open = true;
                 self.agents_open = false;
             }
             Message::ApplySettings => {
@@ -1948,8 +1953,7 @@ impl App {
                         } else if self.search_active {
                             return self.update_inner(Message::ToggleSearch);
                         } else if self.settings_open {
-                            self.view_epoch = self.view_epoch.wrapping_add(1);
-                            self.settings_open = false;
+                            return self.update_inner(Message::CancelSettings);
                         } else if self.agents_open {
                             self.agents_open = false;
                             self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -5483,6 +5487,50 @@ mod tests {
         assert!(app.active_questionnaire.is_none());
         assert!(app.questionnaires.is_empty());
         assert_eq!(app.editor.text(), "Unsent composer draft");
+    }
+
+    #[tokio::test]
+    async fn dismissing_settings_discards_drafts_but_keeps_saved_values() {
+        for dismiss in [
+            Message::CancelSettings,
+            Message::ToggleSettings,
+            Message::ToggleAgents,
+            footer_key(keyboard::key::Named::Escape),
+        ] {
+            let mut app = app();
+            let model = "gpt-6-astra";
+            // Exercise both the original default and a subsequently saved value.
+            for saved_fast in [false, true] {
+                dispatch(&mut app, Message::ToggleSettings).await;
+                dispatch(&mut app, Message::ModelFast(model.into(), saved_fast)).await;
+                dispatch(&mut app, Message::Context("128000".into())).await;
+                dispatch(&mut app, Message::Threshold("75".into())).await;
+                dispatch(&mut app, Message::ApplySettings).await;
+                assert!(!app.settings_open);
+
+                dispatch(&mut app, Message::ToggleSettings).await;
+                dispatch(&mut app, Message::ModelFast(model.into(), !saved_fast)).await;
+                dispatch(&mut app, Message::Context("invalid".into())).await;
+                dispatch(&mut app, Message::Threshold("42".into())).await;
+                dispatch(&mut app, Message::ApiKey("unsaved-key".into())).await;
+                dispatch(&mut app, Message::Font(19.)).await;
+                assert_eq!(app.catalog.settings.models[model].fast, saved_fast);
+
+                dispatch(&mut app, dismiss.clone()).await;
+                assert!(!app.settings_open);
+                assert!(app.api_key_draft.is_empty());
+                dispatch(&mut app, Message::ToggleSettings).await;
+                assert!(app.settings_open);
+                assert_eq!(app.settings.models[model].fast, saved_fast);
+                assert_eq!(app.context_text, "128000");
+                assert_eq!(app.threshold_text, "75");
+                assert_eq!(app.settings.font_size, 19.);
+                let saved = app.harness.as_ref().unwrap().store.load().unwrap().0;
+                assert_eq!(saved.settings.models[model].fast, saved_fast);
+                assert_eq!(saved.settings.font_size, 19.);
+                dispatch(&mut app, Message::CancelSettings).await;
+            }
+        }
     }
 
     #[tokio::test]
