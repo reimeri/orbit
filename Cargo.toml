@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/pico-app", "crates/pico-core"]
 default-members = ["crates/pico-app"]
-exclude = [".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-graphics"]
+exclude = [".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-graphics", ".build-deps/rquickjs-sys", ".build-deps/rquickjs-core"]
 resolver = "3"
 
 [workspace.package]
@@ -26,3 +26,5 @@ incremental = true
 winit = { path = ".build-deps/winit" }
 iced_widget = { path = ".build-deps/iced-widget" }
 iced_graphics = { path = ".build-deps/iced-graphics" }
+rquickjs-sys = { path = ".build-deps/rquickjs-sys" }
+rquickjs-core = { path = ".build-deps/rquickjs-core" }

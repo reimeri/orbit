@@ -31,6 +31,13 @@ Caret positioning and selection highlighting inside ligatures use a
 checksum-pinned iced graphics patch;
 see [its maintenance notes](../patches/iced-graphics/README.md). The shell also
 prepares `.build-deps/iced-graphics`, shared by development and packaged builds.
+Code-mode's QuickJS engine and its Rust module-handle wrapper also use pinned
+patches to fix pending top-level-await teardown; see
+[`patches/quickjs/README.md`](../patches/quickjs/README.md). The shell prepares
+`.build-deps/rquickjs-sys` and `.build-deps/rquickjs-core` and supplies Valgrind.
+`just test-quickjs-memory` checks the lifetime regressions for invalid accesses
+and leaked module references. It is included in `just verify` and the Nix
+package's checks: successful tests alone cannot rule out a silent use-after-free.
 The package and formatting checks prepare their own links, independent of the
 working tree. See [patch maintenance](../patches/winit/README.md).
 

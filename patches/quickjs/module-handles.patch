@@ -1,0 +1,22 @@
+Balance temporary module JSValues in rquickjs-core 0.11.0.
+Module handles borrow context-owned definitions; the Ctx field keeps the
+context alive. This is required with the reference-counting fix in
+module-lifetime.patch, which no longer unconditionally frees leaked handles.
+
+--- a/src/value/module.rs
++++ b/src/value/module.rs
+@@ -260,4 +260,7 @@
+             NonNull::new(qjs::JS_VALUE_GET_PTR(module_val).cast()).ok_or(Error::Unknown)?
+         };
++        // Module borrows the context-owned definition and keeps that context
++        // alive. Release the extra JSValue reference returned by QuickJS.
++        unsafe { qjs::JS_FreeValue(ctx.as_ptr(), module_val) };
+         unsafe { Ok(Module::from_ptr(ctx, module_ptr)) }
+     }
+@@ -335,4 +338,6 @@
+         let module_ptr =
+             unsafe { NonNull::new(qjs::JS_VALUE_GET_PTR(module).cast()).ok_or(Error::Unknown)? };
++        // As in declare(), the Module handle borrows the context's reference.
++        unsafe { qjs::JS_FreeValue(ctx.as_ptr(), module) };
+         unsafe { Ok(Module::from_ptr(ctx, module_ptr)) }
+     }

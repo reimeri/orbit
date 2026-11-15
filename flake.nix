@@ -11,6 +11,7 @@
       runtimeLibraries = with pkgs; [ wayland libxkbcommon vulkan-loader libGL fontconfig ];
       runtimePath = lib.makeLibraryPath runtimeLibraries;
       fontConfig = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
+      patchedQuickjs = import ./patches/quickjs { inherit pkgs; };
       patchedWinit = import ./patches/winit { inherit pkgs; };
       patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
       patchedIcedWidget = import ./patches/iced-widget { inherit pkgs; };
@@ -30,6 +31,8 @@
         ln -s ${patchedWinit} "$out/.build-deps/winit"
         ln -s ${patchedIcedWidget} "$out/.build-deps/iced-widget"
         ln -s ${patchedIcedGraphics} "$out/.build-deps/iced-graphics"
+        ln -s ${patchedQuickjs.sys} "$out/.build-deps/rquickjs-sys"
+        ln -s ${patchedQuickjs.core} "$out/.build-deps/rquickjs-core"
       '';
       desktopItem = pkgs.makeDesktopItem {
         name = "pico-evo";
@@ -51,7 +54,13 @@
         # in the development shell and installed wrapper.
         FONTCONFIG_FILE = fontConfig;
         doCheck = true;
-        nativeCheckInputs = [ pkgs.git ];
+        nativeCheckInputs = [ pkgs.git pkgs.valgrind ];
+        postCheck = ''
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="${pkgs.bash}/bin/bash $PWD/scripts/check-quickjs-memory.sh" \
+            cargo test --locked --offline --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} \
+              --workspace --test quickjs_lifetime -- --test-threads=1
+          bash scripts/check-quickjs-memory.sh
+        '';
         cargoTestFlags = [ "--workspace" ];
         doInstallCheck = true;
         nativeInstallCheckInputs = [ pkgs.weston ];
@@ -94,7 +103,7 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           rustc cargo rustfmt clippy rust-analyzer
-          pkg-config mold git just time xdg-utils
+          pkg-config mold git just time xdg-utils valgrind
           weston wayland-utils
         ];
         buildInputs = runtimeLibraries ++ [ pkgs.sqlite ];
@@ -114,7 +123,9 @@
           mkdir -p "$root/.build-deps" &&
             ln -sfnT ${patchedWinit} "$root/.build-deps/winit" &&
             ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" &&
-            ln -sfnT ${patchedIcedGraphics} "$root/.build-deps/iced-graphics" || {
+            ln -sfnT ${patchedIcedGraphics} "$root/.build-deps/iced-graphics" &&
+            ln -sfnT ${patchedQuickjs.sys} "$root/.build-deps/rquickjs-sys" &&
+            ln -sfnT ${patchedQuickjs.core} "$root/.build-deps/rquickjs-core" || {
               echo "Could not prepare .build-deps. Check checkout permissions and re-enter nix develop." >&2
               exit 1
             }

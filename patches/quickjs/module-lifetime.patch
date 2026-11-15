@@ -1,0 +1,61 @@
+Backport of QuickJS-NG PR #1877, commit
+8b34053991af13f02bbbd1015493ce448616b8d6 by xyaman:
+https://github.com/quickjs-ng/quickjs/pull/1877
+
+Adapted to the bundled QuickJS-NG 0.11.0. Engine changes only; regression
+coverage lives in pico-core/tests/quickjs_lifetime.rs.
+
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -5999,7 +5999,12 @@
+         }
+         break;
+     case JS_TAG_MODULE:
+-        abort(); /* never freed here */
++        {
++            JSModuleDef *m = JS_VALUE_GET_PTR(v);
++            if (m->link.prev != NULL)
++                abort(); /* the module list holds a reference */
++            js_free_rt(rt, m);
++        }
+         break;
+     case JS_TAG_BIG_INT:
+         {
+@@ -27718,7 +27723,8 @@
+     JS_FreeValue(ctx, m->resolving_funcs[0]);
+     JS_FreeValue(ctx, m->resolving_funcs[1]);
+     list_del(&m->link);
+-    js_free(ctx, m);
++    /* pending promise reactions can still hold a reference */
++    JS_FreeValueRT(ctx->rt, JS_MKPTR(JS_TAG_MODULE, m));
+ }
+ 
+ #ifndef QJS_DISABLE_PARSER
+@@ -36759,7 +36765,6 @@
+ static JSValue JS_ReadModule(BCReaderState *s)
+ {
+     JSContext *ctx = s->ctx;
+-    JSValue obj;
+     JSModuleDef *m = NULL;
+     JSAtom module_name;
+     int i;
+@@ -36777,10 +36782,8 @@
+     m = js_new_module_def(ctx, module_name);
+     if (!m)
+         goto fail;
+-    obj = js_dup(JS_MKPTR(JS_TAG_MODULE, m));
+     if (bc_get_leb128_int(s, &m->req_module_entries_count))
+         goto fail;
+-    obj = JS_NewModuleValue(ctx, m);
+     if (m->req_module_entries_count != 0) {
+         m->req_module_entries_size = m->req_module_entries_count;
+         m->req_module_entries = js_mallocz(ctx, sizeof(m->req_module_entries[0]) * m->req_module_entries_size);
+@@ -36871,7 +36874,7 @@
+     m->func_obj = JS_ReadObjectRec(s);
+     if (JS_IsException(m->func_obj))
+         goto fail;
+-    return obj;
++    return JS_NewModuleValue(ctx, m);
+  fail:
+     if (m) {
+         js_free_module_def(ctx, m);
