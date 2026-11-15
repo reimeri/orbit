@@ -31,9 +31,6 @@ pub const SCRIM: Color = Color::from_rgba(0., 0., 0., 0.65);
 pub const SELECTION: Color = Color::from_rgba8(100, 160, 230, 0.35);
 pub const IMAGE_TEXT: Color = Color::WHITE;
 const CODE: Color = Color::from_rgb8(17, 17, 17);
-const QUESTIONNAIRE: Color = Color::from_rgb8(34, 34, 42);
-const OPTION: Color = Color::from_rgb8(22, 22, 27);
-const OPTION_SELECTED: Color = Color::from_rgb8(44, 44, 55);
 
 pub const RADIUS_SMALL: f32 = 4.;
 pub const RADIUS_CONTROL: f32 = 8.;
@@ -155,16 +152,16 @@ pub fn code_block(theme: &Theme) -> container::Style {
 
 pub fn questionnaire(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(QUESTIONNAIRE.into()),
+        background: Some(PANEL.into()),
         border: iced::border::rounded(RADIUS_SURFACE),
         ..Default::default()
     }
 }
 
-pub fn option_row(selected: bool) -> container::Style {
+pub fn questionnaire_handle(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(if selected { OPTION_SELECTED } else { OPTION }.into()),
-        border: iced::border::rounded(RADIUS_CONTROL),
+        background: Some(MUTED.into()),
+        border: iced::border::rounded(RADIUS_SMALL),
         ..Default::default()
     }
 }
@@ -175,14 +172,19 @@ pub fn option_button(
     selected: bool,
 ) -> button_widget::Style {
     let mut style = text_button(theme, status);
-    style.background = option_row(
-        selected
-            || matches!(
-                status,
-                button_widget::Status::Hovered | button_widget::Status::Pressed
-            ),
-    )
-    .background;
+    style.background = Some(
+        if matches!(
+            status,
+            button_widget::Status::Hovered | button_widget::Status::Pressed
+        ) {
+            SECONDARY_HOVER
+        } else if selected {
+            SECONDARY
+        } else {
+            BACKGROUND
+        }
+        .into(),
+    );
     style
 }
 

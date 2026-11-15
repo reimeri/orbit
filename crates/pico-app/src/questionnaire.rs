@@ -295,9 +295,12 @@ impl Draft {
         let a = &self.answers[self.current];
         let header = row![
             container(text("Answer needed").size(12)).width(Fill),
-            theme::button(text(if self.collapsed { "Resume" } else { "━" }).size(12))
-                .on_press(message(Action::Toggle))
-                .style(theme::text_button),
+            theme::button(
+                container(space().width(32).height(4)).style(theme::questionnaire_handle)
+            )
+            .padding([10, 10])
+            .on_press(message(Action::Toggle))
+            .style(theme::text_button),
             container(
                 text(format!("{} / {}", self.current + 1, self.answers.len()))
                     .size(12)
@@ -335,32 +338,38 @@ impl Draft {
                     .enumerate()
                 {
                     let selected = a.selected == Some(index);
-                    let select = theme::button(
+                    let label = container(
                         row![
                             text((index + 1).to_string()).size(12).color(MUTED),
                             text(option).size(font_size)
                         ]
+                        .align_y(iced::Center)
                         .spacing(10),
                     )
                     .width(Fill)
-                    .padding([7, 10])
-                    .on_press(message(Action::Select(index)))
-                    .style(move |theme, status| theme::option_button(theme, status, selected));
-                    let mut option_row = row![select].align_y(iced::Center);
+                    .padding([7, 10]);
+                    let mut option_row = row![label].align_y(iced::Center);
                     if index < self.options().len() {
                         option_row = option_row.push(
                             theme::button(text("Edit").size(12))
                                 .padding([7, 10])
                                 .on_press(message(Action::Edit(index)))
+                                .style(theme::sidebar_control),
+                        );
+                    }
+                    // The row owns the background, including behind Edit. The nested
+                    // Edit button captures its clicks before the row can select.
+                    body = body.push(
+                        container(
+                            theme::button(option_row)
+                                .width(Fill)
+                                .padding(0)
+                                .on_press(message(Action::Select(index)))
                                 .style(move |theme, status| {
                                     theme::option_button(theme, status, selected)
                                 }),
-                        );
-                    }
-                    body = body.push(
-                        container(option_row)
-                            .id(format!("questionnaire-option-{}-{index}", self.pending.id))
-                            .style(move |_| theme::option_row(selected)),
+                        )
+                        .id(format!("questionnaire-option-{}-{index}", self.pending.id)),
                     );
                 }
             }
@@ -826,6 +835,121 @@ mod tests {
             draft.update(message.clone());
         }
         messages
+    }
+
+    #[test]
+    fn questionnaire_option_hover_and_edit_share_surface_but_not_clicks() {
+        struct OptionBounds(Option<Rectangle>);
+        impl Operation for OptionBounds {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn container(&mut self, id: Option<&widget::Id>, bounds: Rectangle) {
+                if id == Some(&widget::Id::from("questionnaire-option-fixture-0")) {
+                    self.0 = Some(bounds);
+                }
+            }
+        }
+
+        let draft = draft();
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(14.),
+        ));
+        let mut ui = UserInterface::build(
+            draft.view(14., 360., true, true),
+            Size::new(600., 500.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = OptionBounds(None);
+        ui.operate(&renderer, &mut bounds);
+        let bounds = bounds.0.expect("first option is laid out");
+        let label = iced::Point::new(bounds.x + 60., bounds.center_y());
+        let edit = iced::Point::new(bounds.x + bounds.width - 20., bounds.center_y());
+        let theme = theme::app();
+        let hover_background = theme::secondary(&theme, widget::button::Status::Hovered)
+            .background
+            .unwrap();
+
+        for (cursor, background, edit_color) in [
+            (mouse::Cursor::Unavailable, theme::BACKGROUND.into(), MUTED),
+            (mouse::Cursor::Available(label), hover_background, MUTED),
+            (
+                mouse::Cursor::Available(edit),
+                hover_background,
+                theme::TEXT,
+            ),
+        ] {
+            let mut messages = vec![];
+            ui.update(
+                &[Event::Window(iced::window::Event::RedrawRequested(
+                    iced::time::Instant::now(),
+                ))],
+                cursor,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            ui.draw(
+                &mut renderer,
+                &theme,
+                &renderer::Style {
+                    text_color: theme::TEXT,
+                },
+                cursor,
+            );
+            let iced::Renderer::Secondary(renderer) = &mut renderer else {
+                unreachable!()
+            };
+            // Both hit targets must have the same topmost painted background.
+            for point in [label, edit] {
+                let painted = renderer
+                    .layers()
+                    .iter()
+                    .flat_map(|layer| &layer.quads)
+                    .rfind(|(quad, _)| quad.bounds.contains(point))
+                    .expect("option has a background");
+                assert_eq!(painted.1, background);
+            }
+            let edit_colors: Vec<_> = renderer
+                .layers()
+                .iter()
+                .flat_map(|layer| &layer.text)
+                .flat_map(|group| group.as_slice())
+                .filter_map(|text| match text {
+                    iced_tiny_skia::graphics::Text::Paragraph {
+                        position, color, ..
+                    } if bounds.contains(*position)
+                        && position.x > bounds.x + bounds.width - 45. =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(edit_colors, vec![edit_color]);
+        }
+
+        for (point, editing) in [(label, false), (edit, true)] {
+            let mut messages = vec![];
+            ui.update(
+                &[
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert_eq!(messages.len(), 1, "Edit must not also select the option");
+            assert_eq!(messages[0].question, 0);
+            assert!(matches!(
+                (&messages[0].action, editing),
+                (Action::Edit(0), true) | (Action::Select(0), false)
+            ));
+        }
     }
 
     #[test]

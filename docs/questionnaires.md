@@ -80,7 +80,11 @@ with pending questions appear under **Needs attention**, ahead of Working.
   text and puts the caret at the end, without changing the original option or
   advancing. A different nonempty custom draft requires **Keep draft / Replace**,
   defaulting to Keep draft. Typing during this confirmation does not edit the draft.
-- Collapse/Resume retains the current question, answers, and replacement confirmation.
+- The centered pill toggles collapse/expand without changing shape, retaining the
+  current question, answers, and replacement confirmation.
+- The panel and options use the shared app palette. Hover highlights the entire
+  option, including behind Edit; Edit is muted until hovered. Option numbers are
+  vertically centered alongside their labels.
 - Switching sessions preserves questionnaire drafts and the ordinary composer draft.
 - Long prompts/options scroll in a bounded body; the multiline editor, keyboard hints
   and navigation remain accessible outside it. The editor scrolls independently.
@@ -133,7 +137,7 @@ Live acceptance (requires a signed-in account):
    edit another option, and exercise both Keep draft and Replace.
 3. Try Ctrl+Backspace and Ctrl+W in the middle of a line and with a selection;
    verify suffix preservation, Unicode and multiline clipboard editing.
-4. Use Shift+Enter, Back, Next, Collapse/Resume and switch to another session.
+4. Use Shift+Enter, Back, Next, collapse/expand and switch to another session.
    Return and verify both questionnaire and ordinary composer drafts remain intact.
 5. Submit and verify the model receives the complete ordered answers through its
    waiting cell; inspect the nested tool result. No extra user message should appear.
