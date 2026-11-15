@@ -338,37 +338,9 @@ mod tests {
         let path = dir.path().join("image.gif");
         std::fs::write(&path, include_bytes!("fixtures/media.gif")).unwrap();
         let mut cache = Cache::default();
-        let decoders = crate::image_view::DECODERS
-            .clone()
-            .acquire_many_owned(2)
-            .await
-            .unwrap();
         let task = cache.prepare(Some(("first", dir.path())), one_url());
         let stale_generation = cache.slots["image.gif"].generation;
-        let mut stream = iced_runtime::task::into_stream(task).unwrap();
-        let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
-            .await
-            .unwrap()
-            .unwrap();
-        let iced_runtime::Action::Output(message) = first else {
-            panic!("expected metadata output")
-        };
-        assert!(matches!(
-            &message,
-            Message::Dimensions {
-                dimensions: (96, 64),
-                ..
-            }
-        ));
-        cache.update(message);
-        assert!(cache.loaded("image.gif").is_none());
-        assert_eq!(cache.slots["image.gif"].dimensions, Some((96, 64)));
-        drop(decoders);
-        while let Some(action) = stream.next().await {
-            if let iced_runtime::Action::Output(message) = action {
-                cache.update(message);
-            }
-        }
+        finish(&mut cache, task).await;
         let loaded = cache.slots["image.gif"]
             .result
             .as_ref()
@@ -409,6 +381,69 @@ mod tests {
         let _ = cache.prepare(None, HashSet::new());
         finish(&mut cache, task).await;
         assert!(cache.slots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preview_dimensions_arrive_before_the_image_body_finishes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let bytes = include_bytes!("fixtures/media.gif");
+            // Hold the trailer: dimensions are readable, but the complete image
+            // bytes cannot have arrived regardless of decoder concurrency.
+            let split = bytes.len() - 1;
+            assert_eq!(
+                pico_core::media::image_dimensions(&bytes[..split]).unwrap(),
+                (96, 64)
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/image.gif", listener.local_addr().unwrap());
+            let (release, blocked) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                }
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", bytes.len())
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.write_all(&bytes[..split]).await.unwrap();
+                blocked.await.unwrap();
+                socket.write_all(&bytes[split..]).await.unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let mut cache = Cache::default();
+            let task = cache.prepare(Some(("session", dir.path())), HashSet::from([url.clone()]));
+            let mut stream = iced_runtime::task::into_stream(task).unwrap();
+            let first = stream.next().await.unwrap();
+            let iced_runtime::Action::Output(message) = first else {
+                panic!("expected image metadata")
+            };
+            assert!(matches!(
+                &message,
+                Message::Dimensions {
+                    dimensions: (96, 64),
+                    ..
+                }
+            ));
+            cache.update(message);
+            assert_eq!(cache.slots[&url].dimensions, Some((96, 64)));
+            assert!(cache.loaded(&url).is_none());
+            release.send(()).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    cache.update(message);
+                }
+            }
+            assert_eq!(cache.loaded(&url).unwrap().bytes.as_slice(), bytes);
+            server.await.unwrap();
+        })
+        .await
+        .expect("preview metadata/body pipeline must complete");
     }
 
     fn layout(cache: &Cache, width: f32) -> (iced::Rectangle, f32) {

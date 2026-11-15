@@ -590,9 +590,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = Shell::new(dir.path().into());
         let cancel = CancellationToken::new();
-        let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"printf before; sleep 0.15; printf after >&2; exit 7","login":false,"yield_time_ms":20})).unwrap(), &cancel).unwrap();
+        let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"printf before; while [ ! -f release ]; do sleep 0.01; done; printf after >&2; exit 7","login":false,"yield_time_ms":20})).unwrap(), &cancel).unwrap();
         let session_id = running_id(&first.text);
-        assert!(first.text.contains("before"));
+        fn output(text: &str) -> &str {
+            text.split_once("\nOutput:\n").unwrap().1
+        }
+        let mut before = output(&first.text).to_owned();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while before.len() < "before".len() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "first marker never arrived"
+            );
+            let next = shell
+                .write(
+                    StdinArgs {
+                        session_id,
+                        chars: String::new(),
+                        yield_time_ms: 20,
+                        max_output_tokens: None,
+                    },
+                    &cancel,
+                )
+                .unwrap();
+            assert!(!next.failed);
+            before.push_str(output(&next.text));
+        }
+        assert_eq!(before, "before");
+        std::fs::write(dir.path().join("release"), "").unwrap();
         let second = shell
             .write(
                 StdinArgs {
@@ -607,8 +632,11 @@ mod tests {
         assert!(second.failed);
         assert!(!first.failed);
         assert!(second.text.contains("code 7"));
-        assert!(second.text.contains("after"));
-        assert!(!second.text.contains("before"));
+        assert_eq!(
+            output(&second.text),
+            "after",
+            "the first marker must not replay"
+        );
     }
     #[test]
     fn pty_accepts_input() {

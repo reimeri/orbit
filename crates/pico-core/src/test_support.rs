@@ -1,4 +1,6 @@
 //! Local-only protocol fixture; no test reads user credentials or calls OpenAI.
+pub mod sqlite;
+
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -82,4 +84,28 @@ pub fn saved_output(notice: &str) -> Vec<u8> {
         "{notice}"
     );
     std::fs::read(path).unwrap()
+}
+
+/// HTTP field names are case-insensitive; field values retain their original case.
+pub fn header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request
+        .split_once("\r\n\r\n")
+        .unwrap()
+        .0
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .find(|(field, _)| field.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim())
+}
+
+#[test]
+fn request_headers_ignore_name_case_but_preserve_values_and_exclude_body() {
+    let request =
+        "POST / HTTP/1.1\r\nAuThOrIzAtIoN:\tBearer CaseSensitive \r\n\r\nMissing: not-a-header";
+    assert_eq!(
+        header(request, "authorization"),
+        Some("Bearer CaseSensitive")
+    );
+    assert_eq!(header(request, "missing"), None);
 }

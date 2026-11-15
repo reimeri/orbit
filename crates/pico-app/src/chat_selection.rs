@@ -1339,7 +1339,48 @@ pub(crate) mod tests {
             at,
         );
         let display = crate::tool_output::display("test", "cmd", &source, false);
-        let expected_end = display.find("line 036").unwrap();
+        #[derive(Default)]
+        struct ScrolledText {
+            translation: iced::Vector,
+            rows: Vec<(String, Rectangle)>,
+        }
+        impl Operation for ScrolledText {
+            fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+                visit(self);
+            }
+            fn scrollable(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                _: Rectangle,
+                _: Rectangle,
+                translation: iced::Vector,
+                _: &mut dyn iced::advanced::widget::operation::Scrollable,
+            ) {
+                self.translation = translation;
+            }
+            fn text(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                mut bounds: Rectangle,
+                text: &str,
+            ) {
+                bounds.x -= self.translation.x;
+                bounds.y -= self.translation.y;
+                self.rows.push((text.to_owned(), bounds));
+            }
+        }
+        let mut painted = ScrolledText::default();
+        ui.operate(&renderer, &mut painted);
+        let (row, _) = painted
+            .rows
+            .iter()
+            .find(|(text, bounds)| text.starts_with("line ") && bounds.contains(at))
+            .expect("scroll must expose a numbered source row under the stationary pointer");
+        let expected_end = display.find(row.trim_end()).unwrap();
+        assert!(
+            expected_end > selection.borrow().anchor.unwrap().byte,
+            "scroll must advance the selection"
+        );
         assert_eq!(selection.borrow().focus.unwrap().byte, expected_end);
         send(&mut ui, &mut renderer, release(), at);
         assert_eq!(

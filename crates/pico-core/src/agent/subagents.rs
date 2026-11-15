@@ -799,11 +799,12 @@ mod tests {
     async fn assert_tool_catalog(f: &Fixture, session: &str, request: &Value, expected: &[&str]) {
         let tools = request["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0]["name"], "exec");
-        assert_eq!(tools[0]["type"], "custom");
-        assert_eq!(tools[0]["format"]["definition"], crate::code_mode::GRAMMAR);
-        assert_eq!(tools[1]["name"], "wait");
-        let description = tools[0]["description"].as_str().unwrap();
+        let exec = tools.iter().find(|tool| tool["name"] == "exec").unwrap();
+        let wait = tools.iter().find(|tool| tool["name"] == "wait").unwrap();
+        assert_eq!(exec["type"], "custom");
+        assert_eq!(exec["format"]["definition"], crate::code_mode::GRAMMAR);
+        assert_eq!(wait["type"], "function");
+        let description = exec["description"].as_str().unwrap();
         let instructions = request["instructions"].as_str().unwrap();
         let c = f.h.get(session).unwrap();
         let output = tokio::task::spawn_blocking(move || {
@@ -819,15 +820,29 @@ mod tests {
         let runtime: Value =
             serde_json::from_str(output.strip_prefix("Script completed\nOutput:\n").unwrap())
                 .unwrap();
-        assert_eq!(runtime["names"], json!(expected));
-        assert_eq!(description.matches("### `").count(), expected.len());
-        for tool in runtime["definitions"].as_array().unwrap() {
+        let names = runtime["names"].as_array().unwrap();
+        let actual: std::collections::BTreeSet<_> =
+            names.iter().map(|name| name.as_str().unwrap()).collect();
+        assert_eq!(names.len(), actual.len(), "tool names must be unique");
+        assert_eq!(actual, expected.iter().copied().collect());
+        let definitions = runtime["definitions"].as_array().unwrap();
+        let documented: std::collections::BTreeSet<_> = definitions
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            definitions.len(),
+            documented.len(),
+            "definitions must be unique"
+        );
+        assert_eq!(
+            documented, actual,
+            "ALL_TOOLS must describe every callable tool"
+        );
+        for tool in definitions {
             let name = tool["name"].as_str().unwrap();
-            assert!(description.contains(&format!(
-                "### `{name}`\n{}",
-                tool["description"].as_str().unwrap()
-            )));
-            assert!(description.contains(&format!("declare const tools: {{ {name}(args:")));
+            assert!(description.contains(name));
+            assert!(description.contains(tool["description"].as_str().unwrap()));
             assert!(tool["input_schema"].is_object());
             assert!(tool["output_schema"].is_object());
         }
@@ -1274,12 +1289,12 @@ mod tests {
     async fn acceptance_is_atomic_and_completion_survives_failed_storage_without_replay() {
         let mut f = Fixture::new().await;
         let db = rusqlite::Connection::open(f.h.store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_run BEFORE INSERT ON subagent_runs BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(&db, "subagent_runs", "disk fixture");
         assert!(f.spawn(Profile::Explore, None, "retry").is_err());
         assert_eq!(f.h.store.load().unwrap().1.len(), 1);
         assert!(f.h.subagent_runs(&f.parent).is_empty());
         assert!(f.requests.try_recv().is_err());
-        db.execute_batch("DROP TRIGGER fail_run;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "subagent_runs");
         let run = f.spawn(Profile::Explore, None, "retry").unwrap();
         let child = f.request().await;
         assert_eq!(
@@ -1287,7 +1302,7 @@ mod tests {
             run.run_id
         );
         assert_eq!(f.h.active_children(&f.parent), 1);
-        db.execute_batch("CREATE TRIGGER fail_terminal BEFORE UPDATE ON subagent_runs BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(&db, "subagent_runs", "disk fixture");
         child
             .reply
             .send(answer("Retain this full final answer λ"))
@@ -1302,7 +1317,7 @@ mod tests {
             "Retain this full final answer λ"
         );
         assert!(f.h.flush().is_err());
-        db.execute_batch("DROP TRIGGER fail_terminal;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "subagent_runs");
         f.h.flush().unwrap();
         let stored: String = db
             .query_row(
@@ -1319,9 +1334,25 @@ mod tests {
             parent
                 .entries
                 .iter()
-                .filter(|e| e.id == format!("subagent-{}", run.run_id))
+                .filter(|e| matches!(e.kind, EntryKind::Notice) && e.text.contains(&run.run_id))
                 .count(),
             1
+        );
+        let notices: Vec<_> = parent
+            .entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::Notice) && e.text.contains(&run.run_id))
+            .cloned()
+            .collect();
+        let reloaded = f.h.store.load_session(&f.parent).unwrap();
+        assert_eq!(
+            reloaded
+                .entries
+                .iter()
+                .filter(|e| matches!(e.kind, EntryKind::Notice) && e.text.contains(&run.run_id))
+                .cloned()
+                .collect::<Vec<_>>(),
+            notices
         );
         assert!(
             f.requests.try_recv().is_err(),
@@ -1357,7 +1388,7 @@ mod tests {
         let second_request = f.request().await;
         assert!(f.h.attention(&first.session_id).is_none());
         let db = rusqlite::Connection::open(f.h.store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_terminal BEFORE UPDATE ON subagent_runs BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(&db, "subagent_runs", "disk fixture");
         let failure = |message| {
             format!(
                 "data: {}\n\n",
@@ -1382,7 +1413,7 @@ mod tests {
                 .is_err()
         );
         assert!(f.h.children_need_attention(&f.parent));
-        db.execute_batch("DROP TRIGGER fail_terminal;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "subagent_runs");
 
         let seen = f.h.attention(&f.parent).unwrap();
         second_request.reply.send(failure("Newer failure")).unwrap();

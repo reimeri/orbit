@@ -846,11 +846,15 @@ mod tests {
         session.accept_submission("first-submission".into(), draft.message.clone().into());
         // Failure consuming the draft must also roll back the new session.
         let db = Connection::open(dir.path().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_consume BEFORE DELETE ON new_session_draft BEGIN SELECT RAISE(FAIL,'fixture consume failure'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(
+            &db,
+            "new_session_draft",
+            "fixture consume failure",
+        );
         assert!(store.commit_new_session(&session).is_err());
         assert!(store.load().unwrap().1.is_empty());
         assert_eq!(store.load_new_draft().unwrap(), draft);
-        db.execute_batch("DROP TRIGGER fail_consume;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "new_session_draft");
         store.commit_new_session(&session).unwrap();
         drop(db);
         drop(store);
@@ -874,7 +878,10 @@ mod tests {
         store.save_session(&session).unwrap();
         let before = session.clone();
         let db = Connection::open(store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER protect_history BEFORE UPDATE ON entries WHEN OLD.position != 1 BEGIN SELECT RAISE(FAIL,'unchanged entry rewritten'); END; CREATE TRIGGER protect_context BEFORE UPDATE ON context BEGIN SELECT RAISE(FAIL,'unchanged context rewritten'); END;").unwrap();
+        for (operation, row) in [("INSERT", "NEW"), ("UPDATE", "OLD"), ("DELETE", "OLD")] {
+            db.execute_batch(&format!("CREATE TRIGGER protect_history_{operation} BEFORE {operation} ON entries WHEN {row}.position != 1 BEGIN SELECT RAISE(FAIL,'unchanged entry rewritten'); END;")).unwrap();
+        }
+        crate::test_support::sqlite::fail_writes(&db, "context", "unchanged context rewritten");
         session.entries[1].text = "edited middle".into();
         session.draft = "draft only metadata".into();
         store.save_changes(Some(&before), &session).unwrap();

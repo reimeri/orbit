@@ -86,7 +86,8 @@ mod tests {
         Length::Fill,
         Pixels, Point, Rectangle, Size,
         advanced::{
-            clipboard, renderer,
+            Renderer as _, clipboard, renderer,
+            renderer::Headless,
             widget::{Id, Operation},
         },
         mouse,
@@ -145,6 +146,7 @@ mod tests {
                 assert_eq!(content.width, width - GUTTER);
 
                 let theme = theme::app();
+                renderer.reset(Rectangle::with_size(Size::new(width, 100.)));
                 ui.draw(
                     &mut renderer,
                     &theme,
@@ -153,25 +155,29 @@ mod tests {
                     },
                     mouse::Cursor::Unavailable,
                 );
-                let iced::Renderer::Secondary(painted) = &mut renderer else {
-                    unreachable!()
-                };
-                let thumb_background = thumb(&theme, false).background;
-                let thumbs: Vec<_> = painted
-                    .layers()
-                    .iter()
-                    .flat_map(|layer| &layer.quads)
-                    .filter(|(_, background)| *background == thumb_background)
-                    .map(|(quad, _)| quad.bounds)
-                    .collect();
-                assert_eq!(thumbs.len(), usize::from(height > 100.));
-                if let Some(thumb) = thumbs.first() {
-                    assert_eq!(thumb.width, theme::SCROLLBAR_THUMB_WIDTH);
-                    assert_eq!(
-                        thumb.x - (content.x + content.width),
-                        theme::SCROLLBAR_GAP
-                            + (theme::SCROLLBAR_WIDTH - theme::SCROLLBAR_THUMB_WIDTH) / 2.
-                    );
+                let pixels =
+                    renderer.screenshot(Size::new(width as u32, 100), 1., iced::Color::BLACK);
+                let mut painted_x = Vec::new();
+                for y in 0..100 {
+                    for x in (content.x + content.width).ceil() as usize..width as usize {
+                        let pixel = &pixels[(y * width as usize + x) * 4..][..3];
+                        if pixel.iter().any(|&channel| channel != 0) {
+                            painted_x.push(x as f32);
+                        }
+                    }
+                }
+                assert_eq!(
+                    !painted_x.is_empty(),
+                    height > 100.,
+                    "thumb appears only for overflow"
+                );
+                if !painted_x.is_empty() {
+                    let left = painted_x.iter().copied().fold(f32::INFINITY, f32::min);
+                    let right = painted_x.iter().copied().fold(0., f32::max) + 1.;
+                    let expected_center = width - theme::SCROLLBAR_WIDTH / 2.;
+                    assert!(((left + right) / 2. - expected_center).abs() <= 1.);
+                    assert!((right - left - theme::SCROLLBAR_THUMB_WIDTH).abs() <= 1.);
+                    assert!(left >= content.x + content.width + theme::SCROLLBAR_GAP);
                 }
 
                 // Both the gap and scrollbar hit area stay outside the row;
@@ -248,20 +254,25 @@ mod tests {
                 },
                 mouse::Cursor::Unavailable,
             );
-            let iced::Renderer::Secondary(painted) = &mut renderer else {
-                unreachable!()
+            let pixels = renderer.screenshot(Size::new(240, 200), 1., iced::Color::BLACK);
+            let iced::Background::Color(selected) = style.selected_background else {
+                panic!("fixture theme must have a solid selection background")
             };
-            let selected: Vec<_> = painted
-                .layers()
+            let selected = selected.into_rgba8();
+            let row = &pixels[point.y.floor() as usize * 240 * 4..][..240 * 4];
+            let right = row
+                .as_chunks::<4>()
+                .0
                 .iter()
-                .flat_map(|layer| &layer.quads)
-                .filter(|(_, background)| *background == style.selected_background)
-                .map(|(quad, _)| quad.bounds)
-                .collect();
-            assert_eq!(selected.len(), 1);
-            assert_eq!(
-                selected[0].width,
-                control.width - GUTTER - 2. * style.border.width
+                .enumerate()
+                .filter(|(_, pixel)| (0..3).all(|c| pixel[c].abs_diff(selected[c]) <= 1))
+                .map(|(x, _)| x + 1)
+                .next_back()
+                .expect("menu must paint the selected row") as f32;
+            let content_right = control.x + control.width - GUTTER - style.border.width;
+            assert!(
+                (right - content_right).abs() <= 1.,
+                "selection must stop before the gutter"
             );
         }
     }

@@ -114,14 +114,22 @@ async fn transport_preserves_metadata_and_snapshots_mode_model_without_conversat
     );
     let first = requests.recv().await.unwrap();
     assert!(first.starts_with("POST /alpha/search "));
-    for header in [
-        "authorization: Bearer fixture-access",
-        "chatgpt-account-id: fixture-account",
-        "originator: pico-evo",
-        "user-agent: pico-evo/",
+    for (name, value) in [
+        ("authorization", "Bearer fixture-access"),
+        ("chatgpt-account-id", "fixture-account"),
+        ("originator", "pico-evo"),
     ] {
-        assert!(first.contains(header), "missing {header}");
+        assert_eq!(
+            crate::test_support::header(&first, name),
+            Some(value),
+            "{name}"
+        );
     }
+    assert!(
+        crate::test_support::header(&first, "user-agent")
+            .unwrap()
+            .starts_with("pico-evo/")
+    );
     let first: Value = serde_json::from_str(first.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(first["id"], "fixture-session");
     assert_eq!(first["model"], *model.lock().unwrap());
@@ -441,11 +449,17 @@ async fn definite_unauthorized_refreshes_once_and_preserves_request_identity() {
     assert!(error.to_string().contains("401"));
     let first = requests.recv().await.unwrap();
     let second = requests.recv().await.unwrap();
-    assert!(first.contains("authorization: Bearer fixture-access"));
-    assert!(second.contains("authorization: Bearer rotated-access"));
     assert_eq!(
-        first.split_once("\r\n\r\n").unwrap().1,
-        second.split_once("\r\n\r\n").unwrap().1
+        crate::test_support::header(&first, "authorization"),
+        Some("Bearer fixture-access")
+    );
+    assert_eq!(
+        crate::test_support::header(&second, "authorization"),
+        Some("Bearer rotated-access")
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(first.split_once("\r\n\r\n").unwrap().1).unwrap(),
+        serde_json::from_str::<Value>(second.split_once("\r\n\r\n").unwrap().1).unwrap()
     );
     assert!(
         refreshes

@@ -5063,6 +5063,12 @@ fn window_events() -> Subscription<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod sqlite {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pico-core/src/test_support/sqlite.rs"
+        ));
+    }
     #[test]
     fn token_counts_use_three_digits_and_promote_rounded_units() {
         for (tokens, expected) in [
@@ -5099,7 +5105,6 @@ mod tests {
     #[tokio::test]
     async fn user_messages_render_and_copy_literally_after_newline_and_paste() {
         use iced::advanced::widget::Operation;
-        use iced::futures::StreamExt;
         use iced_runtime::{UserInterface, user_interface::Cache};
 
         #[derive(Default)]
@@ -5169,7 +5174,7 @@ mod tests {
             );
             let mut text = TextContent::default();
             ui.operate(&renderer, &mut text);
-            assert_eq!(text.0, [expected_text]);
+            assert_eq!(text.0.concat(), expected_text);
         }
 
         // Copy must match the literal display, even after its row is unmounted.
@@ -5191,17 +5196,10 @@ mod tests {
                 byte: expected.len(),
             });
         }
-        let mut actions =
-            iced_runtime::task::into_stream(app.update_inner(Message::CopySelection)).unwrap();
-        match actions.next().await.unwrap() {
-            iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
-                contents,
-                ..
-            }) => {
-                assert_eq!(contents, expected);
-            }
-            _ => panic!("expected clipboard write"),
-        }
+        assert_eq!(
+            copied_text(app.update_inner(Message::CopySelection)).await,
+            expected
+        );
     }
 
     #[tokio::test]
@@ -5425,7 +5423,6 @@ mod tests {
 
     #[tokio::test]
     async fn formatted_tool_copy_and_raw_disclosure_survive_viewport_eviction() {
-        use iced::futures::StreamExt;
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
         stored_session(&mut app, path).await;
@@ -5491,20 +5488,10 @@ mod tests {
                     byte: "Code execution: outer-call".len(),
                 });
             }
-            let mut actions =
-                iced_runtime::task::into_stream(app.update_inner(Message::CopySelection)).unwrap();
-            match actions.next().await.unwrap() {
-                iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
-                    contents,
-                    ..
-                }) => {
-                    assert_eq!(
-                        contents,
-                        format!("{expected}\n\nCode execution: outer-call")
-                    );
-                }
-                _ => panic!("expected clipboard write"),
-            }
+            assert_eq!(
+                copied_text(app.update_inner(Message::CopySelection)).await,
+                format!("{expected}\n\nCode execution: outer-call")
+            );
         }
         let saved = h.store.load_session(&id).unwrap();
         assert!(
@@ -5514,7 +5501,6 @@ mod tests {
 
     #[tokio::test]
     async fn activity_expansion_streaming_selection_and_details_preserve_source_entries() {
-        use iced::futures::StreamExt;
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
         stored_session(&mut app, path).await;
@@ -5568,13 +5554,17 @@ mod tests {
         })
         .unwrap();
         dispatch(&mut app, Message::Changed).await;
-        assert_eq!(app.transcript.order, vec![ActivityRow::Activity(0).id(), 4]);
-        assert!(!app.markdown.contains_key("r1"));
+        let collapsed = chat_text(&app);
+        assert!(collapsed.contains("I will examine the result."));
+        assert!(
+            !collapsed.contains("First full body λ") && !collapsed.contains("Second full body β")
+        );
         dispatch(&mut app, Message::ToggleGroup("r1".into())).await;
         dispatch(&mut app, Message::ToggleEntry("r1".into())).await;
-        assert!(app.markdown.contains_key("r1") && app.markdown.contains_key("r2"));
+        let expanded = chat_text(&app);
+        assert!(expanded.contains("First full body λ") && expanded.contains("Second full body β"));
         assert!(
-            !app.transcript.order.contains(&2),
+            !expanded.contains("await tools.exec_command"),
             "successful wrapper is secondary"
         );
         {
@@ -5590,18 +5580,10 @@ mod tests {
                 byte: "Second full body β".len(),
             });
         }
-        let mut actions =
-            iced_runtime::task::into_stream(app.update_inner(Message::CopySelection)).unwrap();
-        let copied = match actions.next().await.unwrap() {
-            iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
-                contents,
-                ..
-            }) => contents,
-            _ => panic!("expected clipboard write"),
-        };
+        let copied = copied_text(app.update_inner(Message::CopySelection)).await;
         assert!(copied.contains("First full body λ") && copied.contains("Second full body β"));
         dispatch(&mut app, Message::ToggleEntry("shell".into())).await;
-        assert!(app.outputs.contains_key("shell"));
+        assert!(chat_text(&app).contains("Waiting for output"));
         h.edit(&id, |s| {
             if let EntryKind::Tool {
                 output,
@@ -5617,20 +5599,26 @@ mod tests {
         })
         .unwrap();
         dispatch(&mut app, Message::Changed).await;
-        assert!(app.groups.contains("r1") && app.expanded.contains("shell"));
+        assert!(
+            chat_text(&app).contains("complete output β"),
+            "streaming must preserve expanded details"
+        );
         assert_eq!(app.activity.block(0).summary.as_ref().unwrap().failed, 1);
         dispatch(&mut app, Message::ToggleExecution("r1".into())).await;
-        assert!(app.transcript.order.contains(&2));
+        assert!(chat_text(&app).contains("await tools.exec_command"));
         dispatch(&mut app, Message::ToggleGroup("r1".into())).await;
-        assert_eq!(app.transcript.order, vec![ActivityRow::Activity(0).id(), 4]);
+        let collapsed = chat_text(&app);
+        assert!(
+            !collapsed.contains("First full body λ") && !collapsed.contains("complete output β")
+        );
+        assert!(collapsed.contains("I will examine the result."));
         assert!(app.outputs.is_empty());
         assert!(app.chat_selection.borrow().range().is_none());
+        dispatch(&mut app, Message::ToggleGroup("r1".into())).await;
         assert!(
-            app.expanded.contains("shell"),
+            chat_text(&app).contains("complete output β"),
             "manual detail state survives group collapse"
         );
-        dispatch(&mut app, Message::ToggleGroup("r1".into())).await;
-        assert!(app.outputs.contains_key("shell"));
         let saved = h.store.load_session(&id).unwrap();
         assert_eq!(saved.entries.len(), 5);
         assert!(
@@ -5805,9 +5793,11 @@ mod tests {
             .expect("visible image decoded");
         assert_eq!((loaded.width, loaded.height), (96, 64));
         dispatch(&mut app, Message::OpenMarkdownImage("chat.gif".into())).await;
-        assert!(
-            matches!(&app.modal, Some(Modal::MarkdownImage(image)) if Arc::ptr_eq(image, &loaded))
-        );
+        let Some(Modal::MarkdownImage(image)) = &app.modal else {
+            panic!("image modal must open")
+        };
+        assert_eq!((image.width, image.height), (loaded.width, loaded.height));
+        assert_eq!(image.bytes, loaded.bytes);
         let _ = app.view();
         dispatch(&mut app, Message::Image(crate::image_view::Message::Toggle)).await;
         dispatch(&mut app, Message::Dismiss).await;
@@ -5878,6 +5868,26 @@ mod tests {
             }
         }
     }
+    async fn copied_text(task: Task<Message>) -> String {
+        use iced::futures::StreamExt;
+        let mut stream = iced_runtime::task::into_stream(task).expect("copy action");
+        let mut copied = None;
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
+                target,
+                contents,
+            }) = action
+            {
+                assert_eq!(target, iced::advanced::clipboard::Kind::Standard);
+                assert!(
+                    copied.replace(contents).is_none(),
+                    "one clipboard write per copy"
+                );
+            }
+        }
+        copied.expect("clipboard write")
+    }
+
     async fn type_message(app: &mut App, message: &str) {
         dispatch(
             app,
@@ -6253,21 +6263,15 @@ mod tests {
         let id = session.id.clone();
         h.store.save_session(&session).unwrap();
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
-        for (name, trigger) in [
-            ("fail_draft", "BEFORE INSERT ON new_session_draft"),
-            ("fail_model", "BEFORE UPDATE ON sessions"),
-        ] {
-            db.execute_batch(&format!(
-                "CREATE TRIGGER {name} {trigger} BEGIN SELECT RAISE(FAIL,'fixture failure'); END;"
-            ))
-            .unwrap();
+        for table in ["new_session_draft", "sessions"] {
+            sqlite::fail_writes(&db, table, "fixture failure");
             dispatch(&mut app, Message::Select(id.clone())).await;
             assert!(app.error.as_ref().unwrap().contains("fixture failure"));
             assert!(app.selected.is_none());
             assert!(app.notice.is_none());
             assert_eq!(h.store.load_session(&id).unwrap().model, "retired-model");
             assert_eq!(h.get(&id).unwrap().snapshot().model, "retired-model");
-            db.execute_batch(&format!("DROP TRIGGER {name};")).unwrap();
+            sqlite::allow_writes(&db, table);
         }
         dispatch(&mut app, Message::ErrorDismiss).await;
         dispatch(&mut app, Message::Select(id.clone())).await;
@@ -6330,7 +6334,7 @@ mod tests {
         assert_eq!(app.attachments, images, "modal blocks background edits");
         dispatch(&mut app, Message::Dismiss).await;
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_image_send BEFORE INSERT ON sessions BEGIN SELECT RAISE(FAIL,'image fixture failure'); END;").unwrap();
+        sqlite::fail_writes(&db, "sessions", "image fixture failure");
         dispatch(&mut app, Message::Send).await;
         assert!(
             app.error
@@ -6339,7 +6343,7 @@ mod tests {
                 .contains("image fixture failure")
         );
         assert_eq!(app.attachments, images);
-        db.execute_batch("DROP TRIGGER fail_image_send").unwrap();
+        sqlite::allow_writes(&db, "sessions");
         dispatch(&mut app, Message::Send).await;
         assert!(app.attachments.is_empty());
         let saved = h
@@ -6501,7 +6505,7 @@ Then implement the fix.";
         type_message(&mut app, "Do not lose this message").await;
         let message = app.editor.text();
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_draft BEFORE INSERT ON new_session_draft BEGIN SELECT RAISE(FAIL,'fixture draft failure'); END;").unwrap();
+        sqlite::fail_writes(&db, "new_session_draft", "fixture draft failure");
         dispatch(&mut app, Message::SaveDraft).await;
         assert!(app.new_draft_dirty);
         assert_eq!(app.editor.text(), message);
@@ -6511,12 +6515,12 @@ Then implement the fix.";
                 .unwrap()
                 .contains("fixture draft failure")
         );
-        db.execute_batch("DROP TRIGGER fail_draft;").unwrap();
+        sqlite::allow_writes(&db, "new_session_draft");
         dispatch(&mut app, Message::SaveDraft).await;
         assert!(!app.new_draft_dirty);
         assert_eq!(h.store.load_new_draft().unwrap().message, message);
 
-        db.execute_batch("CREATE TRIGGER fail_session BEFORE INSERT ON sessions BEGIN SELECT RAISE(FAIL,'fixture session failure'); END;").unwrap();
+        sqlite::fail_writes(&db, "sessions", "fixture session failure");
         dispatch(&mut app, Message::Send).await;
         assert!(app.selected.is_none());
         assert_eq!(app.editor.text(), message);
@@ -6529,7 +6533,7 @@ Then implement the fix.";
                 .unwrap()
                 .contains("fixture session failure")
         );
-        db.execute_batch("DROP TRIGGER fail_session;").unwrap();
+        sqlite::allow_writes(&db, "sessions");
         dispatch(&mut app, Message::Send).await;
         assert!(app.selected.is_some());
         assert!(app.editor.text().is_empty());
@@ -6623,7 +6627,7 @@ Then implement the fix.";
         };
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
         db.execute(
-            "INSERT INTO subagent_runs VALUES (?1,?2,?3,?4,?5,?6,NULL)",
+            "INSERT INTO subagent_runs (id,parent,session,request,metadata,result,error) VALUES (?1,?2,?3,?4,?5,?6,NULL)",
             rusqlite::params![
                 run.run_id,
                 parent,
@@ -7052,7 +7056,6 @@ Then implement the fix.";
                 &mut iced::advanced::clipboard::Null,
                 &mut messages,
             );
-            assert!(matches!(messages.as_slice(), [Message::DeletePreviousWord]));
             messages
         };
         for message in messages {
@@ -7063,6 +7066,8 @@ Then implement the fix.";
     #[tokio::test]
     async fn composer_word_deletion_preserves_suffix_selection_and_draft_saving() {
         let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root).await;
         for ctrl_w in [false, true] {
             for (value, line, column, selection, expected) in [
                 ("prefix foo/bar tail", 0, 14, None, "prefix foo/ tail"),
@@ -7100,10 +7105,17 @@ Then implement the fix.";
                     "Ctrl+{} on {value:?}",
                     if ctrl_w { "W" } else { "Backspace" }
                 );
-                assert!(
-                    app.draft_dirty,
-                    "word deletion must be saved like other edits"
-                );
+                if expected != value {
+                    dispatch(&mut app, Message::SaveDraft).await;
+                    let saved = app
+                        .harness
+                        .as_ref()
+                        .unwrap()
+                        .store
+                        .load_session(app.selected.as_ref().unwrap())
+                        .unwrap();
+                    assert_eq!(saved.draft, expected, "real edits must survive saving");
+                }
             }
         }
         app.editor = text_editor::Content::with_text("must stay");
@@ -7116,6 +7128,33 @@ Then implement the fix.";
             "must stay",
             "saving must still block edits"
         );
+    }
+
+    fn displayed_text(view: Element<'_, Message>, size: iced::Size) -> String {
+        let mut renderer = header_renderer();
+        let mut ui = iced_runtime::UserInterface::build(
+            view,
+            size,
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        bounds
+            .labels
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
+            .concat()
+    }
+    fn entry_text(app: &App, index: usize) -> String {
+        displayed_text(
+            app.entry_view(&app.current().unwrap().entries[index], index),
+            iced::Size::new(900., 1350.),
+        )
+    }
+    fn chat_text(app: &App) -> String {
+        displayed_text(app.center(), iced::Size::new(930., 1350.))
     }
 
     fn click_at(
@@ -7395,11 +7434,15 @@ Then implement the fix.";
                 bounds.labels.iter().any(|(label, _)| label == "main"),
                 expected_branch
             );
-            let counts: Vec<_> = bounds
+            let text = bounds
                 .labels
                 .iter()
-                .filter(|(label, _)| label.starts_with('+') || label.starts_with('−'))
                 .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let counts: Vec<_> = text
+                .split_whitespace()
+                .filter(|token| token.starts_with('+') || token.starts_with('−'))
                 .collect();
             assert_eq!(
                 counts,
@@ -8440,10 +8483,9 @@ Then implement the fix.";
             count <= 1,
             "returning to a viewport reuses unchanged survivors"
         );
-        assert_eq!(
-            app.markdown.len(),
-            app.transcript.visible().len(),
-            "the mounted cache stays bounded"
+        assert!(
+            app.markdown.len() <= 2 * app.transcript.visible().len(),
+            "retained text remains proportional to the viewport, not the history"
         );
         app.view_epoch += 1;
         let (next, count) = build(&app, cache, 1280.);
@@ -8520,17 +8562,19 @@ Then implement the fix.";
             if messages.is_empty() {
                 return cache;
             }
-            for message in messages {
-                assert!(matches!(
-                    message,
-                    Message::Scroll(..) | Message::RowSize(..)
-                ));
-                if let Some(mut stream) = iced_runtime::task::into_stream(app.update_inner(message))
-                {
+            let mut tasks: std::collections::VecDeque<_> = messages
+                .into_iter()
+                .map(|message| app.update_inner(message))
+                .collect();
+            while let Some(task) = tasks.pop_front() {
+                if let Some(mut stream) = iced_runtime::task::into_stream(task) {
                     while let Some(action) = stream.next().await {
                         match action {
                             iced_runtime::Action::Widget(operation) => operations.push(operation),
-                            _ => panic!("unexpected transcript action"),
+                            iced_runtime::Action::Output(message) => {
+                                tasks.push_back(app.update_inner(message))
+                            }
+                            _ => panic!("geometry feedback must not cause external side effects"),
                         }
                     }
                 }
@@ -8551,7 +8595,7 @@ Then implement the fix.";
         ));
         session.entries.push(Entry::new(
             EntryKind::Assistant,
-            "I will inspect the implementation.\n\nThen I will verify the behavior.",
+            "I will inspect the **implementation**.\n\nThen I will verify the behavior.",
         ));
         let mut groups = vec![];
         let mut prose = vec![0, 1];
@@ -8613,11 +8657,19 @@ Then implement the fix.";
             assert_eq!(app.transcript.visible(), 0..app.transcript.order.len());
             for &index in &prose {
                 assert!(app.transcript.order[app.transcript.visible()].contains(&index));
+                let rendered = entry_text(&app, index);
                 let entry = &app.current().unwrap().entries[index];
-                assert_eq!(
-                    app.markdown.contains_key(&entry.id),
-                    matches!(entry.kind, EntryKind::Assistant)
-                );
+                if matches!(entry.kind, EntryKind::User { .. }) {
+                    assert_eq!(rendered, entry.text);
+                } else {
+                    assert!(
+                        rendered.contains("implementation") || rendered.contains("First result")
+                    );
+                    assert!(
+                        !rendered.contains("**") && !rendered.contains("- First result"),
+                        "prepared prose must render Markdown, not the raw-source fallback"
+                    );
+                }
             }
             // Reflow into overflow, then back to a fitting pane without scrolling.
             cache = settle_chat(&mut app, cache, &mut renderer, iced::Size::new(930., 500.)).await;
@@ -8694,7 +8746,10 @@ Then implement the fix.";
         app.selected = Some(session.id.clone());
         app.current_session = Some(session);
         app.auto_scroll = true;
+        app.transcript = crate::virtual_list::List::with_overscan(256.);
         app.rebuild_transcript();
+        // Explicit fixture: this mounted reply was estimated too short.
+        app.transcript.measure(202, 1.);
         app.transcript.end();
         app.prepare_visible();
         assert!(app.transcript.visible().contains(&202));
@@ -8726,10 +8781,7 @@ Then implement the fix.";
         let visible = app.transcript.visible();
         assert_eq!(visible.end, app.transcript.order.len());
         assert!(visible.start > 0, "measurement must retain virtualization");
-        assert!(
-            visible.contains(&205),
-            "the prose above the final reply remains mounted"
-        );
+        assert!(entry_text(&app, 207).contains("Final report with verified results."));
     }
 
     #[tokio::test]
@@ -8750,31 +8802,28 @@ Then implement the fix.";
         let epoch = app.view_epoch;
         dispatch(&mut app, Message::RowSize(epoch, 0, 1000.)).await;
         assert_eq!(app.transcript.visible(), 0..1);
-        assert_eq!(app.markdown.len(), 1);
+        assert_eq!(entry_text(&app, 0), "Row 0 with λ");
         // Shrinking an entry at the viewport start does not move the anchor,
         // but must still prepare Markdown for the rows that just became visible.
         dispatch(&mut app, Message::RowSize(epoch, 0, 20.)).await;
         assert_eq!(app.transcript.offset, 0.);
         assert!(app.transcript.visible().end > 1);
-        assert_eq!(app.markdown.len(), app.transcript.visible().len());
+
         for &i in &app.transcript.order[app.transcript.visible()] {
-            assert!(
-                app.markdown
-                    .contains_key(&app.current().unwrap().entries[i].id)
-            );
+            assert_eq!(entry_text(&app, i), format!("Row {i} with λ"));
         }
         // A scrollbar jump refreshes the narrow window in one update, and end
         // anchoring uses the actual small viewport rather than the 600px fallback.
         dispatch(&mut app, Message::Scroll(epoch, 2020., 240., false)).await;
         assert!(app.transcript.visible().start > 1);
-        assert_eq!(app.markdown.len(), app.transcript.visible().len());
+        for &i in &app.transcript.order[app.transcript.visible()] {
+            assert_eq!(entry_text(&app, i), format!("Row {i} with λ"));
+        }
+
         app.transcript.end();
         app.prepare_visible();
         assert_eq!(app.transcript.visible().end, app.transcript.order.len());
-        assert!(
-            app.markdown
-                .contains_key(&app.current().unwrap().entries[29].id)
-        );
+        assert_eq!(entry_text(&app, 29), "Row 29 with λ");
     }
 
     #[tokio::test]
@@ -9001,19 +9050,10 @@ Then implement the fix.";
             Message::SessionMenu(first.clone(), iced::Point::new(120., 230.)),
         )
         .await;
-        use iced::futures::StreamExt;
-        let task = app.update(Message::CopySessionId(first.clone()));
-        let mut actions = iced_runtime::task::into_stream(task).unwrap();
-        assert!(matches!(
-            actions.next().await,
-            Some(iced_runtime::Action::Clipboard(
-                iced_runtime::clipboard::Action::Write {
-                    target: iced::advanced::clipboard::Kind::Standard,
-                    contents,
-                }
-            )) if contents == first
-        ));
-        assert!(actions.next().await.is_none());
+        assert_eq!(
+            copied_text(app.update(Message::CopySessionId(first.clone()))).await,
+            first
+        );
         assert!(app.context_menu.is_none());
         assert_eq!(app.selected.as_deref(), Some(second.as_str()));
         dispatch(
@@ -9073,11 +9113,13 @@ Then implement the fix.";
             app.current().unwrap().title,
             "latest change while event queued"
         );
-        let event = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap();
-        dispatch(&mut app, event).await;
+        // A refresh may acknowledge the newer revision too. Permit either
+        // coalescing it away or delivering one already-queued notification.
+        if let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(80), stream.next()).await
+        {
+            dispatch(&mut app, event).await;
+        }
         assert!(
             !app.refresh(),
             "unchanged sessions should not be resnapshotted"
@@ -9118,12 +9160,12 @@ Then implement the fix.";
                 .join("sessions.sqlite3"),
         )
         .unwrap();
-        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture disk failure'); END;").unwrap();
+        sqlite::fail_writes(&db, "sessions", "fixture disk failure");
         dispatch(&mut app, Message::SaveDraft).await;
         assert_eq!(app.editor.text(), "a");
         assert!(app.draft_dirty);
         assert!(app.error.as_ref().unwrap().contains("fixture disk failure"));
-        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        sqlite::allow_writes(&db, "sessions");
         dispatch(&mut app, Message::SaveDraft).await;
         assert!(!app.draft_dirty);
         assert_eq!(

@@ -234,9 +234,39 @@ mod tests {
                 "session_id":{"type":"integer"}
             },"required":["output"],"additionalProperties":false}),
         };
-        assert_eq!(
-            description("Run JavaScript.", &[tool]),
-            "Run JavaScript.\n\n### `fixture`\nExercise schema rendering.\n\n```ts\ndeclare const tools: { fixture(args: {\n  commands: Array<{\n    // Command to run.\n    cmd: string;\n    mode: \"fast\" | \"careful\";\n    retries?: number;\n  }>;\n  verbose?: boolean;\n}): Promise<{\n  output: string;\n  session_id?: number;\n}>; };\n```"
+        let rendered = description("Run JavaScript.", &[tool]);
+        for prose in [
+            "Run JavaScript.",
+            "Exercise schema rendering.",
+            "Command to run.",
+        ] {
+            assert!(rendered.contains(prose), "missing documentation: {prose}");
+        }
+        // Check type distinctions, not Markdown layout, property order or indentation.
+        let declaration: String = rendered
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        for field in [
+            "fixture(args:",
+            "commands:Array<{",
+            "cmd:string",
+            "retries?:number",
+            "verbose?:boolean",
+            "):Promise<{",
+            "output:string",
+            "session_id?:number",
+        ] {
+            assert!(
+                declaration.contains(field),
+                "missing type contract: {field}"
+            );
+        }
+        assert!(
+            declaration.contains("mode:\"fast\"|\"careful\"")
+                || declaration.contains("mode:\"careful\"|\"fast\"")
         );
 
         let tools = definitions(Capabilities::conversation(false, true));
@@ -252,14 +282,20 @@ mod tests {
             "list_subagents",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            let declaration: String = description("", std::slice::from_ref(tool))
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
             assert!(
-                description("", std::slice::from_ref(tool)).contains("): Promise<string>"),
+                declaration.contains("):Promise<string>"),
                 "{name} must return text"
             );
         }
-        assert!(rendered.contains("list_subagents(args: Record<string, never>)"));
-        assert!(rendered.contains("gif?: {"));
-        assert!(rendered.contains("output_hint: string;"));
-        assert!(rendered.contains("path: string;"));
+        let declaration: String = rendered.chars().filter(|c| !c.is_whitespace()).collect();
+        // A closed empty object must not become `{}`/`any`, which accept extra arguments.
+        assert!(declaration.contains("list_subagents(args:Record<string,never>)"));
+        assert!(declaration.contains("gif?:{"));
+        assert!(declaration.contains("output_hint:string"));
+        assert!(declaration.contains("path:string"));
     }
 }

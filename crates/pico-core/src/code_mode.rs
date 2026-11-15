@@ -676,7 +676,7 @@ mod tests {
         );
         let result = mode
             .exec_output(
-                "// @exec: {\"yield_time_ms\":1}\nawait new Promise(r => setTimeout(r, 100));",
+                "// @exec: {\"yield_time_ms\":1}\nawait new Promise(() => {});",
                 "yield",
                 &cancel,
             )
@@ -684,9 +684,11 @@ mod tests {
         assert!(!result.failed);
         assert!(result.summary().starts_with("Script running"));
         mode.stop_all();
-        let yielded = mode.exec_output("text(await tools.exec_command({cmd:'printf ready',login:false})); await yield_control(); await new Promise(r => setTimeout(r, 100));", "yielded-tools", &cancel).unwrap();
+        let yielded = mode.exec_output("text(await tools.exec_command({cmd:'printf ready',login:false})); await yield_control(); while (!load('resume-tools')) await new Promise(r => setTimeout(r, 1));", "yielded-tools", &cancel).unwrap();
         let cell = yielded.cell_id.as_ref().unwrap();
         assert!(yielded.summary().starts_with("Script running"));
+        mode.exec("store('resume-tools', true);", "resume", &cancel)
+            .unwrap();
         let waited = mode
             .wait_output(&json!({"cell_id":cell}).to_string(), &cancel)
             .unwrap();
@@ -732,9 +734,23 @@ mod tests {
         let source = r#"text('before'); const result=await tools.view_image({path:'source.png'}); store('viewed',result); image(result); text('after'); text(typeof tools.image_gen__imagegen);"#;
         let out = mode.exec_output(source, "parent", &cancel).unwrap();
         assert_eq!(out.media().len(), 1);
-        assert!(matches!(&out.parts[1],Part::InputText {text} if text=="before"));
-        assert!(matches!(&out.parts[2], Part::PicoMedia { .. }));
-        assert!(matches!(&out.parts[3],Part::InputText {text} if text=="after\nundefined"));
+        let image_index = out
+            .parts
+            .iter()
+            .position(|part| matches!(part, Part::PicoMedia { .. }))
+            .unwrap();
+        let text = |parts: &[Part]| {
+            parts
+                .iter()
+                .filter_map(|part| match part {
+                    Part::InputText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(text(&out.parts[..image_index]).ends_with("before"));
+        assert_eq!(text(&out.parts[image_index + 1..]), "after\nundefined");
         let events = events.lock().unwrap();
         let finished = events
             .iter()
@@ -764,7 +780,9 @@ mod tests {
             .unwrap();
         assert_eq!(out.media().len(), 1);
         assert!(out.summary().ends_with("saved hint"));
-        let out=mode.exec_output("// @exec: {\"yield_time_ms\": 1, \"max_output_tokens\": 0}\nimage(load('viewed'));text('first text');await yield_control();await new Promise(r=>setTimeout(r,100));image(load('viewed'));text('second text');","yield",&cancel).unwrap();
+        let out=mode.exec_output("// @exec: {\"yield_time_ms\": 1, \"max_output_tokens\": 0}\nimage(load('viewed'));text('first text');await yield_control();while (!load('resume-media')) await new Promise(r=>setTimeout(r,1));image(load('viewed'));text('second text');","yield",&cancel).unwrap();
+        mode.exec("store('resume-media', true);", "resume", &cancel)
+            .unwrap();
         let mut all = out.media().len();
         let summary = out.summary();
         let id = summary

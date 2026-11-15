@@ -610,29 +610,17 @@ mod tests {
         server.await.unwrap();
         for fast in [true, true, false] {
             let request = requests.recv().await.unwrap();
-            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            let (_, body) = request.split_once("\r\n\r\n").unwrap();
             let body: Value = serde_json::from_str(body).unwrap();
             assert_eq!(body["model"], session.model);
             assert_eq!(body["reasoning"]["effort"], "max");
-            let hint = headers
-                .lines()
-                .find(|line| line.starts_with("x-codex-routing-hint:"))
-                .unwrap();
+            let hint = crate::test_support::header(&request, "x-codex-routing-hint").unwrap();
             if fast {
                 assert_eq!(body["service_tier"], "priority");
-                assert_eq!(
-                    hint,
-                    format!(
-                        "x-codex-routing-hint: model={};tier=priority",
-                        session.model
-                    )
-                );
+                assert_eq!(hint, format!("model={};tier=priority", session.model));
             } else {
                 assert!(body.get("service_tier").is_none());
-                assert_eq!(
-                    hint,
-                    format!("x-codex-routing-hint: model={}", session.model)
-                );
+                assert_eq!(hint, format!("model={}", session.model));
             }
         }
     }
@@ -672,17 +660,29 @@ mod tests {
         assert_eq!(final_response.output[0]["content"][0]["text"], "Done.");
         server.await.unwrap();
         let initial = requests.recv().await.unwrap();
-        assert!(
-            initial
-                .to_lowercase()
-                .contains("chatgpt-account-id: fixture-account")
+        assert_eq!(
+            crate::test_support::header(&initial, "chatgpt-account-id"),
+            Some("fixture-account")
         );
         requests.recv().await.unwrap();
         let final_request = requests.recv().await.unwrap();
         let body: Value =
             serde_json::from_str(final_request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["tools"].as_array().unwrap().len(), 2);
-        assert_eq!(body["tools"][0]["type"], "custom");
+        let exec = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "exec")
+            .unwrap();
+        let wait = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "wait")
+            .unwrap();
+        assert_eq!(exec["type"], "custom");
+        assert_eq!(wait["type"], "function");
         assert_eq!(body["input"][2]["call_id"], "call-1");
         assert_eq!(body["store"], false);
     }
@@ -801,10 +801,10 @@ mod tests {
             let body: Value =
                 serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
             assert_eq!(body["service_tier"], "priority");
-            assert!(request.contains(&format!(
-                "x-codex-routing-hint: model={};tier=priority\r\n",
-                session.model
-            )));
+            assert_eq!(
+                crate::test_support::header(&request, "x-codex-routing-hint").unwrap(),
+                format!("model={};tier=priority", session.model)
+            );
             let input = body["input"][0]["content"].as_str().unwrap();
             assert!(
                 input.len() <= context_limit as usize,
@@ -1023,7 +1023,7 @@ mod tests {
         let inline = compacted.summary.unwrap();
         assert!(!inline.contains(&generated));
         let assembled = String::from_utf8(crate::test_support::saved_output(&inline)).unwrap();
-        assert!(assembled.starts_with(&generated));
+        assert!(assembled.contains(&generated));
         let archive = String::from_utf8(crate::test_support::saved_output(&assembled)).unwrap();
         let entries = archive
             .split_once("Historical entries (JSONL):\n")

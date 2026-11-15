@@ -649,7 +649,10 @@ mod tests {
         assert!(!error.contains("subscription-token"));
         let request = requests.recv().await.unwrap();
         assert!(request.contains("Bearer subscription-token"));
-        assert!(request.contains("chatgpt-account-id: account-id"));
+        assert_eq!(
+            crate::test_support::header(&request, "chatgpt-account-id"),
+            Some("account-id")
+        );
         assert!(!request.contains("must-not-use"));
         task.await.unwrap();
         assert!(requests.recv().await.is_none());

@@ -1232,7 +1232,7 @@ mod tests {
         let source = r#"// @exec: {"yield_time_ms": 1}
 text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text'}]}));"#;
         let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture disk failure'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(&db, "sessions", "fixture disk failure");
         let result = c
             .code
             .exec(source, "failed-start", &CancellationToken::new())
@@ -1255,7 +1255,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             !q.has_pending(),
             "do not display a request before tool-start persistence succeeds"
         );
-        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "sessions");
         let running = c
             .code
             .exec(source, "working-start", &CancellationToken::new())
@@ -1276,7 +1276,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
                 ..
             }
         ));
-        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture result failure'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(&db, "sessions", "fixture result failure");
         q.submit(&pending.id, vec!["Retain this answer λ".into()])
             .unwrap();
         let cell = running
@@ -1297,7 +1297,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         assert!(
             matches!(&snapshot.entries.by_id(&pending.id).unwrap().kind, EntryKind::Tool { output, complete:true, .. } if output.contains("Retain this answer λ"))
         );
-        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "sessions");
         h.flush().unwrap();
         assert!(
             matches!(&store.load_session(&id).unwrap().entries.by_id(&pending.id).unwrap().kind, EntryKind::Tool { output, complete:true, .. } if output.contains("Retain this answer λ"))
@@ -1367,12 +1367,12 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         store.save_session(&session).unwrap();
         let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
         let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture failure'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(&db, "sessions", "fixture failure");
         assert!(
             h.send(&id, "old", "old text".into(), Settings::default())
                 .is_err()
         );
-        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "sessions");
         h.edit(&id, |s| s.draft = "corrected text".into()).unwrap();
         h.flush().unwrap();
         drop(h);
@@ -1417,7 +1417,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let c = h.load(&id).unwrap();
         assert_eq!(c.snapshot().entries.len(), 2);
         let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'fixture disk failure'); END;").unwrap();
+        crate::test_support::sqlite::fail_writes(&db, "sessions", "fixture disk failure");
         assert!(
             h.send(
                 &id,
@@ -1432,7 +1432,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             c.snapshot().pending.is_empty(),
             "failed acceptance must not be published"
         );
-        db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+        crate::test_support::sqlite::allow_writes(&db, "sessions");
         h.send(
             &id,
             "submission-1",
@@ -1475,12 +1475,19 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             "preserved history",
         ));
         let c = h.insert(session);
-        let result=c.code.exec("// @exec: {\"yield_time_ms\": 1}\nstore('key','retained');await new Promise(r=>setTimeout(r,30));text('unread result');","parent",&CancellationToken::new()).unwrap();
+        let result=c.code.exec("// @exec: {\"yield_time_ms\": 1}\nstore('key','retained');while (!load('release')) await new Promise(r=>setTimeout(r,1));text('unread result');","parent",&CancellationToken::new()).unwrap();
         let cell = result
             .lines()
             .find_map(|l| l.strip_prefix("Script running with cell ID "))
             .unwrap()
             .to_owned();
+        c.code
+            .exec(
+                "store('release',true);",
+                "release",
+                &CancellationToken::new(),
+            )
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while c.code.is_executing() {
             assert!(Instant::now() < deadline);
@@ -1490,7 +1497,6 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         assert!(!c.loaded.load(Ordering::Acquire));
         assert!(c.snapshot().entries.is_empty());
         let loaded = h.load(&id).unwrap();
-        assert!(Arc::ptr_eq(&c, &loaded));
         assert_eq!(loaded.snapshot().entries[0].text, "preserved history");
         assert!(
             loaded

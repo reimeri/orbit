@@ -848,6 +848,7 @@ mod tests {
 
     #[test]
     fn questionnaire_option_hover_and_edit_share_surface_but_not_clicks() {
+        use iced::advanced::{Renderer as _, renderer::Headless};
         struct OptionBounds(Option<Rectangle>);
         impl Operation for OptionBounds {
             fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
@@ -900,6 +901,7 @@ mod tests {
                 &mut iced::advanced::clipboard::Null,
                 &mut messages,
             );
+            renderer.reset(Rectangle::with_size(Size::new(600., 500.)));
             ui.draw(
                 &mut renderer,
                 &theme,
@@ -908,36 +910,36 @@ mod tests {
                 },
                 cursor,
             );
-            let iced::Renderer::Secondary(renderer) = &mut renderer else {
-                unreachable!()
+            let pixels = renderer.screenshot(Size::new(600, 500), 1., iced::Color::BLACK);
+            let iced::Background::Color(background) = background else {
+                panic!("fixture theme must have a solid option background")
             };
-            // Both hit targets must have the same topmost painted background.
+            // Sample padding below the text, not the renderer's quad decomposition.
             for point in [label, edit] {
-                let painted = renderer
-                    .layers()
-                    .iter()
-                    .flat_map(|layer| &layer.quads)
-                    .rfind(|(quad, _)| quad.bounds.contains(point))
-                    .expect("option has a background");
-                assert_eq!(painted.1, background);
+                let offset = (((bounds.y + bounds.height - 4.).floor() as usize) * 600
+                    + point.x.floor() as usize)
+                    * 4;
+                assert_eq!(&pixels[offset..offset + 4], &background.into_rgba8());
             }
-            let edit_colors: Vec<_> = renderer
-                .layers()
-                .iter()
-                .flat_map(|layer| &layer.text)
-                .flat_map(|group| group.as_slice())
-                .filter_map(|text| match text {
-                    iced_tiny_skia::graphics::Text::Paragraph {
-                        position, color, ..
-                    } if bounds.contains(*position)
-                        && position.x > bounds.x + bounds.width - 45. =>
-                    {
-                        Some(*color)
-                    }
-                    _ => None,
+            let expected = edit_color.into_rgba8();
+            let closest = (bounds.y.ceil() as usize..(bounds.y + bounds.height).floor() as usize)
+                .flat_map(|y| {
+                    ((bounds.x + bounds.width - 45.).ceil() as usize
+                        ..(bounds.x + bounds.width).floor() as usize)
+                        .map(move |x| (y * 600 + x) * 4)
                 })
-                .collect();
-            assert_eq!(edit_colors, vec![edit_color]);
+                .map(|offset| {
+                    (0..3)
+                        .map(|c| pixels[offset + c].abs_diff(expected[c]))
+                        .max()
+                        .unwrap()
+                })
+                .min()
+                .unwrap();
+            assert!(
+                closest < 30,
+                "Edit must paint its state-dependent foreground color"
+            );
         }
 
         for (point, editing) in [(label, false), (edit, true)] {

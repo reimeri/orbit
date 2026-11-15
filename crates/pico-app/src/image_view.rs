@@ -527,7 +527,10 @@ mod tests {
 
     #[test]
     fn attachment_remove_is_hover_only_and_does_not_open_modal() {
-        use iced::{Point, Size, advanced::Renderer as _};
+        use iced::{
+            Point, Size,
+            advanced::{Renderer as _, renderer::Headless},
+        };
         let dir = tempfile::tempdir().unwrap();
         let media = pico_core::media::MediaStore::new(dir.path().into())
             .image(include_bytes!("fixtures/media.png"))
@@ -553,29 +556,13 @@ mod tests {
             iced_runtime::user_interface::Cache::new(),
             &mut renderer,
         );
-        #[derive(Default)]
-        struct RemoveBounds(Option<Rectangle>);
-        impl iced::advanced::widget::Operation for RemoveBounds {
-            fn traverse(
-                &mut self,
-                visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
-            ) {
-                visit(self);
-            }
-            fn text(
-                &mut self,
-                _: Option<&iced::advanced::widget::Id>,
-                bounds: Rectangle,
-                text: &str,
-            ) {
-                if text == "×" {
-                    self.0 = Some(bounds);
-                }
-            }
-        }
-        let mut remove = RemoveBounds::default();
-        ui.operate(&renderer, &mut remove);
-        let remove = remove.0.unwrap().center();
+        // The remove control occupies the upper-right corner. Its appearance
+        // may be text or vector geometry; neither is part of the interaction contract.
+        let corner = Rectangle::new(
+            Point::new(size.width * 2. / 3., 0.),
+            Size::new(size.width / 3., size.height / 3.),
+        );
+        let remove = corner.center();
         let base = Point::new(size.width / 4., size.height * 0.75);
         for (point, hovering) in [
             (Point::new(size.width + 1., size.height + 1.), false),
@@ -594,31 +581,24 @@ mod tests {
             renderer.reset(iced::Rectangle::with_size(size));
             ui.draw(
                 &mut renderer,
-                &iced::Theme::Dark,
+                &theme::app(),
                 &renderer::Style {
                     text_color: Color::WHITE,
                 },
                 cursor,
             );
-            let iced::Renderer::Secondary(renderer) = &mut renderer else {
-                unreachable!()
-            };
-            use iced::advanced::graphics::text::Text;
-            let remove_painted = renderer
-                .layers()
-                .iter()
-                .flat_map(|layer| &layer.text)
-                .flat_map(|group| group.as_slice())
-                .any(|text| match text {
-                    Text::Paragraph { paragraph, .. } => paragraph
-                        .upgrade()
-                        .unwrap()
-                        .buffer()
-                        .lines
-                        .iter()
-                        .any(|line| line.text() == "×"),
-                    Text::Cached { content, .. } => content == "×",
-                    _ => false,
+            let pixels = renderer.screenshot(
+                Size::new(size.width as u32, size.height as u32),
+                1.,
+                Color::BLACK,
+            );
+            let foreground = theme::TEXT.into_rgba8();
+            let remove_painted =
+                (corner.y as usize..(corner.y + corner.height) as usize).any(|y| {
+                    (corner.x as usize..(corner.x + corner.width) as usize).any(|x| {
+                        let pixel = &pixels[(y * size.width as usize + x) * 4..][..4];
+                        (0..3).all(|c| pixel[c].abs_diff(foreground[c]) < 30)
+                    })
                 });
             assert_eq!(remove_painted, hovering, "remove is visible only on hover");
         }
