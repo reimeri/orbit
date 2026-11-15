@@ -1,4 +1,4 @@
-//! A low-contrast row background. Animation belongs to mounted widgets, not the app clock.
+//! A low-contrast row background. Widget-local motion advances on existing app redraws.
 use std::cell::Cell;
 
 use iced::{
@@ -83,15 +83,14 @@ impl Motion {
         self.working = working;
     }
 
-    fn frame(&mut self, now: Instant, visible: bool) -> bool {
+    fn frame(&mut self, now: Instant, visible: bool) {
         if !self.working || !visible {
             self.last_frame = None;
-            return false;
+            return;
         }
         if let Some(last) = self.last_frame.replace(now) {
             self.elapsed = (self.elapsed + (now - last).as_secs_f32()) % PERIOD;
         }
-        true
     }
 }
 
@@ -149,13 +148,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Wave<'_, Message>
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if let Event::Window(window::Event::RedrawRequested(now)) = event
-            && tree
-                .state
+        if let Event::Window(window::Event::RedrawRequested(now)) = event {
+            // The existing activity Tick already redraws working sessions. Do not
+            // turn this subtle background into a display-rate redraw loop.
+            tree.state
                 .downcast_mut::<Motion>()
-                .frame(*now, layout.bounds().intersects(viewport))
-        {
-            shell.request_redraw();
+                .frame(*now, layout.bounds().intersects(viewport));
         }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
@@ -292,7 +290,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn rendered_wave_freezes_resumes_and_only_visible_work_requests_frames() {
+    fn rendered_wave_moves_freezes_and_resumes_without_requesting_frames() {
         exercise_wave(crate::test_renderer::new(16.));
     }
 
@@ -344,8 +342,9 @@ mod tests {
                 &clip,
             );
             assert_eq!(
-                shell.redraw_request() == window::RedrawRequest::NextFrame,
-                visible && status == Status::Working
+                shell.redraw_request(),
+                window::RedrawRequest::Wait,
+                "the wave must reuse existing redraws, never schedule its own"
             );
             assert!(
                 !shell.is_layout_invalid(),

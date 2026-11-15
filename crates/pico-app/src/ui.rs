@@ -76,6 +76,7 @@ const COMPOSER_LINE_HEIGHT_FACTOR: f32 = 1.3;
 const COMPOSER_MIN_LINES: usize = 2;
 const COMPOSER_MAX_LINES: usize = 10;
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
+const ACTIVITY_INTERVAL: Duration = Duration::from_millis(100);
 
 struct Markdown {
     source: Arc<Entry>,
@@ -2252,9 +2253,15 @@ impl App {
         ];
         if let Some(harness) = &self.harness {
             subscriptions.push(Subscription::run_with(Updates(harness.clone()), updates));
-            if harness.all().iter().any(|c| c.is_running()) {
-                subscriptions
-                    .push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick));
+            // Waves reuse this clock, including Working rows whose own turn is
+            // no longer running (terminal persistence or active children).
+            if harness.all().iter().any(|c| c.is_running())
+                || self
+                    .sidebar_rows
+                    .iter()
+                    .any(|row| matches!(row, SidebarRow::Session(_, SessionStatus::Working)))
+            {
+                subscriptions.push(iced::time::every(ACTIVITY_INTERVAL).map(|_| Message::Tick));
             }
         }
         if self.current().is_some() {
@@ -8292,6 +8299,51 @@ Then implement the fix.";
             ("", ""),
         ] {
             assert_eq!(project_initials(name), expected, "{name:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sidebar_work_keeps_activity_ticks_until_frozen_or_idle() {
+        use iced::futures::{StreamExt, stream};
+        use iced_runtime::futures::subscription;
+
+        let mut app = app();
+        let session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+        app.sessions.push(SessionSummary::from(&session));
+        assert!(app.harness.as_ref().unwrap().all().is_empty());
+        // A Working presentation can outlive is_running(), or represent children.
+        // Exercise the production subscription without a running conversation.
+        for status in [
+            SessionStatus::Working,
+            SessionStatus::Question,
+            SessionStatus::Idle,
+            SessionStatus::Working,
+        ] {
+            app.sidebar_rows = vec![SidebarRow::Session(0, status)];
+            let messages = stream::select_all(
+                subscription::into_recipes(app.subscription())
+                    .into_iter()
+                    .map(|recipe| recipe.stream(stream::pending().boxed())),
+            );
+            let mut ticks =
+                messages.filter(|message| std::future::ready(matches!(message, Message::Tick)));
+            let timeout = if status == SessionStatus::Working {
+                ACTIVITY_INTERVAL + Duration::from_secs(1)
+            } else {
+                ACTIVITY_INTERVAL * 3
+            };
+            let next = tokio::time::timeout(timeout, ticks.next()).await;
+            if status == SessionStatus::Working {
+                assert!(
+                    matches!(next, Ok(Some(Message::Tick))),
+                    "Working rows need the existing activity clock"
+                );
+            } else {
+                assert!(
+                    next.is_err(),
+                    "frozen/idle rows must not keep an activity clock alive"
+                );
+            }
         }
     }
 

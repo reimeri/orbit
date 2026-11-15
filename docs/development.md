@@ -422,7 +422,11 @@ wave motion. Session grouping and row rendering use the same prepared status.
 A small untextured triangle mesh reproduces the V1 wave, following each row's
 rounded outline and interpolating per-vertex alpha across two moving crests.
 There is no gradient-strip implementation or alternate renderer path. Work stays
-bounded to visible rows, and frozen states do not request continuous redraws.
+bounded to visible rows. Waves never request their own redraws: they advance on
+existing window redraws, normally the shared 100 ms activity Tick while work is
+active. That timer also covers sidebar Working rows during terminal persistence
+or child work. The wave retains its 12-second cycle; questionnaire/error states
+remain frozen. Interaction/streaming redraws may update the wave more frequently.
 The final smoke frame renders working, questionnaire, error, unchecked-completion
 and idle rows. See [notifications](notifications.md#sidebar-status-and-unchecked-completion)
 for completion-dot persistence and open-to-clear behavior.

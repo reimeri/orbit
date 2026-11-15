@@ -328,3 +328,16 @@ Markdown block may still be expensive, since virtualization is at message level.
 Compaction still requires sequential model calls for its new chunks. Resource use
 can grow with deliberately retained runtime results/JS store data across many
 conversations because the requested policy has no global cap.
+
+## Sidebar wave CPU investigation
+
+See the [2026-11-15 native-GPU benchmark](benchmarks/session-wave-2026-11-15/README.md)
+for full-window measurements of continuous redraws, timed redraws, geometry
+reuse, a static GPU-cache diagnostic, and reuse of the existing activity cadence.
+It includes raw samples and a reproducible experimental patch; no production
+animation behavior was changed as part of the investigation.
+
+The subsequent minimal implementation reuses the existing activity redraws:
+sidebar waves no longer request their own frames. The activity timer also remains
+active for prepared Working rows, covering finalization and child work. This is
+the report's `tick-driven` approach, not the larger widget-local-clock redesign.
