@@ -2682,6 +2682,7 @@ dependencies = [
  "unicode-width",
  "url",
  "winit",
+ "zbus",
 ]
 
 [[package]]

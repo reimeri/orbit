@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod notifications;
 pub mod subagents;
 use crate::{
     auth::Auth,
@@ -22,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Conversation {
     pub id: String,
+    notifications: Arc<notifications::Notifications>,
     pub questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     revision: Arc<AtomicU64>,
     changes: tokio::sync::watch::Sender<()>,
@@ -83,6 +85,7 @@ impl Conversation {
         let _state = self.state.lock().expect("session lock");
         self.cancel.lock().expect("cancel lock").cancel();
         self.code.stop_all();
+        self.notifications.clear(&self.id);
         *self.status.lock().expect("status lock") = if self.is_running() {
             "Stopping…"
         } else {
@@ -110,6 +113,7 @@ impl TurnUsage {
 }
 
 pub struct Harness {
+    notifications: Arc<notifications::Notifications>,
     changes: tokio::sync::watch::Sender<()>,
     pub store: Store,
     pub auth: Arc<Auth>,
@@ -144,6 +148,7 @@ impl Harness {
         let image_client = crate::image_tools::ImageTools::client()?;
         let web_client = crate::web_search::WebSearch::client()?;
         let harness = Arc::new_cyclic(|weak| Self {
+            notifications: Arc::new(notifications::Notifications::default()),
             image_client,
             web_client,
             weak: weak.clone(),
@@ -237,8 +242,30 @@ impl Harness {
             });
             let questionnaires = session.child.is_none().then(|| {
                 let target = weak.clone();
+                let front = Mutex::new(None);
                 Arc::new(crate::questionnaire::Questionnaires::new(move || {
                     if let Some(c) = target.upgrade() {
+                        let mut front = front.lock().expect("questionnaire notification");
+                        let pending = c
+                            .questionnaires
+                            .as_ref()
+                            .expect("main questionnaires")
+                            .pending();
+                        let next = pending.first().map(|q| q.id.clone());
+                        if *front != next {
+                            let state = c.state.lock().expect("session lock");
+                            if let Some(id) = &next {
+                                if !c.deleted.load(Ordering::Acquire)
+                                    && !c.cancel.lock().expect("cancel lock").is_cancelled()
+                                {
+                                    c.notifications
+                                        .publish(&state, notifications::Kind::Question(id.clone()));
+                                }
+                            } else {
+                                c.notifications.clear_question(&c.id);
+                            }
+                            *front = next;
+                        }
                         c.changed();
                     }
                 }))
@@ -282,6 +309,7 @@ impl Harness {
             });
             Conversation {
                 id: id.clone(),
+                notifications: self.notifications.clone(),
                 revision: Arc::new(AtomicU64::new(0)),
                 changes: self.changes.clone(),
                 last_settings: Mutex::new(Settings::default()),
@@ -608,11 +636,13 @@ impl Harness {
             // token between publishing a running turn and installing its token.
             conversation.turn_generation.fetch_add(1, Ordering::Release);
             conversation.running.store(true, Ordering::Release);
+            conversation.notifications.clear_terminal(&conversation.id);
             cancel
         };
         conversation.changed();
         self.catalog_revision.fetch_add(1, Ordering::Release);
         let is_child = conversation.snapshot().child.is_some();
+        let generation = conversation.turn_generation.load(Ordering::Acquire);
         let harness = self.clone();
         self.runtime.as_ref().expect("live runtime").spawn(async move {
             loop {
@@ -638,15 +668,18 @@ impl Harness {
                     state.interrupted = false;
                     state.needs_attention = result.is_err() && !cancel.is_cancelled();
                 }
-                if let Err(error) = conversation.save_async().await {
-                    conversation.state.lock().expect("session lock").entries.push(Entry::new(
+                let save_result = conversation.save_async().await;
+                if let Err(error) = &save_result {
+                    let mut state = conversation.state.lock().expect("session lock");
+                    state.needs_attention = !cancel.is_cancelled();
+                    state.entries.push(Entry::new(
                         EntryKind::Notice,
                         format!("Could not save session: {error:#}. Keep Pico open, free disk space or fix permissions, then retry saving."),
                     ));
                 }
                 *conversation.status.lock().expect("status lock") = if cancel.is_cancelled() {
                     "Stopped"
-                } else if result.is_ok() {
+                } else if result.is_ok() && save_result.is_ok() {
                     "Completed"
                 } else {
                     "Needs attention"
@@ -660,9 +693,29 @@ impl Harness {
                     if !cancel.is_cancelled() && pending && (submitted || result.is_ok()) {
                         continue;
                     }
-                    conversation.finishing.store(is_child, Ordering::Release);
+                    conversation.finishing.store(true, Ordering::Release);
                     conversation.running.store(false, Ordering::Release);
                     conversation.stopped.notify_all();
+                }
+                if !is_child {
+                    // start_inner can wait for a cancelled turn while holding the
+                    // coordinator. Publish only after marking idle and waking it.
+                    let coordinator = harness.subagents.lock().expect("subagent lock");
+                    let state = conversation.state.lock().expect("session lock");
+                    if conversation.turn_generation.load(Ordering::Acquire) == generation {
+                        if !cancel.is_cancelled() {
+                            if result.is_err() || save_result.is_err() {
+                                conversation.notifications.publish(&state, notifications::Kind::Failed);
+                            } else if !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
+                                && !coordinator.runs.values().any(|r| r.parent_id == conversation.id && r.status == subagents::RunStatus::Running)
+                            {
+                                conversation.notifications.publish(&state, notifications::Kind::Finished);
+                            }
+                        }
+                        // A newer turn may already be finishing. An old task must
+                        // not clear its eviction/deletion guard after releasing this lock.
+                        conversation.finishing.store(false, Ordering::Release);
+                    }
                 }
                 if is_child {
                 let finish_harness = harness.clone();

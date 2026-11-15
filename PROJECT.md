@@ -96,6 +96,7 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
   - Browser tools
   - Use skill
 - UI
+  - [x] Native desktop notifications for main-agent questions, completion and terminal errors — see [behavior and verification](docs/notifications.md)
   - Integrated browser
   - Integrated diff viewer
   - Statistics

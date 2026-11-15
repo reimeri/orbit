@@ -393,3 +393,11 @@ pick-list popups (see `patches/iced-widget/README.md`).
 After changing visual styles, run `just verify` and, on a Wayland desktop,
 `just smoke-gpu`. These exercise the existing rendered views and interaction
 regressions without requiring real credentials or modifying user sessions.
+
+## Desktop notifications
+
+See [notifications](notifications.md) for focus policy, native delivery, failure
+recovery, Wayland activation limitations and manual acceptance. Protocol tests
+start a private `dbus-daemon` with a fake notification service; the development
+shell and Nix package checks provide D-Bus, but the installed app uses the desktop's
+existing session bus. Smoke mode never sends desktop notifications.

@@ -590,6 +590,7 @@ impl Harness {
             } else if let Err(e) = crate::media::remove(&self.store.root().join("media").join(id)) {
                 cleanup_errors.push(format!("{id}: {e:#}"));
             }
+            self.notifications.clear(id);
             self.conversations
                 .lock()
                 .expect("conversations lock")
@@ -862,6 +863,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_question_prevents_completion_notification_across_a_new_main_turn() {
+        let mut f = Fixture::new().await;
+        let c = f.h.get(&f.parent).unwrap();
+        let q = c.questionnaires.as_ref().unwrap().clone();
+        let questions = q.clone();
+        let ask = tokio::spawn(async move {
+            questions.ask("pending-ask", r#"{"questions":[{"id":"answer","question":"Private question","kind":"text"}]}"#, &CancellationToken::new()).await
+        });
+        until(|| q.has_pending()).await;
+        f.h.start(&f.parent, Settings::default()).unwrap();
+        f.request()
+            .await
+            .reply
+            .send(answer("Main response ended, but input is still needed"))
+            .unwrap();
+        until(|| !c.is_running() && !c.finishing.load(Ordering::Acquire)).await;
+        let events = f.h.take_notifications();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind,
+            super::super::notifications::Kind::Question("pending-ask".into())
+        );
+        assert!(f.h.notification_is_current(&events[0]));
+        q.submit("pending-ask", vec!["Answer".into()]).unwrap();
+        ask.await.unwrap().unwrap();
+        assert!(!f.h.notification_is_current(&events[0]));
+        assert!(
+            f.h.take_notifications().is_empty(),
+            "answering must not replay a past completion"
+        );
+    }
+
+    #[tokio::test]
     async fn parallel_children_isolate_context_wake_parent_and_resume_with_stable_results() {
         let mut f = Fixture::new().await;
         // Exercise the real QuickJS bridge. A completed spawning cell must not cancel its child.
@@ -955,6 +989,10 @@ mod tests {
             .send(answer("Main work finished while children run"))
             .unwrap();
         until(|| !f.h.get(&f.parent).unwrap().is_executing()).await;
+        assert!(
+            f.h.take_notifications().is_empty(),
+            "main is waiting for children, not finished"
+        );
         explore_request.reply.send(crate::test_support::completed(json!([
             {"type":"message","id":"progress","phase":"commentary","content":[{"type":"output_text","text":"intermediate secret"}]},
             {"type":"message","id":"final","phase":"final_answer","content":[{"type":"output_text","text":"Final sapphire finding"}]}
@@ -982,6 +1020,10 @@ mod tests {
         );
         acknowledged.reply.send(answer("Acknowledged")).unwrap();
         until(|| !f.h.get(&f.parent).unwrap().is_executing()).await;
+        assert!(
+            f.h.take_notifications().is_empty(),
+            "child completion and intermediate parent wake must not notify"
+        );
         let result = f
             .wait(vec![explore.run_id.clone(), review.run_id.clone()], 100)
             .await;

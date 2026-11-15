@@ -148,6 +148,9 @@ pub struct App {
     smoke_passed: Arc<AtomicBool>,
     smoke_dir: Option<PathBuf>,
     window_id: Option<window::Id>,
+    window_focused: bool,
+    notifications: crate::notifications::Client,
+    notification_selection: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -185,6 +188,7 @@ pub enum Selection {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    Notification(crate::notifications::Message),
     Image(crate::image_view::Message),
     OpenImage(pico_core::media::Media),
     MarkdownImage(crate::markdown_images::Message),
@@ -392,6 +396,9 @@ impl App {
             smoke_passed,
             smoke_dir,
             window_id: None,
+            window_focused: false,
+            notifications: Default::default(),
+            notification_selection: None,
         };
         if let Some(h) = &app.harness {
             let h = h.clone();
@@ -963,6 +970,20 @@ impl App {
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
+        if !self.smoke
+            && let Some(h) = &self.harness
+        {
+            self.notifications
+                .sync(h, self.window_focused, self.selected.as_deref());
+        }
+        if !self.io_busy
+            && !self.closing
+            && !self.close_requested
+            && let Some(id) = self.notification_selection.take()
+            && self.sessions.iter().any(|s| s.id == id)
+        {
+            self.select(Selection::Session(id));
+        }
         if !matches!(self.modal, Some(Modal::Image(_) | Modal::MarkdownImage(_))) {
             self.image_view.close();
         }
@@ -1018,6 +1039,29 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::Notification(crate::notifications::Message::Open(event)) => {
+                if !self.closing
+                    && !self.close_requested
+                    && self.notifications.contains(&event)
+                    && self
+                        .harness
+                        .as_ref()
+                        .is_some_and(|h| h.notification_is_current(&event))
+                {
+                    self.notification_selection = Some(event.session_id);
+                    if let Some(id) = self.window_id {
+                        // Native Wayland activation is compositor-controlled. Iced cannot
+                        // apply notification activation tokens to an existing surface.
+                        return window::request_user_attention(
+                            id,
+                            Some(window::UserAttention::Informational),
+                        );
+                    }
+                }
+            }
+            Message::Notification(crate::notifications::Message::Unavailable(error)) => {
+                self.notice = Some((error, std::time::Instant::now()));
+            }
             Message::Paste => {
                 if !self.can_attach() {
                     return Task::none();
@@ -1945,6 +1989,8 @@ impl App {
                 ));
             }
             Message::Event(event) => match event {
+                iced::Event::Window(window::Event::Focused) => self.window_focused = true,
+                iced::Event::Window(window::Event::Unfocused) => self.window_focused = false,
                 iced::Event::Window(window::Event::FileDropped(path)) => self.import_file(path),
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     if let Some((right, start, width)) = self.drag {
@@ -2197,6 +2243,9 @@ impl App {
         if self.draft_dirty || self.new_draft_dirty {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveDraft));
+        }
+        if !self.smoke {
+            subscriptions.push(self.notifications.subscription().map(Message::Notification));
         }
         subscriptions.push(self.image_view.subscription().map(Message::Image));
         Subscription::batch(subscriptions)
@@ -4989,6 +5038,8 @@ fn window_events() -> Subscription<Message> {
         iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
         | iced::Event::Window(
             window::Event::Resized(_)
+            | window::Event::Focused
+            | window::Event::Unfocused
             | window::Event::CloseRequested
             | window::Event::FileDropped(_),
         ) => Some(Message::Event(event)),

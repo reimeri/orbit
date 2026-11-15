@@ -10,6 +10,7 @@ mod image_view;
 mod io_worker;
 mod keyed_column;
 mod markdown_images;
+mod notifications;
 mod pointer_input;
 mod questionnaire;
 mod scrollbar;

@@ -54,7 +54,7 @@
         # in the development shell and installed wrapper.
         FONTCONFIG_FILE = fontConfig;
         doCheck = true;
-        nativeCheckInputs = [ pkgs.git pkgs.valgrind ];
+        nativeCheckInputs = [ pkgs.git pkgs.valgrind pkgs.dbus ];
         postCheck = ''
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="${pkgs.bash}/bin/bash $PWD/scripts/check-quickjs-memory.sh" \
             cargo test --locked --offline --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} \
@@ -102,6 +102,7 @@
       };
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
+          dbus
           rustc cargo rustfmt clippy rust-analyzer
           pkg-config mold git just time xdg-utils valgrind
           weston wayland-utils
