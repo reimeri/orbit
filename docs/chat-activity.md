@@ -12,7 +12,9 @@ subagent sections also omit Copy buttons; select transcript text and use Ctrl+C.
 Settings and session-menu copy actions are unchanged.
 
 - Groups start collapsed, including during live work. Opening or closing a group
-  is a user choice and remains stable as results arrive.
+  is a user choice and remains stable as results arrive. While working, the left
+  disclosure slot shows the status circle; hovering anywhere on the group header
+  reveals the right/down chevron. Finished groups always show the chevron.
 - Completed groups summarize actual tool-call counts and delegation counts. Live
   groups show the current tool/input or reasoning heading, with completed/running
   counts kept separate from the ellipsized preview. Failure counts stay visible

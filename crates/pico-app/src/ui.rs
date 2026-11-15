@@ -2947,14 +2947,12 @@ impl App {
                     })
                     .count();
                 let failures = summary.failed + summary.code_failures + failed_notices;
-                let mut header = row![chevron_icon(self.groups.contains(&entry.id), MUTED),]
+                let working = active || summary.running > 0;
+                let mut header = row![space().width(12).height(12)]
                     .spacing(8)
                     .align_y(iced::Center);
-                if active || summary.running > 0 {
-                    header = header.push(text("◌").size(12).color(ACCENT));
-                }
                 header = header.push(ellipsized_text(&summary.label(active), 12., Some(MUTED)));
-                if (active || summary.running > 0) && summary.tools > 0 {
+                if working && summary.tools > 0 {
                     let progress = if summary.running > 0 {
                         format!(
                             "{} completed · {} running",
@@ -2968,12 +2966,18 @@ impl App {
                 if failures > 0 {
                     header = header.push(text(format!("{failures} failed")).size(12).color(DANGER));
                 }
-                theme::button(header)
-                    .padding([6, 2])
-                    .width(Fill)
-                    .style(theme::text_button)
-                    .on_press(Message::ToggleGroup(entry.id.clone()))
-                    .into()
+                theme::button(stack![
+                    container(header).padding([6, 2]).width(Fill),
+                    crate::chevron_icon::activity_disclosure(
+                        self.groups.contains(&entry.id),
+                        working,
+                    ),
+                ])
+                .padding(0)
+                .width(Fill)
+                .style(theme::text_button)
+                .on_press(Message::ToggleGroup(entry.id.clone()))
+                .into()
             }
             ActivityRow::Execution(_) => {
                 let wrappers = self.activity.block(index).wrappers;
@@ -5117,6 +5121,115 @@ mod tests {
                 assert_eq!(contents, expected);
             }
             _ => panic!("expected clipboard write"),
+        }
+    }
+
+    #[tokio::test]
+    async fn activity_disclosure_swaps_on_header_hover_and_completion() {
+        use iced::advanced::{Renderer as _, renderer::Headless};
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let id = app.selected.clone().unwrap();
+        let harness = app.harness.as_ref().unwrap().clone();
+        let mut renderer = header_renderer();
+        for width in [360., 860.] {
+            let mut icons = Vec::new();
+            let mut cache = Cache::new();
+            for open in [false, true] {
+                for complete in [false, true] {
+                    harness
+                        .edit(&id, |s| {
+                            s.entries = vec![Entry {
+                                id: "group".into(),
+                                text: String::new(),
+                                kind: EntryKind::Tool {
+                                    name: "exec_command".into(),
+                                    input: r#"{"cmd":"sleep 1"}"#.into(),
+                                    output: String::new(),
+                                    complete,
+                                    failed: false,
+                                    cell_id: None,
+                                    parent: None,
+                                    media: vec![],
+                                    web: None,
+                                },
+                            }]
+                            .into();
+                        })
+                        .unwrap();
+                    dispatch(&mut app, Message::Changed).await;
+                    if open {
+                        app.groups.insert("group".into());
+                    } else {
+                        app.groups.remove("group");
+                    }
+                    let size = iced::Size::new(width, 40.);
+                    let mut ui = UserInterface::build(
+                        app.activity_row(ActivityRow::Activity(0)),
+                        size,
+                        cache,
+                        &mut renderer,
+                    );
+                    for cursor in [
+                        mouse::Cursor::Unavailable,
+                        // Hover the far edge, including the header's padding, not the icon.
+                        mouse::Cursor::Available(iced::Point::new(width - 1., 1.)),
+                        mouse::Cursor::Unavailable,
+                    ] {
+                        let mut messages = Vec::new();
+                        ui.update(
+                            &[iced::Event::Mouse(mouse::Event::CursorMoved {
+                                position: cursor
+                                    .position()
+                                    .unwrap_or(iced::Point::new(width + 1., 1.)),
+                            })],
+                            cursor,
+                            &mut renderer,
+                            &mut iced::advanced::clipboard::Null,
+                            &mut messages,
+                        );
+                        assert!(messages.is_empty(), "hover must remain widget-local");
+                        renderer.reset(iced::Rectangle::with_size(size));
+                        ui.draw(
+                            &mut renderer,
+                            &theme::app(),
+                            &iced::advanced::renderer::Style {
+                                text_color: theme::TEXT,
+                            },
+                            cursor,
+                        );
+                        let pixels = renderer.screenshot(
+                            iced::Size::new(width as u32, 40),
+                            1.,
+                            theme::BACKGROUND,
+                        );
+                        icons.push(
+                            pixels
+                                .chunks_exact(width as usize * 4)
+                                .flat_map(|row| row[..16 * 4].iter().copied())
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                    assert!(matches!(
+                        click_header(&mut ui, &mut renderer, width - 1.).as_slice(),
+                        [Message::ToggleGroup(id)] if id == "group"
+                    ));
+                    cache = ui.into_cache();
+                }
+            }
+            for states in icons.as_chunks::<6>().0 {
+                assert_ne!(states[0], states[1], "working circle must become a chevron");
+                assert_eq!(states[0], states[2], "leaving restores the circle");
+                assert_eq!(states[1], states[3], "completion shows the same chevron");
+                assert_eq!(
+                    states[3], states[4],
+                    "completed hover does not change the icon"
+                );
+                assert_eq!(states[3], states[5]);
+            }
+            assert_ne!(icons[3], icons[9], "open and closed chevrons differ");
         }
     }
 
