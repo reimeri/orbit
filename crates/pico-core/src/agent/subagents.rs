@@ -630,11 +630,11 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
-        sync::{mpsc, oneshot},
+        sync::mpsc,
     };
     struct Request {
         body: Value,
-        reply: oneshot::Sender<String>,
+        reply: mpsc::UnboundedSender<String>,
     }
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -709,7 +709,7 @@ mod tests {
                             }
                             bytes.extend_from_slice(&buffer[..n]);
                         }
-                        let (reply, rx) = oneshot::channel();
+                        let (reply, mut rx) = mpsc::unbounded_channel();
                         if tx
                             .send(Request {
                                 body: serde_json::from_slice(&bytes[end..end + length]).unwrap(),
@@ -719,13 +719,20 @@ mod tests {
                         {
                             return;
                         }
-                        if let Ok(body) = rx.await {
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                body.len()
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
+                        if socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                            .await
+                            .is_err()
+                        {
+                            return;
                         }
+                        while let Some(body) = rx.recv().await {
+                            let chunk = format!("{:x}\r\n{body}\r\n", body.len());
+                            if socket.write_all(chunk.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        let _ = socket.write_all(b"0\r\n\r\n").await;
                     });
                 }
             });
@@ -860,6 +867,58 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn child_activity_tracks_streamed_reasoning_and_message_text() {
+        let mut f = Fixture::new().await;
+        let run = f
+            .spawn(Profile::Explore, None, "streaming activity")
+            .unwrap();
+        let request = f.request().await;
+        let child = f.h.get(&run.session_id).unwrap();
+        assert_eq!(child.status.lock().unwrap().clone(), "Thinking…");
+
+        for (event, entry_id, text, expected) in [
+            (
+                "response.reasoning_summary_text.delta",
+                "reasoning-1",
+                "Inspecting",
+                "Thinking…",
+            ),
+            (
+                "response.output_text.delta",
+                "commentary",
+                "Here is my update",
+                "Writing…",
+            ),
+            (
+                "response.reasoning_summary_text.delta",
+                "reasoning-2",
+                "Checking again",
+                "Thinking…",
+            ),
+            (
+                "response.output_text.delta",
+                "answer",
+                "Finished",
+                "Writing…",
+            ),
+        ] {
+            request
+                .reply
+                .send(format!(
+                    "data: {}\n\n",
+                    json!({"type": event, "item_id": entry_id, "delta": text})
+                ))
+                .unwrap();
+            until(|| child.snapshot().entries.by_id(entry_id).is_some()).await;
+            assert_eq!(child.status.lock().unwrap().clone(), expected);
+            assert!(child.is_running());
+        }
+        request.reply.send(answer("Finished")).unwrap();
+        until(|| !child.is_running()).await;
+        assert_eq!(child.status.lock().unwrap().clone(), "Completed");
     }
 
     #[tokio::test]

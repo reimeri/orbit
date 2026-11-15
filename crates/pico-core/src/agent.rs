@@ -821,6 +821,12 @@ impl Harness {
                             text,
                             reasoning,
                         } => {
+                            *target.status.lock().expect("status lock") = if reasoning {
+                                "Thinking…"
+                            } else {
+                                "Writing…"
+                            }
+                            .into();
                             let mut s = target.state.lock().expect("session lock");
                             if let Some(entry) = s.entries.by_id_mut(&id) {
                                 entry.text.push_str(&text);
