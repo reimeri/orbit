@@ -41,6 +41,23 @@ still separate calls. Nonzero process exits, native tool errors and code-executi
 errors carry explicit failure metadata, not guesses based on output text. No
 elapsed-time metadata or polling consolidation is introduced here.
 
+## Session attention
+
+A stopped turn's **Needs attention** indicator is an unacknowledged notification,
+not a permanent error state. This applies to all stopped-turn errors, including
+provider flags and failures, and to restart interruptions.
+
+- Opening/revisiting a session acknowledges its existing terminal attention and
+  returns it to the normal idle grouping. A failure arriving while the session is
+  already selected stays visible until Escape or revisiting the session.
+- Escape acknowledges a stopped session. While work is active, it retains its
+  Stop behavior; menus, dialogs and panels retain their existing Escape priority.
+- Viewing a pending questionnaire does not dismiss it or acknowledge it away.
+- Acknowledging a parent also acknowledges its existing child-failure alerts.
+  New failures remain unacknowledged. Child failure/interruption labels, complete
+  diagnostics, results and transcript entries remain intact.
+- Acknowledgements persist across restart. They never retry or resume work.
+
 ## Expanded tool details
 
 The compact disclosure row keeps identical geometry when opened or closed. Its

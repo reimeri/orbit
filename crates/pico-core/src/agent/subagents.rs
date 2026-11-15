@@ -82,6 +82,8 @@ pub struct RunInfo {
     pub started: u64,
     pub finished: Option<u64>,
     pub notified: bool,
+    #[serde(default)]
+    pub attention_acknowledged: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,7 +183,7 @@ impl Harness {
     pub fn children_need_attention(&self, parent: &str) -> bool {
         self.subagent_runs(parent)
             .iter()
-            .any(|r| r.status.needs_attention())
+            .any(|r| r.status.needs_attention() && !r.attention_acknowledged)
     }
     pub fn subagent_run(&self, parent: &str, run_id: &str) -> Option<RunInfo> {
         self.subagents
@@ -328,6 +330,7 @@ impl Harness {
             started: now(),
             finished: None,
             notified: false,
+            attention_acknowledged: false,
         };
         session.accept_submission(run.run_id.clone(), args.task.into());
         if let Some(child) = &existing {
@@ -1236,6 +1239,72 @@ mod tests {
         .unwrap();
         let saved = crate::test_support::saved_output(&spill);
         assert_eq!(serde_json::from_slice::<Value>(&saved).unwrap(), result);
+    }
+
+    #[tokio::test]
+    async fn attention_acknowledges_existing_child_failures_without_losing_results_or_new_alerts() {
+        let mut f = Fixture::new().await;
+        let first = f.spawn(Profile::Explore, None, "first failure").unwrap();
+        let first_request = f.request().await;
+        let second = f.spawn(Profile::Review, None, "later failure").unwrap();
+        let second_request = f.request().await;
+        assert!(f.h.attention(&first.session_id).is_none());
+        let db = rusqlite::Connection::open(f.h.store.root().join("sessions.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_terminal BEFORE UPDATE ON subagent_runs BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+        let failure = |message| {
+            format!(
+                "data: {}\n\n",
+                json!({"type":"response.failed","response":{"status":"failed","error":{"message":message}}})
+            )
+        };
+        first_request
+            .reply
+            .send(failure("First flagged request"))
+            .unwrap();
+        until(|| !f.h.get(&first.session_id).unwrap().is_executing()).await;
+        let original = f.wait(vec![first.run_id.clone()], 0).await;
+        assert_eq!(original["runs"][0]["status"], "failed");
+        assert!(
+            original["runs"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("First flagged request")
+        );
+        assert!(
+            f.h.acknowledge_attention(f.h.attention(&f.parent).unwrap())
+                .is_err()
+        );
+        assert!(f.h.children_need_attention(&f.parent));
+        db.execute_batch("DROP TRIGGER fail_terminal;").unwrap();
+
+        let seen = f.h.attention(&f.parent).unwrap();
+        second_request.reply.send(failure("Newer failure")).unwrap();
+        let wake = f.request().await;
+        wake.reply.send(answer("Observed both failures")).unwrap();
+        until(|| f.h.all().iter().all(|c| !c.is_executing())).await;
+        f.h.acknowledge_attention(seen).unwrap();
+        assert!(
+            f.h.subagent_run(&f.parent, &first.run_id)
+                .unwrap()
+                .attention_acknowledged
+        );
+        assert!(
+            !f.h.subagent_run(&f.parent, &second.run_id)
+                .unwrap()
+                .attention_acknowledged
+        );
+        assert!(f.h.children_need_attention(&f.parent));
+        f.h.acknowledge_attention(f.h.attention(&f.parent).unwrap())
+            .unwrap();
+        assert!(!f.h.children_need_attention(&f.parent));
+        f.h.flush().unwrap();
+        assert_eq!(f.wait(vec![first.run_id.clone()], 0).await, original);
+        let reloaded = Coordinator::load(&f.h.store).unwrap();
+        for id in [&first.run_id, &second.run_id] {
+            assert!(reloaded.runs[id].attention_acknowledged);
+            assert_eq!(reloaded.runs[id].status, RunStatus::Failed);
+            assert!(reloaded.runs[id].notified);
+        }
     }
 
     #[tokio::test]

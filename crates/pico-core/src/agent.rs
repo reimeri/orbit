@@ -1,3 +1,4 @@
+pub mod attention;
 pub mod subagents;
 use crate::{
     auth::Auth,
@@ -35,6 +36,7 @@ pub struct Conversation {
     last_settings: Mutex<Settings>,
     persisted: Mutex<Option<Session>>,
     submissions: AtomicU64,
+    turn_generation: AtomicU64,
     loaded: AtomicBool,
     stopped: Condvar,
     store: Store,
@@ -322,6 +324,7 @@ impl Harness {
                 deleted: Arc::new(AtomicBool::new(false)),
                 persisted: Mutex::new(saved),
                 submissions: AtomicU64::new(0),
+                turn_generation: AtomicU64::new(0),
                 loaded: AtomicBool::new(true),
                 stopped: Condvar::new(),
                 store: self.store.clone(),
@@ -603,6 +606,7 @@ impl Harness {
             *conversation.status.lock().expect("status lock") = "Connecting…".into();
             // cancel() takes the same state lock: it cannot cancel an obsolete
             // token between publishing a running turn and installing its token.
+            conversation.turn_generation.fetch_add(1, Ordering::Release);
             conversation.running.store(true, Ordering::Release);
             cancel
         };

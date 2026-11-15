@@ -944,6 +944,18 @@ impl App {
             }));
         }
     }
+    fn acknowledge_selected_attention(&mut self) {
+        if let (Some(h), Some(id)) = (&self.harness, &self.selected)
+            && let Some(attention) = h.attention(id)
+        {
+            let h = h.clone();
+            self.tasks.push(self.io.run(move || {
+                Message::Edited(h.acknowledge_attention(attention).map_err(|e| {
+                    format!("Could not save attention acknowledgement: {e:#}. Keep Pico open, fix storage, then retry saving or revisit the session.")
+                }))
+            }));
+        }
+    }
     fn fail(&mut self, result: Result<(), impl std::fmt::Display>) {
         if let Err(e) = result {
             self.error = Some(e.to_string());
@@ -1155,6 +1167,7 @@ impl App {
                         self.context_menu = None;
                         self.auto_scroll = true;
                         self.refresh();
+                        self.acknowledge_selected_attention();
                         self.restore_draft();
                         let git = self.refresh_git();
                         self.tasks.push(git);
@@ -2010,11 +2023,14 @@ impl App {
                         } else if self.agents_open {
                             self.agents_open = false;
                             self.view_epoch = self.view_epoch.wrapping_add(1);
-                        } else if let (Some(h), Some(id)) = (&self.harness, &self.selected)
-                            && (h.get(id).is_some_and(|s| s.is_executing())
-                                || h.active_children(id) > 0)
-                        {
-                            h.stop(id);
+                        } else {
+                            if let (Some(h), Some(id)) = (&self.harness, &self.selected)
+                                && (h.get(id).is_some_and(|s| s.is_executing())
+                                    || h.active_children(id) > 0)
+                            {
+                                h.stop(id);
+                            }
+                            self.acknowledge_selected_attention();
                         }
                     } else if self.modal.is_none()
                         && self.context_menu.is_none()
@@ -5772,6 +5788,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopped_attention_clears_on_escape_or_revisit_not_on_refresh() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let id = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        let fail = || {
+            h.edit(&id, |s| {
+                s.needs_attention = true;
+                s.entries
+                    .push(Entry::new(EntryKind::Notice, "Request flagged by provider"));
+            })
+            .unwrap();
+            *h.get(&id).unwrap().status.lock().unwrap() = "Needs attention".into();
+        };
+        fail();
+        dispatch(&mut app, Message::Changed).await;
+        assert!(app.current().unwrap().needs_attention);
+        assert!(
+            app.sidebar_rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::Heading("NEEDS ATTENTION", 1)))
+        );
+        app.modal = Some(Modal::Rename(id.clone()));
+        dispatch(&mut app, footer_key(keyboard::key::Named::Escape)).await;
+        assert!(app.modal.is_none());
+        assert!(h.get(&id).unwrap().snapshot().needs_attention);
+        dispatch(&mut app, footer_key(keyboard::key::Named::Escape)).await;
+        assert!(!app.current().unwrap().needs_attention);
+        assert!(
+            !app.sidebar_rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::Heading("NEEDS ATTENTION", _)))
+        );
+        assert!(!h.store.load_session(&id).unwrap().needs_attention);
+        assert_eq!(
+            app.current().unwrap().entries.iter().last().unwrap().text,
+            "Request flagged by provider"
+        );
+
+        fail();
+        dispatch(&mut app, Message::Changed).await;
+        dispatch(&mut app, Message::Selected(Err("Selection failed".into()))).await;
+        assert!(h.get(&id).unwrap().snapshot().needs_attention);
+        stored_session(&mut app, path).await;
+        assert!(h.store.load_session(&id).unwrap().needs_attention);
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        assert!(!app.current().unwrap().needs_attention);
+        assert!(!h.store.load_session(&id).unwrap().needs_attention);
+        assert!(
+            !app.sidebar_rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::Heading("NEEDS ATTENTION", _)))
+        );
+    }
+
+    #[tokio::test]
     async fn questionnaires_preserve_session_drafts_queue_and_modal_priority() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
@@ -6435,6 +6508,7 @@ Then implement the fix.";
             started: finished - 17,
             finished: Some(finished),
             notified: true,
+            attention_acknowledged: false,
         };
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
         db.execute(

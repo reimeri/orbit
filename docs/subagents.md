@@ -149,10 +149,11 @@ and scroll positions survive navigation. Request child continuations through the
 parent rather than messaging children directly.
 
 Children do not clutter the main session list. Their parent remains in Working
-while children run, and child failures/interruption contribute to its attention
-indicator. Children and results remain saved with the parent. Confirmed parent
-deletion atomically deletes the whole family and is refused while related turns
-are active. Project files are never deleted by session deletion.
+while children run, and unacknowledged child failures/interruption contribute to
+its attention indicator. Viewing the parent or acknowledging it with Escape clears
+existing child alerts without changing their outcomes. Children and results remain
+saved with the parent. Confirmed parent deletion atomically deletes the whole
+family and is refused while related turns are active. Project files are never deleted by session deletion.
 
 ## Acceptance checks
 
