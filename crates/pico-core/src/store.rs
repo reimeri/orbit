@@ -209,6 +209,9 @@ pub struct NewSessionDraft {
 pub enum EntryKind {
     User {
         images: Vec<crate::media::Media>,
+        /// Submitted during an active turn and not yet consumed at a model boundary.
+        #[serde(default)]
+        steering: bool,
     },
     Assistant,
     Reasoning,
@@ -348,9 +351,9 @@ impl Session {
         Some(retired)
     }
     pub fn accept(&mut self, message: UserMessage) {
-        self.accept_submission(id(), message);
+        self.accept_submission(id(), message, false);
     }
-    pub fn accept_submission(&mut self, submission: String, message: UserMessage) {
+    pub fn accept_submission(&mut self, submission: String, message: UserMessage, steering: bool) {
         if self.title == "New session" {
             self.title = message
                 .text
@@ -368,6 +371,7 @@ impl Session {
             id: submission,
             kind: EntryKind::User {
                 images: message.images.clone(),
+                steering,
             },
             text: message.text.clone(),
         });
@@ -380,7 +384,16 @@ impl Session {
             self.input
                 .push(serde_json::json!({"role":"user", "content":notice}));
         }
-        self.pending_submissions.clear();
+        for submission in self.pending_submissions.drain(..) {
+            let entry = self
+                .entries
+                .by_id_mut(&submission)
+                .expect("accepted submission");
+            let EntryKind::User { steering, .. } = &mut entry.kind else {
+                unreachable!("submissions are user entries");
+            };
+            *steering = false;
+        }
         for output in self.pending_tool_outputs.drain(..) {
             if self.input.iter().any(|item| {
                 matches!(item["type"].as_str(), Some("custom_tool_call"))
@@ -703,7 +716,7 @@ mod tests {
         assert!(!message.is_empty());
         let mut session = Session::new(dir.path().into(), &Settings::default());
         session.draft_images = message.images.clone();
-        session.accept_submission("image-only".into(), message.clone());
+        session.accept_submission("image-only".into(), message.clone(), false);
         assert_eq!(session.title, "Image message");
         assert!(session.draft_images.is_empty());
         session.accept_submission(
@@ -712,6 +725,7 @@ mod tests {
                 text: "Compare this image".into(),
                 images: vec![image.clone()],
             },
+            true,
         );
         let id = session.id.clone();
         {
@@ -722,9 +736,29 @@ mod tests {
         let mut saved = store.load_session(&id).unwrap();
         assert_eq!(saved.pending[0], message);
         assert!(
-            matches!(&saved.entries[0].kind, EntryKind::User { images } if images == &vec![image.clone()])
+            matches!(&saved.entries[0].kind, EntryKind::User { images, steering: false } if images == &vec![image.clone()])
         );
+        assert!(matches!(
+            saved.entries[1].kind,
+            EntryKind::User { steering: true, .. }
+        ));
         saved.consume_pending();
+        assert!(saved.pending_submissions.is_empty());
+        assert!(matches!(
+            saved.entries[1].kind,
+            EntryKind::User {
+                steering: false,
+                ..
+            }
+        ));
+        store.save_changes(Some(&session), &saved).unwrap();
+        assert!(matches!(
+            store.load_session(&id).unwrap().entries[1].kind,
+            EntryKind::User {
+                steering: false,
+                ..
+            }
+        ));
         assert_eq!(saved.input.len(), 2);
         assert_eq!(saved.input[1]["content"][0]["text"], "Compare this image");
         assert_eq!(
@@ -852,7 +886,11 @@ mod tests {
         let store = Store::open(dir.path().into()).unwrap();
         assert_eq!(store.load_new_draft().unwrap(), draft);
         let mut session = Session::new(draft.project.clone().unwrap(), &Settings::default());
-        session.accept_submission("first-submission".into(), draft.message.clone().into());
+        session.accept_submission(
+            "first-submission".into(),
+            draft.message.clone().into(),
+            false,
+        );
         // Failure consuming the draft must also roll back the new session.
         let db = Connection::open(dir.path().join("sessions.sqlite3")).unwrap();
         crate::test_support::sqlite::fail_writes(

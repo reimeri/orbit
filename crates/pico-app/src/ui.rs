@@ -673,7 +673,7 @@ impl App {
                 .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
             for &index in &visible {
                 let entry = &session.entries[index];
-                if let EntryKind::User { images } = &entry.kind {
+                if let EntryKind::User { images, .. } = &entry.kind {
                     visible_media.extend(images.iter().cloned());
                 }
                 // User text is literal, including newlines and Markdown syntax.
@@ -3002,16 +3002,6 @@ impl App {
             compose = compose.push(crate::scrollbar::horizontal(images));
         }
         compose = compose.push(self.composer_editor(running));
-        if !session.pending.is_empty() && running {
-            compose = compose.push(
-                text(format!(
-                    "{} steering message(s) waiting for the next boundary",
-                    session.pending.len()
-                ))
-                .size(11)
-                .color(ACCENT),
-            );
-        }
         column![
             chat,
             container(
@@ -3413,7 +3403,14 @@ impl App {
             }
             _ => {
                 let mut content = column![].spacing(8);
-                if let EntryKind::User { images } = &entry.kind {
+                if let EntryKind::User { images, steering } = &entry.kind {
+                    if *steering {
+                        content = content.push(
+                            text("Steering · waiting for the next boundary")
+                                .size(11)
+                                .color(ACCENT),
+                        );
+                    }
                     for media in images {
                         content = content.push(self.image_view.thumbnail(media));
                     }
@@ -4167,7 +4164,7 @@ impl App {
                 s.usage.total_cached = 126_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
-                    Entry::new(EntryKind::User { images: vec![] }, "Inspect this project and run its tests."),
+                    Entry::new(EntryKind::User { images: vec![], steering: false }, "Inspect this project and run its tests."),
                     Entry::new(
                         EntryKind::Assistant,
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Pico V2\"); }\n```\n\n[Documentation](https://openai.com)",
@@ -4430,7 +4427,10 @@ impl App {
                 child.model = "gpt-6-luna".into();
                 child.effort = "high".into();
                 child.entries.push(Entry::new(
-                    EntryKind::User { images: vec![] },
+                    EntryKind::User {
+                        images: vec![],
+                        steering: false,
+                    },
                     "Inspect the completion notification path. Do not modify files.",
                 ));
                 child.entries.push(Entry::new(EntryKind::Assistant,"## Exploration result\n\nThe **parent wake-up** path preserves cancellation and uses durable completion notices.\n\n- Separate conversation context\n- Repeatable final results\n- No nested delegation"));
@@ -4729,7 +4729,7 @@ impl App {
                         }
                     };
                 session.entries = vec![
-                    Entry::new(EntryKind::User { images: vec![] }, "Check the implementation and run validation."),
+                    Entry::new(EntryKind::User { images: vec![], steering: false }, "Check the implementation and run validation."),
                     Entry { id: "activity-reason".into(), kind: EntryKind::Reasoning, text: "**Inspecting the build configuration**\n\nReviewing the existing Nix development environment.".into() },
                     Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
                     tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),
@@ -6491,7 +6491,10 @@ mod tests {
         session.effort = "low".into();
         session.fast = false;
         session.entries.push(Entry::new(
-            EntryKind::User { images: vec![] },
+            EntryKind::User {
+                images: vec![],
+                steering: false,
+            },
             "Keep this transcript",
         ));
         session.draft = "Keep this draft".into();
@@ -6633,7 +6636,7 @@ mod tests {
             .unwrap();
         assert_eq!(saved.entries[0].text, "");
         assert!(
-            matches!(&saved.entries[0].kind, EntryKind::User { images: saved_images } if saved_images == &images)
+            matches!(&saved.entries[0].kind, EntryKind::User { images: saved_images, .. } if saved_images == &images)
         );
         assert!(h.store.load_new_draft().unwrap().images.is_empty());
         dispatch(&mut app, Message::Select(existing.clone())).await;
@@ -6836,7 +6839,10 @@ Then implement the fix.";
             .unwrap()
             .edit(&id, |s| {
                 s.entries.push(Entry::new(
-                    EntryKind::User { images: vec![] },
+                    EntryKind::User {
+                        images: vec![],
+                        steering: false,
+                    },
                     "Old message",
                 ));
             })
@@ -6883,7 +6889,10 @@ Then implement the fix.";
         child.model = "gpt-6-luna".into();
         child.effort = "high".into();
         child.entries.push(Entry::new(
-            EntryKind::User { images: vec![] },
+            EntryKind::User {
+                images: vec![],
+                steering: false,
+            },
             "Inspect without edits",
         ));
         child
@@ -7431,6 +7440,47 @@ Then implement the fix.";
             iced::Size::new(900., 1350.),
         )
     }
+    #[tokio::test]
+    async fn steering_labels_live_only_in_queued_bubbles_not_the_composer() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root).await;
+        let h = app.harness.as_ref().unwrap().clone();
+        let id = app.selected.clone().unwrap();
+        let conversation = h.get(&id).unwrap();
+        // Reproduce the interval after a normal submission starts a turn but
+        // before the model boundary consumes the shared pending queue.
+        conversation.running.store(true, Ordering::Release);
+        h.edit(&id, |s| {
+            s.accept_submission("normal".into(), "Same text".into(), false)
+        })
+        .unwrap();
+        app.refresh();
+        assert!(!chat_text(&app).to_lowercase().contains("steering"));
+
+        h.edit(&id, |s| {
+            for submission in ["steer-1", "steer-2"] {
+                s.accept_submission(submission.into(), "Same text".into(), true);
+            }
+        })
+        .unwrap();
+        app.refresh();
+        assert!(!entry_text(&app, 0).contains("Steering"));
+        for index in [1, 2] {
+            assert!(entry_text(&app, index).contains("Steering"));
+        }
+        assert_eq!(chat_text(&app).matches("Steering").count(), 2);
+        assert!(!chat_text(&app).contains("steering message(s)"));
+
+        h.edit(&id, Session::consume_pending).unwrap();
+        app.refresh();
+        assert!(!chat_text(&app).contains("Steering"));
+        for index in 0..3 {
+            assert_eq!(entry_text(&app, index), "Same text");
+        }
+        conversation.running.store(false, Ordering::Release);
+    }
+
     fn chat_text(app: &App) -> String {
         displayed_text(app.center(), iced::Size::new(930., 1350.))
     }
@@ -8924,7 +8974,10 @@ Then implement the fix.";
         let mut app = app();
         let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
         session.entries.push(Entry::new(
-            EntryKind::User { images: vec![] },
+            EntryKind::User {
+                images: vec![],
+                steering: false,
+            },
             "Please examine these changes.\n\nKeep the first message visible.",
         ));
         session.entries.push(Entry::new(
@@ -9049,7 +9102,10 @@ Then implement the fix.";
         }
         for (kind, text) in [
             (
-                EntryKind::User { images: vec![] },
+                EntryKind::User {
+                    images: vec![],
+                    steering: false,
+                },
                 "Inspect these changes.\n".repeat(6),
             ),
             (EntryKind::Reasoning, "Reviewing the implementation".into()),
@@ -9058,7 +9114,10 @@ Then implement the fix.";
                 "An earlier finding with **details**.\n\n".repeat(20),
             ),
             (
-                EntryKind::User { images: vec![] },
+                EntryKind::User {
+                    images: vec![],
+                    steering: false,
+                },
                 "Please verify the result.\n".repeat(7),
             ),
             (EntryKind::Reasoning, "Checking the regression".into()),

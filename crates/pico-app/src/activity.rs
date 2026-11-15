@@ -497,7 +497,14 @@ mod tests {
     #[test]
     fn flattening_preserves_boundaries_failures_reasoning_and_execution_details() {
         let source: History<_> = vec![
-            entry("user", EntryKind::User { images: vec![] }, "Inspect it"),
+            entry(
+                "user",
+                EntryKind::User {
+                    images: vec![],
+                    steering: false,
+                },
+                "Inspect it",
+            ),
             entry(
                 "r1",
                 EntryKind::Reasoning,

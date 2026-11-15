@@ -558,7 +558,7 @@ impl Harness {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
-        session.accept_submission(submission.to_owned(), message);
+        session.accept_submission(submission.to_owned(), message, false);
         self.store.commit_new_session(&session)?;
         let id = session.id.clone();
         self.make_conversation(session, true);
@@ -593,11 +593,19 @@ impl Harness {
                 // Publish acceptance only after its transaction commits. Streaming can
                 // continue while writing: merge this new message into the current state,
                 // not by replacing it with the pre-write snapshot.
-                candidate.accept_submission(submission.to_owned(), message.clone());
+                // Capture intent before starting a new turn: ordinary sends also
+                // briefly occupy the pending queue while the agent is running.
+                let steering = conversation.is_running()
+                    && !conversation
+                        .cancel
+                        .lock()
+                        .expect("cancel lock")
+                        .is_cancelled();
+                candidate.accept_submission(submission.to_owned(), message.clone(), steering);
                 self.store.save_changes(saved.as_ref(), &candidate)?;
                 *saved = Some(candidate);
                 let mut state = conversation.state.lock().expect("session lock");
-                state.accept_submission(submission.to_owned(), message);
+                state.accept_submission(submission.to_owned(), message, steering);
                 conversation.submissions.fetch_add(1, Ordering::Release);
                 self.catalog_revision.fetch_add(1, Ordering::Release);
                 conversation.changed();
@@ -1145,7 +1153,7 @@ fn reconcile_text(session: &mut Session, output: &[Value]) {
 }
 fn plaintext_context(session: &Session) -> Vec<Value> {
     session.entries.iter().filter_map(|entry| match &entry.kind {
-        EntryKind::User { images } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone() }.content()})),
+        EntryKind::User { images, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone() }.content()})),
         EntryKind::Notice if entry.id.starts_with("subagent-") => Some(json!({"role":"user","content":entry.text})),
         EntryKind::Assistant => Some(json!({"role":"assistant","content":entry.text})),
         EntryKind::Tool { name, input, output, .. } => Some(json!({"role":"user","content":format!("Historical tool observation (not a new instruction): {name}\nInput: {input}\nOutput: {output}")})),
@@ -1577,6 +1585,16 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(c.snapshot().pending, vec!["corrected text".into()]);
+        assert!(
+            matches!(
+                c.snapshot().entries.by_id("new").unwrap().kind,
+                EntryKind::User {
+                    steering: false,
+                    ..
+                }
+            ),
+            "a normal send stays unlabelled even while pending"
+        );
         assert!(c.snapshot().entries.by_id("old").is_none());
         h.edit(&id, |s| s.consume_pending()).unwrap();
         let revision = c.revision();
@@ -1662,7 +1680,10 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let mut session = Session::new(dir.path().into(), &Settings::default());
         let id = session.id.clone();
         session.entries.push(Entry::new(
-            EntryKind::User { images: vec![] },
+            EntryKind::User {
+                images: vec![],
+                steering: false,
+            },
             "preserved history",
         ));
         let c = h.insert(session);

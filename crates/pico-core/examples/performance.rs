@@ -38,7 +38,10 @@ fn main() -> Result<()> {
     for i in 0..20000 {
         session.entries.push(Entry::new(
             if i % 3 == 0 {
-                EntryKind::User { images: vec![] }
+                EntryKind::User {
+                    images: vec![],
+                    steering: false,
+                }
             } else {
                 EntryKind::Assistant
             },

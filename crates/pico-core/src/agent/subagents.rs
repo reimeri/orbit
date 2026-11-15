@@ -332,7 +332,7 @@ impl Harness {
             notified: false,
             attention_acknowledged: false,
         };
-        session.accept_submission(run.run_id.clone(), args.task.into());
+        session.accept_submission(run.run_id.clone(), args.task.into(), false);
         if let Some(child) = &existing {
             let mut saved = child.persisted.lock().expect("persistence lock");
             self.store
@@ -1532,8 +1532,33 @@ mod tests {
             f.requests.try_recv().is_err(),
             "completion must not start overlapping parent requests"
         );
+        let queued = f.h.load(&f.parent).unwrap().snapshot();
+        assert!(matches!(
+            queued.entries.by_id("parent-work").unwrap().kind,
+            EntryKind::User {
+                steering: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            queued.entries.by_id("steering").unwrap().kind,
+            EntryKind::User { steering: true, .. }
+        ));
         parent.reply.send(answer("Reached boundary")).unwrap();
         let next = f.request().await;
+        assert!(matches!(
+            f.h.store
+                .load_session(&f.parent)
+                .unwrap()
+                .entries
+                .by_id("steering")
+                .unwrap()
+                .kind,
+            EntryKind::User {
+                steering: false,
+                ..
+            }
+        ));
         let input = next.body["input"].to_string();
         assert!(input.contains(&explore.run_id) && input.contains(&review.run_id));
         assert!(input.contains("User steering takes precedence"));

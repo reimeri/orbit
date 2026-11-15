@@ -134,7 +134,7 @@ impl Provider {
             .entries
             .range(session.summarized_entries)
             .filter_map(|entry| match &entry.kind {
-                crate::store::EntryKind::User { images } => Some(format!(
+                crate::store::EntryKind::User { images, .. } => Some(format!(
                     "USER: {}\n{}\n\n",
                     entry.text,
                     images
