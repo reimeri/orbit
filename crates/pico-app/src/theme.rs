@@ -280,6 +280,24 @@ pub fn card(_: &Theme) -> container::Style {
     }
 }
 
+/// Clickable cards retain the surface border and gain a quiet hover highlight.
+pub fn card_button(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
+    let surface = card(theme);
+    button_widget::Style {
+        background: if matches!(
+            status,
+            button_widget::Status::Hovered | button_widget::Status::Pressed
+        ) {
+            Some(SECONDARY.into())
+        } else {
+            surface.background
+        },
+        border: surface.border,
+        text_color: theme.palette().text,
+        ..Default::default()
+    }
+}
+
 pub const PROJECT_COLORS: [Color; 8] = [
     Color::from_rgb8(197, 193, 112),
     Color::from_rgb8(137, 190, 146),

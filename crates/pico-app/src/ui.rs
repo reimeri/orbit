@@ -2420,48 +2420,47 @@ impl App {
                 .and_then(|h| h.get(&run.session_id))
                 .filter(|_| run.status == pico_core::agent::subagents::RunStatus::Running)
                 .map(|c| c.status.lock().expect("status lock").clone());
-            let mut card_content = column![
+            let status_color = if run.status.needs_attention() {
+                DANGER
+            } else if activity.is_some() {
+                ACCENT
+            } else {
+                MUTED
+            };
+            let status = activity.as_deref().unwrap_or(run.status.label());
+            let card_content = column![
                 row![
-                    text(run.profile.label()).size(13).width(Fill),
-                    text(run.status.label())
-                        .size(11)
-                        .color(if run.status.needs_attention() {
-                            DANGER
-                        } else {
-                            MUTED
-                        })
-                ],
-                text(run.title).size(13),
-                text(format!(
-                    "{} · {} · {elapsed}s",
-                    run.profile.model(),
-                    run.profile.effort()
-                ))
-                .size(10)
-                .color(MUTED),
+                    text(run.profile.label()).size(13),
+                    container(crate::ellipsized_text::shrinking_ellipsized_text(
+                        status,
+                        11.,
+                        Some(status_color)
+                    ))
+                    .align_right(Fill),
+                ]
+                .spacing(10)
+                .align_y(iced::Center),
+                row![
+                    ellipsized_text(&run.title, 13., None),
+                    text(format!(
+                        "{} · {} · {elapsed}s",
+                        run.profile.model(),
+                        run.profile.effort()
+                    ))
+                    .size(10)
+                    .color(MUTED)
+                    .wrapping(text::Wrapping::None),
+                ]
+                .spacing(10)
+                .align_y(iced::Center),
             ]
             .spacing(7);
-            if let Some(activity) = activity {
-                card_content = card_content.push(text(activity).size(11).color(ACCENT));
-            }
-            let mut actions = row![
-                theme::button("Open")
-                    .on_press(Message::Select(run.session_id.clone()))
-                    .style(theme::text_button)
-            ]
-            .spacing(10);
-            if run.status == pico_core::agent::subagents::RunStatus::Running {
-                actions = actions.push(
-                    theme::button("Stop")
-                        .on_press(Message::StopAgent(run.session_id))
-                        .style(theme::text_button),
-                );
-            }
             cards = cards.push(
-                container(card_content.push(actions))
+                theme::button(card_content)
+                    .on_press(Message::Select(run.session_id))
                     .padding(12)
                     .width(Fill)
-                    .style(card),
+                    .style(theme::card_button),
             );
         }
         content = content.push(scroll(cards).height(Fill));
@@ -5991,6 +5990,7 @@ Then implement the fix.";
             .push(Entry::new(EntryKind::Assistant, "Final inspection result"));
         let child_id = child.id.clone();
         h.store.save_session(&child).unwrap();
+        let finished = pico_core::store::now();
         let run = RunInfo {
             run_id: pico_core::store::id(),
             session_id: child_id.clone(),
@@ -6000,8 +6000,8 @@ Then implement the fix.";
             title: child.title.clone(),
             status: RunStatus::Completed,
             assignment: 1,
-            started: pico_core::store::now() - 17,
-            finished: Some(pico_core::store::now()),
+            started: finished - 17,
+            finished: Some(finished),
             notified: true,
         };
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
@@ -6021,7 +6021,48 @@ Then implement the fix.";
         app.catalog_revision = u64::MAX;
         dispatch(&mut app, Message::ToggleAgents).await;
         assert!(app.agents_open && !app.settings_open);
-        dispatch(&mut app, Message::Select(child_id.clone())).await;
+        // A terminal run must not display stale runtime activity. The entire
+        // card, including its padding outside the labels, opens the child.
+        *app.harness
+            .as_ref()
+            .unwrap()
+            .load(&child_id)
+            .unwrap()
+            .status
+            .lock()
+            .unwrap() = "Thinking…".into();
+        let mut renderer = header_renderer();
+        let messages =
+            {
+                let mut ui = iced_runtime::UserInterface::build(
+                    app.agents_panel(),
+                    iced::Size::new(480., 560.),
+                    iced_runtime::user_interface::Cache::new(),
+                    &mut renderer,
+                );
+                let mut bounds = UiBounds::default();
+                ui.operate(&renderer, &mut bounds);
+                assert!(!bounds.labels.iter().any(|(label, _)| {
+                    matches!(label.as_str(), "Open" | "Stop" | "Thinking…")
+                }));
+                let profile = bounds.label("Explore");
+                let mut messages = Vec::new();
+                ui.update(
+                    &[
+                        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                        iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                    ],
+                    mouse::Cursor::Available(iced::Point::new(profile.x - 6., profile.y - 6.)),
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                messages
+            };
+        assert!(matches!(messages.as_slice(), [Message::Select(id)] if id == &child_id));
+        for message in messages {
+            dispatch(&mut app, message).await;
+        }
         assert_eq!(app.parent_id(), Some(parent.as_str()));
         assert!(
             app.sidebar_rows
@@ -6061,7 +6102,22 @@ Then implement the fix.";
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
-            for label in ["Agents", "Completed", "Open", "■"] {
+            let profile = bounds.label("Explore");
+            let status = bounds.label("Completed");
+            let title = bounds.label("Inspect cancellation");
+            let metadata = bounds.label("gpt-6-luna · high · 17s");
+            assert!((profile.center_y() - status.center_y()).abs() <= 1.);
+            assert!((title.center_y() - metadata.center_y()).abs() <= 1.);
+            assert!(title.y > profile.y);
+            assert!(title.x + title.width <= metadata.x);
+            assert!((status.x + status.width - metadata.x - metadata.width).abs() <= 1.);
+            for label in [
+                "Agents",
+                "Completed",
+                "Explore",
+                "Inspect cancellation",
+                "■",
+            ] {
                 let rect = bounds.label(label);
                 assert!(
                     rect.x >= 0. && rect.x + rect.width <= width,

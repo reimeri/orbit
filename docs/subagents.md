@@ -139,7 +139,10 @@ the current family has running children. The panel header shows the running coun
 elapsed times and current runtime activity. Spawn tool rows link to the child
 and show assignment status separately from the completed spawn call.
 
-**Open** displays the child's live, full-width transcript with **Back to parent**
+Each clickable card uses two lines: profile and live activity (or terminal status)
+on the first; title and right-aligned model, effort and elapsed time on the second.
+Long titles are ellipsized for display only. Clicking anywhere on the card displays
+the child's live, full-width transcript with **Back to parent**
 and **Stop**. The existing Markdown, selection, Copy and expandable tool views
 are reused. There is no child composer or editable model selector. Parent drafts
 and scroll positions survive navigation. Request child continuations through the
