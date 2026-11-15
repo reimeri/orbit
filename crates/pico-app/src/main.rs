@@ -15,6 +15,7 @@ mod questionnaire;
 mod scrollbar;
 mod search_icon;
 mod tool_output;
+mod transcript_viewport;
 mod ui;
 mod virtual_list;
 use iced::{Theme, window};

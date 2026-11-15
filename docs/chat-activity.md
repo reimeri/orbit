@@ -48,7 +48,11 @@ rows. The virtual list retains row measurements and scroll anchors by identity.
 Full Markdown/tool-detail caches are only prepared for visible source rows;
 collapsing a group releases its output caches without forgetting manual expansion.
 Chat prepares the actual viewport plus a 120px margin above and below, including
-prose and expanded details. The sidebar keeps its larger overscan margin.
+prose and expanded details. A transcript-local observer reports the actual scroll
+viewport and effective offset even when content fits; it does not rely on iced
+scroll notifications, which omit non-overflowing content. Geometry is refreshed
+after session/reflow epochs and changes, without publishing on unchanged frames.
+The sidebar keeps its larger overscan margin.
 Display preview shortening never changes the stored inputs, output or selection-copy data.
 
 Updates use persistent-history diffs and reproject the affected block/tail, not
@@ -61,6 +65,9 @@ separately benchmarked.
 `nix develop --command just verify` covers grouping boundaries, flattened calls,
 failed wrappers, wait/cell linkage, multiple reasoning headings, selection/copy,
 streaming outcomes, persisted details, and virtual-list measurement retention.
+Layout/event regressions cover fitting tool-group expansions, viewport resizing,
+clamped offsets after overflow disappears, equal-geometry session changes, wheel
+scrolling, and unchanged-frame notification suppression.
 The existing long-transcript and bounded-output tests also remain in place.
 
 The rendered-window smoke includes collapsed/live activity, expanded calls,

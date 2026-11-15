@@ -2674,20 +2674,19 @@ impl App {
             .max_width(self.catalog.settings.chat_width)
             .width(Fill)
             .padding([20, 26]);
-        let chat = scroll(container(transcript).center_x(Fill))
-            .id("chat")
-            .height(Fill)
-            .on_scroll(move |v| {
-                let offset = v.absolute_offset();
-                let bounds = v.bounds();
-                let content = v.content_bounds();
+        let content = crate::transcript_viewport::observe(
+            container(transcript).center_x(Fill),
+            epoch,
+            move |offset, height, content_height| {
                 Message::Scroll(
                     epoch,
-                    offset.y,
-                    bounds.height,
-                    offset.y + bounds.height >= content.height - 40.,
+                    offset,
+                    height,
+                    offset + height >= content_height - 40.,
                 )
-            });
+            },
+        );
+        let chat = scroll(content).id("chat").height(Fill);
         let chat = container(chat).padding(iced::Padding::ZERO.right(6));
         let running = self.running();
         if let Some(child) = &session.child {
@@ -7278,6 +7277,156 @@ Then implement the fix.";
         app.selected = Some(id);
         let (_, count) = build(&app, cache, 900.);
         assert_eq!(count, app.transcript.visible().len());
+    }
+
+    #[tokio::test]
+    async fn fitting_chat_expansions_keep_prose_mounted_with_real_viewport_feedback() {
+        use iced::futures::StreamExt;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        // Drive actual widget feedback and scroll operations, not fabricated
+        // Scroll/RowSize messages. Short content never triggers iced's on_scroll.
+        async fn settle(
+            app: &mut App,
+            mut cache: Cache,
+            renderer: &mut iced::Renderer,
+            size: iced::Size,
+        ) -> Cache {
+            let mut operations: Vec<Box<dyn iced::advanced::widget::Operation>> = vec![];
+            for _ in 0..32 {
+                let mut ui = UserInterface::build(app.center(), size, cache, renderer);
+                for mut operation in operations.drain(..) {
+                    ui.operate(renderer, operation.as_mut());
+                }
+                let mut messages = vec![];
+                ui.update(
+                    &[iced::Event::Window(window::Event::RedrawRequested(
+                        iced::time::Instant::now(),
+                    ))],
+                    mouse::Cursor::Unavailable,
+                    renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                cache = ui.into_cache();
+                if messages.is_empty() {
+                    return cache;
+                }
+                for message in messages {
+                    assert!(matches!(
+                        message,
+                        Message::Scroll(..) | Message::RowSize(..)
+                    ));
+                    if let Some(mut stream) =
+                        iced_runtime::task::into_stream(app.update_inner(message))
+                    {
+                        while let Some(action) = stream.next().await {
+                            match action {
+                                iced_runtime::Action::Widget(operation) => {
+                                    operations.push(operation)
+                                }
+                                _ => panic!("unexpected transcript action"),
+                            }
+                        }
+                    }
+                }
+            }
+            panic!("transcript geometry did not settle");
+        }
+
+        let mut app = app();
+        let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+        session.entries.push(Entry::new(
+            EntryKind::User { images: vec![] },
+            "Please examine these changes.\n\nKeep the first message visible.",
+        ));
+        session.entries.push(Entry::new(
+            EntryKind::Assistant,
+            "I will inspect the implementation.\n\nThen I will verify the behavior.",
+        ));
+        let mut groups = vec![];
+        let mut prose = vec![0, 1];
+        for count in [13, 7] {
+            let head = session.entries.len();
+            for i in 0..count {
+                session.entries.push(Entry::new(
+                    EntryKind::Reasoning,
+                    format!("**Checking item {i}**"),
+                ));
+                session.entries.push(Entry::new(
+                    EntryKind::Tool {
+                        name: "exec_command".into(),
+                        input: format!(r#"{{"cmd":"check item {i}"}}"#),
+                        output: "Checked".into(),
+                        complete: true,
+                        failed: false,
+                        cell_id: None,
+                        parent: None,
+                        media: vec![],
+                        web: None,
+                    },
+                    "",
+                ));
+            }
+            groups.push(session.entries[head].id.clone());
+            prose.push(session.entries.len());
+            session.entries.push(Entry::new(EntryKind::Assistant,
+                "Checks completed.\n\n- First result\n- Second result\nAll expected content remains visible."));
+        }
+        app.selected = Some(session.id.clone());
+        app.current_session = Some(session);
+        app.rebuild_transcript();
+        app.prepare_visible();
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.),
+        ));
+        let tall = iced::Size::new(930., 1350.);
+        let mut cache = settle(&mut app, Cache::new(), &mut renderer, tall).await;
+        assert!(app.transcript.viewport > 1200.);
+        for (group, follow) in groups.iter().zip([false, true]) {
+            app.auto_scroll = follow;
+            let _ = app.update_inner(Message::ToggleGroup(group.clone()));
+            cache = settle(&mut app, cache, &mut renderer, tall).await;
+            assert!(
+                app.transcript.total() > 720.,
+                "fixture must exceed the old fallback window"
+            );
+            assert!(
+                app.transcript.total() + 40. < app.transcript.viewport,
+                "total={} viewport={}",
+                app.transcript.total(),
+                app.transcript.viewport
+            );
+            assert_eq!(app.transcript.offset, 0.);
+            assert_eq!(app.transcript.visible(), 0..app.transcript.order.len());
+            for &index in &prose {
+                assert!(app.transcript.order[app.transcript.visible()].contains(&index));
+                assert!(
+                    app.markdown
+                        .contains_key(&app.current().unwrap().entries[index].id)
+                );
+            }
+            // Reflow into overflow, then back to a fitting pane without scrolling.
+            cache = settle(&mut app, cache, &mut renderer, iced::Size::new(930., 500.)).await;
+            assert!(app.transcript.viewport < 500.);
+            cache = settle(&mut app, cache, &mut renderer, tall).await;
+            assert_eq!(app.transcript.offset, 0.);
+            assert_eq!(app.transcript.visible(), 0..app.transcript.order.len());
+            let _ = app.update_inner(Message::ToggleGroup(group.clone()));
+            cache = settle(&mut app, cache, &mut renderer, tall).await;
+        }
+        // Session changes reset the index but can retain equal-sized widget trees.
+        app.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
+        app.view_epoch += 1;
+        let id = pico_core::store::id();
+        app.current_session.as_mut().unwrap().id = id.clone();
+        app.selected = Some(id);
+        app.rebuild_transcript();
+        app.prepare_visible();
+        let _ = settle(&mut app, cache, &mut renderer, tall).await;
+        assert!(app.transcript.viewport > 1200.);
+        assert_eq!(app.transcript.visible(), 0..app.transcript.order.len());
     }
 
     #[tokio::test]
