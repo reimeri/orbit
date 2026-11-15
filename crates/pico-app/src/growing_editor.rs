@@ -13,6 +13,8 @@ use iced::{
     widget::{TextEditor, text_editor},
 };
 
+pub(crate) const PADDING: f32 = 12.;
+
 pub fn growing_editor<'a, Message: Clone + 'a>(
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
@@ -22,7 +24,9 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
 ) -> Element<'a, Message> {
     Element::new(GrowingEditor {
         editor: editor
-            .padding(iced::Padding::new(12.).right(scrollbar::GUTTER + theme::SCROLLBAR_EDGE_INSET))
+            .padding(
+                iced::Padding::new(PADDING).right(scrollbar::GUTTER + theme::SCROLLBAR_EDGE_INSET),
+            )
             .height(Length::Shrink)
             .max_height(max_height),
         content,
@@ -108,9 +112,9 @@ impl State {
     fn scrollbar(&self, bounds: Rectangle) -> Option<Scrollbar> {
         let track = Rectangle {
             x: bounds.x + bounds.width - theme::SCROLLBAR_EDGE_INSET - theme::SCROLLBAR_WIDTH,
-            y: bounds.y + 12.,
+            y: bounds.y + PADDING,
             width: theme::SCROLLBAR_WIDTH,
-            height: (bounds.height - 24.).max(0.),
+            height: (bounds.height - 2. * PADDING).max(0.),
         };
         let max_offset = self.content_height - track.height;
         // Ignore subpixel rounding at the exact ten-row boundary.
@@ -354,15 +358,18 @@ mod tests {
     use iced::{Point, advanced::clipboard, keyboard};
     use text_editor::{Action, Content, Edit, Motion};
 
+    const LINE_HEIGHT: f32 = 19.5;
+    const VISIBLE_ROWS: usize = 10;
+
     fn view(content: &Content) -> Element<'_, Action> {
         growing_editor(
             text_editor(content)
                 .size(15)
-                .line_height(iced::widget::text::LineHeight::Absolute(19.5.into()))
-                .min_height(39)
+                .line_height(iced::widget::text::LineHeight::Absolute(LINE_HEIGHT.into()))
+                .min_height(2. * LINE_HEIGHT)
                 .on_action(|action| action),
             content,
-            219.,
+            VISIBLE_ROWS as f32 * LINE_HEIGHT + 2. * PADDING,
             |action| action,
             |action| match action {
                 Action::Scroll { lines } => Some(*lines),
@@ -466,7 +473,7 @@ mod tests {
             Size::new(width, height),
             iced::Font::with_name("DejaVu Sans"),
             iced::Pixels(15.),
-            iced::widget::text::LineHeight::Absolute(19.5.into()),
+            iced::widget::text::LineHeight::Absolute(LINE_HEIGHT.into()),
             iced::advanced::text::Wrapping::default(),
             &mut PlainText,
         );
@@ -580,7 +587,7 @@ mod tests {
             Size::new(12., 100.),
             iced::Font::with_name("DejaVu Sans"),
             iced::Pixels(15.),
-            iced::widget::text::LineHeight::Absolute(19.5.into()),
+            iced::widget::text::LineHeight::Absolute(LINE_HEIGHT.into()),
             iced::advanced::text::Wrapping::Glyph,
             &mut PlainText,
         );
@@ -594,7 +601,7 @@ mod tests {
         assert_eq!(editor.cursor().position.column, 2);
         let next_row_start = caret(&editor);
         assert!(previous_row_end.x > next_row_start.x);
-        assert!((next_row_start.y - previous_row_end.y - 19.5).abs() < 0.01);
+        assert!((next_row_start.y - previous_row_end.y - LINE_HEIGHT).abs() < 0.01);
     }
 
     #[test]
@@ -674,7 +681,7 @@ mod tests {
         editor.perform(Action::Move(Motion::Right));
         let row_start = caret(&editor);
         assert_eq!(row_start.x, 0.);
-        assert!((row_start.y - row_end.y - 19.5).abs() < 0.01);
+        assert!((row_start.y - row_end.y - LINE_HEIGHT).abs() < 0.01);
         for column in (3..=4).rev() {
             editor.perform(Action::Move(Motion::Left));
             assert_eq!(editor.cursor().position.column, column);
@@ -760,7 +767,7 @@ mod tests {
                     "{value:?}: {rectangles:?}"
                 );
                 assert_eq!(rectangles[0].y, 0.);
-                assert_eq!(rectangles[0].height, 19.5);
+                assert_eq!(rectangles[0].height, LINE_HEIGHT);
             }
             // The ordinary click/drag path must select and highlight f or i,
             // not just keyboard-created logical ranges.
@@ -832,7 +839,10 @@ mod tests {
         assert_eq!(editor.copy().as_deref(), Some("i\n\nf"));
         let rectangles = selection_rectangles(&editor);
         assert_eq!(rectangles.len(), 2);
-        for (rectangle, (x, y)) in rectangles.iter().zip([(half, 39.), (0., 78.)]) {
+        for (rectangle, (x, y)) in rectangles
+            .iter()
+            .zip([(half, 2. * LINE_HEIGHT), (0., 4. * LINE_HEIGHT)])
+        {
             assert!((rectangle.x - x).abs() < 0.01);
             assert!((rectangle.width - half).abs() < 0.01);
             assert_eq!(rectangle.y, y);
@@ -843,7 +853,7 @@ mod tests {
         for (before, after) in rectangles.iter().zip(scrolled) {
             assert_eq!(after.x, before.x);
             assert_eq!(after.width, before.width);
-            assert_eq!(after.y, before.y - 58.5);
+            assert_eq!(after.y, before.y - 3. * LINE_HEIGHT);
         }
     }
 
@@ -860,10 +870,16 @@ mod tests {
             let text_width = editor
                 .content
                 .with_editor(|editor| editor.buffer().size().0.unwrap());
-            assert_eq!(text_width, 279.); // 12 px left + 9 px gutter/inset on the right.
+            assert_eq!(
+                text_width,
+                node.size().width - PADDING - scrollbar::GUTTER - theme::SCROLLBAR_EDGE_INSET
+            );
             if let Some(bar) = editor.bar(&node) {
-                assert_eq!(bar.track.x - (12. + text_width), 2.);
-                assert_eq!(300. - (bar.track.x + bar.track.width), 2.);
+                assert_eq!(bar.track.x - (PADDING + text_width), theme::SCROLLBAR_GAP);
+                assert_eq!(
+                    node.size().width - (bar.track.x + bar.track.width),
+                    theme::SCROLLBAR_EDGE_INSET
+                );
             }
         }
     }
@@ -895,7 +911,10 @@ mod tests {
         let mut editor = Editor::new(&value);
         let node = editor.layout(400.);
         let bar = editor.bar(&node).unwrap();
-        assert_eq!(bar.thumb.height, 65.);
+        assert_eq!(
+            bar.thumb.height / bar.track.height,
+            VISIBLE_ROWS as f32 / editor.content.line_count() as f32
+        );
         assert_eq!(bar.thumb.y, bar.track.y);
 
         // Focus the real editor before grabbing its scrollbar.
@@ -927,7 +946,12 @@ mod tests {
                 (release(), end),
             ],
         );
-        assert_eq!(messages, [Action::Scroll { lines: 20 }]);
+        assert_eq!(
+            messages,
+            [Action::Scroll {
+                lines: (editor.content.line_count() - VISIBLE_ROWS) as i32
+            }]
+        );
         assert_eq!(editor.content.cursor(), cursor);
         let node = editor.layout(400.);
         let bar = editor.bar(&node).unwrap();
@@ -982,7 +1006,7 @@ mod tests {
         editor.content.perform(Action::SelectAll);
         editor.content.perform(Action::Edit(Edit::Backspace));
         let node = editor.layout(400.);
-        assert_eq!(node.size().height, 63.);
+        assert_eq!(node.size().height, 2. * LINE_HEIGHT + 2. * PADDING);
         assert!(editor.bar(&node).is_none());
     }
 
@@ -1028,7 +1052,7 @@ mod tests {
 
     #[test]
     fn scrollbar_uses_wrapped_rows_and_disappears_at_the_limit_or_after_reflow() {
-        let mut editor = Editor::new(&["line"; 10].join("\n"));
+        let mut editor = Editor::new(&["line"; VISIBLE_ROWS].join("\n"));
         let node = editor.layout(400.);
         assert!(editor.bar(&node).is_none());
         editor.content.perform(Action::Move(Motion::DocumentEnd));

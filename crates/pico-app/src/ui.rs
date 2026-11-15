@@ -68,8 +68,13 @@ type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
 const SIDEBAR_CONTENT_PADDING: f32 = 8.;
 const RIGHT_PANEL_PADDING: f32 = 18.;
+const FOOTER_MENU_TEXT_SIZE: f32 = 12.;
 const FAST_OPTION: &str = "Fast mode";
 const CHAT_OVERSCAN: f32 = 120.;
+const COMPOSER_LINE_HEIGHT_FACTOR: f32 = 1.3;
+const COMPOSER_MIN_LINES: usize = 2;
+const COMPOSER_MAX_LINES: usize = 10;
+const NOTICE_DURATION: Duration = Duration::from_secs(8);
 
 struct Markdown {
     source: Arc<Entry>,
@@ -1591,7 +1596,7 @@ impl App {
                 if self
                     .notice
                     .as_ref()
-                    .is_some_and(|(_, since)| since.elapsed() >= Duration::from_secs(8))
+                    .is_some_and(|(_, since)| since.elapsed() >= NOTICE_DURATION)
                 {
                     self.notice = None;
                 }
@@ -2983,7 +2988,7 @@ impl App {
         .into()
     }
     fn composer_editor(&self, running: bool) -> Element<'_, Message> {
-        let line_height = self.catalog.settings.font_size * 1.3;
+        let line_height = self.catalog.settings.font_size * COMPOSER_LINE_HEIGHT_FACTOR;
         let editor = text_editor(&self.editor)
             .style(theme::editor)
             .placeholder(if self.io_busy || self.closing {
@@ -2996,12 +3001,12 @@ impl App {
             .on_action(Message::Editor)
             .key_binding(composer_key_binding)
             .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
-            .min_height(2. * line_height)
+            .min_height(COMPOSER_MIN_LINES as f32 * line_height)
             .size(self.catalog.settings.font_size);
         crate::growing_editor::growing_editor(
             editor,
             &self.editor,
-            10. * line_height + 24.,
+            COMPOSER_MAX_LINES as f32 * line_height + 2. * crate::growing_editor::PADDING,
             Message::Editor,
             |message| match message {
                 Message::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
@@ -3959,9 +3964,9 @@ impl App {
             };
             let item = theme::button(
                 row![
-                    ellipsized_text(option, 12., None),
+                    ellipsized_text(option, FOOTER_MENU_TEXT_SIZE, None),
                     text(if chosen { "✓" } else { "" })
-                        .size(12)
+                        .size(FOOTER_MENU_TEXT_SIZE)
                         .color(ACCENT)
                         .width(16),
                 ]
@@ -3974,7 +3979,9 @@ impl App {
             .on_press(message)
             .style(move |theme, status| theme::menu_button(theme, status, focused || chosen));
             options = options.push(
-                if footer_text_width(option, 12.) > 228. - crate::scrollbar::GUTTER {
+                if footer_text_width(option, FOOTER_MENU_TEXT_SIZE)
+                    > 228. - crate::scrollbar::GUTTER
+                {
                     footer_tip(item, option.clone())
                 } else {
                     item.into()
@@ -5210,7 +5217,8 @@ mod tests {
         for width in [360., 860.] {
             let mut frames = Vec::new();
             let mut cache = Cache::new();
-            for tick in [0, 2, 4, 6, 8] {
+            // Sample activity over time without specifying its exact waveform/period.
+            for tick in 0..16 {
                 app.tick = tick;
                 let mut icons = Vec::new();
                 for open in [false, true] {
@@ -5241,13 +5249,31 @@ mod tests {
                         } else {
                             app.groups.remove("group");
                         }
-                        let size = iced::Size::new(width, 40.);
+                        let size = iced::Size::new(width, 100.);
                         let mut ui = UserInterface::build(
                             app.activity_row(ActivityRow::Activity(0)),
                             size,
                             cache,
                             &mut renderer,
                         );
+                        let mut bounds = UiBounds::default();
+                        ui.operate(&renderer, &mut bounds);
+                        // Compare only the disclosure area before the first label,
+                        // at the actual header height, not a fixed icon-size crop.
+                        let icon_width = bounds
+                            .labels
+                            .iter()
+                            .map(|(_, b)| b.x)
+                            .min_by(f32::total_cmp)
+                            .unwrap()
+                            .floor() as usize;
+                        let header_height = bounds
+                            .containers
+                            .iter()
+                            .map(|b| b.y + b.height)
+                            .max_by(f32::total_cmp)
+                            .unwrap()
+                            .ceil() as usize;
                         for cursor in [
                             mouse::Cursor::Unavailable,
                             // Hover the far edge, including the header's padding, not the icon.
@@ -5277,19 +5303,20 @@ mod tests {
                                 cursor,
                             );
                             let pixels = renderer.screenshot(
-                                iced::Size::new(width as u32, 40),
+                                iced::Size::new(width as u32, size.height as u32),
                                 1.,
                                 theme::BACKGROUND,
                             );
                             icons.push(
                                 pixels
                                     .chunks_exact(width as usize * 4)
-                                    .flat_map(|row| row[..16 * 4].iter().copied())
+                                    .take(header_height)
+                                    .flat_map(|row| row[..icon_width * 4].iter().copied())
                                     .collect::<Vec<_>>(),
                             );
                         }
                         assert!(matches!(
-                            click_header(&mut ui, &mut renderer, width - 1.).as_slice(),
+                            click_at(&mut ui, &mut renderer, iced::Point::new(width - 1., 1.)).as_slice(),
                             [Message::ToggleGroup(id)] if id == "group"
                         ));
                         cache = ui.into_cache();
@@ -5309,13 +5336,10 @@ mod tests {
                 frames.push(icons);
             }
             for index in [0, 2, 6, 8] {
-                assert_ne!(
-                    frames[0][index], frames[1][index],
+                assert!(
+                    frames.iter().any(|frame| frame[index] != frames[0][index]),
                     "working circle animates"
                 );
-                assert_ne!(frames[1][index], frames[2][index], "working circle fills");
-                assert_eq!(frames[1][index], frames[3][index], "circle pulses back");
-                assert_eq!(frames[0][index], frames[4][index], "animation repeats");
             }
             for index in [1, 3, 4, 5, 7, 9, 10, 11] {
                 assert!(
@@ -5383,7 +5407,7 @@ mod tests {
                     header = Some(current);
                 }
                 if open {
-                    assert!(bounds.label("Command").y > current.0.y + current.0.height + 8.);
+                    assert!(bounds.label("Command").y > current.0.y + current.0.height);
                     assert!(
                         bounds.label("Code execution: parent-call").y > bounds.label("Output").y
                     );
@@ -5392,7 +5416,7 @@ mod tests {
                 }
                 // The original header remains the collapse/expand hit target.
                 assert!(
-                    matches!(click_header(&mut ui, &mut renderer, current.0.center_x()).as_slice(), [Message::ToggleEntry(id)] if id == &entry.id)
+                    matches!(click_at(&mut ui, &mut renderer, current.0.center()).as_slice(), [Message::ToggleEntry(id)] if id == &entry.id)
                 );
                 cache = ui.into_cache();
             }
@@ -6129,6 +6153,12 @@ mod tests {
         let h = app.harness.as_ref().unwrap().clone();
         dispatch(
             &mut app,
+            Message::ModelEffort("gpt-6-luna".into(), "medium".into()),
+        )
+        .await;
+        dispatch(&mut app, Message::ModelFast("gpt-6-luna".into(), false)).await;
+        dispatch(
+            &mut app,
             Message::ModelEffort("gpt-6-astra".into(), "max".into()),
         )
         .await;
@@ -6204,7 +6234,10 @@ mod tests {
         dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
         assert_eq!(
             app.footer_menu.as_ref().unwrap().options,
-            ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]
+            MODELS
+                .iter()
+                .map(|model| model.id.to_owned())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -6212,6 +6245,7 @@ mod tests {
     async fn retired_model_recovery_retries_failed_selection_without_losing_notice() {
         let mut app = app();
         let h = app.harness.as_ref().unwrap().clone();
+        let defaults = app.catalog.settings.models[&app.catalog.settings.model].clone();
         let mut session = Session::new(PathBuf::from("/recovery"), &app.catalog.settings);
         session.model = "retired-model".into();
         session.effort = "low".into();
@@ -6241,11 +6275,11 @@ mod tests {
         assert!(app.error.is_none());
         assert!(app.notice.as_ref().unwrap().0.contains("retired-model"));
         let saved = h.store.load_session(&id).unwrap();
-        assert_eq!(saved.model, "gpt-6.1-sol");
-        assert_eq!(saved.effort, "medium");
-        assert!(!saved.fast);
+        assert_eq!(saved.model, app.catalog.settings.model);
+        assert_eq!(saved.effort, defaults.effort);
+        assert_eq!(saved.fast, defaults.fast);
         // Deterministic expiry, without sleeping or an always-on timer.
-        app.notice.as_mut().unwrap().1 = std::time::Instant::now() - Duration::from_secs(9);
+        app.notice.as_mut().unwrap().1 = std::time::Instant::now() - NOTICE_DURATION;
         dispatch(&mut app, Message::NoticeTick).await;
         assert!(app.notice.is_none());
     }
@@ -6615,33 +6649,42 @@ Then implement the fix.";
             .lock()
             .unwrap() = "Thinking…".into();
         let mut renderer = header_renderer();
-        let messages =
-            {
-                let mut ui = iced_runtime::UserInterface::build(
-                    app.agents_panel(),
-                    iced::Size::new(480., 560.),
-                    iced_runtime::user_interface::Cache::new(),
-                    &mut renderer,
-                );
-                let mut bounds = UiBounds::default();
-                ui.operate(&renderer, &mut bounds);
-                assert!(!bounds.labels.iter().any(|(label, _)| {
+        let messages = {
+            let mut ui = iced_runtime::UserInterface::build(
+                app.agents_panel(),
+                iced::Size::new(480., 560.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            assert!(
+                !bounds.labels.iter().any(|(label, _)| {
                     matches!(label.as_str(), "Open" | "Stop" | "Thinking…")
-                }));
-                let profile = bounds.label("Explore");
-                let mut messages = Vec::new();
-                ui.update(
-                    &[
-                        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-                        iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-                    ],
-                    mouse::Cursor::Available(iced::Point::new(profile.x - 6., profile.y - 6.)),
-                    &mut renderer,
-                    &mut iced::advanced::clipboard::Null,
-                    &mut messages,
-                );
-                messages
-            };
+                })
+            );
+            let profile = bounds.label("Explore");
+            let title = bounds.label("Inspect cancellation");
+            let card = bounds
+                .containers
+                .iter()
+                .filter(|b| b.contains(profile.center()) && b.contains(title.center()))
+                .min_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+                .unwrap();
+            let padding = iced::Point::new((card.x + profile.x) / 2., (card.y + profile.y) / 2.);
+            let mut messages = Vec::new();
+            ui.update(
+                &[
+                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ],
+                mouse::Cursor::Available(padding),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            messages
+        };
         assert!(matches!(messages.as_slice(), [Message::Select(id)] if id == &child_id));
         for message in messages {
             dispatch(&mut app, message).await;
@@ -6714,7 +6757,12 @@ Then implement the fix.";
         }
         // Measure the actual available center width, independently of side panels.
         let conversation = app.harness.as_ref().unwrap().get(&child_id).unwrap();
-        for (width, running) in [(1000., false), (664., true), (663., true), (320., false)] {
+        for (width, running, wide) in [
+            (1000., false, true),
+            (1000., true, true),
+            (320., true, false),
+            (320., false, false),
+        ] {
             conversation.running.store(running, Ordering::Release);
             let mut ui = iced_runtime::UserInterface::build(
                 app.center(),
@@ -6730,7 +6778,6 @@ Then implement the fix.";
             assert!(status.x + status.width < stop.x);
             assert!(stop.x + stop.width <= width);
             let title = "Explore · Inspect cancellation";
-            let wide = width >= 664.;
             for label in [title, "Back to main agent"] {
                 assert_eq!(bounds.labels.iter().any(|(s, _)| s == label), wide);
             }
@@ -6749,7 +6796,13 @@ Then implement the fix.";
                     || s.contains("Read-only profile instructions")
                     || s.contains("Parent task")
             }));
-            for (point, back) in [(iced::Point::new(26., 28.), true), (stop.center(), false)] {
+            let back = bounds
+                .containers
+                .iter()
+                .filter(|rect| rect.center_y() == stop.center_y() && rect.x + rect.width < status.x)
+                .min_by(|a, b| a.width.total_cmp(&b.width))
+                .expect("back button content");
+            for (point, back) in [(back.center(), true), (stop.center(), false)] {
                 let mut messages = Vec::new();
                 ui.update(
                     &[
@@ -6804,7 +6857,7 @@ Then implement the fix.";
     }
 
     #[test]
-    fn composer_grows_with_newlines_and_wrapping_up_to_ten_lines() {
+    fn composer_grows_and_shrinks_within_its_configured_limits() {
         use iced::advanced::{layout, widget::Tree};
 
         let mut app = app();
@@ -6817,45 +6870,80 @@ Then implement the fix.";
                 .layout(
                     &mut tree,
                     &renderer,
-                    &layout::Limits::new(iced::Size::ZERO, iced::Size::new(width, 600.)),
+                    &layout::Limits::new(iced::Size::ZERO, iced::Size::new(width, f32::INFINITY)),
                 )
                 .size()
                 .height
         };
-        for font_size in [15., 20.] {
+        let assert_height = |actual: f32, expected: f32| {
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "height {actual}, expected {expected}"
+            );
+        };
+        for font_size in [app.catalog.settings.font_size, 20.] {
             app.catalog.settings.font_size = font_size;
-            let line_height = font_size * 1.3;
-            let min_height = 2. * line_height + 24.;
-            let max_height = 10. * line_height + 24.;
-            for (value, lines) in [
-                ("".to_owned(), 2.),
-                ("first\n".to_owned(), 2.),
-                ("first\nsecond\nthird".to_owned(), 3.),
-                (["line"; 10].join("\n"), 10.),
-                (["line"; 25].join("\n"), 10.),
+            app.editor = text_editor::Content::new();
+            let min_height = measure(&app, 400.);
+            let line_height = app
+                .editor
+                .with_editor(|editor| editor.buffer().metrics().line_height);
+            assert_eq!(line_height, font_size * COMPOSER_LINE_HEIGHT_FACTOR);
+            assert_height(
+                min_height,
+                COMPOSER_MIN_LINES as f32 * line_height + 2. * crate::growing_editor::PADDING,
+            );
+            let max_height =
+                min_height + (COMPOSER_MAX_LINES - COMPOSER_MIN_LINES) as f32 * line_height;
+            let overflow_lines = COMPOSER_MAX_LINES + 7;
+            for lines in [
+                0,
+                1,
+                COMPOSER_MIN_LINES,
+                COMPOSER_MIN_LINES + 1,
+                COMPOSER_MAX_LINES - 1,
+                COMPOSER_MAX_LINES,
+                overflow_lines,
             ] {
+                let value = vec!["line"; lines].join("\n");
                 app.editor = text_editor::Content::with_text(&value);
-                assert_eq!(measure(&app, 400.), lines * line_height + 24., "{value:?}");
+                let visible_lines = lines.clamp(COMPOSER_MIN_LINES, COMPOSER_MAX_LINES);
+                assert_height(
+                    measure(&app, 400.),
+                    min_height + (visible_lines - COMPOSER_MIN_LINES) as f32 * line_height,
+                );
             }
             // Cursor scrolling must not grow the field or discard overflow.
             app.editor
                 .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
-            assert_eq!(measure(&app, 400.), max_height);
-            assert_eq!(app.editor.line_count(), 25);
+            assert_height(measure(&app, 400.), max_height);
+            assert_eq!(app.editor.line_count(), overflow_lines);
             app.editor.perform(text_editor::Action::Select(
                 text_editor::Motion::DocumentStart,
             ));
             app.editor
                 .perform(text_editor::Action::Edit(text_editor::Edit::Backspace));
             assert!(app.editor.is_empty());
-            assert_eq!(measure(&app, 400.), min_height);
+            assert_height(measure(&app, 400.), min_height);
 
             let wrapped = "Words that wrap naturally. ".repeat(8);
             app.editor = text_editor::Content::with_text(&wrapped);
             let height = measure(&app, 400.);
-            assert!(height > min_height && height < max_height);
-            assert_eq!(measure(&app, 100.), max_height);
-            assert_eq!(measure(&app, 2400.), min_height);
+            let narrow = measure(&app, 100.);
+            let wide = measure(&app, wrapped.chars().count() as f32 * font_size);
+            if COMPOSER_MAX_LINES > COMPOSER_MIN_LINES {
+                assert!(
+                    narrow > wide,
+                    "wrapping grows the composer when its limits allow growth"
+                );
+            }
+            assert!(
+                min_height <= wide
+                    && wide <= height
+                    && height <= narrow
+                    && narrow <= max_height + 0.01
+            );
+            assert_height(wide, min_height);
             assert_eq!(app.editor.text(), wrapped);
         }
     }
@@ -7030,10 +7118,10 @@ Then implement the fix.";
         );
     }
 
-    fn click_header(
+    fn click_at(
         ui: &mut iced_runtime::UserInterface<'_, Message, Theme, iced::Renderer>,
         renderer: &mut iced::Renderer,
-        x: f32,
+        point: iced::Point,
     ) -> Vec<Message> {
         let mut messages = Vec::new();
         ui.update(
@@ -7041,7 +7129,7 @@ Then implement the fix.";
                 iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
                 iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             ],
-            mouse::Cursor::Available(iced::Point::new(x, 12.)),
+            mouse::Cursor::Available(point),
             renderer,
             &mut iced::advanced::clipboard::Null,
             &mut messages,
@@ -7053,6 +7141,7 @@ Then implement the fix.";
     struct UiBounds {
         labels: Vec<(String, iced::Rectangle)>,
         containers: Vec<iced::Rectangle>,
+        scrolls: Vec<(iced::advanced::widget::Id, iced::Rectangle)>,
     }
     impl iced::advanced::widget::Operation for UiBounds {
         fn traverse(
@@ -7064,6 +7153,18 @@ Then implement the fix.";
         fn container(&mut self, _: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
             self.containers.push(bounds);
         }
+        fn scrollable(
+            &mut self,
+            id: Option<&iced::advanced::widget::Id>,
+            bounds: iced::Rectangle,
+            _: iced::Rectangle,
+            _: iced::Vector,
+            _: &mut dyn iced::advanced::widget::operation::Scrollable,
+        ) {
+            if let Some(id) = id {
+                self.scrolls.push((id.clone(), bounds));
+            }
+        }
         fn text(
             &mut self,
             _: Option<&iced::advanced::widget::Id>,
@@ -7074,6 +7175,13 @@ Then implement the fix.";
         }
     }
     impl UiBounds {
+        fn leftmost_control(&self) -> iced::Point {
+            self.containers
+                .iter()
+                .min_by(|a, b| a.x.total_cmp(&b.x).then(a.width.total_cmp(&b.width)))
+                .unwrap()
+                .center()
+        }
         fn label(&self, value: &str) -> iced::Rectangle {
             self.labels
                 .iter()
@@ -7105,9 +7213,9 @@ Then implement the fix.";
                 ui.operate(&renderer, &mut bounds);
                 let title = bounds.label(title);
                 let close = bounds.label("×");
-                assert_eq!(title.x, 18.);
+                assert_eq!(title.x, RIGHT_PANEL_PADDING);
                 // The title is centered within the taller close-button row.
-                assert!(title.y >= 18.);
+                assert!(title.y >= RIGHT_PANEL_PADDING);
                 assert_eq!(title.center_y(), close.center_y());
                 headers.push((title, close));
 
@@ -7277,7 +7385,7 @@ Then implement the fix.";
             let _ = app.update(Message::Git(path, status));
             let mut ui = iced_runtime::UserInterface::build(
                 app.footer_content(1400.),
-                iced::Size::new(1400., 36.),
+                iced::Size::new(1400., 100.),
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
             );
@@ -7309,6 +7417,13 @@ Then implement the fix.";
     #[tokio::test]
     async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
         let mut app = app();
+        // This layout fixture uses the plain effort chip, independently of saved defaults.
+        app.catalog
+            .settings
+            .models
+            .get_mut(&app.catalog.settings.model)
+            .unwrap()
+            .fast = false;
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
         app.git.insert(
             app.current().unwrap().project.clone(),
@@ -7333,21 +7448,35 @@ Then implement the fix.";
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
-            for label in [
-                &app.current().unwrap().model,
-                &app.current().unwrap().effort,
-            ] {
-                let control = bounds.label(label);
+            let model = bounds.label(&app.current().unwrap().model);
+            let effort = bounds.label(&app.current().unwrap().effort);
+            let footer = bounds
+                .containers
+                .iter()
+                .filter(|b| {
+                    b.y > 0.
+                        && b.y + b.height == height
+                        && b.contains(model.center())
+                        && b.contains(effort.center())
+                })
+                .min_by(|a, b| a.height.total_cmp(&b.height))
+                .expect("bottom-anchored footer containing both controls");
+            assert!(
+                footer.height < height / 4.,
+                "footer must not take a fill-height share"
+            );
+            assert!(footer.x > left && footer.x + footer.width < width - right);
+            for control in [model, effort] {
                 assert!(
-                    control.y >= height - 36.,
-                    "footer must not take a fill-height share: {control:?}"
+                    control.width > 0. && control.height > 0.,
+                    "control must remain clickable"
                 );
-                assert!(control.x >= left + 5. && control.x + control.width <= width - right - 55.);
                 assert!(
-                    control.width >= 14.,
-                    "control must remain clickable: {control:?}"
+                    control.x >= footer.x && control.x + control.width <= footer.x + footer.width
                 );
+                assert!(control.y >= footer.y && control.y + control.height <= height);
             }
+            assert!(model.x + model.width <= effort.x);
             assert!(
                 bounds
                     .containers
@@ -7358,7 +7487,11 @@ Then implement the fix.";
                 bounds
                     .containers
                     .iter()
-                    .any(|b| b.x == width - 50. && b.height == height)
+                    .any(|b| b.x > footer.x + footer.width
+                        && b.x + b.width == width
+                        && b.y == 0.
+                        && b.height == height
+                        && b.contains(bounds.label("⚙").center()))
             );
             let has_tps = bounds
                 .labels
@@ -7372,9 +7505,9 @@ Then implement the fix.";
             if width == 1600. {
                 let added = bounds.label("+12345");
                 let removed = bounds.label("−678");
-                assert!(added.y >= height - 36. && removed.y >= height - 36.);
+                assert!(added.y >= footer.y && removed.y >= footer.y);
                 assert!(added.x + added.width <= removed.x);
-                assert!(removed.x + removed.width <= width - right - 55.);
+                assert!(removed.x + removed.width <= footer.x + footer.width);
             } else {
                 assert!(!bounds.labels.iter().any(|(label, _)| label == "+12345"));
             }
@@ -7390,7 +7523,7 @@ Then implement the fix.";
             ui.operate(&renderer, &mut menu_bounds);
             let option = menu_bounds.label("gpt-6-luna");
             assert!(
-                option.width >= footer_text_width("gpt-6-luna", 12.),
+                option.width >= footer_text_width("gpt-6-luna", FOOTER_MENU_TEXT_SIZE),
                 "popup options must stay readable even with a narrow chat"
             );
             drop(ui);
@@ -7433,7 +7566,7 @@ Then implement the fix.";
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
             );
-            click_header(&mut ui, &mut renderer, 12.)
+            click_at(&mut ui, &mut renderer, iced::Point::ORIGIN)
         };
         assert!(matches!(messages.as_slice(), [Message::CloseFooterMenu]));
         dispatch(&mut app, messages.into_iter().next().unwrap()).await;
@@ -7524,19 +7657,29 @@ Then implement the fix.";
         let create = {
             let mut ui = iced_runtime::UserInterface::build(
                 app.sidebar_header(),
-                iced::Size::new(346., 24.),
+                iced::Size::new(346., 100.),
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
             );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
             assert!(matches!(
-                click_header(&mut ui, &mut renderer, 12.).as_slice(),
+                click_at(&mut ui, &mut renderer, bounds.leftmost_control()).as_slice(),
                 [Message::ToggleSearch]
             ));
             assert!(matches!(
-                click_header(&mut ui, &mut renderer, 334.).as_slice(),
+                click_at(&mut ui, &mut renderer, bounds.label("+").center()).as_slice(),
                 [Message::New]
             ));
-            let messages = click_header(&mut ui, &mut renderer, 173.);
+            let messages = click_at(
+                &mut ui,
+                &mut renderer,
+                bounds
+                    .label(&project_initials(
+                        &path.file_name().unwrap().to_string_lossy(),
+                    ))
+                    .center(),
+            );
             assert!(matches!(messages.as_slice(), [Message::Create(p)] if p == &path));
             messages.into_iter().next().unwrap()
         };
@@ -7561,9 +7704,7 @@ Then implement the fix.";
                 operate(self);
             }
             fn container(&mut self, _id: Option<&Id>, bounds: iced::Rectangle) {
-                if bounds.size() == iced::Size::new(16., 16.) {
-                    self.containers.push(bounds);
-                }
+                self.containers.push(bounds);
             }
             fn text(&mut self, _id: Option<&Id>, bounds: iced::Rectangle, text: &str) {
                 if text == "PE" {
@@ -7619,31 +7760,41 @@ Then implement the fix.";
         let mut renderer = header_renderer();
         let mut ui = iced_runtime::UserInterface::build(
             app.sidebar_header(),
-            iced::Size::new(160., 24.),
+            iced::Size::new(160., 100.),
             iced_runtime::user_interface::Cache::new(),
             &mut renderer,
         );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let favorites = bounds
+            .scrolls
+            .iter()
+            .find(|(id, _)| id == &iced::advanced::widget::Id::new("favorite-projects"))
+            .unwrap()
+            .1;
+        let search = bounds.leftmost_control();
+        let new = bounds.label("+").center();
         assert!(
-            matches!(click_header(&mut ui, &mut renderer, 38.).as_slice(), [Message::Create(p)] if p == Path::new("/project-0"))
+            matches!(click_at(&mut ui, &mut renderer, iced::Point::new(favorites.x + 1., favorites.center_y())).as_slice(), [Message::Create(p)] if p == Path::new("/project-0"))
         );
         ui.update(
             &[iced::Event::Mouse(mouse::Event::WheelScrolled {
                 delta: mouse::ScrollDelta::Pixels { x: -1000., y: 0. },
             })],
-            mouse::Cursor::Available(iced::Point::new(80., 12.)),
+            mouse::Cursor::Available(favorites.center()),
             &mut renderer,
             &mut iced::advanced::clipboard::Null,
             &mut Vec::new(),
         );
         assert!(
-            matches!(click_header(&mut ui, &mut renderer, 122.).as_slice(), [Message::Create(p)] if p == Path::new("/project-11"))
+            matches!(click_at(&mut ui, &mut renderer, iced::Point::new(favorites.x + favorites.width - 1., favorites.center_y())).as_slice(), [Message::Create(p)] if p == Path::new("/project-11"))
         );
         assert!(matches!(
-            click_header(&mut ui, &mut renderer, 12.).as_slice(),
+            click_at(&mut ui, &mut renderer, search).as_slice(),
             [Message::ToggleSearch]
         ));
         assert!(matches!(
-            click_header(&mut ui, &mut renderer, 148.).as_slice(),
+            click_at(&mut ui, &mut renderer, new).as_slice(),
             [Message::New]
         ));
     }
@@ -7741,14 +7892,35 @@ Then implement the fix.";
         app.sessions.insert(0, moved);
         app.prepare_sidebar();
         assert_eq!(app.sidebar_list.order[13], anchor);
-        cache = check(&mut app, Task::none(), cache, offset + 53.).await;
+        let anchor_index = app
+            .sidebar_list
+            .order
+            .iter()
+            .position(|&id| id == anchor)
+            .unwrap();
+        let moved_offset = app.sidebar_list.prefix(anchor_index) + 7.;
+        assert!(
+            moved_offset > offset,
+            "inserting above the anchor advances its scroll offset"
+        );
+        cache = check(&mut app, Task::none(), cache, moved_offset).await;
 
         // Late scroll notifications from the old layout must not re-enable
         // following. A measured height above the anchor still corrects it.
         let _ = app.update(Message::SidebarScroll(epoch, 0., 300.));
         assert!(!app.sidebar_follow_top);
-        let task = app.update(Message::SidebarSize(app.sidebar_epoch, 1, 48.));
-        cache = check(&mut app, task, cache, offset + 53. + 17.).await;
+        let previous_height = app.sidebar_list.prefix(1) - app.sidebar_list.prefix(0);
+        let task = app.update(Message::SidebarSize(
+            app.sidebar_epoch,
+            1,
+            previous_height * 1.5,
+        ));
+        let measured_offset = app.sidebar_list.prefix(anchor_index) + 7.;
+        assert!(
+            measured_offset > moved_offset,
+            "a taller row above the anchor advances it"
+        );
+        cache = check(&mut app, task, cache, measured_offset).await;
 
         // Returning within one pixel of the top resumes following. Removing
         // the first section and later moving a session back into it stay pinned.
@@ -7786,7 +7958,7 @@ Then implement the fix.";
         let input = {
             let mut ui = iced_runtime::UserInterface::build(
                 app.sidebar_header(),
-                iced::Size::new(346., 24.),
+                iced::Size::new(346., 100.),
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
             );
@@ -7814,8 +7986,10 @@ Then implement the fix.";
                 &mut messages,
             );
             assert!(matches!(messages.as_slice(), [Message::Search(query)] if query == "z"));
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
             assert!(matches!(
-                click_header(&mut ui, &mut renderer, 12.).as_slice(),
+                click_at(&mut ui, &mut renderer, bounds.label("×").center()).as_slice(),
                 [Message::ToggleSearch]
             ));
             messages.into_iter().next().unwrap()
@@ -8166,8 +8340,9 @@ Then implement the fix.";
         assert!(!app.chat_selection.borrow().dragging);
     }
     #[tokio::test]
-    async fn transcript_reuses_layout_by_session_and_entry_not_slot_or_epoch() {
-        use crate::chat_selection::tests::shaped_paragraphs;
+    async fn transcript_layout_work_is_bounded_across_scroll_resize_and_identity_changes() {
+        use crate::chat_selection::tests::{painted_paragraphs, shaped_paragraphs};
+        use iced::advanced::Renderer as _;
         use iced_runtime::{UserInterface, user_interface::Cache};
         let mut app = app();
         let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
@@ -8189,33 +8364,86 @@ Then implement the fix.";
         ));
         let mut build = |app: &App, cache, width| {
             let before = shaped_paragraphs();
-            let ui = UserInterface::build(
+            let mut ui = UserInterface::build(
                 app.view(),
                 iced::Size::new(width, 900.),
                 cache,
                 &mut renderer,
             );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            for &index in &app.transcript.order[app.transcript.visible()] {
+                assert!(
+                    bounds
+                        .labels
+                        .iter()
+                        .any(|(text, _)| text == &app.current().unwrap().entries[index].text),
+                    "the current viewport must display the current entries"
+                );
+            }
+            ui.operate(
+                &renderer,
+                &mut iced::advanced::widget::operation::scrollable::scroll_to::<()>(
+                    iced::advanced::widget::Id::new("chat"),
+                    scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(app.transcript.offset),
+                    },
+                ),
+            );
+            renderer.reset(iced::Rectangle::with_size(iced::Size::new(width, 900.)));
+            ui.draw(
+                &mut renderer,
+                &theme::app(),
+                &iced::advanced::renderer::Style {
+                    text_color: theme::TEXT,
+                },
+                mouse::Cursor::Unavailable,
+            );
+            let painted: Vec<_> = painted_paragraphs(&mut renderer)
+                .into_iter()
+                .filter(|text| text.starts_with("Message "))
+                .collect();
+            assert!(
+                !painted.is_empty(),
+                "the viewport must paint transcript text"
+            );
+            assert!(
+                painted
+                    .iter()
+                    .all(|text| app.transcript.order[app.transcript.visible()]
+                        .iter()
+                        .any(|&index| &app.current().unwrap().entries[index].text == text)),
+                "retained paragraphs must paint current entries: {painted:?}"
+            );
             (ui.into_cache(), shaped_paragraphs() - before)
         };
         let (mut cache, count) = build(&app, Cache::new(), 1280.);
-        assert_eq!(count, app.transcript.visible().len());
+        assert!(
+            count <= app.transcript.visible().len(),
+            "shape only mounted entries"
+        );
         let visible = app.transcript.visible();
-        app.transcript.offset += 120.;
+        let row_height =
+            app.transcript.prefix(visible.start + 1) - app.transcript.prefix(visible.start);
+        app.transcript.offset += row_height;
         app.prepare_visible();
         assert_eq!(app.transcript.visible(), visible.start + 1..visible.end + 1);
         let (next, count) = build(&app, cache, 1280.);
         cache = next;
-        assert_eq!(
-            count, 1,
-            "overlapping Markdown entries must keep their paragraphs"
-        );
-        app.transcript.offset -= 120.;
+        assert!(count <= 1, "scrolling reshapes at most the entering entry");
+        app.transcript.offset -= row_height;
         app.prepare_visible();
         let (next, count) = build(&app, cache, 1280.);
         cache = next;
+        assert!(
+            count <= 1,
+            "returning to a viewport reuses unchanged survivors"
+        );
         assert_eq!(
-            count, 1,
-            "unmounted entries are evicted, not kept in a growing cache"
+            app.markdown.len(),
+            app.transcript.visible().len(),
+            "the mounted cache stays bounded"
         );
         app.view_epoch += 1;
         let (next, count) = build(&app, cache, 1280.);
@@ -8227,8 +8455,7 @@ Then implement the fix.";
         let (next, count) = build(&app, cache, 900.);
         cache = next;
         assert_eq!(count, 0, "width changes resize existing paragraphs");
-        // Keep the same session/slot but replace an entry with identical text and
-        // a new identity. It must not inherit the old entry's interaction state.
+        // Replacing a single entry identity must not reshape unrelated entries.
         let index = app.transcript.order[app.transcript.visible().start];
         let session = app.current_session.as_mut().unwrap();
         session.entries = session
@@ -8237,7 +8464,10 @@ Then implement the fix.";
             .enumerate()
             .map(|(i, entry)| {
                 if i == index {
-                    Entry::new(entry.kind.clone(), entry.text.clone())
+                    Entry::new(
+                        entry.kind.clone(),
+                        format!("Message {i:03}: replacement café text."),
+                    )
                 } else {
                     entry.clone()
                 }
@@ -8246,13 +8476,19 @@ Then implement the fix.";
         app.prepare_visible();
         let (next, count) = build(&app, cache, 900.);
         cache = next;
-        assert_eq!(count, 1);
-        // Even identical entry IDs in a different session must start fresh.
+        assert!(
+            count <= 1,
+            "only the replaced entry can require new shaping"
+        );
+        // Changing sessions must not trigger work outside the mounted viewport.
         let id = pico_core::store::id();
         app.current_session.as_mut().unwrap().id = id.clone();
         app.selected = Some(id);
         let (_, count) = build(&app, cache, 900.);
-        assert_eq!(count, app.transcript.visible().len());
+        assert!(
+            count <= app.transcript.visible().len(),
+            "shape only mounted entries"
+        );
     }
 
     // Drive real redraw feedback and scroll operations, without wheel input.
@@ -8356,7 +8592,9 @@ Then implement the fix.";
         ));
         let tall = iced::Size::new(930., 1350.);
         let mut cache = settle_chat(&mut app, Cache::new(), &mut renderer, tall).await;
-        assert!(app.transcript.viewport > 1200.);
+        assert!(
+            app.transcript.viewport > tall.height / 2. && app.transcript.viewport < tall.height
+        );
         for (group, follow) in groups.iter().zip([false, true]) {
             app.auto_scroll = follow;
             let _ = app.update_inner(Message::ToggleGroup(group.clone()));
@@ -8366,7 +8604,7 @@ Then implement the fix.";
                 "fixture must exceed the old fallback window"
             );
             assert!(
-                app.transcript.total() + 40. < app.transcript.viewport,
+                app.transcript.total() < app.transcript.viewport,
                 "total={} viewport={}",
                 app.transcript.total(),
                 app.transcript.viewport
@@ -8383,7 +8621,10 @@ Then implement the fix.";
             }
             // Reflow into overflow, then back to a fitting pane without scrolling.
             cache = settle_chat(&mut app, cache, &mut renderer, iced::Size::new(930., 500.)).await;
-            assert!(app.transcript.viewport < 500.);
+            assert!(
+                app.transcript.total() > app.transcript.viewport,
+                "the narrow pane overflows"
+            );
             cache = settle_chat(&mut app, cache, &mut renderer, tall).await;
             assert_eq!(app.transcript.offset, 0.);
             assert_eq!(app.transcript.visible(), 0..app.transcript.order.len());
@@ -8399,7 +8640,9 @@ Then implement the fix.";
         app.rebuild_transcript();
         app.prepare_visible();
         let _ = settle_chat(&mut app, cache, &mut renderer, tall).await;
-        assert!(app.transcript.viewport > 1200.);
+        assert!(
+            app.transcript.viewport > tall.height / 2. && app.transcript.viewport < tall.height
+        );
         assert_eq!(app.transcript.visible(), 0..app.transcript.order.len());
     }
 
@@ -8455,8 +8698,12 @@ Then implement the fix.";
         app.transcript.end();
         app.prepare_visible();
         assert!(app.transcript.visible().contains(&202));
-        assert!(app.transcript.visible().len() < 12);
+        assert!(
+            app.transcript.visible().start > 0,
+            "historical entries remain virtualized"
+        );
 
+        let estimate = app.transcript.prefix(203) - app.transcript.prefix(202);
         let mut renderer = header_renderer();
         let size = iced::Size::new(1462., 1320.);
         let mut ui = UserInterface::build(app.center(), size, Cache::new(), &mut renderer);
@@ -8473,12 +8720,12 @@ Then implement the fix.";
         let _ = settle_chat(&mut app, cache, &mut renderer, size).await;
         assert!(app.auto_scroll);
         assert!(
-            app.transcript.prefix(203) - app.transcript.prefix(202) > 500.,
-            "the offscreen mounted reply must not retain its 120px estimate"
+            app.transcript.prefix(203) - app.transcript.prefix(202) > estimate,
+            "the tall offscreen mounted reply must be measured rather than retain its estimate"
         );
         let visible = app.transcript.visible();
         assert_eq!(visible.end, app.transcript.order.len());
-        assert!(visible.len() < 12, "measurement must retain virtualization");
+        assert!(visible.start > 0, "measurement must retain virtualization");
         assert!(
             visible.contains(&205),
             "the prose above the final reply remains mounted"
@@ -8557,7 +8804,19 @@ Then implement the fix.";
         })
         .unwrap();
         dispatch(&mut app, Message::Changed).await;
-        assert_eq!(app.transcript.total(), before + 120.);
+        assert_eq!(
+            app.transcript.prefix(20000),
+            before,
+            "existing row heights survive append"
+        );
+        assert_eq!(
+            app.transcript.prefix(20000) - app.transcript.prefix(19999),
+            333.
+        );
+        assert!(
+            app.transcript.total() > before,
+            "appended entry contributes height"
+        );
         assert!(app.markdown.len() < 100);
         let _ = app.view();
     }

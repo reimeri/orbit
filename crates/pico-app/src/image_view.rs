@@ -57,6 +57,14 @@ fn handles(frames: Vec<Frame>) -> Arc<Vec<DisplayFrame>> {
             .collect(),
     )
 }
+const MODAL_MARGIN: f32 = 24.;
+const INFO_PADDING: f32 = 8.;
+const INFO_TITLE_SIZE: f32 = 14.;
+const INFO_DETAIL_SIZE: f32 = 12.;
+const INFO_LINE_SPACING: f32 = 2.;
+const THUMBNAIL_MAX_WIDTH: f32 = 320.;
+const THUMBNAIL_MAX_HEIGHT: f32 = 220.;
+
 impl Viewer {
     pub fn prepare(&mut self, media: &[Media]) -> Task<Message> {
         let wanted: HashSet<_> = media.iter().filter_map(|m| m.thumbnail.clone()).collect();
@@ -109,8 +117,8 @@ impl Viewer {
         {
             Some(Ok(handle)) => theme::button(
                 container(image(handle.clone()).content_fit(iced::ContentFit::Contain))
-                    .max_width(320)
-                    .max_height(220),
+                    .max_width(THUMBNAIL_MAX_WIDTH)
+                    .max_height(THUMBNAIL_MAX_HEIGHT),
             )
             .on_press(crate::ui::Message::OpenImage(media.clone()))
             .style(theme::text_button)
@@ -259,8 +267,8 @@ impl Viewer {
         width: f32,
         height: f32,
     ) -> Element<'_, crate::ui::Message> {
-        let available_width = (width - 48.).max(1.);
-        let available_height = (height - 48.).max(1.);
+        let available_width = (width - 2. * MODAL_MARGIN).max(1.);
+        let available_height = (height - 2. * MODAL_MARGIN).max(1.);
         let body: Element<'_, crate::ui::Message> = match &self.frames {
             None => text("Loading image…").into(),
             Some(Err(error)) => text(format!("Could not open image: {error}")).into(),
@@ -275,15 +283,15 @@ impl Viewer {
                     column![
                         crate::ellipsized_text::shrinking_ellipsized_text(
                             &title,
-                            14.,
+                            INFO_TITLE_SIZE,
                             Some(theme::IMAGE_TEXT)
                         ),
-                        text(description).size(12),
+                        text(description).size(INFO_DETAIL_SIZE),
                     ]
-                    .spacing(2),
+                    .spacing(INFO_LINE_SPACING),
                 )
                 .max_width(600)
-                .padding(8)
+                .padding(INFO_PADDING)
                 .style(|_| container::Style {
                     text_color: Some(theme::IMAGE_TEXT),
                     ..Default::default()
@@ -458,10 +466,21 @@ mod tests {
             iced::Font::DEFAULT,
             iced::Pixels(16.),
         ));
-        for (width, height, available_width, expected_image) in [
-            (640, 60, 800., Size::new(320., 30.)),
-            (100, 400, 800., Size::new(55., 220.)),
-            (320, 30, 180., Size::new(160., 15.)),
+        // Measure the normal button inset instead of pinning iced's padding default.
+        let mut button = theme::button::<crate::ui::Message>(iced::widget::space());
+        let mut tree = Tree::new(&button as &dyn Widget<_, _, _>);
+        let padding = button
+            .layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(800., 1000.)),
+            )
+            .size();
+        for (width, height, available_width) in [
+            (640, 60, 800.),
+            (100, 400, 800.),
+            (320, 30, 180.),
+            (48, 32, 800.),
         ] {
             let mut viewer = Viewer::default();
             viewer.thumbnails.insert(
@@ -479,12 +498,30 @@ mod tests {
                 &renderer,
                 &layout::Limits::new(Size::ZERO, Size::new(available_width, 1000.)),
             );
-            // Only the button's normal padding should surround the fitted image.
-            assert_eq!(
-                node.size(),
-                Size::new(expected_image.width + 20., expected_image.height + 10.),
-                "{width}×{height} thumbnail in {available_width}px available width",
+            let fitted = Size::new(
+                node.size().width - padding.width,
+                node.size().height - padding.height,
             );
+            let available = Size::new(
+                (available_width - padding.width).min(THUMBNAIL_MAX_WIDTH),
+                THUMBNAIL_MAX_HEIGHT,
+            );
+            let natural = Size::new(width as f32, height as f32);
+            assert!(fitted.width > 0. && fitted.height > 0.);
+            assert!(
+                fitted.width <= available.width + 0.001
+                    && fitted.height <= available.height + 0.001
+            );
+            assert!((fitted.width / fitted.height - natural.width / natural.height).abs() < 0.001);
+            if natural.width <= available.width && natural.height <= available.height {
+                assert_eq!(fitted, natural, "small images are not enlarged");
+            } else {
+                assert!(
+                    (fitted.width - available.width).abs() < 0.001
+                        || (fitted.height - available.height).abs() < 0.001,
+                    "shrink-wrap to the constraining axis rather than leaving blank space"
+                );
+            }
         }
     }
 
@@ -500,14 +537,50 @@ mod tests {
             iced::Font::DEFAULT,
             iced::Pixels(16.),
         ));
-        let size = Size::new(72., 72.);
+        let mut view = viewer.attachment(&media, 3);
+        let mut tree = Tree::new(view.as_widget());
+        let size = view
+            .as_widget_mut()
+            .layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(400., 400.)),
+            )
+            .size();
         let mut ui = iced_runtime::UserInterface::build(
             viewer.attachment(&media, 3),
             size,
             iced_runtime::user_interface::Cache::new(),
             &mut renderer,
         );
-        for (point, text_count) in [(Point::new(100., 100.), 1), (Point::new(36., 36.), 2)] {
+        #[derive(Default)]
+        struct RemoveBounds(Option<Rectangle>);
+        impl iced::advanced::widget::Operation for RemoveBounds {
+            fn traverse(
+                &mut self,
+                visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
+            ) {
+                visit(self);
+            }
+            fn text(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                bounds: Rectangle,
+                text: &str,
+            ) {
+                if text == "×" {
+                    self.0 = Some(bounds);
+                }
+            }
+        }
+        let mut remove = RemoveBounds::default();
+        ui.operate(&renderer, &mut remove);
+        let remove = remove.0.unwrap().center();
+        let base = Point::new(size.width / 4., size.height * 0.75);
+        for (point, hovering) in [
+            (Point::new(size.width + 1., size.height + 1.), false),
+            (base, true),
+        ] {
             let cursor = mouse::Cursor::Available(point);
             ui.update(
                 &[iced::Event::Mouse(mouse::Event::CursorMoved {
@@ -530,17 +603,26 @@ mod tests {
             let iced::Renderer::Secondary(renderer) = &mut renderer else {
                 unreachable!()
             };
-            assert_eq!(
-                renderer
-                    .layers()
-                    .iter()
-                    .flat_map(|layer| &layer.text)
-                    .map(|group| group.as_slice().len())
-                    .sum::<usize>(),
-                text_count
-            );
+            use iced::advanced::graphics::text::Text;
+            let remove_painted = renderer
+                .layers()
+                .iter()
+                .flat_map(|layer| &layer.text)
+                .flat_map(|group| group.as_slice())
+                .any(|text| match text {
+                    Text::Paragraph { paragraph, .. } => paragraph
+                        .upgrade()
+                        .unwrap()
+                        .buffer()
+                        .lines
+                        .iter()
+                        .any(|line| line.text() == "×"),
+                    Text::Cached { content, .. } => content == "×",
+                    _ => false,
+                });
+            assert_eq!(remove_painted, hovering, "remove is visible only on hover");
         }
-        for (point, remove) in [(Point::new(61., 11.), true), (Point::new(28., 40.), false)] {
+        for (point, remove) in [(remove, true), (base, false)] {
             let mut messages = vec![];
             ui.update(
                 &[
@@ -575,12 +657,12 @@ mod tests {
             iced::Font::DEFAULT,
             iced::Pixels(16.),
         ));
-        for (width, height, animated, expected) in [
-            (96, 64, false, Size::new(96., 64.)),
-            (96, 64, true, Size::new(96., 104.)),
-            (1600, 400, false, Size::new(752., 188.)),
-            (400, 1600, false, Size::new(138., 552.)),
-            (400, 1600, true, Size::new(128., 552.)),
+        for (width, height, animated) in [
+            (96, 64, false),
+            (96, 64, true),
+            (1600, 400, false),
+            (400, 1600, false),
+            (400, 1600, true),
         ] {
             let frames = (0..if animated { 2 } else { 1 })
                 .map(|_| Frame {
@@ -606,7 +688,18 @@ mod tests {
                 &renderer,
                 &layout::Limits::new(Size::ZERO, Size::new(800., 600.)),
             );
-            assert_eq!(node.size(), expected);
+            let picture = node.children()[0].size();
+            let controls_height = node.size().height - picture.height;
+            assert_eq!(controls_height > 0., animated);
+            let available = Size::new(800. - 2. * MODAL_MARGIN, 600. - 2. * MODAL_MARGIN);
+            let scale = (available.width / width as f32)
+                .min((available.height - controls_height) / height as f32)
+                .min(1.);
+            assert_eq!(
+                picture,
+                Size::new(width as f32 * scale, height as f32 * scale)
+            );
+            assert!(node.size().width <= available.width && node.size().height <= available.height);
         }
     }
 
@@ -629,23 +722,27 @@ mod tests {
             }]))),
             ..Default::default()
         };
-        let mut view = viewer.view(
+        let mut sizes = Vec::new();
+        for title in [
+            "image.png".to_owned(),
             format!("/{}image.png", "long-directory/".repeat(20)),
-            "320 × 120 · 2588760 bytes".into(),
-            800.,
-            600.,
-        );
-        let mut tree = Tree::new(view.as_widget());
-        let node = view.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &layout::Limits::new(Size::ZERO, Size::new(800., 600.)),
-        );
-        // Column → hover → info container. Metadata stays two lines,
-        // not a path-sized paragraph that clips the dimensions/byte count.
-        let info = &node.children()[0].children()[1];
-        assert!((300. ..=320.).contains(&info.size().width));
-        assert!(info.size().height <= 52., "{:?}", info.size());
+        ] {
+            let mut view = viewer.view(title, "320 × 120 · 2588760 bytes".into(), 800., 600.);
+            let mut tree = Tree::new(view.as_widget());
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(800., 600.)),
+            );
+            // Column → image/info pair → metadata. Long paths must not wrap
+            // into a paragraph that crowds out the dimensions and byte count.
+            let info = &node.children()[0].children()[1];
+            assert!(info.size().width <= node.size().width);
+            assert!(info.size().height <= node.size().height);
+            sizes.push(info.size());
+        }
+        assert_eq!(sizes[0].height, sizes[1].height);
+        assert!(sizes[1].width >= sizes[0].width);
     }
 
     #[test]
@@ -668,9 +765,13 @@ mod tests {
             ("a.png", "800 × 400 · 2588760 bytes"),
         ] {
             let mut natural: Element<'_, crate::ui::Message> = container(
-                iced::widget::column![text(title).size(14), text(description).size(12)].spacing(2),
+                iced::widget::column![
+                    text(title).size(INFO_TITLE_SIZE),
+                    text(description).size(INFO_DETAIL_SIZE)
+                ]
+                .spacing(INFO_LINE_SPACING),
             )
-            .padding(8)
+            .padding(INFO_PADDING)
             .into();
             let mut tree = Tree::new(natural.as_widget());
             let expected = natural
@@ -714,6 +815,28 @@ mod tests {
             ..Default::default()
         };
         let size = Size::new(721., 321.); // Centering puts both edges at .5 logical pixels.
+        let mut view = viewer.view(
+            "a.png".into(),
+            "320 × 120 · 1234 bytes".into(),
+            size.width,
+            size.height,
+        );
+        let mut tree = Tree::new(view.as_widget());
+        let node = view.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let pair = Layout::new(&node).children().next().unwrap();
+        let info = pair.children().nth(1).unwrap();
+        let lines: Vec<_> = info
+            .children()
+            .next()
+            .unwrap()
+            .children()
+            .map(|line| line.bounds())
+            .collect();
+        assert_eq!(lines.len(), 2);
         let mut ui = iced_runtime::UserInterface::build(
             container(viewer.view(
                 "a.png".into(),
@@ -757,28 +880,39 @@ mod tests {
             let y = first / physical.width as usize;
             // Both text lines must remain bright above the translucent panel,
             // not be dimmed by a background submitted in a later render layer.
-            for (top, bottom) in [(8., 26.), (28., 44.)] {
-                let left = x + (8. * scale) as usize;
-                let right = x + (48. * scale) as usize;
-                let top = y + (top * scale) as usize;
-                let bottom = y + (bottom * scale) as usize;
-                let brightest = (top..bottom)
+            let foreground = theme::IMAGE_TEXT.into_rgba8();
+            for line in &lines {
+                let left = x + (line.x * scale).floor() as usize;
+                let right = x + ((line.x + line.width) * scale).ceil() as usize;
+                let top = y + (line.y * scale).floor() as usize;
+                let bottom = y + ((line.y + line.height) * scale).ceil() as usize;
+                let closest = (top..bottom)
                     .flat_map(|y| (left..right).map(move |x| (y * physical.width as usize + x) * 4))
-                    .map(|offset| hovered[offset])
-                    .max()
+                    .map(|offset| {
+                        (0..3)
+                            .map(|c| hovered[offset + c].abs_diff(foreground[c]))
+                            .max()
+                            .unwrap()
+                    })
+                    .min()
                     .unwrap();
                 assert!(
-                    brightest > 220,
-                    "dimmed metadata text on {backend} at scale {scale}: {brightest}"
+                    closest < 30,
+                    "dimmed metadata text on {backend} at scale {scale}: color distance {closest}"
                 );
             }
             // Check the first painted top row and left column, away from text.
             // Quad/scissor rounding previously left these bright on WGPU.
+            let interior = hovered[((y + 1) * physical.width as usize + x + 1) * 4];
+            assert!(
+                interior < plain[first * 4],
+                "hover must paint the metadata backdrop"
+            );
             for (x, y) in [(x + 4, y), (x, y + 4)] {
                 let offset = (y * physical.width as usize + x) * 4;
                 assert!(plain[offset] > 200);
                 assert!(
-                    hovered[offset] < 180,
+                    hovered[offset].abs_diff(interior) <= 3,
                     "uncovered image edge on {backend} at scale {scale}: {}",
                     hovered[offset]
                 );
@@ -799,7 +933,11 @@ mod tests {
 
     #[test]
     fn metadata_is_hover_only_and_playback_click_does_not_dismiss() {
-        use iced::{Point, Size, advanced::Renderer as _, mouse};
+        use iced::{
+            Point, Size,
+            advanced::{Renderer as _, renderer::Headless},
+            mouse,
+        };
         let viewer = Viewer {
             frames: Some(Ok(handles(
                 pico_core::media::frames_from_bytes(
@@ -815,6 +953,15 @@ mod tests {
             iced::Font::DEFAULT,
             iced::Pixels(16.),
         ));
+        let mut view = viewer.view("image.gif".into(), "96 × 64 · 123 bytes".into(), 800., 600.);
+        let mut tree = Tree::new(view.as_widget());
+        let node = view.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(800., 600.)),
+        );
+        let picture = node.children()[0].bounds();
+        let playback = node.children()[1].bounds();
         let mut ui = iced_runtime::UserInterface::build(
             viewer.view("image.gif".into(), "96 × 64 · 123 bytes".into(), 800., 600.),
             Size::new(800., 600.),
@@ -822,10 +969,12 @@ mod tests {
             &mut renderer,
         );
         // The 96×64 fixture is not enlarged. The button is centered below it.
-        for (point, expected_text_count) in [
-            (Point::new(48., 32.), 3),
-            (Point::new(48., 88.), 1),
-            (Point::new(200., 200.), 1),
+        let mut baseline = None;
+        for (cursor, metadata_visible) in [
+            (mouse::Cursor::Unavailable, false),
+            (mouse::Cursor::Available(picture.center()), true),
+            (mouse::Cursor::Available(playback.center()), false),
+            (mouse::Cursor::Available(Point::new(200., 200.)), false),
         ] {
             renderer.reset(iced::Rectangle::with_size(Size::new(800., 600.)));
             ui.draw(
@@ -834,23 +983,34 @@ mod tests {
                 &iced::advanced::renderer::Style {
                     text_color: Color::WHITE,
                 },
-                mouse::Cursor::Available(point),
+                cursor,
             );
-            let iced::Renderer::Secondary(renderer) = &mut renderer else {
-                unreachable!()
-            };
-            let count: usize = renderer
-                .layers()
-                .iter()
-                .flat_map(|layer| &layer.text)
-                .map(|group| group.as_slice().len())
-                .sum();
-            assert_eq!(count, expected_text_count);
+            let pixels = renderer.screenshot(Size::new(800, 600), 1., Color::BLACK);
+            let image_pixels: Vec<_> = (picture.y as usize..(picture.y + picture.height) as usize)
+                .flat_map(|y| {
+                    let start = (y * 800 + picture.x as usize) * 4;
+                    pixels[start..start + picture.width as usize * 4]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            if let Some(baseline) = &baseline {
+                assert_eq!(
+                    &image_pixels != baseline,
+                    metadata_visible,
+                    "metadata changes the image only while the picture is hovered"
+                );
+            } else {
+                baseline = Some(image_pixels);
+            }
         }
         for (point, toggle) in [
-            (Point::new(48., 88.), true),
+            (playback.center(), true),
             (Point::new(4., 4.), false), // Includes clicks over the metadata.
-            (Point::new(48., 60.), false),
+            (
+                iced::Point::new(picture.center_x(), picture.y + picture.height - 1.),
+                false,
+            ),
         ] {
             let mut messages = Vec::new();
             ui.update(

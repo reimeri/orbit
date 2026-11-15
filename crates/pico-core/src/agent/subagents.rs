@@ -976,8 +976,11 @@ mod tests {
             &["exec_command", "write_stdin", "view_image"],
         )
         .await;
-        assert_eq!(explore_request.body["model"], "gpt-6-luna");
-        assert_eq!(explore_request.body["reasoning"]["effort"], "high");
+        assert_eq!(explore_request.body["model"], Profile::Explore.model());
+        assert_eq!(
+            explore_request.body["reasoning"]["effort"],
+            Profile::Explore.effort()
+        );
         assert!(
             !explore_request
                 .body
@@ -1004,8 +1007,11 @@ mod tests {
         );
         let review = f.spawn(Profile::Review, None, "review").unwrap();
         let review_request = f.request().await;
-        assert_eq!(review_request.body["model"], "gpt-6.1-sol");
-        assert_eq!(review_request.body["reasoning"]["effort"], "medium");
+        assert_eq!(review_request.body["model"], Profile::Review.model());
+        assert_eq!(
+            review_request.body["reasoning"]["effort"],
+            Profile::Review.effort()
+        );
         assert_eq!(f.h.active_children(&f.parent), 2);
         assert_eq!(
             f.wait(vec![explore.run_id.clone(), review.run_id.clone()], 0)

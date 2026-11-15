@@ -390,7 +390,7 @@ impl Draft {
                     .size(font_size)
                     // Keep the answer field fixed-height while sharing the
                     // composer's overflow gutter and 12 px vertical padding.
-                    .min_height(editor_height - 24.)
+                    .min_height(editor_height - 2. * crate::growing_editor::PADDING)
                     .on_action(move |action| message(Action::Editor(action)))
                     .key_binding(move |event| {
                         if matches!(event.status, text_editor::Status::Focused { .. })
@@ -963,6 +963,29 @@ mod tests {
 
     #[test]
     fn questionnaire_answer_scrollbar_handles_overflow_without_editing_the_answer() {
+        #[derive(Default)]
+        struct EditorBounds {
+            id: String,
+            bounds: Option<iced::Rectangle>,
+        }
+        impl iced::advanced::widget::Operation for EditorBounds {
+            fn traverse(
+                &mut self,
+                visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
+            ) {
+                visit(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&iced::advanced::widget::Id>,
+                bounds: iced::Rectangle,
+                _: &mut dyn iced::advanced::widget::operation::Focusable,
+            ) {
+                if id.is_some_and(|id| id == &iced::advanced::widget::Id::from(self.id.clone())) {
+                    self.bounds = Some(bounds);
+                }
+            }
+        }
         let mut draft = draft();
         apply(&mut draft, Action::Select(3));
         let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
@@ -978,11 +1001,14 @@ mod tests {
         // wrapped overflow and shrinking again with retained widget state.
         for question in [0, 1] {
             draft.current = question;
-            for value in [
-                "Short answer".to_owned(),
-                "A line of text λ\n".repeat(40),
-                "A long wrapped answer with Unicode λ and words. ".repeat(100),
-                "Short again".to_owned(),
+            for (value, overflowing) in [
+                ("Short answer".to_owned(), false),
+                ("A line of text λ\n".repeat(40), true),
+                (
+                    "A long wrapped answer with Unicode λ and words. ".repeat(100),
+                    true,
+                ),
+                ("Short again".to_owned(), false),
             ] {
                 draft.answers[question].editor = text_editor::Content::with_text(&value);
                 let cursor = draft.answers[question].editor.cursor();
@@ -1010,7 +1036,12 @@ mod tests {
                     .filter(|(_, background)| thumb_backgrounds.contains(background))
                     .map(|(quad, _)| quad.bounds)
                     .collect();
-                let overflowing = value.len() > 100;
+                let mut editor = EditorBounds {
+                    id: draft.editor_id(),
+                    ..EditorBounds::default()
+                };
+                ui.operate(&renderer, &mut editor);
+                let editor = editor.bounds.unwrap();
                 assert_eq!(
                     thumbs.len(),
                     usize::from(overflowing),
@@ -1021,7 +1052,10 @@ mod tests {
                 if overflowing {
                     // Click the track below the thumb. It must route a scroll
                     // to this question, not move the caret or advance the form.
-                    let point = iced::Point::new(thumbs[0].center_x(), thumbs[0].y + 80.);
+                    let thumb_bottom = thumbs[0].y + thumbs[0].height;
+                    let track_bottom = editor.y + editor.height - crate::growing_editor::PADDING;
+                    let point =
+                        iced::Point::new(thumbs[0].center_x(), (thumb_bottom + track_bottom) / 2.);
                     ui.update(
                         &[
                             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),

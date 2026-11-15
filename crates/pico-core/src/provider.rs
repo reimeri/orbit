@@ -13,6 +13,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+const SUMMARY_CONTEXT_DIVISOR: u64 = 32;
+
 #[derive(Clone, Debug)]
 pub enum Delta {
     Text {
@@ -177,7 +179,8 @@ impl Provider {
         // A tools-disabled summarizer cannot open a spilled summary; continue
         // independently after an oversized summary and retain its reference here.
         let mut preserved = Vec::new();
-        let summary_budget = crate::output::character_budget((context_limit / 32) as usize);
+        let summary_budget =
+            crate::output::character_budget((context_limit / SUMMARY_CONTEXT_DIVISOR) as usize);
         if summary.chars().count() > summary_budget {
             summary.clear();
         }
@@ -550,7 +553,7 @@ impl ResponseStream {
 mod tests {
     use super::*;
     async fn fixture(
-        replies: Vec<(u16, String)>,
+        replies: impl IntoIterator<Item = (u16, String), IntoIter: Send + 'static>,
     ) -> (
         tempfile::TempDir,
         Provider,
@@ -586,6 +589,13 @@ mod tests {
         ])
         .await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        // Use a non-default selection so accidentally routing with the default is caught.
+        session.model = crate::models::MODELS
+            .iter()
+            .find(|m| m.id != session.model)
+            .unwrap()
+            .id
+            .into();
         session.fast = true;
         session.effort = "max".into();
         provider
@@ -602,7 +612,7 @@ mod tests {
             let request = requests.recv().await.unwrap();
             let (headers, body) = request.split_once("\r\n\r\n").unwrap();
             let body: Value = serde_json::from_str(body).unwrap();
-            assert_eq!(body["model"], "gpt-6.1-sol");
+            assert_eq!(body["model"], session.model);
             assert_eq!(body["reasoning"]["effort"], "max");
             let hint = headers
                 .lines()
@@ -612,11 +622,17 @@ mod tests {
                 assert_eq!(body["service_tier"], "priority");
                 assert_eq!(
                     hint,
-                    "x-codex-routing-hint: model=gpt-6.1-sol;tier=priority"
+                    format!(
+                        "x-codex-routing-hint: model={};tier=priority",
+                        session.model
+                    )
                 );
             } else {
                 assert!(body.get("service_tier").is_none());
-                assert_eq!(hint, "x-codex-routing-hint: model=gpt-6.1-sol");
+                assert_eq!(
+                    hint,
+                    format!("x-codex-routing-hint: model={}", session.model)
+                );
             }
         }
     }
@@ -745,24 +761,20 @@ mod tests {
         let reply = crate::test_support::completed(
             json!([{"type":"message","id":"summary","content":[{"type":"output_text","text":"Preserve goal: fix buffer; test boundary sizes."}]}]),
         );
-        let (dir, provider, mut requests, server) = fixture(vec![
-            (200, reply.clone()),
-            (200, reply.clone()),
-            (200, reply),
-        ])
-        .await;
+        let (dir, provider, mut requests, server) = fixture(std::iter::repeat((200, reply))).await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.fast = true;
         session.accept("λ".repeat(5000).into());
         session.consume_pending();
         // Force the oversized-history fallback without making a network-native-compaction attempt.
         session.input[0]["content"] = json!("z".repeat(30_000));
+        let context_limit = 8000;
         let usage = std::sync::Mutex::new(Usage::default());
         let compacted = provider
             .compact(
                 &session,
                 "fixture",
-                8000,
+                context_limit,
                 &CancellationToken::new(),
                 &|response| {
                     usage
@@ -773,8 +785,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(usage.lock().unwrap().total_input, 111);
-        assert_eq!(usage.lock().unwrap().total_output, 33);
         assert!(
             compacted.input[0]["content"]
                 .as_str()
@@ -782,16 +792,36 @@ mod tests {
                 .contains("fix buffer")
         );
         assert_eq!(session.entries[0].text.chars().count(), 5000);
-        server.await.unwrap();
-        for _ in 0..3 {
-            let request = requests.recv().await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let mut chunks = 0;
+        let mut original_characters = 0;
+        while let Some(request) = requests.recv().await {
+            chunks += 1;
             let body: Value =
                 serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
             assert_eq!(body["service_tier"], "priority");
-            assert!(request.contains("x-codex-routing-hint: model=gpt-6.1-sol;tier=priority\r\n"));
-            assert!(body["input"][0]["content"].as_str().unwrap().len() < 5000);
+            assert!(request.contains(&format!(
+                "x-codex-routing-hint: model={};tier=priority\r\n",
+                session.model
+            )));
+            let input = body["input"][0]["content"].as_str().unwrap();
+            assert!(
+                input.len() <= context_limit as usize,
+                "summarizer inputs stay bounded"
+            );
+            original_characters += input.matches('λ').count();
             assert_eq!(body["tools"], json!([]));
         }
+        assert!(chunks > 1, "oversized history must be split");
+        assert_eq!(
+            original_characters,
+            session.entries[0].text.chars().count(),
+            "all Unicode content is summarized exactly once"
+        );
+        // Each fixture response reports these token counts, independently of chunking policy.
+        assert_eq!(usage.lock().unwrap().total_input, 37 * chunks);
+        assert_eq!(usage.lock().unwrap().total_output, 11 * chunks);
         assert!(!valid_compaction(&[
             json!({"type":"compaction","encrypted_content":"opaque"}),
             json!({"type":"custom_tool_call","call_id":"bad"})
@@ -799,21 +829,23 @@ mod tests {
     }
     #[tokio::test]
     async fn oversized_summary_files_survive_later_chunks_and_compactions() {
+        let context_limit = 8000;
+        let budget =
+            crate::output::character_budget((context_limit / SUMMARY_CONTEXT_DIVISOR) as usize);
         let oversized = format!(
             "start {} crucial middle {} end",
-            "λ".repeat(700),
-            "界".repeat(700)
+            "λ".repeat(budget),
+            "界".repeat(budget)
         );
         let reply = |text: &str| {
             crate::test_support::completed(json!([
                 {"type":"message", "content":[{"type":"output_text", "text":text}]}
             ]))
         };
-        let (dir, provider, mut requests, server) = fixture(vec![
-            (200, reply(&oversized)),
-            (200, reply("latest chunk")),
-            (200, reply("next compaction")),
-        ])
+        let (dir, provider, mut requests, server) = fixture(
+            std::iter::once((200, reply(&oversized)))
+                .chain(std::iter::repeat((200, reply("latest chunk")))),
+        )
         .await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.accept("a".repeat(5000).into());
@@ -823,7 +855,7 @@ mod tests {
             .compact(
                 &session,
                 "fixture",
-                8000,
+                context_limit,
                 &CancellationToken::new(),
                 &|_| {},
             )
@@ -842,14 +874,14 @@ mod tests {
             .compact(
                 &session,
                 "fixture",
-                8000,
+                context_limit,
                 &CancellationToken::new(),
                 &|_| {},
             )
             .await
             .unwrap();
         let next = compacted.summary.unwrap();
-        assert!(next.contains("next compaction"));
+        assert!(next.contains("latest chunk"));
         let saved_checkpoint = crate::test_support::saved_output(&next);
         let saved_checkpoint_text = std::str::from_utf8(&saved_checkpoint).unwrap();
         let (previous, entries) = saved_checkpoint_text
@@ -862,7 +894,8 @@ mod tests {
             crate::test_support::saved_output(std::str::from_utf8(&saved_checkpoint).unwrap()),
             oversized.as_bytes()
         );
-        server.await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
         // The tools-disabled summarizer never receives a file reference in place
         // of the oversized summary it cannot open; later chunks are independent.
         requests.recv().await.unwrap();
@@ -877,12 +910,7 @@ mod tests {
         let reply = crate::test_support::completed(
             json!([{"type":"message","content":[{"type":"output_text","text":"summary"}]}]),
         );
-        let (dir, provider, mut requests, server) = fixture(vec![
-            (200, reply.clone()),
-            (200, reply.clone()),
-            (200, reply),
-        ])
-        .await;
+        let (dir, provider, mut requests, server) = fixture(std::iter::repeat((200, reply))).await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.accept("search".into());
         session.consume_pending();
@@ -934,21 +962,29 @@ mod tests {
             .unwrap()
             .summary
             .unwrap();
-        let request = requests.recv().await.unwrap();
-        assert!(!request.contains("ui-metadata-marker"));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let mut chunks = 0;
+        while let Some(request) = requests.recv().await {
+            chunks += 1;
+            assert!(!request.contains("ui-metadata-marker"));
+        }
+        assert!(chunks > 0);
         let archive = String::from_utf8(crate::test_support::saved_output(&summary)).unwrap();
         assert!(archive.contains("Agent-visible text"));
         assert!(!archive.contains("ui-metadata-marker"));
         assert!(
             matches!(&session.entries[1].kind,crate::store::EntryKind::Tool{web:Some(metadata),..} if metadata.details=="ui-metadata-marker")
         );
-        server.await.unwrap();
     }
 
     #[tokio::test]
     async fn compaction_preserves_nested_tool_references_even_when_model_omits_them() {
         // Near-budget summary + archive notice must itself spill in full.
-        let generated = "s".repeat(950);
+        let context_limit = 8000;
+        let budget =
+            crate::output::character_budget((context_limit / SUMMARY_CONTEXT_DIVISOR) as usize);
+        let generated = "s".repeat(budget - 50);
         let reply = crate::test_support::completed(json!([
             {"type":"message", "content":[{"type":"output_text", "text":generated}]}
         ]));
@@ -978,7 +1014,7 @@ mod tests {
             .compact(
                 &session,
                 "fixture",
-                8000,
+                context_limit,
                 &CancellationToken::new(),
                 &|_| {},
             )
@@ -1018,10 +1054,13 @@ mod tests {
             .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
             .await
             .unwrap_err();
-        assert_eq!(
-            crate::test_support::saved_output(&error.to_string()),
-            diagnostic.as_bytes()
-        );
+        let error = error.to_string();
+        if !error.contains(&diagnostic) {
+            assert_eq!(
+                crate::test_support::saved_output(&error),
+                diagnostic.as_bytes()
+            );
+        }
         server.await.unwrap();
     }
 

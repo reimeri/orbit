@@ -142,7 +142,7 @@ mod tests {
                 ui.operate(&renderer, &mut bounds);
                 let content = bounds.0.unwrap();
                 assert_eq!(content.x, 0.);
-                assert_eq!(content.width, width - 7.);
+                assert_eq!(content.width, width - GUTTER);
 
                 let theme = theme::app();
                 ui.draw(
@@ -166,13 +166,22 @@ mod tests {
                     .collect();
                 assert_eq!(thumbs.len(), usize::from(height > 100.));
                 if let Some(thumb) = thumbs.first() {
-                    assert_eq!(thumb.width, 3.);
-                    assert_eq!(thumb.x - (content.x + content.width), 3.);
+                    assert_eq!(thumb.width, theme::SCROLLBAR_THUMB_WIDTH);
+                    assert_eq!(
+                        thumb.x - (content.x + content.width),
+                        theme::SCROLLBAR_GAP
+                            + (theme::SCROLLBAR_WIDTH - theme::SCROLLBAR_THUMB_WIDTH) / 2.
+                    );
                 }
 
                 // Both the gap and scrollbar hit area stay outside the row;
                 // contrast with an actual click on its rightmost pixel.
-                for (x, expected) in [(width - 6., 0), (width - 2., 0), (width - 8., 1)] {
+                let content_right = content.x + content.width;
+                for (x, expected) in [
+                    (content_right + theme::SCROLLBAR_GAP / 2., 0),
+                    (width - theme::SCROLLBAR_WIDTH / 2., 0),
+                    (content_right - 1., 1),
+                ] {
                     let mut messages = Vec::new();
                     ui.update(
                         &[
@@ -250,7 +259,10 @@ mod tests {
                 .map(|(quad, _)| quad.bounds)
                 .collect();
             assert_eq!(selected.len(), 1);
-            assert_eq!(selected[0].width, 180. - 7. - 2. * style.border.width);
+            assert_eq!(
+                selected[0].width,
+                control.width - GUTTER - 2. * style.border.width
+            );
         }
     }
 

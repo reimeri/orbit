@@ -72,6 +72,10 @@ Write idiomatic, straightforward Rust. Trust the type system and established inv
 
 - Test observable behavior and public contracts rather than implementation details.
 - Tests should remain valid when code is refactored without changing its behavior.
+- Distinguish explicit unit-test fixture inputs from production defaults. Integration tests should exercise the real production configuration and derive expectations from its shared settings or observable relationships, not copy current default values into separate test fixtures. Include meaningful growth/overflow/transition checks so configuration-derived assertions do not become tautologies.
+- Do not freeze incidental styling, defaults, catalog sizes, animation phases, or tuning values with hardcoded expectations. For consistency checks, derive expectations from the shared theme/configuration, explicit test inputs, or measured layout relationships; intentional styling/configuration changes should not require rewriting unrelated tests.
+- Keep independent expected values for actual contracts (protocols, persisted formats, specified algorithms, and deliberate fixtures). Do not replace meaningful assertions with calls to the same implementation being tested, or make a test tautological merely to remove literals.
+- Exercise behavior such as alignment, containment, overflow, state transitions, and bounded work rather than exact pixels, current defaults, or internal operation counts unless those exact values are the contract.
 - Derive expected results independently from requirements, specifications, or manually verified examples. Do not simply copy results produced by the implementation under test.
 - Include meaningful assertions about outcomes, not merely that code executes without crashing.
 - Use asymmetric inputs, boundaries, and contrasting cases to expose mistakes that simple or uniform inputs would miss.

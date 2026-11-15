@@ -916,7 +916,5 @@ mod tests {
         );
         tools.store.save_api_key("").unwrap();
         assert!(tools.store.api_key().unwrap().is_none());
-        assert_eq!(Settings::default().model, DEFAULT_API_MODEL);
-        assert_eq!(Settings::default().quality, "auto");
     }
 }

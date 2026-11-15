@@ -782,38 +782,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
         let mut catalog = Catalog::default();
-        catalog
-            .settings
-            .models
-            .get_mut("gpt-6-luna")
-            .unwrap()
-            .effort = "none".into();
-        catalog.settings.models.get_mut("gpt-6-luna").unwrap().fast = true;
-        catalog
-            .settings
-            .models
-            .get_mut("gpt-6-astra")
-            .unwrap()
-            .effort = "max".into();
+        // The catalog supplies capabilities; this test protects validation and refresh,
+        // not today's model names, count, or default reasoning effort.
+        for (index, model) in MODELS.iter().enumerate() {
+            let preferences = catalog.settings.models.get_mut(model.id).unwrap();
+            preferences.effort = model.efforts.last().unwrap().to_string();
+            preferences.fast = index % 2 == 0;
+        }
         catalog.settings.validate().unwrap();
-        catalog
-            .settings
-            .models
-            .get_mut("gpt-6.1-sol")
-            .unwrap()
-            .effort = "none".into();
-        assert!(catalog.settings.validate().is_err());
-        catalog
-            .settings
-            .models
-            .get_mut("gpt-6.1-sol")
-            .unwrap()
-            .effort = "minimal".into();
-        assert!(catalog.settings.validate().is_err());
-        catalog.settings.models.remove("gpt-6.1-sol");
-        catalog.settings.model = "retired-sol".into();
+        let mut expected = catalog.settings.models.clone();
+        for model in MODELS {
+            // Also reject efforts that are valid for a different model.
+            let unsupported = MODELS
+                .iter()
+                .flat_map(|other| other.efforts.iter().copied())
+                .filter(|effort| !model.efforts.contains(effort))
+                .chain(std::iter::once("unsupported-fixture-effort"));
+            for effort in unsupported {
+                catalog.settings.models.get_mut(model.id).unwrap().effort = effort.into();
+                assert!(
+                    catalog.settings.validate().is_err(),
+                    "{} accepted {effort}",
+                    model.id
+                );
+            }
+            catalog.settings.models.get_mut(model.id).unwrap().effort =
+                expected[model.id].effort.clone();
+        }
+        catalog.settings.models.remove(DEFAULT_MODEL);
+        expected.insert(DEFAULT_MODEL.into(), ModelDefaults::default());
+        catalog.settings.model = "retired-fixture-model".into();
         catalog.settings.models.insert(
-            "retired-sol".into(),
+            "retired-fixture-model".into(),
             ModelDefaults {
                 effort: "low".into(),
                 fast: true,
@@ -822,16 +822,9 @@ mod tests {
         // Simulate settings saved by a previous catalog; normal writes reject retired IDs.
         store.write("settings.json", &catalog).unwrap();
         let (loaded, _, _) = store.load().unwrap();
-        assert_eq!(loaded.settings.model, "gpt-6.1-sol");
-        assert!(!loaded.settings.models.contains_key("retired-sol"));
-        assert_eq!(loaded.settings.models.len(), 3);
-        assert_eq!(
-            loaded.settings.models["gpt-6.1-sol"],
-            ModelDefaults::default()
-        );
-        assert_eq!(loaded.settings.models["gpt-6-luna"].effort, "none");
-        assert!(loaded.settings.models["gpt-6-luna"].fast);
-        assert_eq!(loaded.settings.models["gpt-6-astra"].effort, "max");
+        assert_eq!(loaded.settings.model, DEFAULT_MODEL);
+        assert_eq!(loaded.settings.models, expected);
+        loaded.settings.validate().unwrap();
     }
 
     #[test]

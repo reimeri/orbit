@@ -22,7 +22,7 @@ fn fixture() -> (tempfile::TempDir, WebSearch, Arc<Mutex<String>>) {
             },
         )
         .unwrap();
-    let model = Arc::new(Mutex::new("gpt-6.1-sol".to_owned()));
+    let model = Arc::new(Mutex::new("fixture-selected-model".to_owned()));
     let selected = model.clone();
     let web = WebSearch::new(
         store.clone(),
@@ -123,10 +123,18 @@ async fn transport_preserves_metadata_and_snapshots_mode_model_without_conversat
         assert!(first.contains(header), "missing {header}");
     }
     let first: Value = serde_json::from_str(first.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(first["id"], "fixture-session");
+    assert_eq!(first["model"], *model.lock().unwrap());
     assert_eq!(
-        first,
-        json!({"id":"fixture-session","model":"gpt-6.1-sol","commands":{"search_query":[{"q":"manual","domains":["example.org"],"recency":14}]},"settings":{"external_web_access":true,"allowed_callers":["direct"]},"max_output_tokens":10000})
+        first["commands"],
+        json!({"search_query":[{"q":"manual","domains":["example.org"],"recency":14}]})
     );
+    assert_eq!(
+        first["settings"],
+        json!({"external_web_access":true,"allowed_callers":["direct"]})
+    );
+    assert!(first["max_output_tokens"].as_u64().unwrap() > 0);
+    assert!(first.get("input").is_none());
     mode(&web, Mode::Cached);
     *model.lock().unwrap() = "gpt-6-luna".into();
     let second = web

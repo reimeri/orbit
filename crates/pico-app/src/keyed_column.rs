@@ -366,34 +366,32 @@ mod tests {
             ),
             [8., 100., 180.]
         );
-        state.now = start + Duration::from_millis(90);
-        // Cubic ease-out has completed 7/8 of the movement at half duration.
-        assert_eq!(
-            positions(
-                &mut state,
-                &[(0, false, 8.), (22, true, 44.), (33, true, 124.)]
-            ),
-            [8., 51., 131.]
+        state.now = start + DURATION / 2;
+        let halfway = positions(
+            &mut state,
+            &[(0, false, 8.), (22, true, 44.), (33, true, 124.)],
         );
+        assert_eq!(halfway[0], 8.);
+        assert!(halfway[1] > 44. && halfway[1] < 100.);
+        assert!(halfway[2] > 124. && halfway[2] < 180.);
 
-        // A second query/reorder interrupts without jumping to the old targets.
-        // Returning 11 is a new row, not an exit/entry animation from stale state.
+        // Retarget without jumping. Returning 11 is new, not an animation from stale state.
         assert_eq!(
             positions(
                 &mut state,
                 &[(33, true, 36.), (11, true, 100.), (22, true, 180.)]
             ),
-            [131., 100., 51.]
+            [halfway[2], 100., halfway[1]]
         );
-        state.now = start + Duration::from_millis(180);
-        assert_eq!(
-            positions(
-                &mut state,
-                &[(33, true, 36.), (11, true, 100.), (22, true, 180.)]
-            ),
-            [47.875, 100., 163.875]
+        state.now = start + DURATION;
+        let retargeted = positions(
+            &mut state,
+            &[(33, true, 36.), (11, true, 100.), (22, true, 180.)],
         );
-        state.now = start + Duration::from_millis(270);
+        assert!(retargeted[0] > 36. && retargeted[0] < halfway[2]);
+        assert_eq!(retargeted[1], 100.);
+        assert!(retargeted[2] > halfway[1] && retargeted[2] < 180.);
+        state.now = start + DURATION + DURATION / 2;
         assert_eq!(
             positions(
                 &mut state,
@@ -470,14 +468,16 @@ mod tests {
             "scroll extent uses the final layout"
         );
 
-        for (elapsed, expected_y, redraw) in [(90, 20., true), (180, 0., false), (250, 0., false)] {
+        for (elapsed, redraw) in [
+            (DURATION / 2, true),
+            (DURATION, false),
+            (DURATION * 2, false),
+        ] {
             let mut messages = Vec::new();
             let mut shell = Shell::new(&mut messages);
             content.as_widget_mut().update(
                 &mut tree,
-                &Event::Window(window::Event::RedrawRequested(
-                    start + Duration::from_millis(elapsed),
-                )),
+                &Event::Window(window::Event::RedrawRequested(start + elapsed)),
                 Layout::new(&node),
                 mouse::Cursor::Unavailable,
                 &renderer,
@@ -489,7 +489,7 @@ mod tests {
                 shell.redraw_request() == window::RedrawRequest::NextFrame,
                 redraw
             );
-            assert_eq!(shell.is_layout_invalid(), elapsed <= 180);
+            assert_eq!(shell.is_layout_invalid(), elapsed <= DURATION);
             if shell.is_layout_invalid() {
                 node = content
                     .as_widget_mut()
@@ -498,9 +498,7 @@ mod tests {
             let mut shell = Shell::new(&mut messages);
             content.as_widget_mut().update(
                 &mut tree,
-                &Event::Window(window::Event::RedrawRequested(
-                    start + Duration::from_millis(elapsed),
-                )),
+                &Event::Window(window::Event::RedrawRequested(start + elapsed)),
                 Layout::new(&node),
                 mouse::Cursor::Unavailable,
                 &renderer,
@@ -512,15 +510,23 @@ mod tests {
                 !shell.is_layout_invalid(),
                 "repeated redraw must converge after relayout"
             );
-            assert_eq!(node.children()[0].bounds().y, expected_y);
+            let row = node.children()[0].bounds();
+            if redraw {
+                assert!(
+                    row.y > 0. && row.y < 160.,
+                    "row moves toward its final position"
+                );
+            } else {
+                assert_eq!(row.y, 0., "row reaches its final position");
+            }
             assert!(
                 messages.is_empty(),
                 "animation frames must not publish app messages"
             );
 
-            if elapsed == 90 {
-                // Inside the animated row, but outside both its original and final bounds.
-                let cursor = mouse::Cursor::Available(Point::new(50., 55.));
+            if redraw {
+                // Input follows the row's current position, not its old/final layout.
+                let cursor = mouse::Cursor::Available(row.center());
                 for event in [
                     mouse::Event::ButtonPressed(mouse::Button::Left),
                     mouse::Event::ButtonReleased(mouse::Button::Left),
@@ -572,13 +578,15 @@ mod tests {
         content
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits);
-        tree.state.downcast_mut::<State<usize>>().now = start + Duration::from_millis(90);
+        tree.state.downcast_mut::<State<usize>>().now = start + DURATION / 2;
         let node = content
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits);
-        assert_eq!(node.children()[0].bounds().y, 5.);
-        assert_eq!(node.children()[1].bounds().y, 35.);
-        let cursor = mouse::Cursor::Available(Point::new(50., 40.));
+        let overlap = node.children()[0]
+            .bounds()
+            .intersection(&node.children()[1].bounds())
+            .expect("crossing rows overlap");
+        let cursor = mouse::Cursor::Available(overlap.center());
         let mut messages = Vec::new();
         for event in [
             mouse::Event::ButtonPressed(mouse::Button::Left),

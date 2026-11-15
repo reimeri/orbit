@@ -242,7 +242,21 @@ mod tests {
         let tools = definitions(Capabilities::conversation(false, true));
         let rendered = description("", &tools);
         // Text tools return strings, not the objects sometimes encoded in them.
-        assert_eq!(rendered.matches("): Promise<string>").count(), 7);
+        for name in [
+            "exec_command",
+            "write_stdin",
+            "web__run",
+            "ask_user",
+            "spawn_subagent",
+            "wait_subagent",
+            "list_subagents",
+        ] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert!(
+                description("", std::slice::from_ref(tool)).contains("): Promise<string>"),
+                "{name} must return text"
+            );
+        }
         assert!(rendered.contains("list_subagents(args: Record<string, never>)"));
         assert!(rendered.contains("gif?: {"));
         assert!(rendered.contains("output_hint: string;"));

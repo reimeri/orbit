@@ -10,6 +10,9 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+const MAX_PREVIEW_WIDTH: f32 = 640.;
+const MAX_PREVIEW_HEIGHT: f32 = 440.;
+
 static LOADERS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
@@ -191,7 +194,8 @@ impl Cache {
         // upload, decoding, errors and retry never control the widget's size.
         responsive(move |available| {
             let (width, height) = (dimensions.0 as f32, dimensions.1 as f32);
-            let scale = (available.width.min(640.) / width).min(440. / height);
+            let scale =
+                (available.width.min(MAX_PREVIEW_WIDTH) / width).min(MAX_PREVIEW_HEIGHT / height);
             let size = Size::new(width * scale, height * scale);
             let content: Element<'_, crate::ui::Message> = match &result {
                 Some(Ok(loaded)) => theme::button(
@@ -432,26 +436,7 @@ mod tests {
 
     #[test]
     fn metadata_placeholder_loaded_error_and_retry_have_identical_layout_at_each_width() {
-        for (dimensions, wide, narrow_width, narrow) in [
-            (
-                (1200, 600),
-                Size::new(640., 320.),
-                240.,
-                Size::new(240., 120.),
-            ),
-            (
-                (300, 1200),
-                Size::new(110., 440.),
-                90.,
-                Size::new(90., 360.),
-            ),
-            (
-                (6000, 100),
-                Size::new(640., 640. / 60.),
-                180.,
-                Size::new(180., 3.),
-            ),
-        ] {
+        for dimensions in [(1200, 600), (300, 1200), (6000, 100)] {
             let mut cache = Cache::default();
             let _task = cache.prepare(Some(("session", Path::new("/workspace"))), one_url());
             let generation = cache.slots["image.gif"].generation;
@@ -460,12 +445,28 @@ mod tests {
                 generation,
                 dimensions,
             });
-            let loading = [layout(&cache, 700.), layout(&cache, narrow_width)];
-            for (actual, expected) in loading.iter().zip([wide, narrow]) {
-                assert!((actual.0.width - expected.width).abs() < 0.001);
-                assert!((actual.0.height - expected.height).abs() < 0.001);
-                assert!((actual.1 - expected.height - 7.).abs() < 0.001);
+            let wide = layout(&cache, 700.);
+            let narrow_width = wide.0.width / 2.;
+            let loading = [wide, layout(&cache, narrow_width)];
+            for (actual, available) in loading.iter().zip([700., narrow_width]) {
+                let width_limit = available.min(MAX_PREVIEW_WIDTH);
+                assert!(actual.0.width > 0. && actual.0.width <= width_limit + 0.001);
+                assert!(actual.0.height > 0. && actual.0.height <= MAX_PREVIEW_HEIGHT + 0.001);
+                assert!(
+                    (actual.0.width - width_limit).abs() < 0.001
+                        || (actual.0.height - MAX_PREVIEW_HEIGHT).abs() < 0.001,
+                    "the preview fills its constraining axis"
+                );
+                assert!(
+                    (actual.0.width / actual.0.height - dimensions.0 as f32 / dimensions.1 as f32)
+                        .abs()
+                        < 0.001
+                );
+                // Seven pixels is the explicit spacing in this test's surrounding column.
+                assert!((actual.1 - actual.0.height - 7.).abs() < 0.001);
             }
+            assert!(loading[1].0.width < loading[0].0.width);
+            assert!(loading[1].0.height < loading[0].0.height);
             cache.update(Message::Loaded {
                 url: "image.gif".into(),
                 generation,
@@ -491,7 +492,7 @@ mod tests {
                 [layout(&cache, 700.), layout(&cache, narrow_width)],
                 loading
             );
-            // Even a three-pixel-high failed panorama remains clickable;
+            // Even a very short failed panorama remains clickable;
             // error details must not force a taller in-flow layout.
             let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
                 iced::Font::DEFAULT,
@@ -514,8 +515,8 @@ mod tests {
                     )),
                 ],
                 iced::mouse::Cursor::Available(iced::Point::new(
-                    narrow.width / 2.,
-                    narrow.height / 2.,
+                    loading[1].0.center_x(),
+                    loading[1].0.center_y(),
                 )),
                 &mut renderer,
                 &mut iced::advanced::clipboard::Null,

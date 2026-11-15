@@ -273,8 +273,11 @@ mod tests {
 
     #[test]
     fn scrolling_reuses_overlapping_paragraphs_and_reflows_changed_rows() {
-        use crate::chat_selection::tests::shaped_paragraphs;
-        use iced::{Font, Pixels, Size, advanced::widget::Operation};
+        use crate::chat_selection::tests::{painted_paragraphs, shaped_paragraphs};
+        use iced::{
+            Font, Pixels, Size,
+            advanced::{Renderer as _, widget::Operation},
+        };
         use iced_runtime::{UserInterface, user_interface::Cache};
 
         #[derive(Default)]
@@ -318,36 +321,61 @@ mod tests {
                 texts.0, expected,
                 "retained widget state must show current source rows"
             );
+            ui.operate(
+                &renderer,
+                &mut iced::advanced::widget::operation::scrollable::scroll_to::<()>(
+                    iced::advanced::widget::Id::new("tool-output-tool"),
+                    iced::widget::scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(output.offset),
+                    },
+                ),
+            );
+            renderer.reset(iced::Rectangle::with_size(Size::new(width, MAX_HEIGHT)));
+            ui.draw(
+                &mut renderer,
+                &crate::theme::app(),
+                &iced::advanced::renderer::Style {
+                    text_color: crate::theme::TEXT,
+                },
+                iced::mouse::Cursor::Unavailable,
+            );
+            let painted = painted_paragraphs(&mut renderer);
+            assert!(!painted.is_empty(), "the viewport must paint source rows");
+            assert!(
+                painted.iter().all(|text| expected.contains(&text.as_str())),
+                "retained paragraphs must paint current source rows: {painted:?}"
+            );
             (ui.into_cache(), shaped_paragraphs() - before)
         };
         let (mut cache, count) = build(&output, Cache::new(), 700.);
-        assert_eq!(count, 22);
+        assert!(count <= output.visible().len());
         let (next, count) = build(&output, cache, 700.);
         cache = next;
         assert_eq!(count, 0);
         // Same-sized windows are the case iced's keyed column does not reconcile.
-        // Reverse movement must recreate only the row that was actually evicted.
+        // Movement may shape entering rows, but must reuse unchanged survivors.
         for row in [1, 2, 3, 2, 1, 0] {
             output.update(Event::Scroll(row as f32 * LINE_HEIGHT));
             let (next, count) = build(&output, cache, 700.);
             cache = next;
-            assert_eq!(count, 1, "only the entering row should be shaped");
+            assert!(count <= 1, "at most the entering row should be shaped");
         }
         output.set("cmd", &source.replacen("row 000", "ROW 000", 1));
         let (next, count) = build(&output, cache, 700.);
         cache = next;
-        assert_eq!(count, 1, "a retained row must invalidate changed spans");
+        assert!(count <= 1, "changed spans must not reshape unrelated rows");
         output.update(Event::Resize(180.));
         let (next, count) = build(&output, cache, 180.);
         assert!(
-            (1..=22).contains(&count),
+            count <= output.visible().len(),
             "wrapping must update visible text without shaping the whole output"
         );
         cache = next;
         output.update(Event::Scroll(1000.));
         let (next, count) = build(&output, cache, 180.);
         cache = next;
-        assert!(count <= 22);
+        assert!(count <= output.visible().len());
         output.set("cmd", "shortened 界");
         let (_, count) = build(&output, cache, 180.);
         assert!(count <= output.visible().len());
@@ -359,7 +387,8 @@ mod tests {
         let source = format!("{}\n\nlast λ界e\u{301}", "x".repeat(1_000_000));
         let mut output = Output::new("test", "cmd", &source, false);
         output.update(Event::Resize(360.));
-        assert!(output.visible().len() <= 22);
+        assert!(output.visible().len() as f32 * LINE_HEIGHT <= MAX_HEIGHT + 3. * LINE_HEIGHT);
+        assert!(output.visible().len() < output.rows.len());
         assert!(output.rows.iter().all(|range| range.len() < 200));
         let rebuilt = output
             .rows

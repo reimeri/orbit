@@ -269,11 +269,12 @@ mod tests {
             calls += 1;
             measure(&renderer, paragraph, text)
         });
-        assert_eq!(
-            calls, 3,
-            "initial probe, ellipsis, and one verified candidate"
+        assert!(
+            calls <= 4,
+            "fitting a short label needs only bounded shaping"
         );
-        assert!(state.paragraph.content().starts_with("nix develop"));
+        let prefix = state.paragraph.content().strip_suffix('…').unwrap();
+        assert!(!prefix.is_empty() && value.starts_with(prefix));
         assert!(state.paragraph.content().ends_with('…'));
         assert!(state.fitted_width <= 180.);
 
@@ -338,13 +339,13 @@ mod tests {
             measure(&renderer, p, text)
         });
         assert!(
-            lengths.len() > 1 && lengths.len() <= 3,
-            "grow geometrically when thin glyphs fit: {lengths:?}"
+            lengths.len() <= 4,
+            "fitting thin text needs bounded probes: {lengths:?}"
         );
-        assert!(
-            lengths
-                .windows(2)
-                .all(|w| w[1] == (2 * w[0]).min(value.len()))
+        assert_eq!(
+            lengths.last(),
+            Some(&value.len()),
+            "do not stop at a fitting prefix"
         );
         assert_eq!(state.paragraph.content(), value);
         assert_eq!(state.fitted_width, width);

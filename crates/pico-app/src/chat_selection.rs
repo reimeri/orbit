@@ -693,6 +693,32 @@ pub(crate) mod tests {
         SHAPED.with(std::cell::Cell::get)
     }
 
+    // Inspect retained paragraphs submitted for painting, not the widget's new input.
+    pub(crate) fn painted_paragraphs(renderer: &mut iced::Renderer) -> Vec<String> {
+        let iced::Renderer::Secondary(renderer) = renderer else {
+            panic!("paragraph inspection requires the software test renderer");
+        };
+        renderer
+            .layers()
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .flat_map(|group| group.as_slice())
+            .filter_map(|text| match text {
+                iced::advanced::graphics::text::Text::Paragraph { paragraph, .. } => Some(
+                    paragraph
+                        .upgrade()
+                        .unwrap()
+                        .buffer()
+                        .lines
+                        .iter()
+                        .map(|line| line.text())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
     use super::*;
     use crate::pointer_input::pointer_input;
     use iced::{
