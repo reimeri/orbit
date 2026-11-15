@@ -1,11 +1,11 @@
-# Iced editor scroll metrics access
+# Iced widget patches
 
 Base: checksum-pinned crates.io iced_widget **0.14.2**. The Nix development
 shell, package, and formatting check prepare .build-deps/iced-widget using
 default.nix; Cargo redirects this dependency to that immutable patched source.
 No registry cache or upstream source is modified in the checkout.
 
-The patch adds only Content::with_editor, a read-only callback exposing the
+The editor-access.patch adds Content::with_editor, a read-only callback exposing the
 underlying renderer editor. Pico's composer needs its actual shaped buffer and
 scroll offset: logical line counts or accumulated wheel deltas cannot represent
 wrapped lines or cursor-driven scrolling correctly.
@@ -14,6 +14,10 @@ growing_editor.rs uses the buffer's native metrics and layout parameters,
 caches offscreen line layouts, and sends ordinary Action::Scroll messages for
 thumb dragging and track clicks. It does not change the editor's text, selection,
 keyboard handling, or scroll model.
+
+pick-list-f32.patch removes the obsolete std::f32 import so f32::INFINITY
+resolves to the primitive type’s associated constant instead of the deprecated
+module constant. This does not change pick-list behavior.
 
 When updating iced, regenerate the patch against the official release, update
 the version/hash and root lockfile, and re-enter nix develop. Never edit the

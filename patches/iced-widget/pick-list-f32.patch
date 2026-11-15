@@ -1,0 +1,10 @@
+--- a/src/pick_list.rs
++++ b/src/pick_list.rs
+@@ -78,7 +78,6 @@
+ use crate::overlay::menu::{self, Menu};
+ 
+ use std::borrow::Borrow;
+-use std::f32;
+ 
+ /// A widget for selecting a single value from a list of options.
+ ///
