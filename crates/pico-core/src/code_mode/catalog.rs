@@ -14,7 +14,7 @@ impl Capabilities {
     pub fn conversation(child: bool, web: bool) -> Self {
         Self {
             delegation: !child,
-            web: !child && web,
+            web,
             questionnaires: !child,
             images: true,
             image_generation: !child,

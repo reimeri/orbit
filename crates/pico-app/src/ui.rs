@@ -3598,7 +3598,7 @@ impl App {
             SettingsTab::General => {
                 use pico_core::web_search::Mode;
                 settings = settings
-                    .push(text("Web access · main agent").size(12))
+                    .push(text("Web access").size(12))
                     .push(pick_list([Mode::Live, Mode::Cached, Mode::Disabled], Some(self.settings.web_search), Message::WebMode).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
                     .push(text("Uses your ChatGPT subscription. Live permits external access; Cached requests cache-only access and may limit operations. Disabled prevents new web calls. No API billing or automatic fallback.").size(12).color(MUTED))
                     .push(widget::rule::horizontal(1))

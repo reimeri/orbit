@@ -977,6 +977,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_web_catalogs_follow_saved_policy_for_both_profiles() {
+        use crate::web_search::Mode;
+
+        for mode in [Mode::Live, Mode::Cached, Mode::Disabled] {
+            let mut f = Fixture::new().await;
+            let mut catalog = crate::store::Catalog::default();
+            catalog.settings.web_search = mode;
+            f.h.store.save_catalog(&catalog).unwrap();
+            // Keep provider streams open while inspecting the children's catalogs.
+            let mut pending = vec![];
+            for profile in [Profile::Explore, Profile::Review] {
+                let child = f.spawn(profile, None, profile.model()).unwrap();
+                let request = f.request().await;
+                let mut expected = vec!["exec_command", "write_stdin", "view_image"];
+                if mode != Mode::Disabled {
+                    expected.push("web__run");
+                }
+                assert_tool_catalog(&f, &child.session_id, &request.body, &expected).await;
+
+                if mode == Mode::Disabled {
+                    let conversation = f.h.get(&child.session_id).unwrap();
+                    let output = tokio::task::spawn_blocking(move || {
+                        conversation.code.exec(
+                            "try { __call('web__run', '{}'); } catch (e) { text(String(e)); }",
+                            "disabled-web",
+                            &CancellationToken::new(),
+                        )
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert!(output.contains("Unknown nested tool"), "{output}");
+                }
+                pending.push(request);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn parallel_children_isolate_context_wake_parent_and_resume_with_stable_results() {
         let mut f = Fixture::new().await;
         // Exercise the real QuickJS bridge. A completed spawning cell must not cancel its child.
@@ -995,7 +1034,7 @@ mod tests {
             &f,
             &explore.session_id,
             &explore_request.body,
-            &["exec_command", "write_stdin", "view_image"],
+            &["exec_command", "write_stdin", "web__run", "view_image"],
         )
         .await;
         assert_eq!(explore_request.body["model"], Profile::Explore.model());

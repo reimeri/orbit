@@ -289,7 +289,7 @@ impl Harness {
                 }),
                 self.image_client.clone(),
             ));
-            let web = session.child.is_none().then(|| {
+            let web = {
                 let target = weak.clone();
                 Arc::new(crate::web_search::WebSearch::new(
                     self.store.clone(),
@@ -309,7 +309,7 @@ impl Harness {
                     }),
                     self.web_client.clone(),
                 ))
-            });
+            };
             Conversation {
                 id: id.clone(),
                 notifications: self.notifications.clone(),
@@ -344,7 +344,7 @@ impl Harness {
                     questionnaires.clone(),
                 )
                 .with_images(images)
-                .with_web(web),
+                .with_web(Some(web)),
                 questionnaires,
                 state: Arc::new(Mutex::new(session)),
                 running: AtomicBool::new(false),

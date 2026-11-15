@@ -323,9 +323,9 @@ this is separate from the installed wrapper's runtime PATH.
 
 `web_search.rs` owns Codex `alpha/search` authentication/transport and UI-only result
 metadata. `web_search/commands.rs` owns typed operation inputs; `schema.rs` supplies
-the shared code-mode catalog. The main conversation supplies its stable ID and
+the shared code-mode catalog. Each conversation supplies its stable ID and
 current model via a weak-conversation callback. Saved policy is read for every
-provider catalog and native invocation. No web capability is attached to children.
+provider catalog and native invocation. Children use their own conversation IDs and fixed profile models.
 
 `ToolEvent` and `EntryKind::Tool` carry optional web metadata separately from output.
 Complete metadata/diagnostics live in SQLite (not disposable temporary files), while

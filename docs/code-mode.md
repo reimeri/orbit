@@ -8,7 +8,8 @@ Each entry has a one-line purpose and a TypeScript declaration generated from it
 input and output JSON schemas in `crates/pico-core/src/code_mode/catalog.rs`.
 The same catalog supplies JavaScript `tools`, `ALL_TOOLS` (including both schemas),
 and nested-call availability checks. Main requests include nine tools when web access is enabled; child
-requests include only shell tools and `view_image`. Text-returning tools are
+requests include shell tools, `view_image`, and `web__run` when web access is enabled.
+Text-returning tools are
 correctly declared as `Promise<string>`, even when the string contains JSON.
 General assistant/project policies remain in system instructions.
 
@@ -124,7 +125,8 @@ inline (hexadecimal for non-UTF-8 bytes), rather than silently discarding it.
 ## Subagents
 
 Main conversations additionally expose `tools.spawn_subagent`,
-`tools.wait_subagent`, and `tools.list_subagents`. Children expose shell tools and `view_image`, but not generation, questionnaires
+`tools.wait_subagent`, and `tools.list_subagents`. Children expose shell tools,
+`view_image`, and policy-enabled `web__run`, but not generation, questionnaires
 or delegation. See [subagents](subagents.md) for the complete
 contract, profile defaults, final-only results and completion/Stop lifecycle.
 A successful spawn creates an assignment independent of the JavaScript cell: it
@@ -143,7 +145,7 @@ cancellation/restart behavior and acceptance checklist.
 
 ## Web access
 
-Main conversations expose `tools.web__run` when global web access is enabled.
+Main conversations and subagents expose `tools.web__run` when global web access is enabled.
 It returns `Promise<string>` and supports search, image search, open, click, find,
 PDF screenshot requests, finance, weather, sports and time. Structured backend
 metadata is persisted for the UI, never returned to JS or included in model-facing

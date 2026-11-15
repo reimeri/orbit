@@ -1,7 +1,8 @@
 # Web access in code mode
 
-`tools.web__run` is Pico's built-in, main-agent-only implementation of Codex's
-standalone `web.run` tool. `exec` and `wait` remain the only top-level tools.
+`tools.web__run` is Pico's built-in implementation of Codex's
+standalone `web.run` tool for main agents and subagents. `exec` and `wait` remain
+the only top-level tools.
 No extensions, browser cookies, additional Responses model roundtrip, or API-key
 billing path are involved.
 
@@ -84,15 +85,15 @@ This tool is not an interactive browser and does not use browser sessions/cookie
 
 ## Settings, request identity and privacy
 
-**Settings → General → Web access · main agent**:
+**Settings → General → Web access · all agents**:
 
 - **Live** (default): `external_web_access: true`.
 - **Cached**: `external_web_access: false`. Cached does not guarantee freshness;
   navigation and specialized operations may have backend restrictions.
 - **Disabled**: omit the tool from model/JS catalogs and reject native invocations.
 
-Save applies the global policy; Cancel discards the draft. Each invocation snapshots
-policy and the calling conversation's selected model before authentication. A change
+Save applies the global policy to main agents and subagents; Cancel discards the
+draft. Each invocation snapshots policy and the calling conversation's selected model before authentication. A change
 does not alter a call already underway, including one waiting for authentication.
 Calls made later in an existing cell recheck the saved policy; a stale catalog cannot
 bypass Disabled. Stop cancels an in-flight call if it must not proceed.
@@ -100,8 +101,10 @@ bypass Disabled. Stop cancels an in-flight call if it must not proceed.
 Requests use existing Pico V2 ChatGPT OAuth and account routing, a stable calling
 conversation ID, the selected model, explicit commands, and access/output settings.
 They do **not** include user/assistant history, project files or system instructions.
-Separate conversations do not share IDs. The remote reference lifetime is not
-promised; after expiration, open the original URL or repeat the necessary search.
+Separate conversations, including children, do not share IDs. Each subagent uses its
+own fixed profile model and retains its web identity when continued. Web references
+are conversation-scoped; share source URLs rather than reference IDs between agents.
+The remote reference lifetime is not promised; after expiration, open the original URL or repeat the necessary search.
 No local result cache or remote-reference replay layer is added.
 
 Backend: `https://chatgpt.com/backend-api/codex/alpha/search`. This is experimental
