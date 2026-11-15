@@ -2267,7 +2267,9 @@ impl App {
         .height(Fill)
         .width(50)
         .style(panel);
-        let base: Element<_> = body.push(rail).into();
+        // Keep the main UI at the same tree position when popups open/close,
+        // otherwise iced discards its scroll offsets and other widget state.
+        let layers = stack![body.push(rail)];
         if let Some(modal) = &self.modal {
             let shade = mouse_area(container(space().width(Fill).height(Fill)).style(|_| {
                 container::Style {
@@ -2276,14 +2278,14 @@ impl App {
                 }
             }))
             .on_press(Message::Dismiss);
-            stack![
-                base,
-                shade,
-                container(opaque(self.modal_view(modal)))
-                    .center_x(Fill)
-                    .center_y(Fill)
-            ]
-            .into()
+            layers
+                .push(shade)
+                .push(
+                    container(opaque(self.modal_view(modal)))
+                        .center_x(Fill)
+                        .center_y(Fill),
+                )
+                .into()
         } else if let Some((id, position)) = &self.context_menu {
             let dismiss = mouse_area(space().width(Fill).height(Fill))
                 .on_press(Message::CloseMenu)
@@ -2312,7 +2314,7 @@ impl App {
             let x = position.x.min(self.window_width - 180.).max(0.);
             let y = position.y.min(self.window_height - 140.).max(0.);
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
-            stack![base, dismiss, positioned].into()
+            layers.push(dismiss).push(positioned).into()
         } else if let Some(menu) = &self.footer_menu {
             let dismiss = mouse_area(space().width(Fill).height(Fill))
                 .on_press(Message::CloseFooterMenu)
@@ -2342,9 +2344,9 @@ impl App {
                 space().width(right),
             ]
             .height(Fill);
-            stack![base, dismiss, positioned].into()
+            layers.push(dismiss).push(positioned).into()
         } else {
-            base
+            layers.into()
         }
     }
     fn divider(&self, right: bool) -> Element<'_, Message> {
@@ -8093,6 +8095,124 @@ Then implement the fix.";
         assert_eq!(app.transcript.total(), before + 120.);
         assert!(app.markdown.len() < 100);
         let _ = app.view();
+    }
+    #[tokio::test]
+    async fn popup_transitions_preserve_sidebar_and_chat_scroll() {
+        use iced::advanced::widget::{Id, Operation, operation::Scrollable};
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        #[derive(Default)]
+        struct Offsets(Vec<(String, f32)>);
+        impl Operation for Offsets {
+            fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
+                f(self);
+            }
+            fn scrollable(
+                &mut self,
+                id: Option<&Id>,
+                _: iced::Rectangle,
+                _: iced::Rectangle,
+                translation: iced::Vector,
+                _: &mut dyn Scrollable,
+            ) {
+                for name in ["sessions", "chat"] {
+                    if id == Some(&Id::new(name)) {
+                        self.0.push((name.into(), translation.y));
+                    }
+                }
+            }
+        }
+        let mut app = app();
+        let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+        for i in 0..64 {
+            session.entries.push(Entry::new(
+                EntryKind::Assistant,
+                format!("Message {i}: asymmetric café text."),
+            ));
+            app.sessions.push(SessionSummary {
+                child: None,
+                id: format!("scroll-session-{i}"),
+                title: format!("Session {i}"),
+                project: app.smoke_dir.clone().unwrap(),
+                updated: 0,
+                interrupted: false,
+                needs_attention: false,
+            });
+        }
+        app.selected = Some(session.id.clone());
+        app.current_session = Some(session);
+        app.rebuild_transcript();
+        app.prepare_visible();
+        app.prepare_sidebar();
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(1280., 900.);
+        let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+        for (name, y) in [("sessions", 370.), ("chat", 810.)] {
+            ui.operate(
+                &renderer,
+                &mut iced::advanced::widget::operation::scrollable::scroll_to::<()>(
+                    Id::new(name),
+                    scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(y),
+                    },
+                ),
+            );
+        }
+        let mut before = Offsets::default();
+        ui.operate(&renderer, &mut before);
+        assert_eq!(
+            before.0,
+            vec![("sessions".into(), 370.), ("chat".into(), 810.)]
+        );
+        let mut cache = ui.into_cache();
+        // Keep the real widget cache across every transition. Application-level
+        // viewport offsets alone cannot detect scrollable state being discarded.
+        for (message, expected_popups) in [
+            (
+                Message::SessionMenu("scroll-session-0".into(), iced::Point::new(120., 230.)),
+                (true, false, false),
+            ),
+            (Message::CloseMenu, (false, false, false)),
+            (
+                Message::SessionMenu("scroll-session-0".into(), iced::Point::new(120., 230.)),
+                (true, false, false),
+            ),
+            (
+                Message::Rename("scroll-session-0".into()),
+                (false, true, false),
+            ),
+            (Message::Dismiss, (false, false, false)),
+            (
+                Message::Delete("scroll-session-0".into()),
+                (false, true, false),
+            ),
+            (Message::Dismiss, (false, false, false)),
+            (
+                Message::FooterMenu(FooterControl::Model),
+                (false, false, true),
+            ),
+            (Message::CloseFooterMenu, (false, false, false)),
+        ] {
+            let transition = format!("{message:?}");
+            let _ = app.update(message);
+            assert_eq!(
+                (
+                    app.context_menu.is_some(),
+                    app.modal.is_some(),
+                    app.footer_menu.is_some()
+                ),
+                expected_popups,
+                "{transition}",
+            );
+            let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+            let mut offsets = Offsets::default();
+            ui.operate(&renderer, &mut offsets);
+            assert_eq!(
+                offsets.0, before.0,
+                "scroll positions changed on {transition}"
+            );
+            cache = ui.into_cache();
+        }
     }
     #[tokio::test]
     async fn session_menu_targets_the_clicked_session_and_releases_deleted_output() {
