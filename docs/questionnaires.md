@@ -49,9 +49,12 @@ of unlimited physical memory.
 - A request belongs to its unique nested-tool call and code-cell cancellation token,
   not to the currently selected UI session.
 - Tool-start persistence must succeed before a panel opens.
-- Awaiting user input is event-driven and has no questionnaire timeout. Ordinary
-  `exec` yielding applies; the model may continue and must use `wait` to collect its
-  cell's result. A model response ending does not itself discard a pending cell.
+- Awaiting user input is event-driven and has no questionnaire timeout. Code cells
+  may yield internally, but the harness holds `exec`/`wait` results while the
+  conversation has unanswered questionnaires. The turn stays active with **Answer
+  needed**, without model polling or completion notifications. Submission releases
+  the result flow automatically; the model uses `wait` to collect a yielded cell's
+  remaining output as usual. Stop cancels the wait.
 - Multiple concurrent asks queue in arrival order within each conversation. Different
   conversations remain independent. Submission routes by request ID; stale/duplicate
   submissions are rejected.
@@ -64,8 +67,7 @@ of unlimited physical memory.
   failure, and allows normal session saving/flush to retry. Keep Pico open until
   storage is fixed; do not blindly repeat the tool.
 - Pending requests and UI drafts are **not persisted**. After a restart, unfinished
-  `ask_user` rows are marked cancelled, with an explanatory notice. This includes a
-  model turn that finished while its ask cell was still waiting. Already submitted,
+  `ask_user` rows are marked cancelled, with an explanatory notice. Already submitted,
   saved answers remain available. There is no cell-resumption or V1 migration layer.
 
 ## UI behavior
@@ -123,8 +125,9 @@ just smoke-gpu # on a real Wayland desktop
 ```
 
 Tests cover boundary validation, ordered/custom/large answers, actual code-mode
-round trips, capability enforcement, cell cleanup/cancellation, FIFO routing,
-persistence failures, restart cancellation, session switching, draft retention,
+round trips, model-continuation blocking across exec/wait deadlines and queued asks,
+Stop with retained output, capability enforcement, cell cleanup/cancellation, FIFO
+routing, persistence failures, restart cancellation, session switching, draft retention,
 keyboard focus/navigation and both Unicode-aware word-deletion shortcuts.
 Smoke frames include select, seeded editor, replacement confirmation, collapsed,
 large multiline text and long options with Settings open. When inspecting seeded
@@ -141,8 +144,10 @@ Live acceptance (requires a signed-in account):
    verify suffix preservation, Unicode and multiline clipboard editing.
 4. Use Shift+Enter, Back, Next, collapse/expand and switch to another session.
    Return and verify both questionnaire and ordinary composer drafts remain intact.
-5. Submit and verify the model receives the complete ordered answers through its
-   waiting cell; inspect the nested tool result. No extra user message should appear.
+5. Leave the questionnaire open beyond the code-cell yield deadline. Verify the
+   turn remains active without repeated model `wait` calls or a final response.
+   Submit and verify the model resumes automatically and receives the complete
+   ordered answers through its waiting cell, without an extra user message.
 6. Queue two parallel asks and answer them in order. Terminate one owning cell and
    verify only its questions disappear. Stop/Escape must cancel remaining work.
 7. Paste an answer larger than 64 KiB. Verify the complete transcript result and

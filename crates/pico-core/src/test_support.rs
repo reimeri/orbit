@@ -14,12 +14,23 @@ pub async fn server(
     mpsc::UnboundedReceiver<String>,
     tokio::task::JoinHandle<()>,
 ) {
+    server_with(replies.into_iter().map(|reply| move |_: &str| reply)).await
+}
+
+/// Scripted responses that can inspect the request (for generated tool/cell IDs).
+pub async fn server_with<F: FnOnce(&str) -> (u16, String) + Send + 'static>(
+    replies: impl IntoIterator<Item = F, IntoIter: Send + 'static>,
+) -> (
+    String,
+    mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (tx, rx) = mpsc::unbounded_channel();
     let replies = replies.into_iter();
     let task = tokio::spawn(async move {
-        for (status, body) in replies {
+        for reply in replies {
             let (mut socket, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
                     .await
@@ -52,7 +63,9 @@ pub async fn server(
                 assert!(n > 0);
                 bytes.extend_from_slice(&buffer[..n]);
             }
-            tx.send(String::from_utf8(bytes).unwrap()).unwrap();
+            let request = String::from_utf8(bytes).unwrap();
+            let (status, body) = reply(&request);
+            tx.send(request).unwrap();
             let response = format!(
                 "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()

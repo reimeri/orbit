@@ -979,6 +979,19 @@ impl Harness {
                     conversation.changed();
                 }
                 conversation.save_async().await?;
+                // A yielded cell is not permission to continue past unanswered questions.
+                // Reuse the conversation's change signal; subscribe before checking so
+                // submission/cancellation cannot be missed between the check and await.
+                if let Some(questions) = &conversation.questionnaires {
+                    let mut changes = conversation.changes.subscribe();
+                    while questions.has_pending() {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => bail!("Turn cancelled"),
+                            changed = changes.changed() => { changed?; }
+                        }
+                    }
+                }
             }
             // A steering message accepted during streaming/tool execution is consumed at this boundary.
             let state = conversation.state.lock().expect("session lock");
@@ -1227,6 +1240,174 @@ mod tests {
                 .unwrap()
                 .contains("UI-only metadata")
         );
+    }
+
+    #[tokio::test]
+    async fn questionnaire_blocks_model_continuation_until_all_answers_or_stop() {
+        use crate::test_support::{completed, server_with};
+
+        // Exercise both top-level result boundaries, including Stop while held.
+        for (tool, stop) in [
+            ("exec", false),
+            ("wait", false),
+            ("exec", true),
+            ("wait", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().into()).unwrap();
+            store
+                .write(
+                    "auth.json",
+                    &crate::auth::Credentials {
+                        access_token: "fixture".into(),
+                        refresh_token: "fixture".into(),
+                        expires_at: crate::store::now() + 3600,
+                        account_id: Some("fixture".into()),
+                        email: None,
+                    },
+                )
+                .unwrap();
+            let source = r#"// @exec: {"yield_time_ms": 100}
+text('Output before questionnaire');
+await Promise.all(['first', 'second'].map(async id => {
+    text(await tools.ask_user({questions:[{id, question:id + '?', kind:'text'}]}));
+}));"#;
+            let initial_cell = Arc::new(Mutex::new(None::<String>));
+            let cell = initial_cell.clone();
+            let (url, mut requests, server) = server_with((0..3).map(move |step| {
+                let cell = cell.clone();
+                move |request: &str| {
+                    let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                    let output = match step {
+                        0 if tool == "exec" => json!([{"type":"custom_tool_call","call_id":"ask","name":"exec","input":source}]),
+                        0 => json!([{"type":"function_call","call_id":"ask","name":"wait","arguments":json!({"cell_id":cell.lock().unwrap().as_ref().unwrap(),"yield_time_ms":1}).to_string()}]),
+                        1 => {
+                            let result = body["input"].as_array().unwrap().iter().find(|v| v["call_id"] == "ask" && v.get("output").is_some()).unwrap();
+                            let id = result["output"].as_str().unwrap().lines().next().unwrap().strip_prefix("Script running with cell ID ").unwrap();
+                            json!([{"type":"function_call","call_id":"collect","name":"wait","arguments":json!({"cell_id":id}).to_string()}])
+                        }
+                        _ => {
+                            let result = body["input"].as_array().unwrap().iter().find(|v| v["call_id"] == "collect" && v.get("output").is_some()).unwrap();
+                            let output = result["output"].as_str().unwrap();
+                            assert!(output.starts_with("Script completed"), "{output}");
+                            assert!(output.contains("First answer λ") && output.contains("Second answer 界"), "{output}");
+                            json!([{"type":"message","id":"done","phase":"final_answer","content":[{"type":"output_text","text":"Answers received"}]}])
+                        }
+                    };
+                    (200, completed(output))
+                }
+            })).await;
+            let h = Harness::with_provider(store.clone(), vec![], Provider::fixture(store, url))
+                .unwrap();
+            let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+            let questions = c.questionnaires.as_ref().unwrap();
+            let mut changes = h.subscribe();
+            if tool == "wait" {
+                let worker = c.clone();
+                let id = tokio::task::spawn_blocking(move || {
+                    worker
+                        .code
+                        .exec_output(source, "initial", &CancellationToken::new())
+                        .unwrap()
+                        .cell_id
+                        .unwrap()
+                })
+                .await
+                .unwrap();
+                *initial_cell.lock().unwrap() = Some(id);
+            }
+            h.send(
+                &c.id,
+                "user",
+                "Ask before proceeding".into(),
+                Settings::default(),
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while questions.pending().len() != 2 {
+                    changes.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            // The first request is the model asking. No second request may be made
+            // even after the exec/wait yield deadline has elapsed.
+            tokio::time::timeout(Duration::from_secs(3), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), requests.recv())
+                    .await
+                    .is_err()
+            );
+            assert!(c.is_running());
+            assert!(!c.snapshot().unchecked_completion);
+            let pending = questions.pending();
+            questions
+                .submit(&pending[0].id, vec!["First answer λ".into()])
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), requests.recv())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                c.is_running(),
+                "one answered question must not release the queue"
+            );
+            if stop {
+                h.stop(&c.id);
+            } else {
+                questions
+                    .submit(&pending[1].id, vec!["Second answer 界".into()])
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while c.is_executing() {
+                    changes.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!questions.has_pending());
+            if stop {
+                assert_eq!(*c.status.lock().unwrap(), "Stopped");
+                assert!(!c.snapshot().unchecked_completion);
+                if tool == "exec" {
+                    assert!(
+                        matches!(
+                            &c.snapshot().entries.by_id("ask").unwrap().kind,
+                            EntryKind::Tool { output, complete: true, .. }
+                                if output.contains("Output before questionnaire")
+                        ),
+                        "Stop must preserve output collected before the questionnaire"
+                    );
+                }
+                assert!(
+                    requests.try_recv().is_err(),
+                    "Stop must not resume the model"
+                );
+                server.abort();
+            } else {
+                server.await.unwrap();
+                assert_eq!(*c.status.lock().unwrap(), "Completed");
+                assert!(
+                    c.snapshot()
+                        .entries
+                        .iter()
+                        .any(|e| e.text == "Answers received")
+                );
+                assert_eq!(
+                    c.snapshot()
+                        .entries
+                        .iter()
+                        .filter(|e| matches!(e.kind, EntryKind::User { .. }))
+                        .count(),
+                    1
+                );
+            }
+        }
     }
 
     #[test]

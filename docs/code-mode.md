@@ -134,9 +134,10 @@ continues after the cell completes or is terminated. Use the returned persistent
 ## Questionnaires
 
 Main conversations expose `tools.ask_user` for required select/text questions.
-The promise waits for user input with normal code-mode yielding; use `wait` to
-retrieve its cell result. Unawaited calls end with the cell. Children do not have
-this capability. Answers are ordered JSON strings; large results use complete-file
+The promise waits for user input without a questionnaire timeout. Cells may yield,
+but the harness pauses model continuation until pending questions are answered or
+cancelled; use `wait` to retrieve any remaining cell output after resuming.
+Unawaited calls end with the cell. Children do not have this capability. Answers are ordered JSON strings; large results use complete-file
 references. See [questionnaires](questionnaires.md) for the schema, limits, UI,
 cancellation/restart behavior and acceptance checklist.
 

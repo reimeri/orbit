@@ -73,7 +73,7 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - Review (`gpt-6.1-sol`, medium) and Explore (`gpt-6-luna`, high)
     - Both profiles are read-only by instruction, not filesystem sandboxing
   - [x] Questionnaires — see [tool contract and acceptance checks](docs/questionnaires.md)
-    - Built-in `tools.ask_user` for main conversations, with ordinary code-mode yielding
+    - Built-in `tools.ask_user` for main conversations, with model continuation paused until answered
     - V1-style select/text panel, editable options, custom answers and keyboard navigation
     - Session-local drafts, Collapse/Resume, scoped cancellation; no clarification conversation
     - Lossless large answers without V1's answer byte/line limits
