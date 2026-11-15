@@ -1,4 +1,5 @@
 //! Shared, quiet scrollbars with a wider hit area than their visible thumb.
+use crate::theme;
 use iced::{
     Element, Theme, border,
     widget::{Scrollable, scrollable},
@@ -13,7 +14,9 @@ pub fn scroll<'a, Message: 'a>(
 }
 
 pub fn rail() -> scrollable::Scrollbar {
-    scrollable::Scrollbar::new().width(10).scroller_width(6)
+    scrollable::Scrollbar::new()
+        .width(theme::SCROLLBAR_WIDTH)
+        .scroller_width(theme::SCROLLBAR_THUMB_WIDTH)
 }
 
 pub fn thumb(theme: &Theme, active: bool) -> scrollable::Scroller {
@@ -21,9 +24,13 @@ pub fn thumb(theme: &Theme, active: bool) -> scrollable::Scroller {
         background: theme
             .palette()
             .text
-            .scale_alpha(if active { 0.4 } else { 0.25 })
+            .scale_alpha(if active {
+                theme::SCROLLBAR_ACTIVE_ALPHA
+            } else {
+                theme::SCROLLBAR_ALPHA
+            })
             .into(),
-        border: border::rounded(3),
+        border: border::rounded(theme::SCROLLBAR_THUMB_WIDTH / 2.),
     }
 }
 

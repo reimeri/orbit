@@ -1,5 +1,9 @@
 use crate::activity::{self, Row as ActivityRow};
 use crate::scrollbar::scroll;
+use crate::theme::{
+    self, ACCENT, BORDER, DANGER, MUTED, SUCCESS, WARNING, card, footer_surface, panel,
+    right_panel, secondary, sidebar_control,
+};
 use crate::{
     chat_selection::{self, Position},
     chevron_icon::chevron_icon,
@@ -7,11 +11,13 @@ use crate::{
     pointer_input::{Press, pointer_input},
     tool_output,
 };
+#[cfg(test)]
+use iced::Theme;
 use iced::futures::SinkExt;
 use iced::{
-    Color, Element, Fill, Subscription, Task, Theme, keyboard, mouse,
+    Color, Element, Fill, Subscription, Task, keyboard, mouse,
     widget::{
-        self, button, checkbox, column, container, markdown, mouse_area, opaque, pick_list, row,
+        self, checkbox, column, container, markdown, mouse_area, opaque, pick_list, row,
         scrollable, slider, space, stack, text, text_editor, text_input, tooltip,
     },
     window,
@@ -60,12 +66,6 @@ enum SidebarRow {
 
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
-const SUCCESS: Color = Color::from_rgb8(125, 192, 154);
-const DANGER: Color = Color::from_rgb8(224, 130, 130);
-const MUTED: Color = Color::from_rgb8(141, 149, 164);
-const PANEL: Color = Color::from_rgb8(29, 32, 37);
-const BORDER: Color = Color::from_rgb8(48, 53, 61);
-const ACCENT: Color = Color::from_rgb8(137, 175, 210);
 const SIDEBAR_CONTENT_PADDING: f32 = 8.;
 const RIGHT_PANEL_PADDING: f32 = 18.;
 const FAST_OPTION: &str = "Fast mode";
@@ -1736,7 +1736,7 @@ impl App {
                 {
                     let settings = markdown::Settings::with_text_size(
                         self.catalog.settings.font_size,
-                        markdown::Style::from_palette(Theme::Dark.palette()),
+                        theme::markdown_style(),
                     );
                     let entries = self
                         .transcript
@@ -2144,9 +2144,9 @@ impl App {
                 container(
                     row![
                         text(format!("Info · {notice}")).size(13).width(Fill),
-                        button("×")
+                        theme::button("×")
                             .on_press(Message::NoticeDismiss)
-                            .style(button::text)
+                            .style(theme::text_button)
                     ]
                     .spacing(12)
                     .align_y(iced::Center),
@@ -2160,13 +2160,13 @@ impl App {
                 container(
                     row![
                         text(error).size(13).width(Fill),
-                        button("Dismiss").on_press(Message::ErrorDismiss)
+                        theme::button("Dismiss").on_press(Message::ErrorDismiss)
                     ]
                     .spacing(12),
                 )
                 .padding(12)
                 .style(|_| container::Style {
-                    background: Some(Color::from_rgb8(66, 39, 43).into()),
+                    background: Some(theme::ERROR_SURFACE.into()),
                     ..Default::default()
                 }),
             );
@@ -2186,7 +2186,7 @@ impl App {
             column![
                 space().height(Fill),
                 tooltip(
-                    button(
+                    theme::button(
                         container(crate::agent_icon::agent_icon(self.agent_count() > 0))
                             .center_x(Fill)
                             .center_y(34)
@@ -2194,16 +2194,16 @@ impl App {
                     .width(Fill)
                     .padding(0)
                     .on_press(Message::ToggleAgents)
-                    .style(button::text),
+                    .style(theme::text_button),
                     text("Agents").size(12),
                     tooltip::Position::Left,
                 )
                 .style(card),
-                button(container(text("⚙").size(24)).center_x(Fill).center_y(34))
+                theme::button(container(text("⚙").size(24)).center_x(Fill).center_y(34))
                     .width(Fill)
                     .padding(0)
                     .on_press(Message::ToggleSettings)
-                    .style(button::text)
+                    .style(theme::text_button)
             ]
             .spacing(12)
             .width(Fill),
@@ -2216,7 +2216,7 @@ impl App {
         if let Some(modal) = &self.modal {
             let shade = mouse_area(container(space().width(Fill).height(Fill)).style(|_| {
                 container::Style {
-                    background: Some(Color::from_rgba(0., 0., 0., 0.65).into()),
+                    background: Some(theme::SCRIM.into()),
                     ..Default::default()
                 }
             }))
@@ -2236,18 +2236,18 @@ impl App {
                 .on_scroll(|_| Message::CloseMenu);
             let menu = container(
                 column![
-                    button("Rename")
+                    theme::button("Rename")
                         .width(Fill)
                         .on_press(Message::Rename(id.clone()))
-                        .style(button::text),
-                    button("Copy session ID")
+                        .style(theme::text_button),
+                    theme::button("Copy session ID")
                         .width(Fill)
                         .on_press(Message::CopySessionId(id.clone()))
-                        .style(button::text),
-                    button("Delete")
+                        .style(theme::text_button),
+                    theme::button("Delete")
                         .width(Fill)
                         .on_press(Message::Delete(id.clone()))
-                        .style(button::text)
+                        .style(theme::text_button)
                 ]
                 .spacing(4),
             )
@@ -2310,7 +2310,7 @@ impl App {
         } else {
             crate::search_icon::search_icon()
         };
-        let control = button(container(icon).center_x(18).center_y(24))
+        let control = theme::button(container(icon).center_x(18).center_y(24))
             .padding(0)
             .width(18)
             .height(24)
@@ -2322,16 +2322,7 @@ impl App {
                 .on_input(Message::Search)
                 .size(13)
                 .padding([0, 4])
-                .style(|theme, status| {
-                    let mut style = text_input::default(theme, status);
-                    style.background = Color::from_rgb8(39, 42, 48).into();
-                    style.border = iced::Border {
-                        radius: 3.into(),
-                        ..Default::default()
-                    };
-                    style.placeholder = MUTED;
-                    style
-                })
+                .style(theme::search_input)
                 .into()
         } else {
             let badges = row(self
@@ -2341,10 +2332,10 @@ impl App {
                 .filter(|p| p.favorite)
                 .map(|p| {
                     tooltip(
-                        button(project_badge(&p.path))
+                        theme::button(project_badge(&p.path))
                             .padding(0)
                             .on_press(Message::Create(p.path.clone()))
-                            .style(button::text),
+                            .style(theme::text_button),
                         text(format!("New session in {}\n{}", p.name(), p.path.display())).size(12),
                         tooltip::Position::Bottom,
                     )
@@ -2378,7 +2369,7 @@ impl App {
             .style(card),
             center,
             tooltip(
-                button(container(text("+").size(16)).center_x(18).center_y(24))
+                theme::button(container(text("+").size(16)).center_x(18).center_y(24))
                     .padding(0)
                     .width(18)
                     .height(24)
@@ -2437,7 +2428,7 @@ impl App {
                     text(run.status.label())
                         .size(11)
                         .color(if run.status.needs_attention() {
-                            Color::from_rgb8(224, 130, 130)
+                            DANGER
                         } else {
                             MUTED
                         })
@@ -2456,16 +2447,16 @@ impl App {
                 card_content = card_content.push(text(activity).size(11).color(ACCENT));
             }
             let mut actions = row![
-                button("Open")
+                theme::button("Open")
                     .on_press(Message::Select(run.session_id.clone()))
-                    .style(button::text)
+                    .style(theme::text_button)
             ]
             .spacing(10);
             if run.status == pico_core::agent::subagents::RunStatus::Running {
                 actions = actions.push(
-                    button("Stop")
+                    theme::button("Stop")
                         .on_press(Message::StopAgent(run.session_id))
-                        .style(button::text),
+                        .style(theme::text_button),
                 );
             }
             cards = cards.push(
@@ -2535,7 +2526,7 @@ impl App {
                         age(session.updated)
                     };
                     let content = mouse_area(
-                        button(
+                        theme::button(
                             column![
                                 ellipsized_text(&session.title, 13., None),
                                 row![
@@ -2554,7 +2545,7 @@ impl App {
                         .style(if active {
                             secondary
                         } else {
-                            button::text
+                            theme::text_button
                         }),
                     )
                     .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
@@ -2706,17 +2697,17 @@ impl App {
                 .map_or("Ready", |r| r.status.label());
             let header = column![
                 row![
-                    button(ellipsized_text(
+                    theme::button(ellipsized_text(
                         &format!("← Back to {parent_title}"),
                         12.,
                         None
                     ))
                     .width(Fill)
                     .on_press(Message::Select(child.parent_id.clone()))
-                    .style(button::text),
-                    button("Stop")
+                    .style(theme::text_button),
+                    theme::button("Stop")
                         .on_press_maybe(running.then(|| Message::StopAgent(session.id.clone())))
-                        .style(button::text)
+                        .style(theme::text_button)
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -2811,6 +2802,7 @@ impl App {
     fn composer_editor(&self, running: bool) -> Element<'_, Message> {
         let line_height = self.catalog.settings.font_size * 1.3;
         let editor = text_editor(&self.editor)
+            .style(theme::editor)
             .placeholder(if self.io_busy || self.closing {
                 "Saving…"
             } else if running {
@@ -2876,17 +2868,17 @@ impl App {
                 if failures > 0 {
                     header = header.push(text(format!("{failures} failed")).size(12).color(DANGER));
                 }
-                button(header)
+                theme::button(header)
                     .padding([6, 2])
                     .width(Fill)
-                    .style(button::text)
+                    .style(theme::text_button)
                     .on_press(Message::ToggleGroup(entry.id.clone()))
                     .into()
             }
             ActivityRow::Execution(_) => {
                 let wrappers = self.activity.block(index).wrappers;
                 container(
-                    button(
+                    theme::button(
                         row![
                             chevron_icon(self.execution.contains(&entry.id), MUTED),
                             text(format!(
@@ -2900,7 +2892,7 @@ impl App {
                         .align_y(iced::Center),
                     )
                     .padding([4, 2])
-                    .style(button::text)
+                    .style(theme::text_button)
                     .on_press(Message::ToggleExecution(entry.id.clone())),
                 )
                 .padding([0, 12])
@@ -2915,7 +2907,7 @@ impl App {
                     .find(|s| !s.is_empty())
                     .unwrap_or_else(|| "Thinking".into());
                 container(
-                    button(
+                    theme::button(
                         row![
                             chevron_icon(self.expanded.contains(&entry.id), MUTED),
                             ellipsized_text(&preview, 12., Some(MUTED))
@@ -2925,7 +2917,7 @@ impl App {
                     )
                     .padding([4, 2])
                     .width(Fill)
-                    .style(button::text)
+                    .style(theme::text_button)
                     .on_press(Message::ToggleEntry(entry.id.clone())),
                 )
                 .padding([0, 12])
@@ -2961,7 +2953,7 @@ impl App {
             None => ("Subagent update".into(), MUTED),
         };
         let mut block = column![
-            button(
+            theme::button(
                 row![
                     chevron_icon(open, MUTED),
                     text("●").size(11).color(color),
@@ -2972,15 +2964,15 @@ impl App {
             )
             .on_press(Message::ToggleEntry(entry.id.clone()))
             .padding([4, 2])
-            .style(button::text)
+            .style(theme::text_button)
             .width(Fill)
         ]
         .spacing(6);
         if open {
             if let Some(run) = run {
                 block = block.push(
-                    button("Open subagent ↗")
-                        .style(button::text)
+                    theme::button("Open subagent ↗")
+                        .style(theme::text_button)
                         .on_press(Message::Select(run.session_id)),
                 );
             }
@@ -3018,7 +3010,7 @@ impl App {
                 let open = self.expanded.contains(&entry.id);
                 let preview = activity::tool_preview(name, input);
                 let mut block = column![
-                    button(
+                    theme::button(
                         row![
                             chevron_icon(open, MUTED),
                             text(if *complete { "●" } else { "◌" })
@@ -3050,7 +3042,7 @@ impl App {
                         .align_y(iced::Center)
                     )
                     .on_press(Message::ToggleEntry(entry.id.clone()))
-                    .style(button::text)
+                    .style(theme::text_button)
                     .padding([4, 2])
                     .width(Fill)
                 ]
@@ -3061,7 +3053,7 @@ impl App {
                     && let Some(run) = h.subagent_for_request(&session.id, &entry.id)
                 {
                     block = block.push(
-                        button(
+                        theme::button(
                             text(format!(
                                 "{} · {} · {} ↗",
                                 run.profile.label(),
@@ -3071,7 +3063,7 @@ impl App {
                             .size(12),
                         )
                         .on_press(Message::Select(run.session_id))
-                        .style(button::text),
+                        .style(theme::text_button),
                     );
                 }
                 if open {
@@ -3097,9 +3089,9 @@ impl App {
                         );
                         for source in &metadata.sources {
                             block = block.push(
-                                button(ellipsized_text(&source.title, 12., Some(ACCENT)))
+                                theme::button(ellipsized_text(&source.title, 12., Some(ACCENT)))
                                     .on_press(Message::Link(source.url.clone()))
-                                    .style(button::text),
+                                    .style(theme::text_button),
                             );
                         }
                     }
@@ -3125,7 +3117,7 @@ impl App {
             EntryKind::Notice => container(chat_selection::plain(
                 &entry.text,
                 12.,
-                Some(Color::from_rgb8(224, 186, 120)),
+                Some(WARNING),
                 self.chat_selection.clone(),
                 Position {
                     entry: index,
@@ -3141,10 +3133,7 @@ impl App {
                     if let Some(markdown) = self.markdown.get(&entry.id) {
                         markdown::view_with(
                             markdown.content.items(),
-                            markdown::Settings::with_text_size(
-                                12.,
-                                markdown::Style::from_palette(Theme::Dark.palette()),
-                            ),
+                            markdown::Settings::with_text_size(12., theme::markdown_style()),
                             &chat_selection::Viewer::new(self.chat_selection.clone(), index)
                                 .with_images(&self.markdown_images),
                         )
@@ -3179,7 +3168,7 @@ impl App {
                         markdown.content.items(),
                         markdown::Settings::with_text_size(
                             self.catalog.settings.font_size,
-                            markdown::Style::from_palette(Theme::Dark.palette()),
+                            theme::markdown_style(),
                         ),
                         &chat_selection::Viewer::new(self.chat_selection.clone(), index)
                             .with_images(&self.markdown_images),
@@ -3213,7 +3202,7 @@ impl App {
         for project in ordered {
             projects = projects.push(
                 row![
-                    button(
+                    theme::button(
                         column![
                             text(project.name()).size(17),
                             text(project.path.display().to_string())
@@ -3226,9 +3215,9 @@ impl App {
                     .padding(16)
                     .width(Fill)
                     .style(secondary),
-                    button(text(if project.favorite { "★" } else { "☆" }).size(22))
+                    theme::button(text(if project.favorite { "★" } else { "☆" }).size(22))
                         .on_press(Message::Favorite(project.path.clone()))
-                        .style(button::text)
+                        .style(theme::text_button)
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -3241,7 +3230,7 @@ impl App {
                 .size(15)
                 .color(MUTED),
             projects,
-            button("+  Add project")
+            theme::button("+  Add project")
                 .on_press_maybe(self.harness.as_ref().map(|_| Message::AddProject))
                 .padding(12)
                 .style(secondary)
@@ -3251,7 +3240,7 @@ impl App {
             content=content.push(text("Add a local folder to begin. Pico can read and edit files and run commands in your projects.").size(13).color(MUTED));
         }
         if self.account.is_none() {
-            content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).color(MUTED),button("Open Settings →").on_press(Message::ToggleSettings).style(button::text)].spacing(10)).padding(18).style(card));
+            content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).color(MUTED),theme::button("Open Settings →").on_press(Message::ToggleSettings).style(theme::text_button)].spacing(10)).padding(18).style(card));
         }
         container(scroll(container(content).max_width(650).padding(36)))
             .center_x(Fill)
@@ -3269,14 +3258,14 @@ impl App {
             (SettingsTab::Images, "Images"),
         ] {
             tabs = tabs.push(
-                button(text(label).size(13).width(Fill).align_x(iced::Center))
+                theme::button(text(label).size(13).width(Fill).align_x(iced::Center))
                     .width(Fill)
                     .padding([8, 4])
                     .on_press(Message::SettingsTab(tab))
                     .style(if self.settings_tab == tab {
-                        button::primary
+                        theme::primary
                     } else {
-                        button::text
+                        theme::text_button
                     }),
             );
         }
@@ -3291,7 +3280,7 @@ impl App {
             SettingsTab::Account => {
                 if let Some(account) = &self.account {
                     settings = settings.push(text(account).size(14)).push(
-                        button("Sign out")
+                        theme::button("Sign out")
                             .on_press(Message::Logout)
                             .style(secondary),
                     );
@@ -3299,13 +3288,13 @@ impl App {
                     settings = settings.push(text("Finish sign-in in your browser.").size(14));
                     if let Some(url) = &self.login_url {
                         settings = settings.push(
-                            button("Copy login URL")
+                            theme::button("Copy login URL")
                                 .on_press(Message::Copy(url.clone()))
-                                .style(button::text),
+                                .style(theme::text_button),
                         );
                     }
                     settings = settings.push(
-                        button("Cancel login")
+                        theme::button("Cancel login")
                             .on_press(Message::CancelLogin)
                             .style(secondary),
                     );
@@ -3313,7 +3302,7 @@ impl App {
                     settings = settings
                         .push(text("Use your ChatGPT subscription.").size(13).color(MUTED))
                         .push(
-                            button("Sign in with ChatGPT")
+                            theme::button("Sign in with ChatGPT")
                                 .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
                                 .padding(10),
                         );
@@ -3321,8 +3310,8 @@ impl App {
                 settings=settings.push(widget::rule::horizontal(1))
                     .push(text("OpenAI API key · images only").size(14))
                     .push(text(if self.api_key_configured {"A private API key is saved."}else{"No API key saved."}).size(12).color(MUTED))
-                    .push(text_input(if self.api_key_configured {"Enter a replacement key"}else{"Enter API key"},&self.api_key_draft).secure(true).on_input(Message::ApiKey).padding(8))
-                    .push(row![button("Save key").on_press_maybe((!self.api_key_draft.trim().is_empty()).then_some(Message::SaveApiKey)),button("Remove key").on_press_maybe(self.api_key_configured.then_some(Message::RemoveApiKey))].spacing(8))
+                    .push(text_input(if self.api_key_configured {"Enter a replacement key"}else{"Enter API key"},&self.api_key_draft).style(theme::input).secure(true).on_input(Message::ApiKey).padding(8))
+                    .push(row![theme::button("Save key").on_press_maybe((!self.api_key_draft.trim().is_empty()).then_some(Message::SaveApiKey)),theme::button("Remove key").on_press_maybe(self.api_key_configured.then_some(Message::RemoveApiKey))].spacing(8))
                     .push(text("Stored privately, separately from settings. No environment override. Signing out of ChatGPT does not remove this key.").size(12).color(MUTED));
             }
             SettingsTab::Images => {
@@ -3330,13 +3319,13 @@ impl App {
                 settings=settings
                     .push(text("Image generation").size(18))
                     .push(text("Billing backend").size(12))
-                    .push(pick_list([Backend::Codex,Backend::Api],Some(self.settings.images.backend),Message::ImageBackend).width(Fill))
+                    .push(pick_list([Backend::Codex,Backend::Api],Some(self.settings.images.backend),Message::ImageBackend).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
                     .push(text("Codex uses your ChatGPT subscription. API generations are billed separately. Pico never switches billing automatically.").size(12).color(MUTED))
                     .push(text("API model · generation and editing").size(12))
-                    .push(text_input(DEFAULT_API_MODEL,&self.settings.images.model).on_input(Message::ImageModel).padding(8))
-                    .push(button("Reset API model to current default").on_press(Message::ResetImageModel).style(button::text))
+                    .push(text_input(DEFAULT_API_MODEL,&self.settings.images.model).style(theme::input).on_input(Message::ImageModel).padding(8))
+                    .push(theme::button("Reset API model to current default").on_press(Message::ResetImageModel).style(theme::text_button))
                     .push(text("Quality · both backends").size(12))
-                    .push(pick_list(QUALITIES,Some(self.settings.images.quality.as_str()),|q|Message::ImageQuality(q.into())).width(Fill))
+                    .push(pick_list(QUALITIES,Some(self.settings.images.quality.as_str()),|q|Message::ImageQuality(q.into())).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
                     .push(text("Size is automatic. GIF and quality availability depend on your model and account. Unsupported choices return an error, never a silent downgrade.").size(12).color(MUTED));
                 if self.settings.images.backend == Backend::Api && !self.api_key_configured {
                     settings = settings.push(
@@ -3350,7 +3339,7 @@ impl App {
                 use pico_core::web_search::Mode;
                 settings = settings
                     .push(text("Web access · main agent").size(12))
-                    .push(pick_list([Mode::Live, Mode::Cached, Mode::Disabled], Some(self.settings.web_search), Message::WebMode).width(Fill))
+                    .push(pick_list([Mode::Live, Mode::Cached, Mode::Disabled], Some(self.settings.web_search), Message::WebMode).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
                     .push(text("Uses your ChatGPT subscription. Live permits external access; Cached requests cache-only access and may limit operations. Disabled prevents new web calls. No API billing or automatic fallback.").size(12).color(MUTED))
                     .push(widget::rule::horizontal(1))
                     .push(text("Default model").size(12))
@@ -3359,18 +3348,18 @@ impl App {
                             model_options(),
                             Some(self.settings.model.clone()),
                             Message::Model,
-                        )
+                        ).style(theme::pick_list).menu_style(theme::pick_list_menu)
                         .width(Fill),
                     )
                     .push(text("Context token limit").size(12))
                     .push(
-                        text_input("272000", &self.context_text)
+                        text_input("272000", &self.context_text).style(theme::input)
                             .on_input(Message::Context)
                             .padding(8),
                     )
                     .push(text("Auto-compact at (%)").size(12))
                     .push(
-                        text_input("80", &self.threshold_text)
+                        text_input("80", &self.threshold_text).style(theme::input)
                             .on_input(Message::Threshold)
                             .padding(8),
                     )
@@ -3403,7 +3392,7 @@ impl App {
                         .step(20_f32),
                     )
                     .push(
-                        checkbox(self.catalog.settings.resume_last)
+                        checkbox(self.catalog.settings.resume_last).style(theme::checkbox)
                             .label("Restore last session")
                             .on_toggle(Message::Resume),
                     );
@@ -3425,10 +3414,16 @@ impl App {
                                         effort.into()
                                     )
                                 )
+                                .style(theme::pick_list)
+                                .menu_style(theme::pick_list_menu)
                                 .width(Fill),
-                                checkbox(defaults.fast).label("Fast by default").on_toggle(
-                                    move |fast| Message::ModelFast(model.id.into(), fast)
-                                ),
+                                checkbox(defaults.fast)
+                                    .style(theme::checkbox)
+                                    .label("Fast by default")
+                                    .on_toggle(move |fast| Message::ModelFast(
+                                        model.id.into(),
+                                        fast
+                                    )),
                             ]
                             .spacing(10),
                         )
@@ -3443,12 +3438,12 @@ impl App {
         if self.settings_tab != SettingsTab::Account {
             panel_content = panel_content.push(
                 row![
-                    button("Save")
+                    theme::button("Save")
                         .on_press(Message::ApplySettings)
                         .style(secondary),
-                    button("Cancel")
+                    theme::button("Cancel")
                         .on_press(Message::CancelSettings)
-                        .style(button::text)
+                        .style(theme::text_button)
                 ]
                 .spacing(8),
             );
@@ -3556,7 +3551,7 @@ impl App {
                 .footer_menu
                 .as_ref()
                 .is_some_and(|menu| menu.control == kind);
-            let chip = button(ellipsized_text(label, 11., None))
+            let chip = theme::button(ellipsized_text(label, 11., None))
                 .width(width)
                 .padding([3, 4])
                 .on_press_maybe(
@@ -3672,12 +3667,8 @@ impl App {
                         + 8.;
                     row![
                         ellipsized_text(branch, 11., Some(MUTED)),
-                        text(additions)
-                            .size(11)
-                            .color(Color::from_rgb8(125, 192, 154)),
-                        text(deletions)
-                            .size(11)
-                            .color(Color::from_rgb8(220, 120, 120)),
+                        text(additions).size(11).color(SUCCESS),
+                        text(deletions).size(11).color(DANGER),
                     ]
                     .spacing(4)
                     .align_y(iced::Center)
@@ -3760,7 +3751,7 @@ impl App {
                 FooterControl::Effort if option == FAST_OPTION => Message::ToggleSessionFast,
                 FooterControl::Effort => Message::SessionEffort(option.clone()),
             };
-            let item = button(
+            let item = theme::button(
                 row![
                     ellipsized_text(option, 12., None),
                     text(if chosen { "✓" } else { "" })
@@ -3775,17 +3766,7 @@ impl App {
             .height(30)
             .padding([6, 8])
             .on_press(message)
-            .style(move |theme, status| {
-                let mut style = button::text(theme, status);
-                if focused
-                    || chosen
-                    || matches!(status, button::Status::Hovered | button::Status::Pressed)
-                {
-                    style.background = Some(Color::from_rgb8(42, 42, 52).into());
-                }
-                style.border.radius = 4.into();
-                style
-            });
+            .style(move |theme, status| theme::menu_button(theme, status, focused || chosen));
             options = options.push(if footer_text_width(option, 12.) > 228. {
                 footer_tip(item, option.clone())
             } else {
@@ -3859,6 +3840,7 @@ impl App {
             Modal::AddProject | Modal::Rename(_) => {
                 content = content.push(
                     text_input("", &self.modal_input)
+                        .style(theme::input)
                         .id("modal-input")
                         .on_input(Message::ModalInput)
                         .on_submit(Message::Confirm)
@@ -3866,7 +3848,7 @@ impl App {
                 );
                 if matches!(modal, Modal::AddProject) {
                     content = content.push(
-                        button("Browse folders…")
+                        theme::button("Browse folders…")
                             .on_press(Message::Browse)
                             .style(secondary),
                     );
@@ -3876,13 +3858,15 @@ impl App {
             _ => {}
         }
         if let Some(error) = &self.error {
-            content = content.push(text(error).size(12).color(Color::from_rgb8(224, 130, 130)));
+            content = content.push(text(error).size(12).color(DANGER));
         }
         content = content.push(
             row![
                 space().width(Fill),
-                button("Cancel").on_press(Message::Dismiss).style(secondary),
-                button(confirm).on_press(Message::Confirm)
+                theme::button("Cancel")
+                    .on_press(Message::Dismiss)
+                    .style(secondary),
+                theme::button(confirm).on_press(Message::Confirm)
             ]
             .spacing(12),
         );
@@ -4653,92 +4637,17 @@ fn footer_tip<'a>(
     .style(footer_surface)
     .into()
 }
-fn footer_surface(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Color::from_rgb8(30, 30, 36).into()),
-        border: iced::Border {
-            radius: 6.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-fn sidebar_control(theme: &Theme, status: button::Status) -> button::Style {
-    let mut style = button::text(theme, status);
-    style.text_color = if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-        theme.palette().text
-    } else {
-        MUTED
-    };
-    style
-}
-
-fn secondary(theme: &Theme, status: button::Status) -> button::Style {
-    let mut style = button::secondary(theme, status);
-    style.background = Some(
-        if matches!(status, button::Status::Hovered) {
-            Color::from_rgb8(55, 62, 74)
-        } else {
-            Color::from_rgb8(43, 49, 58)
-        }
-        .into(),
-    );
-    style.text_color = if matches!(status, button::Status::Disabled) {
-        MUTED
-    } else {
-        theme.palette().text
-    };
-    style
-}
 fn right_panel_header(title: &str, on_close: Message) -> Element<'_, Message> {
     row![
         text(title).size(22).width(Fill),
-        button("×").on_press(on_close).style(button::text),
+        theme::button("×")
+            .on_press(on_close)
+            .style(theme::text_button),
     ]
     .align_y(iced::Center)
     .into()
 }
 
-fn right_panel(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Color::from_rgb8(24, 27, 31).into()),
-        ..Default::default()
-    }
-}
-fn panel(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(PANEL.into()),
-        ..Default::default()
-    }
-}
-pub(crate) fn attachment_button(theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        background: Some(PANEL.into()),
-        text_color: theme.palette().text,
-        border: iced::Border {
-            color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                ACCENT
-            } else {
-                BORDER
-            },
-            width: 1.,
-            radius: 8.into(),
-        },
-        ..Default::default()
-    }
-}
-fn card(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(PANEL.into()),
-        border: iced::Border {
-            color: BORDER,
-            width: 1.,
-            radius: 8.into(),
-        },
-        ..Default::default()
-    }
-}
 fn bottom() -> Task<Message> {
     widget::operation::snap_to("chat", scrollable::RelativeOffset::END)
 }
@@ -4763,9 +4672,15 @@ fn project_badge(path: &Path) -> Element<'static, Message> {
     .center_x(16)
     .center_y(16)
     .style(move |_| container::Style {
-        background: Some(Color { a: 0.18, ..color }.into()),
+        background: Some(
+            Color {
+                a: theme::BADGE_ALPHA,
+                ..color
+            }
+            .into(),
+        ),
         border: iced::Border {
-            radius: 3.into(),
+            radius: theme::RADIUS_SMALL.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -4793,16 +4708,6 @@ fn project_initials(name: &str) -> String {
 }
 
 fn project_color(path: &Path) -> Color {
-    const COLORS: [Color; 8] = [
-        Color::from_rgb8(197, 193, 112),
-        Color::from_rgb8(137, 190, 146),
-        Color::from_rgb8(118, 188, 194),
-        Color::from_rgb8(139, 170, 221),
-        Color::from_rgb8(184, 151, 217),
-        Color::from_rgb8(216, 145, 177),
-        Color::from_rgb8(221, 158, 122),
-        Color::from_rgb8(199, 181, 137),
-    ];
     // Fixed FNV-1a keeps the same path's color stable across runs.
     let hash = path
         .as_os_str()
@@ -4811,7 +4716,7 @@ fn project_color(path: &Path) -> Color {
         .fold(0xcbf29ce484222325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
         });
-    COLORS[(hash % COLORS.len() as u64) as usize]
+    theme::PROJECT_COLORS[(hash % theme::PROJECT_COLORS.len() as u64) as usize]
 }
 
 fn age(updated: u64) -> String {

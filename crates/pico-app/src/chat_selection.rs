@@ -256,7 +256,7 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
         )
         .width(Length::Fill)
         .padding(settings.code_size / 4)
-        .class(<iced::Theme as markdown::Catalog>::code_block())
+        .style(crate::theme::code_block)
         .into()
     }
     fn image(
@@ -288,6 +288,7 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
                 iced::widget::text(title.to_owned()),
                 iced::widget::tooltip::Position::FollowCursor,
             )
+            .style(crate::theme::footer_surface)
             .into()
         }
     }
@@ -639,7 +640,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                             ),
                             ..Default::default()
                         },
-                        Color::from_rgba8(100, 160, 230, 0.35),
+                        crate::theme::SELECTION,
                     );
                 }
             }

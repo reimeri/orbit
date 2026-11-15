@@ -351,3 +351,21 @@ frame includes overflowing draft text and image attachments.
 See [chat activity](chat-activity.md) for grouping, execution-detail and reasoning
 contracts, status semantics, regression coverage and live acceptance steps. The
 rendered smoke includes collapsed/live groups and expanded/narrow activity details.
+
+### Shared UI theme
+
+`crates/pico-app/src/theme.rs` is the developer-editable source of the app's dark
+palette, semantic colors, corner radii, borders and widget styles. It also supplies
+the Markdown palette; avoid hard-coded colors or `Theme::Dark` in production views.
+
+Use `theme::button` for buttons (including those with no explicit style), and the
+shared style functions for inputs, editors, pick lists and their menus, checkboxes,
+cards, panels and popovers. Controls and session rows use 8 px corners; message
+cards, editors and dialogs use 12 px. Tiny badges, checkboxes and inline code use
+4 px; scrollbar thumbs retain their pill shape. Edge-to-edge panels, dividers and
+icon geometry intentionally stay independent of card rounding. Layout dimensions
+and user-configurable text sizes remain in their owning views.
+
+After changing visual styles, run `just verify` and, on a Wayland desktop,
+`just smoke-gpu`. These exercise the existing rendered views and interaction
+regressions without requiring real credentials or modifying user sessions.

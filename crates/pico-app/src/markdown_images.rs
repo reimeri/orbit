@@ -1,7 +1,8 @@
 //! Visible-only, ephemeral Markdown previews. Never writes to session media storage.
+use crate::theme;
 use iced::{
     Element, Length, Size, Task,
-    widget::{button, container, image, responsive, space, text, tooltip},
+    widget::{container, image, responsive, space, text, tooltip},
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -193,7 +194,7 @@ impl Cache {
             let scale = (available.width.min(640.) / width).min(440. / height);
             let size = Size::new(width * scale, height * scale);
             let content: Element<'_, crate::ui::Message> = match &result {
-                Some(Ok(loaded)) => button(
+                Some(Ok(loaded)) => theme::button(
                     image(loaded.preview.clone())
                         .width(size.width)
                         .height(size.height)
@@ -201,18 +202,18 @@ impl Cache {
                 )
                 .padding(0)
                 .on_press(crate::ui::Message::OpenMarkdownImage(url.clone()))
-                .style(button::text)
+                .style(theme::text_button)
                 .into(),
                 // The whole rectangle retries, even if the aspect ratio leaves
                 // too little room for a separate padded button. Details live in
                 // an overlay, not in the chat flow.
                 Some(Err(error)) => tooltip(
-                    button(text("Image unavailable · Retry image").size(12))
+                    theme::button(text("Image unavailable · Retry image").size(12))
                         .padding(0)
                         .width(size.width)
                         .height(size.height)
                         .on_press(crate::ui::Message::RetryMarkdownImage(url.clone()))
-                        .style(button::danger),
+                        .style(theme::danger),
                     container(
                         text(format!(
                             "Image unavailable: {error}\nClick the rectangle to retry."
@@ -223,11 +224,12 @@ impl Cache {
                     .padding(8),
                     tooltip::Position::FollowCursor,
                 )
+                .style(theme::footer_surface)
                 .into(),
                 None => container(space())
                     .width(size.width)
                     .height(size.height)
-                    .style(container::rounded_box)
+                    .style(theme::card)
                     .into(),
             };
             content

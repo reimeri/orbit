@@ -1,22 +1,18 @@
 //! V1-style composer replacement. Drafts live in the app, never in session storage.
 use crate::scrollbar::scroll;
+use crate::theme::{self, DANGER, MUTED};
 use iced::{
-    Color, Element, Event, Fill, Length, Rectangle, Size, Task, Theme, Vector,
+    Element, Event, Fill, Length, Rectangle, Size, Task, Theme, Vector,
     advanced::{
         Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
         widget::{Operation, Tree, tree},
     },
     keyboard::{self, key::Named},
     mouse,
-    widget::{self, button, column, container, row, scrollable, space, text, text_editor},
+    widget::{self, column, container, row, scrollable, space, text, text_editor},
 };
 use pico_core::questionnaire::{Pending, QuestionKind};
 use unicode_segmentation::UnicodeSegmentation;
-
-const MUTED: Color = Color::from_rgb8(145, 145, 157);
-const BACKGROUND: Color = Color::from_rgb8(34, 34, 42);
-const OPTION: Color = Color::from_rgb8(22, 22, 27);
-const SELECTED: Color = Color::from_rgb8(44, 44, 55);
 
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -299,9 +295,9 @@ impl Draft {
         let a = &self.answers[self.current];
         let header = row![
             container(text("Answer needed").size(12)).width(Fill),
-            button(text(if self.collapsed { "Resume" } else { "━" }).size(12))
+            theme::button(text(if self.collapsed { "Resume" } else { "━" }).size(12))
                 .on_press(message(Action::Toggle))
-                .style(button::text),
+                .style(theme::text_button),
             container(
                 text(format!("{} / {}", self.current + 1, self.answers.len()))
                     .size(12)
@@ -339,7 +335,7 @@ impl Draft {
                     .enumerate()
                 {
                     let selected = a.selected == Some(index);
-                    let select = button(
+                    let select = theme::button(
                         row![
                             text((index + 1).to_string()).size(12).color(MUTED),
                             text(option).size(font_size)
@@ -349,24 +345,22 @@ impl Draft {
                     .width(Fill)
                     .padding([7, 10])
                     .on_press(message(Action::Select(index)))
-                    .style(move |_, status| option_style(selected, status));
+                    .style(move |theme, status| theme::option_button(theme, status, selected));
                     let mut option_row = row![select].align_y(iced::Center);
                     if index < self.options().len() {
                         option_row = option_row.push(
-                            button(text("Edit").size(12))
+                            theme::button(text("Edit").size(12))
                                 .padding([7, 10])
                                 .on_press(message(Action::Edit(index)))
-                                .style(move |_, status| option_style(selected, status)),
+                                .style(move |theme, status| {
+                                    theme::option_button(theme, status, selected)
+                                }),
                         );
                     }
                     body = body.push(
                         container(option_row)
                             .id(format!("questionnaire-option-{}-{index}", self.pending.id))
-                            .style(move |_| container::Style {
-                                background: Some(if selected { SELECTED } else { OPTION }.into()),
-                                border: iced::border::rounded(6),
-                                ..Default::default()
-                            }),
+                            .style(move |_| theme::option_row(selected)),
                     );
                 }
             }
@@ -382,6 +376,7 @@ impl Draft {
             if editor_open {
                 panel = panel.push(
                     text_editor(&a.editor)
+                        .style(theme::editor)
                         .id(self.editor_id())
                         .placeholder("Your answer…")
                         .size(font_size)
@@ -411,31 +406,39 @@ impl Draft {
                 );
             }
             if let Some(error) = &self.error {
-                panel = panel.push(text(error).size(12).color(Color::from_rgb8(235, 140, 140)));
+                panel = panel.push(text(error).size(12).color(DANGER));
             }
             let controls = if a.replace.is_some() {
                 row![
-                    button("Keep draft")
+                    theme::button("Keep draft")
                         .on_press(message(Action::Replace(false)))
-                        .style(move |_, status| option_style(!a.replace_focused, status)),
-                    button("Replace")
+                        .style(move |theme, status| theme::option_button(
+                            theme,
+                            status,
+                            !a.replace_focused
+                        )),
+                    theme::button("Replace")
                         .on_press(message(Action::Replace(true)))
-                        .style(move |_, status| option_style(a.replace_focused, status))
+                        .style(move |theme, status| theme::option_button(
+                            theme,
+                            status,
+                            a.replace_focused
+                        ))
                 ]
                 .spacing(8)
             } else {
                 row![
-                    button("Back")
+                    theme::button("Back")
                         .on_press_maybe((self.current > 0).then(|| message(Action::Back)))
-                        .style(button::text),
+                        .style(theme::text_button),
                     space().width(Fill),
-                    button(if self.current + 1 == self.answers.len() {
+                    theme::button(if self.current + 1 == self.answers.len() {
                         "Submit"
                     } else {
                         "Next"
                     })
                     .on_press_maybe(self.answered(self.current).then(|| message(Action::Next)))
-                    .style(button::text)
+                    .style(theme::text_button)
                 ]
                 .spacing(8)
             };
@@ -444,11 +447,7 @@ impl Draft {
         let content = container(panel)
             .padding(12)
             .width(Fill)
-            .style(|_| container::Style {
-                background: Some(BACKGROUND.into()),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            })
+            .style(theme::questionnaire)
             .into();
         Element::new(Input {
             content,
@@ -460,21 +459,6 @@ impl Draft {
             question: self.current,
             id: &self.pending.id,
         })
-    }
-}
-fn option_style(selected: bool, status: button::Status) -> button::Style {
-    button::Style {
-        background: Some(
-            if selected || status == button::Status::Hovered {
-                SELECTED
-            } else {
-                OPTION
-            }
-            .into(),
-        ),
-        text_color: Color::from_rgb8(225, 225, 232),
-        border: iced::border::rounded(6),
-        ..Default::default()
     }
 }
 fn word_delete(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
@@ -862,7 +846,7 @@ mod tests {
             &mut renderer,
             &Theme::Dark,
             &iced::advanced::renderer::Style {
-                text_color: Color::WHITE,
+                text_color: iced::Color::WHITE,
             },
             mouse::Cursor::Unavailable,
         );

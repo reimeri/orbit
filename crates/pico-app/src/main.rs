@@ -14,11 +14,12 @@ mod pointer_input;
 mod questionnaire;
 mod scrollbar;
 mod search_icon;
+mod theme;
 mod tool_output;
 mod transcript_viewport;
 mod ui;
 mod virtual_list;
-use iced::{Theme, window};
+use iced::window;
 use pico_core::APP_ID;
 use std::{
     process::ExitCode,
@@ -58,17 +59,7 @@ fn main() -> ExitCode {
         App::view,
     )
     .title("Pico V2")
-    .theme(Theme::custom(
-        "Pico",
-        iced::theme::Palette {
-            background: iced::Color::from_rgb8(24, 26, 30),
-            text: iced::Color::from_rgb8(225, 228, 234),
-            primary: iced::Color::from_rgb8(137, 175, 210),
-            success: iced::Color::from_rgb8(125, 192, 154),
-            danger: iced::Color::from_rgb8(224, 130, 130),
-            warning: iced::Color::from_rgb8(224, 186, 120),
-        },
-    ))
+    .theme(theme::app())
     .subscription(App::subscription)
     .window(window::Settings {
         size: iced::Size::new(1200., 800.),

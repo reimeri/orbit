@@ -1,9 +1,12 @@
 //! Images decode off the UI thread. Chat uses static thumbnails; only the modal animates.
+use crate::theme;
+#[cfg(test)]
+use iced::Color;
 use iced::{
-    Color, Element, Length, Rectangle, Size, Subscription, Task,
+    Element, Length, Rectangle, Size, Subscription, Task,
     advanced::{Layout, Widget, image as image_primitive, layout, renderer, widget::Tree},
     mouse,
-    widget::{button, column, container, image, mouse_area, text},
+    widget::{column, container, image, mouse_area, text},
 };
 use pico_core::media::{Frame, Media};
 use std::{
@@ -104,14 +107,14 @@ impl Viewer {
             .as_ref()
             .and_then(|p| self.thumbnails.get(p))
         {
-            Some(Ok(handle)) => button(
+            Some(Ok(handle)) => theme::button(
                 image(handle.clone())
                     .width(320)
                     .height(220)
                     .content_fit(iced::ContentFit::Contain),
             )
             .on_press(crate::ui::Message::OpenImage(media.clone()))
-            .style(button::text)
+            .style(theme::text_button)
             .into(),
             Some(Err(error)) => text(format!("Preview unavailable: {error}"))
                 .size(12)
@@ -133,16 +136,16 @@ impl Viewer {
             Some(Err(_)) => text("Preview unavailable").size(10).into(),
             None => text("Loading…").size(10).into(),
         };
-        let base = button(container(preview).center_x(56).center_y(56))
+        let base = theme::button(container(preview).center_x(56).center_y(56))
             .padding(8)
             .width(72)
             .height(72)
-            .style(crate::ui::attachment_button)
+            .style(theme::attachment_button)
             .on_press(crate::ui::Message::OpenImage(media.clone()));
         let remove = container(
-            button(text("×").size(14))
+            theme::button(text("×").size(14))
                 .padding([0, 5])
-                .style(crate::ui::attachment_button)
+                .style(theme::attachment_remove)
                 .on_press(crate::ui::Message::RemoveAttachment(index)),
         )
         .width(72)
@@ -274,7 +277,7 @@ impl Viewer {
                         crate::ellipsized_text::shrinking_ellipsized_text(
                             &title,
                             14.,
-                            Some(Color::WHITE)
+                            Some(theme::IMAGE_TEXT)
                         ),
                         text(description).size(12),
                     ]
@@ -283,7 +286,7 @@ impl Viewer {
                 .max_width(600)
                 .padding(8)
                 .style(|_| container::Style {
-                    text_color: Some(Color::WHITE),
+                    text_color: Some(theme::IMAGE_TEXT),
                     ..Default::default()
                 });
                 let mut body = column![Element::new(ImageInfo {
@@ -295,7 +298,7 @@ impl Viewer {
                 .align_x(iced::Center);
                 if animated {
                     body = body.push(
-                        button(
+                        theme::button(
                             container(text(if self.playing { "❚❚" } else { "▶" }).size(16))
                                 .center_x(20)
                                 .center_y(20),
@@ -401,16 +404,15 @@ impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
             let info = children.next().expect("info layout");
             // Use the same image primitive/snap rules as the picture. A container
             // quad rounds half-pixels differently on WGPU and can leave a seam.
-            static BACKGROUND: LazyLock<image::Handle> =
-                LazyLock::new(|| image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]));
+            static BACKGROUND: LazyLock<image::Handle> = LazyLock::new(|| {
+                image::Handle::from_rgba(1, 1, theme::SCRIM.into_rgba8().to_vec())
+            });
             // Keep text in the same foreground layer as its background;
             // returning to the parent layer would draw it underneath the panel.
             renderer.with_layer(*viewport, |renderer| {
                 match renderer {
                     iced::Renderer::Primary(_) => renderer.draw_image(
-                        image_primitive::Image::new(BACKGROUND.clone())
-                            .opacity(0.65_f32)
-                            .snap(true),
+                        image_primitive::Image::new(BACKGROUND.clone()).snap(true),
                         info.bounds(),
                         picture.bounds(),
                     ),
@@ -427,7 +429,7 @@ impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
                             snap: false,
                             ..Default::default()
                         },
-                        Color::from_rgba(0., 0., 0., 0.65),
+                        theme::SCRIM,
                     ),
                 }
                 self.info.as_widget().draw(
