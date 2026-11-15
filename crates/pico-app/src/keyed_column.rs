@@ -5,7 +5,7 @@
 use iced::{
     Element, Event, Length, Rectangle, Size, Vector,
     advanced::{
-        Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
+        Clipboard, Layout, Renderer as _, Shell, Widget, layout, overlay, renderer,
         widget::{Operation, Tree, tree},
     },
     mouse,
@@ -278,15 +278,28 @@ impl<Key: Clone + Eq + Hash + 'static, Message> Widget<Message, iced::Theme, ice
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        let layered = self.keys.iter().any(|(_, animated)| *animated);
         for ((child, tree), layout) in self
             .children
             .iter()
             .zip(&tree.children)
             .zip(layout.children())
         {
-            child
-                .as_widget()
-                .draw(tree, renderer, theme, style, layout, cursor, viewport);
+            let draw = |renderer: &mut iced::Renderer| {
+                child
+                    .as_widget()
+                    .draw(tree, renderer, theme, style, layout, cursor, viewport);
+            };
+            if layered {
+                // A row can contain its own mesh/foreground layers. Isolate the
+                // entire row (including its button background) so crossing rows
+                // paint in the same order as reverse-order hit testing.
+                if let Some(clip) = layout.bounds().intersection(viewport) {
+                    renderer.with_layer(clip, draw);
+                }
+            } else {
+                draw(renderer);
+            }
         }
     }
 
@@ -442,11 +455,103 @@ mod tests {
     }
 
     #[test]
+    fn crossing_wave_and_idle_rows_paint_in_hit_test_order() {
+        use crate::session_wave::{self, Status};
+        use iced::{Color, widget::space};
+        let idle = Color::from_rgb8(20, 70, 100);
+        let rows = |order: &[usize]| {
+            animated_column(
+                order
+                    .iter()
+                    .map(|&id| {
+                        let (status, color) = if id == 1 {
+                            (Status::Working, Color::from_rgb8(80, 20, 40))
+                        } else {
+                            (Status::Idle, idle)
+                        };
+                        let button = crate::theme::button(session_wave::wave(
+                            space().width(200).height(60),
+                            status,
+                        ))
+                        .padding(0)
+                        .on_press(id)
+                        .style(move |_, _| iced::widget::button::Style {
+                            background: Some(color.into()),
+                            ..Default::default()
+                        });
+                        (id, true, button.into())
+                    })
+                    .collect(),
+            )
+        };
+        let mut renderer = crate::test_renderer::new(16.);
+        let size = Size::new(200., 160.);
+        let viewport = Rectangle::with_size(size);
+        let limits = layout::Limits::new(Size::ZERO, size);
+        let mut content = rows(&[2, 1]);
+        let mut tree = Tree::new(&content);
+        content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        content = rows(&[1, 2]);
+        content.as_widget().diff(&mut tree);
+        let start = tree.state.downcast_ref::<State<usize>>().now;
+        content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        tree.state.downcast_mut::<State<usize>>().now = start + DURATION / 2;
+        let node = content
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let overlap = node.children()[0]
+            .bounds()
+            .intersection(&node.children()[1].bounds())
+            .expect("crossing rows overlap");
+        let point = overlap.center();
+        renderer.reset(viewport);
+        content.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &crate::theme::app(),
+            &renderer::Style {
+                text_color: crate::theme::TEXT,
+            },
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &viewport,
+        );
+        let pixels =
+            crate::test_renderer::screenshot(&mut renderer, Size::new(200, 160), 1., Color::BLACK);
+        let pixel = &pixels[(point.y as usize * 200 + point.x as usize) * 4..][..4];
+        assert!(
+            pixel
+                .iter()
+                .zip(idle.into_rgba8())
+                .all(|(actual, expected)| actual.abs_diff(expected) <= 1),
+            "the later idle row must cover the earlier wave, not be tinted by it: {pixel:?}"
+        );
+        let mut messages = vec![];
+        for event in [
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ] {
+            content.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Available(point),
+                &renderer,
+                &mut clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &viewport,
+            );
+        }
+        assert_eq!(messages, [2], "the visually topmost row owns the hit");
+    }
+
+    #[test]
     fn animation_frames_move_hit_targets_and_stop_requesting_redraws() {
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let mut renderer = crate::test_renderer::new(16.);
         let limits = layout::Limits::new(Size::ZERO, Size::new(200., 400.));
         let viewport = Rectangle::with_size(Size::new(200., 400.));
         let mut content = buttons(&[(1, 80.), (2, 80.), (3, 40.)]);
@@ -560,10 +665,7 @@ mod tests {
     }
     #[test]
     fn crossing_rows_select_and_open_the_menu_of_the_topmost_session() {
-        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let renderer = crate::test_renderer::new(16.);
         let limits = layout::Limits::new(Size::ZERO, Size::new(200., 400.));
         let viewport = Rectangle::with_size(Size::new(200., 400.));
         let mut content = buttons(&[(1, 40.), (2, 40.)]);

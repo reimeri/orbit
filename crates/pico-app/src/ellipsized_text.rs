@@ -237,10 +237,7 @@ mod tests {
     use super::*;
 
     fn renderer() -> iced::Renderer {
-        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            Font::DEFAULT,
-            iced::Pixels(16.),
-        ))
+        crate::test_renderer::new(16.)
     }
 
     fn measure(renderer: &iced::Renderer, paragraph: &mut Plain, value: &str) -> f32 {

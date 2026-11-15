@@ -2671,8 +2671,9 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "iced_runtime",
- "iced_tiny_skia",
+ "iced_wgpu",
  "pico-core",
+ "pollster",
  "rfd",
  "rusqlite",
  "serde_json",

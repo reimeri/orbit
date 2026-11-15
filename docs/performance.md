@@ -140,7 +140,8 @@ iced 0.14's `keyed_column` alone is insufficient: its splice heuristic still
 diffs equal-length lists positionally. `keyed_column.rs` remaps the actual trees.
 
 These are local microbenchmarks, not end-to-end frame times or an application CPU
-usage guarantee. They use the software renderer's shared CPU text-layout path,
+usage guarantee. These historical measurements used the former renderer's shared
+CPU text-layout path (current rendering tests use wgpu),
 simulated offsets, no draw/present, and separately instrumented test builds.
 First-use font initialization also affects expansion; the change does not remove
 that cost. Normal full-output normalization/reflow remains linear in text size.

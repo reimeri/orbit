@@ -1,5 +1,6 @@
 use crate::activity::{self, Row as ActivityRow};
 use crate::scrollbar::scroll;
+use crate::session_wave::{self, Status as SessionStatus};
 use crate::theme::{
     self, ACCENT, BORDER, DANGER, MUTED, SUCCESS, WARNING, card, footer_surface, panel,
     right_panel, secondary, sidebar_control,
@@ -61,7 +62,7 @@ enum TranscriptKey {
 #[derive(Clone)]
 enum SidebarRow {
     Heading(&'static str, usize),
-    Session(usize),
+    Session(usize, SessionStatus),
 }
 
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
@@ -719,6 +720,30 @@ impl App {
         self.tasks
             .push(self.image_view.prepare(&visible_media).map(Message::Image));
     }
+    fn session_status(&self, s: &SessionSummary) -> SessionStatus {
+        let h = self.harness.as_ref();
+        let c = h.and_then(|h| h.get(&s.id));
+        if c.as_ref()
+            .is_some_and(|c| c.questionnaires.as_ref().is_some_and(|q| q.has_pending()))
+        {
+            SessionStatus::Question
+        } else if c.as_ref().is_some_and(|c| c.is_turn_active())
+            || h.is_some_and(|h| h.active_children(&s.id) > 0)
+        {
+            SessionStatus::Working
+        } else if h.is_some_and(|h| h.children_need_attention(&s.id))
+            || s.interrupted
+            || s.needs_attention
+            || c.as_ref()
+                .is_some_and(|c| *c.status.lock().expect("status lock") == "Needs attention")
+        {
+            SessionStatus::Error
+        } else if s.unchecked_completion {
+            SessionStatus::Unchecked
+        } else {
+            SessionStatus::Idle
+        }
+    }
     fn prepare_sidebar(&mut self) {
         let needle = self.search.to_lowercase();
         let mut sections = [vec![], vec![], vec![]];
@@ -732,33 +757,8 @@ impl App {
             {
                 continue;
             }
-            let c = self.harness.as_ref().and_then(|h| h.get(&s.id));
-            let category = if c
-                .as_ref()
-                .is_some_and(|c| c.questionnaires.as_ref().is_some_and(|q| q.has_pending()))
-            {
-                1
-            } else if c.as_ref().is_some_and(|c| c.is_running())
-                || self
-                    .harness
-                    .as_ref()
-                    .is_some_and(|h| h.active_children(&s.id) > 0)
-            {
-                0
-            } else if self
-                .harness
-                .as_ref()
-                .is_some_and(|h| h.children_need_attention(&s.id))
-                || s.interrupted
-                || s.needs_attention
-                || c.as_ref()
-                    .is_some_and(|c| *c.status.lock().expect("status lock") == "Needs attention")
-            {
-                1
-            } else {
-                2
-            };
-            sections[category].push(SidebarRow::Session(index));
+            let status = self.session_status(s);
+            sections[status.section()].push(SidebarRow::Session(index, status));
         }
         self.sidebar_rows.clear();
         for (name, section) in ["WORKING", "NEEDS ATTENTION", "SESSIONS"]
@@ -782,7 +782,7 @@ impl App {
                     },
                     36.,
                 ),
-                SidebarRow::Session(index) => {
+                SidebarRow::Session(index, _) => {
                     let next = self.sidebar_keys.len() + 3;
                     (
                         *self
@@ -943,7 +943,9 @@ impl App {
                             h.edit(&old, |s| { s.draft = draft.text; s.draft_images = draft.images; })?;
                         }
                         let id = if let Selection::Session(id) = &selection {
-                            h.load(id)?;
+                            if h.load(id)?.snapshot().unchecked_completion {
+                                h.edit(id, |s| s.unchecked_completion = false)?;
+                            }
                             Some(id.as_str())
                         } else {
                             None
@@ -2642,7 +2644,7 @@ impl App {
                         .padding([10., SIDEBAR_CONTENT_PADDING])
                         .into()
                 }
-                SidebarRow::Session(session_index) => {
+                SidebarRow::Session(session_index, status) => {
                     let session = &self.sessions[*session_index];
                     let active = self.parent_id() == Some(session.id.as_str());
                     let project = session
@@ -2669,21 +2671,42 @@ impl App {
                     } else {
                         age(session.updated)
                     };
+                    let status = *status;
+                    let trailing: Element<'_, Message> = if status == SessionStatus::Unchecked {
+                        container(container(space().width(8).height(8)).style(|_| {
+                            container::Style::default()
+                                .background(theme::ACCENT)
+                                .border(iced::Border {
+                                    radius: 4.into(),
+                                    ..Default::default()
+                                })
+                        }))
+                        .width(12)
+                        .center_y(14)
+                        .into()
+                    } else {
+                        text(age).size(10).color(MUTED).into()
+                    };
                     let content = mouse_area(
-                        theme::button(
-                            column![
-                                ellipsized_text(&session.title, 13., None),
-                                row![
-                                    badge,
-                                    ellipsized_text(&project, 11., Some(MUTED)),
-                                    text(age).size(10).color(MUTED)
+                        theme::button(session_wave::wave(
+                            container(
+                                column![
+                                    ellipsized_text(&session.title, 13., None),
+                                    row![
+                                        badge,
+                                        ellipsized_text(&project, 11., Some(MUTED)),
+                                        trailing
+                                    ]
+                                    .spacing(6)
+                                    .align_y(iced::Center)
                                 ]
-                                .spacing(6)
-                                .align_y(iced::Center)
-                            ]
-                            .spacing(3),
-                        )
-                        .padding([6., SIDEBAR_CONTENT_PADDING])
+                                .spacing(3),
+                            )
+                            .padding([6., SIDEBAR_CONTENT_PADDING])
+                            .width(Fill),
+                            status,
+                        ))
+                        .padding(0)
                         .width(Fill)
                         .on_press(Message::Select(session.id.clone()))
                         .style(if active {
@@ -2705,7 +2728,7 @@ impl App {
                 .on_resize(move |size| Message::SidebarSize(epoch, key, size.height));
             rows.push((
                 key,
-                matches!(self.sidebar_rows[index], SidebarRow::Session(_)),
+                matches!(self.sidebar_rows[index], SidebarRow::Session(..)),
                 column![sensor, space().height(5.)].into(),
             ));
         }
@@ -4261,6 +4284,7 @@ impl App {
                         updated: 0,
                         interrupted: false,
                         needs_attention: false,
+                        unchecked_completion: false,
                     });
                 }
                 self.prepare_sidebar();
@@ -4719,10 +4743,62 @@ impl App {
                 ]);
             }
 
+            46 => {
+                self.settings_open = false;
+                self.agents_open = false;
+                self.search.clear();
+                self.sessions.clear();
+                self.sidebar_rows.clear();
+                for (title, status) in [
+                    ("Working — animated blue wave", SessionStatus::Working),
+                    (
+                        "Questionnaire — frozen yellow wave",
+                        SessionStatus::Question,
+                    ),
+                    ("Error — frozen red wave", SessionStatus::Error),
+                    ("Completed — not yet checked", SessionStatus::Unchecked),
+                    ("Checked — ordinary session age", SessionStatus::Idle),
+                ] {
+                    let mut session =
+                        Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
+                    session.title = title.into();
+                    let index = self.sessions.len();
+                    self.sessions.push(SessionSummary::from(&session));
+                    if index != 2 && index != 4 {
+                        let heading = ["WORKING", "NEEDS ATTENTION", "SESSIONS"][status.section()];
+                        self.sidebar_rows
+                            .push(SidebarRow::Heading(heading, if index == 0 { 1 } else { 2 }));
+                    }
+                    self.sidebar_rows.push(SidebarRow::Session(index, status));
+                }
+                self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
+                // These are new sessions, not movements of previously mounted rows.
+                let key_base = self.sidebar_keys.len() + 3;
+                self.sidebar_list
+                    .reset(self.sidebar_rows.iter().enumerate().map(|(key, row)| {
+                        (
+                            key_base + key,
+                            if matches!(row, SidebarRow::Heading(..)) {
+                                36.
+                            } else {
+                                48.
+                            },
+                        )
+                    }));
+                self.sidebar_list.offset = 0.;
+                return Task::batch([
+                    widget::operation::scroll_to(
+                        "sessions",
+                        scrollable::AbsoluteOffset { x: 0., y: 0. },
+                    ),
+                    delayed_capture(),
+                ]);
+            }
+
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar status waves/unchecked completion/favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -5146,10 +5222,7 @@ mod tests {
         let saved = h.store.load_session(&id).unwrap();
         assert_eq!(saved.entries[0].text, expected);
 
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let mut renderer = crate::test_renderer::new(16.);
         let assistant = saved
             .entries
             .iter()
@@ -5194,7 +5267,7 @@ mod tests {
 
     #[tokio::test]
     async fn activity_disclosure_swaps_on_header_hover_and_completion() {
-        use iced::advanced::{Renderer as _, renderer::Headless};
+        use iced::advanced::Renderer as _;
         use iced_runtime::{UserInterface, user_interface::Cache};
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
@@ -5290,7 +5363,8 @@ mod tests {
                                 },
                                 cursor,
                             );
-                            let pixels = renderer.screenshot(
+                            let pixels = crate::test_renderer::screenshot(
+                                &mut renderer,
                                 iced::Size::new(width as u32, size.height as u32),
                                 1.,
                                 theme::BACKGROUND,
@@ -5886,6 +5960,127 @@ mod tests {
             ))),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn sidebar_status_smoke_rows_are_visible_and_do_not_overlap() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let mut renderer = header_renderer();
+        let cache = UserInterface::build(
+            app.sidebar(),
+            iced::Size::new(346., 600.),
+            Cache::new(),
+            &mut renderer,
+        )
+        .into_cache();
+        app.smoke_stage = 45;
+        let _ = app.smoke_frame(window::Screenshot::new(
+            vec![0, 0, 0, 255, 1, 1, 1, 255],
+            iced::Size::new(2, 1),
+            1.,
+        ));
+        let mut ui = UserInterface::build(
+            app.sidebar(),
+            iced::Size::new(346., 600.),
+            cache,
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let mut bottom = 0.;
+        for session in &app.sessions {
+            let title = bounds.label(&session.title);
+            assert!(title.width > 0. && title.height > 0.);
+            assert!(
+                title.y >= bottom && title.y + title.height <= 600.,
+                "status rows must be separate and visible: {title:?}"
+            );
+            bottom = title.y + title.height;
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_dot_clears_only_when_its_session_is_opened() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        use pico_core::agent::subagents::{Child, Profile};
+        let mut renderer = header_renderer();
+        let mut has_age_label = |app: &App| {
+            let mut ui = UserInterface::build(
+                app.sidebar(),
+                iced::Size::new(346., 400.),
+                Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            bounds
+                .labels
+                .iter()
+                .any(|(text, _)| text == &age(app.sessions[0].updated))
+        };
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let parent = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        h.edit(&parent, |s| s.unchecked_completion = true).unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::Focused)),
+        )
+        .await;
+        assert_eq!(
+            app.session_status(&app.sessions[0]),
+            SessionStatus::Unchecked,
+            "refresh/focus is not opening a session"
+        );
+
+        assert!(
+            !has_age_label(&app),
+            "the completion dot replaces the age label"
+        );
+
+        let mut child = Session::new(path, &app.catalog.settings);
+        child.child = Some(Child {
+            parent_id: parent.clone(),
+            profile: Profile::Explore,
+        });
+        let child_id = child.id.clone();
+        h.store.save_session(&child).unwrap();
+        h.insert(child);
+        dispatch(&mut app, Message::Select(child_id)).await;
+        assert!(
+            h.store.load_session(&parent).unwrap().unchecked_completion,
+            "opening a child does not check its parent"
+        );
+        dispatch(
+            &mut app,
+            Message::Event(iced::Event::Window(window::Event::Unfocused)),
+        )
+        .await;
+        dispatch(&mut app, Message::Select(parent.clone())).await;
+        assert!(
+            !h.store.load_session(&parent).unwrap().unchecked_completion,
+            "opening clears and saves the dot, regardless of keyboard focus"
+        );
+        let summary = app.sessions.iter().find(|s| s.id == parent).unwrap();
+        assert_eq!(app.session_status(summary), SessionStatus::Idle);
+        assert!(
+            has_age_label(&app),
+            "opening the session restores its age label"
+        );
+        let restarted = Harness::new(h.store.clone(), h.store.load().unwrap().1).unwrap();
+        assert!(
+            !restarted
+                .load(&parent)
+                .unwrap()
+                .snapshot()
+                .unchecked_completion
+        );
     }
 
     #[tokio::test]
@@ -6688,7 +6883,7 @@ Then implement the fix.";
             app.sidebar_rows
                 .iter()
                 .filter_map(|row| match row {
-                    SidebarRow::Session(i) => Some(&app.sessions[*i]),
+                    SidebarRow::Session(i, _) => Some(&app.sessions[*i]),
                     _ => None,
                 })
                 .all(|s| s.child.is_none())
@@ -6844,10 +7039,7 @@ Then implement the fix.";
     }
 
     fn header_renderer() -> iced::Renderer {
-        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ))
+        crate::test_renderer::new(16.)
     }
 
     #[test]
@@ -7894,6 +8086,7 @@ Then implement the fix.";
                 updated: 0,
                 interrupted: false,
                 needs_attention: false,
+                unchecked_completion: false,
             })
             .collect();
         app.prepare_sidebar();
@@ -8032,7 +8225,7 @@ Then implement the fix.";
             .sidebar_rows
             .iter()
             .filter_map(|r| match r {
-                SidebarRow::Session(i) => Some(app.sessions[*i].title.as_str()),
+                SidebarRow::Session(i, _) => Some(app.sessions[*i].title.as_str()),
                 _ => None,
             })
             .collect();
@@ -8048,7 +8241,7 @@ Then implement the fix.";
         assert_eq!(
             app.sidebar_rows
                 .iter()
-                .filter(|r| matches!(r, SidebarRow::Session(_)))
+                .filter(|r| matches!(r, SidebarRow::Session(..)))
                 .count(),
             2
         );
@@ -8057,7 +8250,7 @@ Then implement the fix.";
         assert_eq!(
             app.sidebar_rows
                 .iter()
-                .filter(|r| matches!(r, SidebarRow::Session(_)))
+                .filter(|r| matches!(r, SidebarRow::Session(..)))
                 .count(),
             1
         );
@@ -8079,7 +8272,7 @@ Then implement the fix.";
         assert_eq!(
             app.sidebar_rows
                 .iter()
-                .filter(|r| matches!(r, SidebarRow::Session(_)))
+                .filter(|r| matches!(r, SidebarRow::Session(..)))
                 .count(),
             2
         );
@@ -8374,7 +8567,7 @@ Then implement the fix.";
     }
     #[tokio::test]
     async fn transcript_layout_work_is_bounded_across_scroll_resize_and_identity_changes() {
-        use crate::chat_selection::tests::{painted_paragraphs, shaped_paragraphs};
+        use crate::chat_selection::tests::shaped_paragraphs;
         use iced::advanced::Renderer as _;
         use iced_runtime::{UserInterface, user_interface::Cache};
         let mut app = app();
@@ -8391,10 +8584,7 @@ Then implement the fix.";
         app.transcript.viewport = 600.;
         app.transcript.offset = 1200.;
         app.prepare_visible();
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let mut renderer = crate::test_renderer::new(16.);
         let mut build = |app: &App, cache, width| {
             let before = shaped_paragraphs();
             let mut ui = UserInterface::build(
@@ -8433,23 +8623,36 @@ Then implement the fix.";
                 },
                 mouse::Cursor::Unavailable,
             );
-            let painted: Vec<_> = painted_paragraphs(&mut renderer)
-                .into_iter()
-                .filter(|text| text.starts_with("Message "))
-                .collect();
-            assert!(
-                !painted.is_empty(),
-                "the viewport must paint transcript text"
+            let shaped = shaped_paragraphs() - before;
+            let viewport = bounds
+                .scrolls
+                .iter()
+                .find(|(id, _)| id == &iced::advanced::widget::Id::new("chat"))
+                .unwrap()
+                .1;
+            let text_region = bounds
+                .labels
+                .iter()
+                .filter(|(text, _)| text.starts_with("Message "))
+                .find_map(|(_, bounds)| {
+                    let bounds = *bounds - iced::Vector::new(0., app.transcript.offset);
+                    if bounds.y < viewport.y
+                        || bounds.y + bounds.height > viewport.y + viewport.height
+                    {
+                        return None;
+                    }
+                    bounds.intersection(&viewport)
+                })
+                .expect("a complete transcript message must be visible");
+            crate::test_renderer::assert_matches_fresh(
+                &mut renderer,
+                app.view(),
+                iced::Size::new(width, 900.),
+                "chat",
+                app.transcript.offset,
+                text_region,
             );
-            assert!(
-                painted
-                    .iter()
-                    .all(|text| app.transcript.order[app.transcript.visible()]
-                        .iter()
-                        .any(|&index| &app.current().unwrap().entries[index].text == text)),
-                "retained paragraphs must paint current entries: {painted:?}"
-            );
-            (ui.into_cache(), shaped_paragraphs() - before)
+            (ui.into_cache(), shaped)
         };
         let (mut cache, count) = build(&app, Cache::new(), 1280.);
         assert!(
@@ -8620,10 +8823,7 @@ Then implement the fix.";
         app.current_session = Some(session);
         app.rebuild_transcript();
         app.prepare_visible();
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let mut renderer = crate::test_renderer::new(16.);
         let tall = iced::Size::new(930., 1350.);
         let mut cache = settle_chat(&mut app, Cache::new(), &mut renderer, tall).await;
         assert!(
@@ -8899,6 +9099,7 @@ Then implement the fix.";
                 updated: 0,
                 interrupted: false,
                 needs_attention: false,
+                unchecked_completion: false,
             });
         }
         app.selected = Some(session.id.clone());

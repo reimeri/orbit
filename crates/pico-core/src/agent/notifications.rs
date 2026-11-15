@@ -138,19 +138,29 @@ mod tests {
         assert_eq!(done.kind, Kind::Finished);
         assert_eq!(done.title, "Asymmetric session λ");
         assert_eq!(done.session_id, id);
+        assert!(c.snapshot().unchecked_completion);
+        assert!(h.summaries()[0].unchecked_completion);
         assert!(h.take_notifications().is_empty());
         h.evict_inactive(None).unwrap();
         assert!(h.get(&id).is_none());
+        // Ordinary eviction saves the sidebar hint; no completion-specific commit.
+        assert!(store.load_session(&id).unwrap().unchecked_completion);
+        let restarted = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        assert!(restarted.summaries()[0].unchecked_completion);
+        assert!(restarted.load(&id).unwrap().snapshot().unchecked_completion);
         assert!(h.notification_is_current(done));
         h.send(&id, "second", "More work".into(), Settings::default())
             .unwrap();
         assert!(!h.notification_is_current(done));
+        assert!(!h.get(&id).unwrap().snapshot().unchecked_completion);
+        assert!(!store.load_session(&id).unwrap().unchecked_completion);
         settled(&h.get(&id).unwrap(), &h).await;
         let errors = h.take_notifications();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, Kind::Failed);
         assert_ne!(errors[0].id, done.id);
         assert!(h.get(&id).unwrap().snapshot().needs_attention);
+        assert!(!h.get(&id).unwrap().snapshot().unchecked_completion);
         server.await.unwrap();
         let restarted = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
         restarted.load(&id).unwrap();

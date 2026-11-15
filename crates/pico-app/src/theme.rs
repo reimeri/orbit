@@ -36,6 +36,7 @@ pub const RADIUS_SMALL: f32 = 4.;
 pub const RADIUS_CONTROL: f32 = 8.;
 pub const RADIUS_SURFACE: f32 = 12.;
 pub const BORDER_WIDTH: f32 = 1.;
+pub const SESSION_WAVE_ALPHA: f32 = 0.18;
 pub const BADGE_ALPHA: f32 = 0.18;
 pub const SCROLLBAR_WIDTH: f32 = 5.;
 pub const SCROLLBAR_GAP: f32 = 2.;

@@ -309,10 +309,7 @@ mod tests {
     use iced_runtime::{UserInterface, user_interface};
 
     fn renderer() -> iced::Renderer {
-        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ))
+        crate::test_renderer::new(16.)
     }
 
     fn divider() -> Element<'static, Message> {

@@ -13,8 +13,8 @@ pin, not every compiler above that lower bound.
 
 Wayland, libxkbcommon, Vulkan loader, GL/EGL, fontconfig and DejaVu fonts are
 supplied by Nix. Iced defaults are disabled: explicitly enabled features are
-wgpu, tiny-skia, Wayland, the Tokio executor, and crisp rendering. Neither
-winit nor softbuffer enables X11. Do not reintroduce default features accidentally.
+wgpu, Wayland, the Tokio executor, and crisp rendering. There is no alternate
+application renderer, softbuffer dependency in the active graph, or X11 backend. Do not reintroduce default features accidentally.
 Phase 1 uses Tokio for provider streams, OAuth and UI tasks.
 
 New files used by a Git-backed flake must be known to Git (`git add <files>`);
@@ -58,7 +58,10 @@ Run these from the repository root inside `nix develop`:
 
 `cargo check` skips code generation and linking. It does not replace tests or
 actually opening the UI. Core-only tests compile networking, storage and QuickJS dependencies but do not compile iced. `just verify` runs format checking, Clippy
-with warnings denied, all workspace tests, and the software window check.
+with warnings denied, all workspace tests, and the wgpu/Vulkan window check.
+`just test` selects the pinned CPU Vulkan driver for rendering tests; focused tests
+can use `./scripts/test-renderer.sh cargo test --locked -p pico-evo <test-name>`.
+Plain `cargo test` also works when a Vulkan adapter is already available.
 
 ## What keeps builds fast
 
@@ -96,7 +99,8 @@ with warnings denied, all workspace tests, and the software window check.
 ### Initial measurements
 
 Observed during Phase 0 on an AMD Ryzen 7 5800X3D (16 logical CPUs), 32 GiB RAM,
-NixOS, pinned Rust 1.99.1; GPU + software renderers both compiled:
+NixOS, pinned Rust 1.99.1, before the wgpu-only conversion. These historical
+measurements included both application renderers:
 
 | Operation | Wall time |
 | --- | ---: |
@@ -123,24 +127,27 @@ artifacts (e.g. Crane), but the local Cargo loop should remain unchanged.
 
 ## Window verification
 
-`just smoke` builds the app, starts a private headless Weston compositor with a
-software renderer, unsets `DISPLAY`, forces `ICED_BACKEND=tiny-skia` by default,
-and launches `pico-evo --smoke-test`. The app requests an iced screenshot after
-its window opens, checks nonzero size, the RGBA byte count and non-uniform pixels,
-prints `SMOKE_OK`, and exits successfully only on a valid frame. This exercises
-real window creation and rendering, not just process startup. The script times
-out after 60 seconds, reports logs on failure, and removes its private runtime
-directory and compositor on exit. It does not change your existing compositor.
+`just smoke` builds the app and starts a private headless Weston compositor
+(using pixman for the compositor itself). Pico renders through **wgpu/Vulkan**;
+`scripts/test-renderer.sh` selects the pinned Mesa Lavapipe CPU Vulkan driver and
+unsets the legacy Vulkan ICD override. No desktop or physical GPU is required.
+The script unsets `DISPLAY`, launches `pico-evo --smoke-test`, and checks nonzero
+screenshot size, the RGBA byte count, and non-uniform pixels. It prints `SMOKE_OK`
+and exits successfully only on valid frames. The 60-second timeout reports logs
+on failure; the private compositor/runtime directory is cleaned up afterward.
 
-`just smoke-gpu` forces `ICED_BACKEND=wgpu`, disables `DISPLAY`, and exercises
-your current Wayland desktop and graphics driver without software fallback.
-The same headless software smoke check runs against the **wrapped installed
-binary** in the Nix package's sandboxed install-check phase. GPU checks remain
-manual: sandbox/CI machines do not necessarily have a GPU.
+The development shell exposes `PICO_TEST_VULKAN_ICD` only as a path. It does not
+set `VK_DRIVER_FILES` or `WGPU_BACKEND` globally. `just test`, `just smoke`, and the
+Nix package's checks select Lavapipe only for their test processes. The installed
+wrapper contains neither a CPU-driver selection nor an application fallback.
 
-The initial checks passed for both renderers, and the desktop window was
-visually inspected. GUI state transitions have a unit test, but the smoke check
-is **not** an automated click/keyboard/layout test. For manual verification, run `just run` and follow
+`just smoke-gpu` uses wgpu on your actual Wayland desktop and host graphics driver.
+Keep this separate from CPU-driver tests: Lavapipe does not certify hardware GPU
+behavior. The Nix package runs the same automated tests, then runs the headless window smoke
+against its **wrapped installed binary**, without needing GPU device access.
+
+The window smoke complements the offscreen wgpu pixel and widget tests, but is
+**not** an automated click/keyboard/layout test. For manual verification, run `just run` and follow
 [the Phase 1 acceptance checklist](phase-1-testing.md). Smoke mode uses private
 temporary application state, no credentials and no provider calls. Its rendered views exercise the project picker, Markdown/tool details, settings,
 modal and session popover, plus scrolling a ~1 MiB tool result to the middle/end
@@ -149,7 +156,7 @@ Inspect feature selection after dependency changes with:
 
 ```sh
 cargo tree --locked -e features -i winit
-cargo tree --locked -e features -i softbuffer
+cargo tree --locked -p pico-evo -e normal,build,dev  # No iced_tiny_skia or softbuffer
 ```
 
 ## Runtime troubleshooting
@@ -157,11 +164,16 @@ cargo tree --locked -e features -i softbuffer
 - **No Wayland session:** verify `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` from a
   terminal in your Wayland desktop. Xwayland is intentionally unsupported.
   For SSH/CI use `just smoke` instead of inventing a display value.
-- **GPU startup trouble:** retry `ICED_BACKEND=tiny-skia cargo run --locked`.
-  Normal startup tries wgpu then software automatically; an explicitly forced
-  backend opts out of fallback. Keep host NixOS graphics drivers enabled
-  (`hardware.graphics.enable` and the appropriate vendor driver). The flake
-  supplies loaders, not a conflicting bundled machine-specific driver/ICD.
+- **GPU startup trouble:** verify the host's Vulkan/graphics driver installation
+  and Wayland session, then retry. On NixOS keep `hardware.graphics.enable` and
+  the appropriate vendor driver enabled. Re-enter `nix develop` if loader libraries
+  are missing. There is no application software fallback. Remove stale
+  `ICED_BACKEND`, `WGPU_BACKEND`, `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` overrides
+  when testing normal startup; the installed wrapper supplies loaders, not a
+  machine-specific graphics driver.
+- **No Vulkan adapter for tests:** run `just test` inside `nix develop` to select
+  the pinned CPU driver, or use `scripts/test-renderer.sh` for a focused Cargo
+  command. Do not export its ICD selection in your normal desktop environment.
 - **Missing native library or linker:** re-enter `nix develop`. A raw
   `target/debug/pico-evo` is intended to run inside the dev environment. Use the
   wrapped `nix run` / `result/bin/pico-evo` outside it.
@@ -172,8 +184,8 @@ cargo tree --locked -e features -i softbuffer
   `RUSTFLAGS`, target triple, linker configuration and environment before cleaning.
   Reopening the same pinned shell alone should not require recompilation.
 - **Smoke timeout:** rerun `just smoke` and inspect its printed app/Weston logs.
-  Test `just smoke-gpu` separately to distinguish software/window plumbing from
-  the host GPU stack. A software check passing does not certify the host GPU.
+  Test `just smoke-gpu` separately to distinguish CPU-driver/window plumbing from
+  the host GPU stack. A Lavapipe check passing does not certify the host GPU.
 
 ## Phase 1 architecture
 
@@ -295,13 +307,14 @@ Iced uses `image-without-codecs`; the core enables PNG/JPEG/WebP/GIF explicitly,
 without image's broad default codec dependency set or any X11 backend.
 
 Run `cargo test --locked --workspace` for media, generation fixture and UI lifecycle
-regressions. The software/GPU window smoke includes the Images settings tab, static
+regressions. The CPU-Vulkan/host-GPU window smoke includes the Images settings tab, static
 thumbnail, animated modal, pause and natural-size static views using deterministic local
 fixtures. See [images](images.md) for resource limits and paid live acceptance.
 
-The expanded rendered smoke sequence now includes 46 frames (including media and
+The expanded rendered smoke sequence now includes 47 frames (including media and
 Markdown image previews, missing-source errors and the byte-backed GIF modal).
-Its timeout is 60 seconds; the earlier 41-frame software debug run took ~33 seconds locally.
+Its timeout is 60 seconds; timings from the former software backend are not a
+performance baseline for wgpu/Lavapipe.
 
 The Nix package supplies Git through `nativeCheckInputs` for Git fixture tests;
 this is separate from the installed wrapper's runtime PATH.
@@ -401,3 +414,23 @@ recovery, Wayland activation limitations and manual acceptance. Protocol tests
 start a private `dbus-daemon` with a fake notification service; the development
 shell and Nix package checks provide D-Bus, but the installed app uses the desktop's
 existing session bus. Smoke mode never sends desktop notifications.
+
+### Sidebar status waves
+
+`session_wave.rs` owns the shared sidebar presentation states and widget-local
+wave motion. Session grouping and row rendering use the same prepared status.
+A small untextured triangle mesh reproduces the V1 wave, following each row's
+rounded outline and interpolating per-vertex alpha across two moving crests.
+There is no gradient-strip implementation or alternate renderer path. Work stays
+bounded to visible rows, and frozen states do not request continuous redraws.
+The final smoke frame renders working, questionnaire, error, unchecked-completion
+and idle rows. See [notifications](notifications.md#sidebar-status-and-unchecked-completion)
+for completion-dot persistence and open-to-clear behavior.
+
+All rendering tests now use wgpu, including the formerly GPU-only pixel checks.
+A shared test engine reuses one Vulkan device and its pipelines per test process;
+individual fixtures retain separate renderer/widget state. Tests that previously
+inspected software-renderer drawing lists instead check painted pixels or compare
+retained-widget output with an independently constructed fresh view. The ordinary
+suite checks wave animation, freeze/resume, clipping, text rendering and fractional
+image edges on the CPU Vulkan driver. Run `just smoke-gpu` for host-GPU acceptance.

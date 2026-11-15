@@ -391,10 +391,7 @@ mod tests {
             Self {
                 content,
                 tree,
-                renderer: iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-                    iced::Font::DEFAULT,
-                    iced::Pixels(16.),
-                )),
+                renderer: crate::test_renderer::new(16.),
             }
         }
 

@@ -7,7 +7,7 @@ rust-version.workspace = true
 [dependencies]
 pico-core = { path = "../pico-core" }
 iced = { version = "0.14.0", default-features = false, features = [
-    "wgpu", "tiny-skia", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs",
+    "wgpu", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs",
 ] }
 
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
@@ -23,8 +23,9 @@ winit = { version = "=0.30.13", default-features = false, features = ["wayland"]
 workspace = true
 
 [dev-dependencies]
+pollster = "0.4"
 tempfile = "3"
-iced_tiny_skia = { version = "0.14", default-features = false, features = ["wayland"] }
+iced_wgpu = { version = "0.14", default-features = false }
 iced_runtime = "0.14"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 url = "2"

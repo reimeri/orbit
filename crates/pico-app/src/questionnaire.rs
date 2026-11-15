@@ -807,10 +807,7 @@ mod tests {
         })
     }
     fn events(draft: &mut Draft, enabled: bool, events: &[Event], outside: bool) -> Vec<Message> {
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(14.),
-        ));
+        let mut renderer = crate::test_renderer::new(14.);
         let messages = {
             let mut ui = UserInterface::build(
                 draft.view(14., 360., enabled, true),
@@ -848,7 +845,7 @@ mod tests {
 
     #[test]
     fn questionnaire_option_hover_and_edit_share_surface_but_not_clicks() {
-        use iced::advanced::{Renderer as _, renderer::Headless};
+        use iced::advanced::Renderer as _;
         struct OptionBounds(Option<Rectangle>);
         impl Operation for OptionBounds {
             fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
@@ -862,10 +859,7 @@ mod tests {
         }
 
         let draft = draft();
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(14.),
-        ));
+        let mut renderer = crate::test_renderer::new(14.);
         let mut ui = UserInterface::build(
             draft.view(14., 360., true, true),
             Size::new(600., 500.),
@@ -910,7 +904,12 @@ mod tests {
                 },
                 cursor,
             );
-            let pixels = renderer.screenshot(Size::new(600, 500), 1., iced::Color::BLACK);
+            let pixels = crate::test_renderer::screenshot(
+                &mut renderer,
+                Size::new(600, 500),
+                1.,
+                iced::Color::BLACK,
+            );
             let iced::Background::Color(background) = background else {
                 panic!("fixture theme must have a solid option background")
             };
@@ -963,40 +962,33 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct EditorBounds {
+        id: String,
+        bounds: Option<iced::Rectangle>,
+    }
+    impl iced::advanced::widget::Operation for EditorBounds {
+        fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation)) {
+            visit(self);
+        }
+        fn focusable(
+            &mut self,
+            id: Option<&iced::advanced::widget::Id>,
+            bounds: iced::Rectangle,
+            _: &mut dyn iced::advanced::widget::operation::Focusable,
+        ) {
+            if id.is_some_and(|id| id == &iced::advanced::widget::Id::from(self.id.clone())) {
+                self.bounds = Some(bounds);
+            }
+        }
+    }
+
     #[test]
     fn questionnaire_answer_scrollbar_handles_overflow_without_editing_the_answer() {
-        #[derive(Default)]
-        struct EditorBounds {
-            id: String,
-            bounds: Option<iced::Rectangle>,
-        }
-        impl iced::advanced::widget::Operation for EditorBounds {
-            fn traverse(
-                &mut self,
-                visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
-            ) {
-                visit(self);
-            }
-            fn focusable(
-                &mut self,
-                id: Option<&iced::advanced::widget::Id>,
-                bounds: iced::Rectangle,
-                _: &mut dyn iced::advanced::widget::operation::Focusable,
-            ) {
-                if id.is_some_and(|id| id == &iced::advanced::widget::Id::from(self.id.clone())) {
-                    self.bounds = Some(bounds);
-                }
-            }
-        }
         let mut draft = draft();
         apply(&mut draft, Action::Select(3));
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(14.),
-        ));
+        let mut renderer = crate::test_renderer::new(14.);
         let theme = theme::app();
-        let thumb_backgrounds =
-            [false, true].map(|active| crate::scrollbar::thumb(&theme, active).background);
         let mut cache = user_interface::Cache::new();
 
         // Exercise both custom select answers and text-only questions, including
@@ -1028,36 +1020,42 @@ mod tests {
                     },
                     mouse::Cursor::Unavailable,
                 );
-                let iced::Renderer::Secondary(painted) = &mut renderer else {
-                    unreachable!()
-                };
-                let thumbs: Vec<_> = painted
-                    .layers()
-                    .iter()
-                    .flat_map(|layer| &layer.quads)
-                    .filter(|(_, background)| thumb_backgrounds.contains(background))
-                    .map(|(quad, _)| quad.bounds)
-                    .collect();
+                let pixels = crate::test_renderer::screenshot(
+                    &mut renderer,
+                    Size::new(600, 700),
+                    1.,
+                    theme::BACKGROUND,
+                );
                 let mut editor = EditorBounds {
                     id: draft.editor_id(),
                     ..EditorBounds::default()
                 };
                 ui.operate(&renderer, &mut editor);
                 let editor = editor.bounds.unwrap();
+                let x = (editor.x + editor.width
+                    - theme::SCROLLBAR_EDGE_INSET
+                    - theme::SCROLLBAR_WIDTH / 2.)
+                    .floor() as usize;
+                let top = (editor.y + crate::growing_editor::PADDING).ceil() as usize + 1;
+                let bottom = (editor.y + editor.height - crate::growing_editor::PADDING).floor()
+                    as usize
+                    - 1;
+                let pixel = |y: usize| &pixels[(y * 600 + x) * 4..(y * 600 + x + 1) * 4];
+                let background = pixel(bottom);
+                let painted: Vec<_> = (top..bottom).filter(|&y| pixel(y) != background).collect();
                 assert_eq!(
-                    thumbs.len(),
-                    usize::from(overflowing),
+                    !painted.is_empty(),
+                    overflowing,
                     "question {question}, answer length {}",
                     value.len()
                 );
                 let mut messages = Vec::new();
                 if overflowing {
-                    // Click the track below the thumb. It must route a scroll
-                    // to this question, not move the caret or advance the form.
-                    let thumb_bottom = thumbs[0].y + thumbs[0].height;
-                    let track_bottom = editor.y + editor.height - crate::growing_editor::PADDING;
+                    // Use the painted thumb, not renderer-private quad lists, to
+                    // click the track below it without moving the caret.
+                    let thumb_bottom = *painted.last().unwrap() as f32 + 1.;
                     let point =
-                        iced::Point::new(thumbs[0].center_x(), (thumb_bottom + track_bottom) / 2.);
+                        iced::Point::new(x as f32 + 0.5, (thumb_bottom + bottom as f32) / 2.);
                     ui.update(
                         &[
                             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
@@ -1088,10 +1086,7 @@ mod tests {
     fn questionnaire_seeded_editor_has_visible_glyphs() {
         let mut draft = draft();
         apply(&mut draft, Action::Edit(1));
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(14.),
-        ));
+        let mut renderer = crate::test_renderer::new(14.);
         let mut ui = UserInterface::build(
             draft.view(14., 360., true, true),
             Size::new(600., 500.),
@@ -1100,41 +1095,41 @@ mod tests {
         );
         ui.draw(
             &mut renderer,
-            &Theme::Dark,
+            &theme::app(),
             &iced::advanced::renderer::Style {
-                text_color: iced::Color::WHITE,
+                text_color: theme::TEXT,
             },
             mouse::Cursor::Unavailable,
         );
-        let iced::Renderer::Secondary(renderer) = &mut renderer else {
-            unreachable!()
+        let mut editor = EditorBounds {
+            id: draft.editor_id(),
+            ..EditorBounds::default()
         };
-        let mut found_editor = false;
-        for layer in renderer.layers() {
-            for group in &layer.text {
-                for text in group.as_slice() {
-                    if let iced_tiny_skia::graphics::Text::Editor {
-                        editor,
-                        position,
-                        clip_bounds,
-                        transformation,
-                        ..
-                    } = text
-                    {
-                        let editor = editor.upgrade().expect("rendered editor remains alive");
-                        found_editor = true;
-                        let runs: Vec<_> = editor.buffer().layout_runs().collect();
-                        assert_eq!(runs.len(), 1);
-                        assert_eq!(runs[0].text, "A mobile app");
-                        assert!(!runs[0].glyphs.is_empty());
-                        let baseline = (*position * *transformation).y + runs[0].line_y;
-                        let clip = *clip_bounds * *transformation;
-                        assert!(baseline > clip.y && baseline < clip.y + clip.height);
-                    }
-                }
-            }
-        }
-        assert!(found_editor, "the custom editor must be rendered");
+        ui.operate(&renderer, &mut editor);
+        let bounds = editor.bounds.expect("custom editor is mounted");
+        let pixels = crate::test_renderer::screenshot(
+            &mut renderer,
+            Size::new(600, 500),
+            1.,
+            theme::BACKGROUND,
+        );
+        let foreground = theme::TEXT.into_rgba8();
+        let padding = crate::growing_editor::PADDING;
+        let columns: Vec<_> = ((bounds.x + padding).ceil() as usize
+            ..(bounds.x + bounds.width - padding).floor() as usize)
+            .filter(|&x| {
+                ((bounds.y + padding).ceil() as usize
+                    ..(bounds.y + bounds.height - padding).floor() as usize)
+                    .any(|y| {
+                        (0..3).all(|c| pixels[(y * 600 + x) * 4 + c].abs_diff(foreground[c]) < 30)
+                    })
+            })
+            .collect();
+        assert!(
+            columns.len() > 14,
+            "seeded text must paint visible glyphs inside the editor, not just a caret"
+        );
+        assert_eq!(draft.value(0).as_deref(), Some("A mobile app"));
         assert_eq!(
             draft.answers[0].editor.cursor().position.column,
             "A mobile app".len()
@@ -1214,10 +1209,7 @@ mod tests {
     fn questionnaire_keyboard_routes_options_text_and_focus_without_double_advancing() {
         // A newly arriving panel must not take typing from an open Settings field.
         let d = draft();
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(14.),
-        ));
+        let mut renderer = crate::test_renderer::new(14.);
         let mut ui = UserInterface::build(
             d.view(14., 360., true, false),
             Size::new(600., 500.),

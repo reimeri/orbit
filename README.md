@@ -120,7 +120,8 @@ boundaries and reproducible large-session measurements.
 # Inside nix develop:
 just check
 just test-core
-just verify       # Format, Clippy, workspace tests, rendered software UI checks
+just test         # All tests, including wgpu rendering via a CPU Vulkan driver
+just verify       # Format, Clippy, tests, memory checks and Wayland smoke
 just smoke-gpu    # wgpu on your real Wayland desktop
 
 # Packaging verification, not the everyday edit loop:
@@ -129,7 +130,10 @@ nix run
 ```
 
 Automated tests use temporary directories and loopback HTTP fixtures—no account
-or live model calls. The rendered smoke test visits the project picker, Markdown
+or live model calls. Rendering tests and `just smoke` use wgpu with the pinned Mesa
+Lavapipe CPU Vulkan driver, so no hardware GPU is needed. Normal app startup and
+`just smoke-gpu` use the host graphics drivers; Pico has no software-renderer fallback.
+The rendered smoke test visits the project picker, Markdown
 chat/tool details, settings and a modal using isolated temporary application state.
 
 **Live OAuth and model access are intentionally left for you to test.** Follow

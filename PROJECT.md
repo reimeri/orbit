@@ -31,7 +31,7 @@ During the development the default folder of pico V2 in .config and such places 
 
 - [x] Pinned Nix flake: Rust development shell and runnable package
 - [x] Rust workspace with an iced app and UI-independent core crate
-- [x] Native Wayland-only window; wgpu with tiny-skia software fallback
+- [x] Native Wayland-only window; wgpu-only rendering (CPU Vulkan driver for automated tests)
 - [x] Isolated `pico-evo` application/configuration identity (no persistence yet)
 - [x] Formatting, linting, unit tests and headless rendered-window smoke check
 - [x] Real desktop GPU window check

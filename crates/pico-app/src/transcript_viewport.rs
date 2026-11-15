@@ -192,10 +192,7 @@ mod tests {
 
     #[test]
     fn reports_fitting_scrolling_resizing_and_new_epochs_without_idle_messages() {
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let mut renderer = crate::test_renderer::new(16.);
         let mut cache = Cache::new();
         let mut frame = |epoch, content_height, height, wheel| {
             let content = observe(

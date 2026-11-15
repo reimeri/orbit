@@ -299,6 +299,9 @@ pub struct Session {
     pub pending_tool_outputs: Vec<Value>,
     pub interrupted: bool,
     pub needs_attention: bool,
+    /// A successful main turn completed since the session was last opened.
+    #[serde(default)]
+    pub unchecked_completion: bool,
     pub context_account: Option<String>,
 }
 impl Session {
@@ -325,6 +328,7 @@ impl Session {
             pending_tool_outputs: vec![],
             interrupted: false,
             needs_attention: false,
+            unchecked_completion: false,
             context_account: None,
         }
     }
@@ -358,6 +362,7 @@ impl Session {
                 .collect();
         }
         self.updated = now();
+        self.unchecked_completion = false;
         self.pending_submissions.push(submission.clone());
         self.entries.push(Entry {
             id: submission,
@@ -399,6 +404,9 @@ pub struct SessionSummary {
     #[serde(default)]
     pub child: Option<crate::agent::subagents::Child>,
     pub needs_attention: bool,
+    /// A successful main turn completed since the session was last opened.
+    #[serde(default)]
+    pub unchecked_completion: bool,
     pub id: String,
     pub project: PathBuf,
     pub title: String,
@@ -410,6 +418,7 @@ impl From<&Session> for SessionSummary {
         Self {
             child: s.child.clone(),
             needs_attention: s.needs_attention,
+            unchecked_completion: s.unchecked_completion,
             id: s.id.clone(),
             project: s.project.clone(),
             title: s.title.clone(),

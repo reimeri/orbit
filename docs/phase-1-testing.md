@@ -131,7 +131,9 @@ lose details; the original transcript remains the source of truth.
   credentials in memory until they can be saved.
 - **No folder picker:** enter the path directly. Native browsing requires your
   desktop's xdg-desktop-portal file chooser backend.
-- **Graphics startup:** retry `ICED_BACKEND=tiny-skia cargo run` in `nix develop`.
+- **Graphics startup:** check the host Vulkan/graphics drivers and native Wayland
+  session, then retry inside `nix develop`. Pico uses wgpu only, with no software
+  fallback. Use `just smoke` for an isolated CPU-Vulkan test, not as a normal app mode.
 
 ## UI regression checks
 

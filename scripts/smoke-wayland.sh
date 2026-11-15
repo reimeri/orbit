@@ -20,7 +20,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 export XDG_RUNTIME_DIR="$runtime"
 export WAYLAND_DISPLAY=pico-evo-smoke
-export ICED_BACKEND=${ICED_BACKEND:-tiny-skia}
+export ICED_BACKEND=wgpu
 unset DISPLAY WAYLAND_SOCKET
 
 weston --backend=headless --renderer=pixman --shell=kiosk \
@@ -37,7 +37,7 @@ if [[ ! -S "$runtime/$WAYLAND_DISPLAY" ]]; then
     echo "Headless Wayland did not start. Re-enter nix develop and retry 'just smoke'." >&2
     exit 1
 fi
-if ! timeout 60s "$binary" --smoke-test >"$runtime/app.log" 2>&1; then
+if ! bash "$(dirname "$0")/test-renderer.sh" timeout 60s "$binary" --smoke-test >"$runtime/app.log" 2>&1; then
     cat "$runtime/app.log" "$runtime/weston.log" >&2
     echo "Window smoke test failed or timed out (renderer: $ICED_BACKEND)." >&2
     exit 1

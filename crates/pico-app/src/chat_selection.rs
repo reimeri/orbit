@@ -693,32 +693,6 @@ pub(crate) mod tests {
         SHAPED.with(std::cell::Cell::get)
     }
 
-    // Inspect retained paragraphs submitted for painting, not the widget's new input.
-    pub(crate) fn painted_paragraphs(renderer: &mut iced::Renderer) -> Vec<String> {
-        let iced::Renderer::Secondary(renderer) = renderer else {
-            panic!("paragraph inspection requires the software test renderer");
-        };
-        renderer
-            .layers()
-            .iter()
-            .flat_map(|layer| &layer.text)
-            .flat_map(|group| group.as_slice())
-            .filter_map(|text| match text {
-                iced::advanced::graphics::text::Text::Paragraph { paragraph, .. } => Some(
-                    paragraph
-                        .upgrade()
-                        .unwrap()
-                        .buffer()
-                        .lines
-                        .iter()
-                        .map(|line| line.text())
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .collect()
-    }
-
     use super::*;
     use crate::pointer_input::pointer_input;
     use iced::{
@@ -729,7 +703,7 @@ pub(crate) mod tests {
     use iced_runtime::{UserInterface, user_interface};
 
     fn renderer() -> iced::Renderer {
-        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.)))
+        crate::test_renderer::new(16.)
     }
     fn send(
         ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
@@ -784,12 +758,10 @@ pub(crate) mod tests {
         }
     }
 
-    async fn shared_paragraph_matches_rich_text_pixels(backend: &str) {
-        use iced::advanced::renderer::Headless;
+    #[test]
+    fn shared_paragraph_matches_rich_text_pixels() {
         use iced::widget::rich_text;
-        let mut renderer = iced::Renderer::new(Font::DEFAULT, Pixels(16.), Some(backend))
-            .await
-            .expect("requested renderer is available");
+        let mut renderer = crate::test_renderer::new(16.);
         let spans: Arc<[Span<'static, String>]> = Arc::from([
             Span::new("Bold café ").font(Font {
                 weight: iced::font::Weight::Bold,
@@ -859,7 +831,8 @@ pub(crate) mod tests {
                         },
                         mouse::Cursor::Unavailable,
                     );
-                    frames.push(renderer.screenshot(
+                    frames.push(crate::test_renderer::screenshot(
+                        &mut renderer,
                         Size::new((width * scale) as u32, (240. * scale) as u32),
                         scale,
                         Color::BLACK,
@@ -879,17 +852,6 @@ pub(crate) mod tests {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn shared_paragraph_matches_rich_text_pixels_software() {
-        shared_paragraph_matches_rich_text_pixels("tiny-skia").await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a GPU adapter"]
-    async fn shared_paragraph_matches_rich_text_pixels_gpu() {
-        shared_paragraph_matches_rich_text_pixels("wgpu").await;
     }
 
     #[test]

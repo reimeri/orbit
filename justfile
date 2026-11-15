@@ -10,8 +10,8 @@ check:
 test-core:
     cargo test --locked -p pico-core
 
-test:
-    cargo test --locked --workspace
+test *args:
+    ./scripts/test-renderer.sh cargo test --locked --workspace {{args}}
 
 # Memory safety and leaked module references, not just successful process exit.
 test-quickjs-memory:
@@ -28,7 +28,7 @@ lint:
 run:
     cargo run --locked -p pico-evo
 
-# Deterministic software-rendered window check; no desktop or GPU required.
+# Wgpu/Vulkan window check using the pinned CPU driver; no desktop/GPU required.
 smoke:
     cargo build --locked -p pico-evo
     ./scripts/smoke-wayland.sh

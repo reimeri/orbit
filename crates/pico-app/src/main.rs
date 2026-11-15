@@ -15,7 +15,10 @@ mod pointer_input;
 mod questionnaire;
 mod scrollbar;
 mod search_icon;
+mod session_wave;
 mod status_circle;
+#[cfg(test)]
+mod test_renderer;
 mod theme;
 mod tool_output;
 mod transcript_viewport;
@@ -76,7 +79,7 @@ fn main() -> ExitCode {
     .run();
     if let Err(error) = result {
         eprintln!(
-            "Pico could not start: {error}\nCheck your Wayland session. For GPU trouble retry `ICED_BACKEND=tiny-skia cargo run` inside nix develop."
+            "Pico could not start: {error}\nCheck your native Wayland session and Vulkan/graphics driver installation, then restart Pico. Re-enter `nix develop` if loader libraries are missing. Pico requires wgpu; there is no software-renderer fallback."
         );
         return ExitCode::FAILURE;
     }

@@ -72,9 +72,12 @@ impl Conversation {
         let conversation = self.clone();
         tokio::task::spawn_blocking(move || conversation.save()).await?
     }
+    /// The main turn includes terminal persistence, not just model/tool execution.
+    pub fn is_turn_active(&self) -> bool {
+        self.is_running() || self.finishing.load(Ordering::Acquire)
+    }
     pub fn is_executing(&self) -> bool {
-        self.is_running()
-            || self.finishing.load(Ordering::Acquire)
+        self.is_turn_active()
             || self.code.is_executing()
             || self
                 .questionnaires
@@ -444,7 +447,6 @@ impl Harness {
             if Some(c.id.as_str()) == selected {
                 continue;
             }
-            let mut saved = c.persisted.lock().expect("persistence lock");
             if c.is_executing()
                 || coordinator
                     .runs
@@ -454,6 +456,10 @@ impl Harness {
             {
                 continue;
             }
+            // The coordinator/loading guards exclude new starts and eviction.
+            // Skip running/finalizing work before waiting on its storage lock,
+            // otherwise a slow save would block UI child-status reads and Stop.
+            let mut saved = c.persisted.lock().expect("persistence lock");
             c.save_locked(&mut saved)?;
             let mut state = c.state.lock().expect("session lock");
             self.summaries
@@ -635,6 +641,7 @@ impl Harness {
             // cancel() takes the same state lock: it cannot cancel an obsolete
             // token between publishing a running turn and installing its token.
             conversation.turn_generation.fetch_add(1, Ordering::Release);
+            state.unchecked_completion = false;
             conversation.running.store(true, Ordering::Release);
             conversation.notifications.clear_terminal(&conversation.id);
             cancel
@@ -701,7 +708,7 @@ impl Harness {
                     // start_inner can wait for a cancelled turn while holding the
                     // coordinator. Publish only after marking idle and waking it.
                     let coordinator = harness.subagents.lock().expect("subagent lock");
-                    let state = conversation.state.lock().expect("session lock");
+                    let mut state = conversation.state.lock().expect("session lock");
                     if conversation.turn_generation.load(Ordering::Acquire) == generation {
                         if !cancel.is_cancelled() {
                             if result.is_err() || save_result.is_err() {
@@ -709,6 +716,9 @@ impl Harness {
                             } else if !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
                                 && !coordinator.runs.values().any(|r| r.parent_id == conversation.id && r.status == subagents::RunStatus::Running)
                             {
+                                // This sidebar hint uses ordinary session saves (eviction,
+                                // edits, shutdown), not a separate completion transaction.
+                                state.unchecked_completion = true;
                                 conversation.notifications.publish(&state, notifications::Kind::Finished);
                             }
                         }

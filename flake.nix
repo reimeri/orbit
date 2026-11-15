@@ -10,6 +10,7 @@
       lib = pkgs.lib;
       runtimeLibraries = with pkgs; [ wayland libxkbcommon vulkan-loader libGL fontconfig ];
       runtimePath = lib.makeLibraryPath runtimeLibraries;
+      testVulkanIcd = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
       fontConfig = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
       patchedQuickjs = import ./patches/quickjs { inherit pkgs; };
       patchedWinit = import ./patches/winit { inherit pkgs; };
@@ -54,7 +55,14 @@
         # in the development shell and installed wrapper.
         FONTCONFIG_FILE = fontConfig;
         doCheck = true;
-        nativeCheckInputs = [ pkgs.git pkgs.valgrind pkgs.dbus ];
+        nativeCheckInputs = [ pkgs.git pkgs.valgrind pkgs.dbus pkgs.mesa ];
+        PICO_TEST_VULKAN_ICD = testVulkanIcd;
+        preCheck = ''
+          export VK_DRIVER_FILES="$PICO_TEST_VULKAN_ICD"
+          unset VK_ICD_FILENAMES
+          export WGPU_BACKEND=vulkan ICED_BACKEND=wgpu MESA_SHADER_CACHE_DISABLE=true
+          export LD_LIBRARY_PATH="${runtimePath}:''${LD_LIBRARY_PATH:-}"
+        '';
         postCheck = ''
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="${pkgs.bash}/bin/bash $PWD/scripts/check-quickjs-memory.sh" \
             cargo test --locked --offline --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} \
@@ -110,6 +118,8 @@
         buildInputs = runtimeLibraries ++ [ pkgs.sqlite ];
         LD_LIBRARY_PATH = runtimePath;
         FONTCONFIG_FILE = fontConfig;
+        # Expose the test driver path, but do not select it for cargo run/the app.
+        PICO_TEST_VULKAN_ICD = testVulkanIcd;
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         shellHook = ''
           # Locate this checkout even when entering from a package subdirectory.

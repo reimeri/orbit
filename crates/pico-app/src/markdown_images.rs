@@ -448,10 +448,7 @@ mod tests {
 
     fn layout(cache: &Cache, width: f32) -> (iced::Rectangle, f32) {
         use iced::advanced::{layout, widget::Tree};
-        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let renderer = crate::test_renderer::new(16.);
         let mut element: Element<'_, crate::ui::Message> =
             iced::widget::column![cache.view("image.gif"), space().height(13)]
                 .spacing(7)
@@ -529,10 +526,7 @@ mod tests {
             );
             // Even a very short failed panorama remains clickable;
             // error details must not force a taller in-flow layout.
-            let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-                iced::Font::DEFAULT,
-                iced::Pixels(16.),
-            ));
+            let mut renderer = crate::test_renderer::new(16.);
             let mut ui = iced_runtime::UserInterface::build(
                 cache.view("image.gif"),
                 Size::new(narrow_width, 800.),

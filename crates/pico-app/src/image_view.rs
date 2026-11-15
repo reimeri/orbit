@@ -417,28 +417,11 @@ impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
             // Keep text in the same foreground layer as its background;
             // returning to the parent layer would draw it underneath the panel.
             renderer.with_layer(*viewport, |renderer| {
-                match renderer {
-                    iced::Renderer::Primary(_) => renderer.draw_image(
-                        image_primitive::Image::new(BACKGROUND.clone()).snap(true),
-                        info.bounds(),
-                        picture.bounds(),
-                    ),
-                    // tiny-skia truncates raster origins and cannot accurately
-                    // position a stretched one-pixel texture. Match its origin
-                    // with a solid quad instead.
-                    iced::Renderer::Secondary(_) => renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: info.bounds().x.floor(),
-                                y: info.bounds().y.floor(),
-                                ..info.bounds()
-                            },
-                            snap: false,
-                            ..Default::default()
-                        },
-                        theme::SCRIM,
-                    ),
-                }
+                renderer.draw_image(
+                    image_primitive::Image::new(BACKGROUND.clone()).snap(true),
+                    info.bounds(),
+                    picture.bounds(),
+                );
                 self.info.as_widget().draw(
                     &tree.children[1],
                     renderer,
@@ -462,10 +445,7 @@ mod tests {
         let media = pico_core::media::MediaStore::new(dir.path().into())
             .image(include_bytes!("fixtures/media.png"))
             .unwrap();
-        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let renderer = crate::test_renderer::new(16.);
         // Measure the normal button inset instead of pinning iced's padding default.
         let mut button = theme::button::<crate::ui::Message>(iced::widget::space());
         let mut tree = Tree::new(&button as &dyn Widget<_, _, _>);
@@ -527,19 +507,13 @@ mod tests {
 
     #[test]
     fn attachment_remove_is_hover_only_and_does_not_open_modal() {
-        use iced::{
-            Point, Size,
-            advanced::{Renderer as _, renderer::Headless},
-        };
+        use iced::{Point, Size, advanced::Renderer as _};
         let dir = tempfile::tempdir().unwrap();
         let media = pico_core::media::MediaStore::new(dir.path().into())
             .image(include_bytes!("fixtures/media.png"))
             .unwrap();
         let viewer = Viewer::default();
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let mut renderer = crate::test_renderer::new(16.);
         let mut view = viewer.attachment(&media, 3);
         let mut tree = Tree::new(view.as_widget());
         let size = view
@@ -587,7 +561,8 @@ mod tests {
                 },
                 cursor,
             );
-            let pixels = renderer.screenshot(
+            let pixels = crate::test_renderer::screenshot(
+                &mut renderer,
                 Size::new(size.width as u32, size.height as u32),
                 1.,
                 Color::BLACK,
@@ -633,10 +608,7 @@ mod tests {
             Size,
             advanced::{layout, widget::Tree},
         };
-        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let renderer = crate::test_renderer::new(16.);
         for (width, height, animated) in [
             (96, 64, false),
             (96, 64, true),
@@ -689,10 +661,7 @@ mod tests {
             Size,
             advanced::{layout, widget::Tree},
         };
-        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let renderer = crate::test_renderer::new(16.);
         let viewer = Viewer {
             frames: Some(Ok(handles(vec![Frame {
                 width: 320,
@@ -727,10 +696,7 @@ mod tests {
 
     #[test]
     fn metadata_shrinks_to_the_wider_text_line() {
-        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let renderer = crate::test_renderer::new(16.);
         let viewer = Viewer {
             frames: Some(Ok(handles(vec![Frame {
                 width: 800,
@@ -779,12 +745,10 @@ mod tests {
         }
     }
 
-    async fn metadata_edges_match_image_pixels(backend: &str) {
-        use iced::advanced::{Renderer as _, renderer::Headless};
-        let mut renderer =
-            iced::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.), Some(backend))
-                .await
-                .expect("requested renderer is available");
+    #[test]
+    fn metadata_covers_fractional_edges() {
+        use iced::advanced::Renderer as _;
+        let mut renderer = crate::test_renderer::new(16.);
         let viewer = Viewer {
             frames: Some(Ok(handles(vec![Frame {
                 width: 320,
@@ -846,7 +810,12 @@ mod tests {
                     },
                     cursor,
                 );
-                screenshots.push(renderer.screenshot(physical, scale, Color::BLACK));
+                screenshots.push(crate::test_renderer::screenshot(
+                    &mut renderer,
+                    physical,
+                    scale,
+                    Color::BLACK,
+                ));
             }
             let plain = &screenshots[0];
             let hovered = &screenshots[1];
@@ -878,7 +847,7 @@ mod tests {
                     .unwrap();
                 assert!(
                     closest < 30,
-                    "dimmed metadata text on {backend} at scale {scale}: color distance {closest}"
+                    "dimmed metadata text on wgpu at scale {scale}: color distance {closest}"
                 );
             }
             // Check the first painted top row and left column, away from text.
@@ -893,31 +862,16 @@ mod tests {
                 assert!(plain[offset] > 200);
                 assert!(
                     hovered[offset].abs_diff(interior) <= 3,
-                    "uncovered image edge on {backend} at scale {scale}: {}",
+                    "uncovered image edge on wgpu at scale {scale}: {}",
                     hovered[offset]
                 );
             }
         }
     }
 
-    #[tokio::test]
-    async fn metadata_covers_fractional_edges_software() {
-        metadata_edges_match_image_pixels("tiny-skia").await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a working GPU; run alongside smoke-gpu"]
-    async fn metadata_covers_fractional_edges_gpu() {
-        metadata_edges_match_image_pixels("wgpu").await;
-    }
-
     #[test]
     fn metadata_is_hover_only_and_playback_click_does_not_dismiss() {
-        use iced::{
-            Point, Size,
-            advanced::{Renderer as _, renderer::Headless},
-            mouse,
-        };
+        use iced::{Point, Size, advanced::Renderer as _, mouse};
         let viewer = Viewer {
             frames: Some(Ok(handles(
                 pico_core::media::frames_from_bytes(
@@ -929,10 +883,7 @@ mod tests {
             playing: true,
             ..Default::default()
         };
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.),
-        ));
+        let mut renderer = crate::test_renderer::new(16.);
         let mut view = viewer.view("image.gif".into(), "96 × 64 · 123 bytes".into(), 800., 600.);
         let mut tree = Tree::new(view.as_widget());
         let node = view.as_widget_mut().layout(
@@ -965,7 +916,12 @@ mod tests {
                 },
                 cursor,
             );
-            let pixels = renderer.screenshot(Size::new(800, 600), 1., Color::BLACK);
+            let pixels = crate::test_renderer::screenshot(
+                &mut renderer,
+                Size::new(800, 600),
+                1.,
+                Color::BLACK,
+            );
             let image_pixels: Vec<_> = (picture.y as usize..(picture.y + picture.height) as usize)
                 .flat_map(|y| {
                     let start = (y * 800 + picture.x as usize) * 4;

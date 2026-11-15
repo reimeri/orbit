@@ -273,15 +273,15 @@ mod tests {
 
     #[test]
     fn scrolling_reuses_overlapping_paragraphs_and_reflows_changed_rows() {
-        use crate::chat_selection::tests::{painted_paragraphs, shaped_paragraphs};
+        use crate::chat_selection::tests::shaped_paragraphs;
         use iced::{
-            Font, Pixels, Size,
+            Size,
             advanced::{Renderer as _, widget::Operation},
         };
         use iced_runtime::{UserInterface, user_interface::Cache};
 
         #[derive(Default)]
-        struct Texts(Vec<String>);
+        struct Texts(Vec<(String, iced::Rectangle)>);
         impl Operation for Texts {
             fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
                 visit(self);
@@ -289,10 +289,10 @@ mod tests {
             fn text(
                 &mut self,
                 _: Option<&iced::advanced::widget::Id>,
-                _: iced::Rectangle,
+                bounds: iced::Rectangle,
                 text: &str,
             ) {
-                self.0.push(text.to_owned());
+                self.0.push((text.to_owned(), bounds));
             }
         }
         let source: String = (0..200)
@@ -301,8 +301,7 @@ mod tests {
         let mut output = Output::new("test", "cmd", &source, false);
         output.update(Event::Resize(700.));
         let selection = chat_selection::Shared::default();
-        let mut renderer =
-            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.)));
+        let mut renderer = crate::test_renderer::new(16.);
         let mut build = |output: &Output, cache, width| {
             let before = shaped_paragraphs();
             let mut ui = UserInterface::build(
@@ -318,7 +317,12 @@ mod tests {
                 .map(|range| &output.display[range.clone()])
                 .collect();
             assert_eq!(
-                texts.0, expected,
+                texts
+                    .0
+                    .iter()
+                    .map(|(text, _)| text.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
                 "retained widget state must show current source rows"
             );
             ui.operate(
@@ -340,13 +344,33 @@ mod tests {
                 },
                 iced::mouse::Cursor::Unavailable,
             );
-            let painted = painted_paragraphs(&mut renderer);
-            assert!(!painted.is_empty(), "the viewport must paint source rows");
-            assert!(
-                painted.iter().all(|text| expected.contains(&text.as_str())),
-                "retained paragraphs must paint current source rows: {painted:?}"
+            let shaped = shaped_paragraphs() - before;
+            let text_region = texts
+                .0
+                .iter()
+                .zip(&output.rows[output.visible()])
+                .filter(|((text, _), range)| {
+                    !text.trim().is_empty()
+                        && !output
+                            .headings
+                            .iter()
+                            .any(|heading| heading.contains(&range.start))
+                })
+                .find_map(|((_, bounds), _)| {
+                    let visible = (*bounds - iced::Vector::new(0., output.offset))
+                        .intersection(&iced::Rectangle::with_size(Size::new(width, MAX_HEIGHT)))?;
+                    (visible.height == bounds.height).then_some(visible)
+                })
+                .expect("a complete source row must be visible");
+            crate::test_renderer::assert_matches_fresh(
+                &mut renderer,
+                output.view("tool", selection.clone(), 0),
+                Size::new(width, MAX_HEIGHT),
+                "tool-output-tool",
+                output.offset,
+                text_region,
             );
-            (ui.into_cache(), shaped_paragraphs() - before)
+            (ui.into_cache(), shaped)
         };
         let (mut cache, count) = build(&output, Cache::new(), 700.);
         assert!(count <= output.visible().len());

@@ -82,12 +82,11 @@ fn style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
 mod tests {
     use super::*;
     use iced::{
-        Event, Font,
+        Event,
         Length::Fill,
-        Pixels, Point, Rectangle, Size,
+        Point, Rectangle, Size,
         advanced::{
             Renderer as _, clipboard, renderer,
-            renderer::Headless,
             widget::{Id, Operation},
         },
         mouse,
@@ -121,8 +120,7 @@ mod tests {
 
     #[test]
     fn vertical_gutter_is_stable_and_does_not_activate_content() {
-        let mut renderer =
-            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.)));
+        let mut renderer = crate::test_renderer::new(16.);
         let mut cache = Cache::new();
         // Reuse widget state through overflow, shrinkage, and panel resizing.
         for width in [240., 137.] {
@@ -155,8 +153,12 @@ mod tests {
                     },
                     mouse::Cursor::Unavailable,
                 );
-                let pixels =
-                    renderer.screenshot(Size::new(width as u32, 100), 1., iced::Color::BLACK);
+                let pixels = crate::test_renderer::screenshot(
+                    &mut renderer,
+                    Size::new(width as u32, 100),
+                    1.,
+                    iced::Color::BLACK,
+                );
                 let mut painted_x = Vec::new();
                 for y in 0..100 {
                     for x in (content.x + content.width).ceil() as usize..width as usize {
@@ -208,8 +210,7 @@ mod tests {
 
     #[test]
     fn builtin_pick_list_menus_reserve_a_gutter_even_when_they_fit() {
-        let mut renderer =
-            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.)));
+        let mut renderer = crate::test_renderer::new(16.);
         let theme = theme::app();
         let style = theme::pick_list_menu(&theme);
         for count in [2, 40] {
@@ -254,7 +255,12 @@ mod tests {
                 },
                 mouse::Cursor::Unavailable,
             );
-            let pixels = renderer.screenshot(Size::new(240, 200), 1., iced::Color::BLACK);
+            let pixels = crate::test_renderer::screenshot(
+                &mut renderer,
+                Size::new(240, 200),
+                1.,
+                iced::Color::BLACK,
+            );
             let iced::Background::Color(selected) = style.selected_background else {
                 panic!("fixture theme must have a solid selection background")
             };
@@ -279,8 +285,7 @@ mod tests {
 
     #[test]
     fn horizontal_scroll_does_not_reserve_a_vertical_gutter() {
-        let mut renderer =
-            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.)));
+        let mut renderer = crate::test_renderer::new(16.);
         let mut ui = UserInterface::<(), _, _>::build(
             horizontal(container(space().width(83).height(20)).id("content")),
             Size::new(240., 100.),
