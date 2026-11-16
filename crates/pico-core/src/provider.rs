@@ -485,6 +485,7 @@ impl Sse {
 #[derive(Default)]
 struct ResponseStream {
     first_token: Option<Instant>,
+    summary_indices: std::collections::HashMap<String, u64>,
 }
 impl ResponseStream {
     fn event(
@@ -519,10 +520,26 @@ impl ResponseStream {
                     .as_str()
                     .context("Text delta missing item ID")?;
                 let text = event["delta"].as_str().context("Text delta missing text")?;
+                let reasoning = event["type"] == "response.reasoning_summary_text.delta";
+                let mut text = text.to_owned();
+                if reasoning {
+                    let index = event["summary_index"]
+                        .as_u64()
+                        .context("Reasoning summary delta missing summary index")?;
+                    // Deltas within a part concatenate verbatim; distinct parts
+                    // need the same separator used by completed-text reconciliation.
+                    if self
+                        .summary_indices
+                        .insert(id.into(), index)
+                        .is_some_and(|previous| previous != index)
+                    {
+                        text.insert(0, '\n');
+                    }
+                }
                 emit(Delta::Text {
                     id: id.into(),
-                    text: text.into(),
-                    reasoning: event["type"] == "response.reasoning_summary_text.delta",
+                    text,
+                    reasoning,
                 });
             }
             "response.completed" => {
@@ -1149,6 +1166,50 @@ mod tests {
         assert!(!request.contains("OLD_HISTORY_MARKER"));
     }
     #[test]
+    fn streamed_summary_parts_keep_boundaries_without_splitting_chunks() {
+        let mut stream = ResponseStream::default();
+        let texts = std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
+        let emit = |delta| {
+            if let Delta::Text { id, text, .. } = delta {
+                texts.lock().unwrap().entry(id).or_default().push_str(&text);
+            }
+        };
+        for (id, index, text) in [
+            ("first", 0, "**Checking known UI"),
+            ("first", 0, " cases**"),
+            ("first", 1, "**Testing Uni"),
+            // A separate item must not inherit the previous item's index.
+            ("second", 0, "**Independent λ**"),
+            ("first", 1, "code shaping**"),
+            ("first", 2, "**Final check**"),
+        ] {
+            stream
+                .event(
+                    json!({"type":"response.reasoning_summary_text.delta",
+                        "item_id":id,"summary_index":index,"delta":text}),
+                    &emit,
+                    Instant::now(),
+                )
+                .unwrap();
+        }
+        stream
+            .event(
+                json!({"type":"response.output_text.delta",
+                    "item_id":"answer","delta":"Ordinary prose"}),
+                &emit,
+                Instant::now(),
+            )
+            .unwrap();
+        let texts = texts.into_inner().unwrap();
+        assert_eq!(
+            texts["first"],
+            "**Checking known UI cases**\n**Testing Unicode shaping**\n**Final check**"
+        );
+        assert_eq!(texts["second"], "**Independent λ**");
+        assert_eq!(texts["answer"], "Ordinary prose");
+    }
+
+    #[test]
     fn streaming_time_starts_at_content_not_metadata_and_includes_tool_calls() {
         let start = Instant::now();
         let completed = json!({"type":"response.completed","response":{
@@ -1166,21 +1227,21 @@ mod tests {
                 .unwrap();
             stream
                 .event(
-                    json!({"type":kind,"item_id":"a","delta":""}),
+                    json!({"type":kind,"item_id":"a","summary_index":0,"delta":""}),
                     &|_| {},
                     start + Duration::from_secs(2),
                 )
                 .unwrap();
             stream
                 .event(
-                    json!({"type":kind,"item_id":"a","delta":"first"}),
+                    json!({"type":kind,"item_id":"a","summary_index":0,"delta":"first"}),
                     &|_| {},
                     start + Duration::from_secs(10),
                 )
                 .unwrap();
             stream
                 .event(
-                    json!({"type":kind,"item_id":"a","delta":"last"}),
+                    json!({"type":kind,"item_id":"a","summary_index":0,"delta":"last"}),
                     &|_| {},
                     start + Duration::from_secs(12),
                 )

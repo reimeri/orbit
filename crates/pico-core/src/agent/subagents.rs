@@ -925,7 +925,7 @@ mod tests {
                 .reply
                 .send(format!(
                     "data: {}\n\n",
-                    json!({"type": event, "item_id": entry_id, "delta": text})
+                    json!({"type": event, "item_id": entry_id, "summary_index": 0, "delta": text})
                 ))
                 .unwrap();
             until(|| child.snapshot().entries.by_id(entry_id).is_some()).await;

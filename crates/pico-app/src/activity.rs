@@ -652,6 +652,40 @@ mod tests {
     }
 
     #[test]
+    fn streamed_summary_label_uses_latest_complete_heading() {
+        let mut source: History<_> = vec![entry(
+            "reasoning",
+            EntryKind::Reasoning,
+            "**Checking known UI cases**",
+        )]
+        .into();
+        let mut projection = Projection::default();
+        projection.sync(&source);
+        assert_eq!(
+            projection.block(0).summary.as_ref().unwrap().label(true),
+            "Checking known UI cases"
+        );
+
+        source[0].text.push_str("\n**Testing Uni");
+        projection.sync(&source);
+        assert_eq!(
+            projection.block(0).summary.as_ref().unwrap().label(true),
+            "Checking known UI cases"
+        );
+
+        source[0].text.push_str("code shaping**");
+        projection.sync(&source);
+        assert_eq!(
+            projection.block(0).summary.as_ref().unwrap().label(true),
+            "Testing Unicode shaping"
+        );
+        assert_eq!(
+            source[0].text,
+            "**Checking known UI cases**\n**Testing Unicode shaping**"
+        );
+    }
+
+    #[test]
     fn previews_use_inputs_not_javascript_wrappers_or_generated_paraphrases() {
         assert_eq!(
             tool_preview(

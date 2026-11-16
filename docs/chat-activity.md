@@ -30,7 +30,9 @@ Settings and session-menu copy actions are unchanged.
   primary rows. Waits use durable cell IDs to find the originating execution.
 - Consecutive reasoning entries share a disclosure showing the latest actual
   Markdown/bold summary heading (or a text preview). Expanding retains all original
-  bodies, in order, with their original selection identities.
+  bodies, in order, with their original selection identities. Streamed summary
+  parts retain newline boundaries, just like completed responses; a new partial
+  heading does not replace the previous complete heading.
 - Subagent completion observations use their durable run identity to display
   profile, title and terminal status. Expanded details retain the full harness
   notice and an Open subagent action. Other warnings and the questionnaire panel
