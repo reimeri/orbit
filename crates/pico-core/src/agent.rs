@@ -1,4 +1,5 @@
 pub mod attention;
+mod naming;
 pub mod notifications;
 pub mod subagents;
 use crate::{
@@ -30,6 +31,8 @@ pub struct Conversation {
     pub state: Arc<Mutex<Session>>,
     pub running: AtomicBool,
     finishing: AtomicBool,
+    naming: AtomicBool,
+    naming_cancel: CancellationToken,
     pub status: Mutex<String>,
     pub turn_usage: Mutex<TurnUsage>,
     cancel: Mutex<CancellationToken>,
@@ -349,6 +352,8 @@ impl Harness {
                 state: Arc::new(Mutex::new(session)),
                 running: AtomicBool::new(false),
                 finishing: AtomicBool::new(false),
+                naming: AtomicBool::new(false),
+                naming_cancel: CancellationToken::new(),
                 status: Mutex::new("Ready".into()),
                 turn_usage: Mutex::new(TurnUsage::default()),
                 cancel: Mutex::new(CancellationToken::new()),
@@ -447,7 +452,8 @@ impl Harness {
             if Some(c.id.as_str()) == selected {
                 continue;
             }
-            if c.is_executing()
+            if c.naming.load(Ordering::Acquire)
+                || c.is_executing()
                 || coordinator
                     .runs
                     .values()
@@ -538,6 +544,9 @@ impl Harness {
             let mut state = conversation.state.lock().expect("session lock");
             let before = SessionSummary::from(&*state);
             edit(&mut state);
+            if state.title != before.title {
+                state.title_manually_set = true;
+            }
             before != SessionSummary::from(&*state)
         };
         // Failed writes retain unsaved changes in memory for retry, never discard user work.
@@ -558,10 +567,14 @@ impl Harness {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
+        let naming_message = session.needs_title().then(|| message.clone());
         session.accept_submission(submission.to_owned(), message, false);
         self.store.commit_new_session(&session)?;
         let id = session.id.clone();
-        self.make_conversation(session, true);
+        let conversation = self.make_conversation(session, true);
+        if let Some(message) = naming_message {
+            self.name_session(&conversation, message);
+        }
         self.start(&id, settings)
     }
     pub fn send(
@@ -601,11 +614,15 @@ impl Harness {
                         .lock()
                         .expect("cancel lock")
                         .is_cancelled();
+                let naming_message = candidate.needs_title().then(|| message.clone());
                 candidate.accept_submission(submission.to_owned(), message.clone(), steering);
                 self.store.save_changes(saved.as_ref(), &candidate)?;
                 *saved = Some(candidate);
                 let mut state = conversation.state.lock().expect("session lock");
                 state.accept_submission(submission.to_owned(), message, steering);
+                if let Some(message) = naming_message {
+                    self.name_session(&conversation, message);
+                }
                 conversation.submissions.fetch_add(1, Ordering::Release);
                 self.catalog_revision.fetch_add(1, Ordering::Release);
                 conversation.changed();
@@ -1307,7 +1324,9 @@ await Promise.all(['first', 'second'].map(async id => {
             })).await;
             let h = Harness::with_provider(store.clone(), vec![], Provider::fixture(store, url))
                 .unwrap();
-            let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+            let mut session = Session::new(dir.path().into(), &Settings::default());
+            session.rename("Questionnaire fixture".into());
+            let c = h.insert(session);
             let questions = c.questionnaires.as_ref().unwrap();
             let mut changes = h.subscribe();
             if tool == "wait" {

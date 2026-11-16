@@ -438,3 +438,29 @@ inspected software-renderer drawing lists instead check painted pixels or compar
 retained-widget output with an independently constructed fresh view. The ordinary
 suite checks wave animation, freeze/resume, clipping, text rendering and fractional
 image edges on the CPU Vulkan driver. Run `just smoke-gpu` for host-GPU acceptance.
+
+## Automatic session titles
+
+On the first accepted user message, main sessions request a short title from
+`gpt-6-luna` in the background through the existing ChatGPT subscription provider.
+The tools-disabled request contains only that message (including attached images),
+not project instructions or later conversation history. It does not change the
+conversation's selected model, transcript, context, usage display or running status.
+The existing first-message title appears immediately and stays if naming fails,
+returns an unusable title, or exceeds 60 seconds. Provider transport retries still
+apply within that deadline; later sends and restarts do not trigger another naming
+job. Existing conversations and subagent titles are not retroactively renamed.
+
+Manual renames are persisted explicitly and always win over pending naming,
+including a rename to the same displayed text. Pending naming prevents transcript
+eviction but not session deletion; deletion cancels the request and excludes late
+writes. A title-save failure retains the generated title in memory for normal save
+retry and adds a recoverable notice without failing the main turn.
+
+Run `cargo test --locked -p pico-core agent::naming` for local HTTP regressions
+covering parallel main responses, first-send/repeat-send behavior, manual rename,
+eviction/reload, deletion, provider/validation failure and storage recovery.
+Live acceptance: send a message in a new session and verify that its sidebar title
+updates while the main response continues normally; rename another session while
+its title request is pending and verify your manual name remains. Live naming uses
+subscription usage and is not exercised by automated tests.

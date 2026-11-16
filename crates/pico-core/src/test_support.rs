@@ -36,34 +36,7 @@ pub async fn server_with<F: FnOnce(&str) -> (u16, String) + Send + 'static>(
                     .await
                     .unwrap()
                     .unwrap();
-            let mut bytes = vec![];
-            let header_end = loop {
-                let mut buffer = [0; 4096];
-                let n = socket.read(&mut buffer).await.unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&buffer[..n]);
-                if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
-                    break end + 4;
-                }
-            };
-            let headers = String::from_utf8_lossy(&bytes[..header_end]);
-            let length: usize = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_lowercase()
-                        .strip_prefix("content-length: ")
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| "0".into())
-                .parse()
-                .unwrap();
-            while bytes.len() < header_end + length {
-                let mut buffer = [0; 4096];
-                let n = socket.read(&mut buffer).await.unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&buffer[..n]);
-            }
-            let request = String::from_utf8(bytes).unwrap();
+            let request = read_request(&mut socket).await;
             let (status, body) = reply(&request);
             tx.send(request).unwrap();
             let response = format!(
@@ -121,4 +94,69 @@ fn request_headers_ignore_name_case_but_preserve_values_and_exclude_body() {
         Some("Bearer CaseSensitive")
     );
     assert_eq!(header(request, "missing"), None);
+}
+
+async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+    let mut bytes = vec![];
+    let header_end = loop {
+        let mut buffer = [0; 4096];
+        let n = socket.read(&mut buffer).await.unwrap();
+        assert!(n > 0);
+        bytes.extend_from_slice(&buffer[..n]);
+        if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let length: usize = headers
+        .lines()
+        .find_map(|line| {
+            line.to_lowercase()
+                .strip_prefix("content-length: ")
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "0".into())
+        .parse()
+        .unwrap();
+    while bytes.len() < header_end + length {
+        let mut buffer = [0; 4096];
+        let n = socket.read(&mut buffer).await.unwrap();
+        assert!(n > 0);
+        bytes.extend_from_slice(&buffer[..n]);
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
+/// Concurrent requests whose replies are independently released by the test.
+pub async fn gated_server() -> (
+    String,
+    mpsc::UnboundedReceiver<(String, tokio::sync::oneshot::Sender<(u16, String)>)>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let request = read_request(&mut socket).await;
+                let (reply, response) = tokio::sync::oneshot::channel::<(u16, String)>();
+                if tx.send((request, reply)).is_err() {
+                    return;
+                }
+                let Ok((status, body)) = response.await else {
+                    return;
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                // Cancellation/deletion can close the client before the gated reply.
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (url, rx, task)
 }

@@ -283,6 +283,9 @@ pub struct Session {
     pub subagent_notices: Vec<String>,
     pub project: PathBuf,
     pub title: String,
+    /// Explicit renames win even if the chosen text equals the automatic fallback.
+    #[serde(default)]
+    pub title_manually_set: bool,
     pub updated: u64,
     pub model: String,
     pub effort: String,
@@ -315,6 +318,7 @@ impl Session {
             subagent_notices: vec![],
             project,
             title: "New session".into(),
+            title_manually_set: false,
             updated: now(),
             model: settings.model.clone(),
             effort: settings.models[&settings.model].effort.clone(),
@@ -350,11 +354,24 @@ impl Session {
         self.select_model(&settings.model, settings);
         Some(retired)
     }
+    pub fn rename(&mut self, title: String) {
+        self.title = title;
+        self.title_manually_set = true;
+    }
+    pub(crate) fn needs_title(&self) -> bool {
+        !self.title_manually_set
+            && self.title == "New session"
+            && self.child.is_none()
+            && !self
+                .entries
+                .iter()
+                .any(|e| matches!(e.kind, EntryKind::User { .. }))
+    }
     pub fn accept(&mut self, message: UserMessage) {
         self.accept_submission(id(), message, false);
     }
     pub fn accept_submission(&mut self, submission: String, message: UserMessage, steering: bool) {
-        if self.title == "New session" {
+        if self.needs_title() {
             self.title = message
                 .text
                 .lines()
@@ -699,6 +716,25 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_looking_titles_do_not_erase_manual_or_first_message_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        for manual in [false, true] {
+            let mut session = Session::new(dir.path().into(), &Settings::default());
+            if manual {
+                session.rename("New session".into());
+            } else {
+                session.accept("New session".into());
+            }
+            store.save_session(&session).unwrap();
+            let mut restored = store.load_session(&session.id).unwrap();
+            assert!(!restored.needs_title());
+            restored.accept("This must not rename the conversation".into());
+            assert_eq!(restored.title, "New session");
+        }
+    }
+
     #[test]
     fn image_submissions_survive_reopen_and_project_only_at_provider_boundary() {
         let dir = tempfile::tempdir().unwrap();

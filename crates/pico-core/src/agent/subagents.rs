@@ -583,6 +583,7 @@ impl Harness {
         for id in children.iter().chain(std::iter::once(&session.to_owned())) {
             if let Some(c) = self.get(id) {
                 c.deleted.store(true, Ordering::Release);
+                c.naming_cancel.cancel();
                 c.cancel();
                 if let Err(e) = c.code.remove_media() {
                     cleanup_errors.push(format!("{id}: {e:#}"));

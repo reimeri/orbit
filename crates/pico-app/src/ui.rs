@@ -2181,7 +2181,7 @@ impl App {
                     let h = h.clone();
                     self.tasks.push(self.io.run(move || {
                         Message::Edited(
-                            h.edit(&id, |s| s.title = title)
+                            h.edit(&id, |s| s.rename(title))
                                 .map_err(|e| format!("{e:#}")),
                         )
                     }));
