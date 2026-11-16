@@ -113,6 +113,22 @@ pub(super) struct Coordinator {
     unsaved: HashMap<String, (RunInfo, Option<String>, Option<String>)>,
 }
 impl Coordinator {
+    pub(super) fn latest_runs(&self, parent: &str) -> Vec<RunInfo> {
+        let mut latest: HashMap<&str, &RunInfo> = HashMap::new();
+        for run in self.runs.values().filter(|r| r.parent_id == parent) {
+            let entry = latest.entry(&run.session_id).or_insert(run);
+            if run.assignment > entry.assignment {
+                *entry = run;
+            }
+        }
+        let mut runs: Vec<_> = latest.into_values().cloned().collect();
+        runs.sort_by(|a, b| {
+            b.started
+                .cmp(&a.started)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        runs
+    }
     pub fn load(store: &Store) -> Result<Self> {
         let mut coordinator = Self::default();
         let db = store.db.lock().expect("database lock");
@@ -156,20 +172,7 @@ impl Coordinator {
 impl Harness {
     pub fn subagent_runs(&self, parent: &str) -> Vec<RunInfo> {
         let coordinator = self.subagents.lock().expect("subagent lock");
-        let mut latest: HashMap<&str, &RunInfo> = HashMap::new();
-        for run in coordinator.runs.values().filter(|r| r.parent_id == parent) {
-            let entry = latest.entry(&run.session_id).or_insert(run);
-            if run.assignment > entry.assignment {
-                *entry = run;
-            }
-        }
-        let mut runs: Vec<_> = latest.into_values().cloned().collect();
-        runs.sort_by(|a, b| {
-            b.started
-                .cmp(&a.started)
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        });
-        runs
+        coordinator.latest_runs(parent)
     }
     pub fn active_children(&self, parent: &str) -> usize {
         self.subagents

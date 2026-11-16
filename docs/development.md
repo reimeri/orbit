@@ -479,3 +479,29 @@ Live acceptance: send a message in a new session and verify that its sidebar tit
 updates while the main response continues normally; rename another session while
 its title request is pending and verify your manual name remains. Live naming uses
 subscription usage and is not exercised by automated tests.
+
+## Settled sessions
+
+Idle, checked main sessions offer **✓ Settle** in place of their age on row hover.
+Working sessions, pending questionnaires, errors and unread completion dots do not
+offer it. Settling leaves the open conversation and draft unchanged. The bottom
+Settled section starts collapsed; its compact, independently virtualized list
+shows at most roughly ten rows (fewer in short windows), newest settlement first.
+Row hover swaps the settlement age for Undo. Search includes settled sessions and
+temporarily expands matching results without changing the normal expansion state.
+
+An optional `settled_at` timestamp in both session metadata and sidebar summaries
+is the entire durable state. Undo preserves the last-submission ordering; accepted
+messages and automatic turn starts clear settlement. Filing is serialized with
+turn/child starts and retries outstanding child-result delivery before saving.
+Paused input and notices are preserved, not resumed or discarded by settlement.
+Hover handling is widget-local and shares questionnaire Edit styling. The supplied
+Lucide SVGs in `crates/pico-app/src/icons/` use Iced’s native SVG renderer and inherit
+the enclosing button’s text color. The checkmark matches the Settle label’s font
+size; Undo remains 16 px without rotation.
+
+Run `just test settl` inside `nix develop` for persistence/retry, eligibility,
+continuation, hover/click routing and bounded-list regressions. The window smoke
+also renders the expanded list at its beginning and end. For manual acceptance,
+settle an open checked session, expand/collapse the section, browse more than ten
+rows, undo another session, and send a new message in the settled conversation.

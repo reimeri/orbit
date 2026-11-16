@@ -308,6 +308,9 @@ pub struct Session {
     /// A successful main turn completed since the session was last opened.
     #[serde(default)]
     pub unchecked_completion: bool,
+    /// Filed away by the user; also the origin for the settlement age.
+    #[serde(default)]
+    pub settled_at: Option<u64>,
     pub context_account: Option<String>,
 }
 impl Session {
@@ -336,6 +339,7 @@ impl Session {
             interrupted: false,
             needs_attention: false,
             unchecked_completion: false,
+            settled_at: None,
             context_account: None,
         }
     }
@@ -383,6 +387,7 @@ impl Session {
         }
         self.updated = now();
         self.unchecked_completion = false;
+        self.settled_at = None;
         self.pending_submissions.push(submission.clone());
         self.entries.push(Entry {
             id: submission,
@@ -437,6 +442,9 @@ pub struct SessionSummary {
     /// A successful main turn completed since the session was last opened.
     #[serde(default)]
     pub unchecked_completion: bool,
+    /// Filed away by the user; also the origin for the settlement age.
+    #[serde(default)]
+    pub settled_at: Option<u64>,
     pub id: String,
     pub project: PathBuf,
     pub title: String,
@@ -449,6 +457,7 @@ impl From<&Session> for SessionSummary {
             child: s.child.clone(),
             needs_attention: s.needs_attention,
             unchecked_completion: s.unchecked_completion,
+            settled_at: s.settled_at,
             id: s.id.clone(),
             project: s.project.clone(),
             title: s.title.clone(),

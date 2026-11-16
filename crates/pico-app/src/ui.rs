@@ -67,7 +67,11 @@ enum SidebarRow {
 
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
-const SIDEBAR_CONTENT_PADDING: f32 = 8.;
+const SETTLE_FONT_SIZE: f32 = 12.;
+const SIDEBAR_CONTENT_PADDING: f32 = crate::session_action::RIGHT;
+const SETTLED_ROW_HEIGHT: f32 = crate::session_action::HEIGHT + 2. * crate::session_action::PADDING;
+const SETTLED_ROW_GAP: f32 = 3.;
+const SETTLED_VISIBLE_ROWS: usize = 10;
 const RIGHT_PANEL_PADDING: f32 = 18.;
 const FOOTER_MENU_TEXT_SIZE: f32 = 12.;
 const FAST_OPTION: &str = "Fast mode";
@@ -97,6 +101,10 @@ pub struct App {
     execution: HashSet<String>,
     sidebar_rows: Vec<SidebarRow>,
     sidebar_list: crate::virtual_list::List,
+    settled_rows: Vec<usize>,
+    settled_list: crate::virtual_list::List,
+    settled_open: bool,
+    settled_search_open: bool,
     catalog_revision: u64,
     view_epoch: u64,
     sidebar_epoch: u64,
@@ -238,6 +246,9 @@ pub enum Message {
     CopySelection,
     New,
     Select(String),
+    SetSettled(String, bool),
+    ToggleSettled,
+    SettledScroll(u64, f32, f32),
     Create(PathBuf),
     Search(String),
     ToggleSearch,
@@ -347,6 +358,10 @@ impl App {
             execution: HashSet::new(),
             sidebar_rows: vec![],
             sidebar_list: crate::virtual_list::List::default(),
+            settled_rows: vec![],
+            settled_list: crate::virtual_list::List::with_overscan(SETTLED_ROW_HEIGHT),
+            settled_open: false,
+            settled_search_open: true,
             catalog_revision: u64::MAX,
             view_epoch: 0,
             sidebar_epoch: 0,
@@ -750,6 +765,7 @@ impl App {
     fn prepare_sidebar(&mut self) {
         let needle = self.search.to_lowercase();
         let mut sections = [vec![], vec![], vec![]];
+        self.settled_rows.clear();
         for (index, s) in self.sessions.iter().enumerate() {
             if s.child.is_some() {
                 continue;
@@ -758,6 +774,10 @@ impl App {
                 && !s.title.to_lowercase().contains(&needle)
                 && !s.project.to_string_lossy().to_lowercase().contains(&needle)
             {
+                continue;
+            }
+            if s.settled_at.is_some() {
+                self.settled_rows.push(index);
                 continue;
             }
             let status = self.session_status(s);
@@ -774,6 +794,32 @@ impl App {
                 self.sidebar_rows.extend(section);
             }
         }
+        self.settled_rows.sort_by(|&a, &b| {
+            self.sessions[b]
+                .settled_at
+                .cmp(&self.sessions[a].settled_at)
+                .then_with(|| self.sessions[a].id.cmp(&self.sessions[b].id))
+        });
+        let follow_top = self.settled_list.offset <= 1.;
+        self.settled_list
+            .reset(self.settled_rows.iter().map(|&index| {
+                let next = self.sidebar_keys.len() + 3;
+                let key = *self
+                    .sidebar_keys
+                    .entry(self.sessions[index].id.clone())
+                    .or_insert(next);
+                (key, SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP)
+            }));
+        if follow_top {
+            self.settled_list.offset = 0.;
+        }
+        self.tasks.push(widget::operation::scroll_to(
+            "settled-sessions",
+            scrollable::AbsoluteOffset {
+                x: 0.,
+                y: self.settled_list.offset,
+            },
+        ));
         self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
         self.sidebar_list
             .reset(self.sidebar_rows.iter().map(|row| match row {
@@ -1432,11 +1478,35 @@ impl App {
                 self.select(Selection::Session(id));
                 return bottom();
             }
+            Message::SetSettled(id, settled) => {
+                if let Some(h) = &self.harness {
+                    let h = h.clone();
+                    self.tasks.push(self.io.run(move || {
+                        Message::Edited(h.set_settled(&id, settled).map_err(|e| format!("{e:#}")))
+                    }));
+                }
+            }
+            Message::ToggleSettled => {
+                if self.search.is_empty() {
+                    self.settled_open = !self.settled_open;
+                } else {
+                    self.settled_search_open = !self.settled_search_open;
+                }
+                self.settled_list.offset = 0.;
+            }
+            Message::SettledScroll(epoch, offset, height) => {
+                if epoch == self.sidebar_epoch {
+                    self.settled_list.offset = offset;
+                    self.settled_list.viewport = height;
+                }
+            }
             Message::Create(path) => self.select(Selection::Draft(path)),
             Message::Search(search) => {
                 self.search = search;
+                self.settled_search_open = true;
                 self.sidebar_follow_top = true;
                 self.sidebar_list.offset = 0.;
+                self.settled_list.offset = 0.;
                 self.prepare_sidebar();
                 return widget::operation::snap_to("sessions", scrollable::RelativeOffset::START);
             }
@@ -2717,8 +2787,10 @@ impl App {
                         .width(12)
                         .center_y(14)
                         .into()
+                    } else if status == SessionStatus::Idle {
+                        crate::session_action::slot(crate::session_action::WIDTH)
                     } else {
-                        text(age).size(10).color(MUTED).into()
+                        text(age.clone()).size(10).color(MUTED).into()
                     };
                     let content = mouse_area(
                         theme::button(session_wave::wave(
@@ -2735,7 +2807,7 @@ impl App {
                                 ]
                                 .spacing(3),
                             )
-                            .padding([6., SIDEBAR_CONTENT_PADDING])
+                            .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
                             .width(Fill),
                             status,
                         ))
@@ -2749,7 +2821,23 @@ impl App {
                         }),
                     )
                     .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
-                    content.into()
+                    if status == SessionStatus::Idle {
+                        crate::session_action::row(
+                            content,
+                            age,
+                            crate::session_action::WIDTH,
+                            row![
+                                crate::session_action::check_icon(SETTLE_FONT_SIZE),
+                                text("Settle").size(SETTLE_FONT_SIZE),
+                            ]
+                            .spacing(4)
+                            .align_y(iced::Center),
+                            "Settle session",
+                            Message::SetSettled(session.id.clone(), true),
+                        )
+                    } else {
+                        content.into()
+                    }
                 }
             };
             let key = self.sidebar_list.order[index];
@@ -2794,6 +2882,7 @@ impl App {
                     Message::SidebarScroll(epoch, v.absolute_offset().y, v.bounds().height)
                 }),
         );
+        list = list.push(self.settled_section());
         container(list)
             .padding(iced::Padding {
                 top: 4.,
@@ -2811,6 +2900,103 @@ impl App {
             .style(panel)
             .into()
     }
+    fn settled_expanded(&self) -> bool {
+        if self.search.is_empty() {
+            self.settled_open
+        } else {
+            self.settled_search_open
+        }
+    }
+
+    fn settled_section(&self) -> Element<'_, Message> {
+        let expanded = self.settled_expanded();
+        let header = theme::button(
+            row![
+                text("Settled").size(12).width(Fill),
+                text(self.settled_rows.len().to_string()).size(11),
+                crate::chevron_icon::chevron_icon(expanded, MUTED),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        )
+        .width(Fill)
+        .padding([8., SIDEBAR_CONTENT_PADDING])
+        .style(sidebar_control)
+        .on_press(Message::ToggleSettled);
+        let mut section = column![header];
+        if expanded && !self.settled_rows.is_empty() {
+            let range = self.settled_list.visible();
+            let mut rows = vec![(
+                usize::MAX,
+                space().height(self.settled_list.prefix(range.start)).into(),
+            )];
+            for index in range.clone() {
+                let session = &self.sessions[self.settled_rows[index]];
+                let active = self.parent_id() == Some(session.id.as_str());
+                let age = age(session.settled_at.expect("settled row"));
+                let trailing_width = text_width(&age, crate::session_action::AGE_SIZE)
+                    .ceil()
+                    .max(crate::session_action::UNDO_SIZE);
+                let content = mouse_area(
+                    theme::button(
+                        row![
+                            project_badge(&session.project),
+                            ellipsized_text(&session.title, 13., None),
+                            crate::session_action::slot(trailing_width),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Center),
+                    )
+                    .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
+                    .width(Fill)
+                    .height(SETTLED_ROW_HEIGHT)
+                    .style(if active {
+                        secondary
+                    } else {
+                        theme::text_button
+                    })
+                    .on_press(Message::Select(session.id.clone())),
+                )
+                .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
+                let row = crate::session_action::row(
+                    content,
+                    age,
+                    trailing_width,
+                    crate::session_action::undo_icon(),
+                    "Unsettle session",
+                    Message::SetSettled(session.id.clone(), false),
+                );
+                rows.push((
+                    self.settled_list.order[index],
+                    column![row, space().height(SETTLED_ROW_GAP)].into(),
+                ));
+            }
+            rows.push((
+                usize::MAX - 1,
+                space()
+                    .height(
+                        (self.settled_list.total() - self.settled_list.prefix(range.end)).max(0.),
+                    )
+                    .into(),
+            ));
+            let epoch = self.sidebar_epoch;
+            let height = self
+                .settled_list
+                .total()
+                .min((SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP) * SETTLED_VISIBLE_ROWS as f32)
+                .min(self.window_height * 0.45);
+            section = section.push(
+                scroll(crate::keyed_column::keyed_column(rows))
+                    .id("settled-sessions")
+                    .height(height)
+                    .on_scroll(move |v| {
+                        Message::SettledScroll(epoch, v.absolute_offset().y, v.bounds().height)
+                    }),
+            );
+        }
+        section.into()
+    }
+
     fn center(&self) -> Element<'_, Message> {
         let Some(session) = self.current() else {
             return self.new_session();
@@ -3830,7 +4016,7 @@ impl App {
                     chip,
                     "Stop the current turn before changing model or effort.".into(),
                 )
-            } else if footer_text_width(label, 11.) > width - 8. {
+            } else if text_width(label, 11.) > width - 8. {
                 footer_tip(chip, label.into())
             } else {
                 chip.into()
@@ -3878,7 +4064,7 @@ impl App {
             .width(Fill)
             .into();
         }
-        let full_path_width = footer_text_width(&display_path, 11.).ceil();
+        let full_path_width = text_width(&display_path, 11.).ceil();
         let path_width = layout.path_width.min(240.).min(full_path_width);
         let path_label = if full_path_width <= path_width {
             display_path
@@ -3887,7 +4073,7 @@ impl App {
         };
         let path_view = container(ellipsized_text(&path_label, 11., Some(MUTED))).width(path_width);
         info = info.push(
-            if path_label != path || footer_text_width(&path_label, 11.) > path_width {
+            if path_label != path || text_width(&path_label, 11.) > path_width {
                 footer_tip(path_view, path)
             } else {
                 path_view.into()
@@ -3902,7 +4088,7 @@ impl App {
                     added: 0,
                     removed: 0,
                 } => container(ellipsized_text(branch, 11., Some(MUTED)))
-                    .width(footer_text_width(branch, 11.).ceil().min(126.))
+                    .width(text_width(branch, 11.).ceil().min(126.))
                     .into(),
                 crate::git::Info::Changes {
                     branch,
@@ -3911,9 +4097,8 @@ impl App {
                 } => {
                     let additions = format!("+{added}");
                     let deletions = format!("−{removed}");
-                    let counts_width = footer_text_width(&additions, 11.)
-                        + footer_text_width(&deletions, 11.)
-                        + 8.;
+                    let counts_width =
+                        text_width(&additions, 11.) + text_width(&deletions, 11.) + 8.;
                     row![
                         ellipsized_text(branch, 11., Some(MUTED)),
                         text(additions).size(11).color(SUCCESS),
@@ -3921,10 +4106,7 @@ impl App {
                     ]
                     .spacing(4)
                     .align_y(iced::Center)
-                    .width(
-                        (footer_text_width(branch, 11.).ceil() + counts_width.ceil() + 2.)
-                            .min(126.),
-                    )
+                    .width((text_width(branch, 11.).ceil() + counts_width.ceil() + 2.).min(126.))
                     .into()
                 }
                 crate::git::Info::Unavailable(message) => {
@@ -4017,9 +4199,7 @@ impl App {
             .on_press(message)
             .style(move |theme, status| theme::menu_button(theme, status, focused || chosen));
             options = options.push(
-                if footer_text_width(option, FOOTER_MENU_TEXT_SIZE)
-                    > 228. - crate::scrollbar::GUTTER
-                {
+                if text_width(option, FOOTER_MENU_TEXT_SIZE) > 228. - crate::scrollbar::GUTTER {
                     footer_tip(item, option.clone())
                 } else {
                     item.into()
@@ -4310,6 +4490,7 @@ impl App {
                         interrupted: false,
                         needs_attention: false,
                         unchecked_completion: false,
+                        settled_at: None,
                     });
                 }
                 self.prepare_sidebar();
@@ -4823,10 +5004,42 @@ impl App {
                 ]);
             }
 
+            47 => {
+                self.sessions.clear();
+                for i in 0..(SETTLED_VISIBLE_ROWS * 3) {
+                    let mut session =
+                        Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
+                    session.title = format!("Settled session {i} — a long title fits on one row");
+                    session.settled_at = Some(pico_core::store::now() - i as u64 * 86400);
+                    self.sessions.push(SessionSummary::from(&session));
+                }
+                let mut idle =
+                    Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
+                idle.title = "Idle session — hover to settle".into();
+                self.sessions.push(SessionSummary::from(&idle));
+                self.settled_open = true;
+                self.prepare_sidebar();
+                return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
+            }
+            48 => {
+                self.settled_list.offset = self.settled_list.total()
+                    - (SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP) * SETTLED_VISIBLE_ROWS as f32;
+                return Task::batch([
+                    widget::operation::scroll_to(
+                        "settled-sessions",
+                        scrollable::AbsoluteOffset {
+                            x: 0.,
+                            y: self.settled_list.offset,
+                        },
+                    ),
+                    delayed_capture(),
+                ]);
+            }
+
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar status waves/unchecked completion/favorites/search/reflow animations, chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -4859,10 +5072,9 @@ struct FooterLayout {
 }
 impl FooterLayout {
     fn new(width: f32, model: &str, effort: &str) -> Self {
-        let model_width =
-            (footer_text_width(model, 11.).ceil() + 8.).min((width * 0.3).clamp(40., 180.));
+        let model_width = (text_width(model, 11.).ceil() + 8.).min((width * 0.3).clamp(40., 180.));
         let effort_width =
-            (footer_text_width(effort, 11.).ceil() + 8.).min((width * 0.2).clamp(28., 110.));
+            (text_width(effort, 11.).ceil() + 8.).min((width * 0.2).clamp(28., 110.));
         let available = width - model_width - effort_width - 88.;
         let usage = available >= 260.;
         let git = available >= 420.;
@@ -4926,7 +5138,7 @@ fn compact_tokens(tokens: u64) -> String {
     }
 }
 // Match the label renderer so wide glyphs also get a full-value tooltip.
-fn footer_text_width(value: &str, size: f32) -> f32 {
+fn text_width(value: &str, size: f32) -> f32 {
     use iced::advanced::text::{Paragraph, Renderer};
     <iced::Renderer as Renderer>::Paragraph::with_text(iced::advanced::Text {
         content: value,
@@ -5988,6 +6200,434 @@ mod tests {
             ))),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn settling_keeps_selection_and_draft_and_requires_opening_unread_completion() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let id = app.selected.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let other = app.selected.clone();
+        let h = app.harness.as_ref().unwrap().clone();
+        h.edit(&id, |s| s.unchecked_completion = true).unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
+        assert!(app.error.is_some());
+        assert!(app.settled_rows.is_empty());
+        assert_eq!(app.selected, other);
+        app.error = None;
+
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        assert!(!app.current().unwrap().unchecked_completion);
+        app.editor = text_editor::Content::with_text("Keep my draft λ");
+        app.draft_dirty = true;
+        let updated = app.current().unwrap().updated;
+        dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
+        assert_eq!(app.selected.as_deref(), Some(id.as_str()));
+        assert_eq!(app.editor.text(), "Keep my draft λ");
+        assert_eq!(app.current().unwrap().updated, updated);
+        assert!(app.current().unwrap().settled_at.is_some());
+        assert!(!app.settled_expanded());
+        assert_eq!(app.settled_rows.len(), 1);
+        assert!(!app.sidebar_rows.iter().any(|row| {
+            matches!(row, SidebarRow::Session(index, _) if app.sessions[*index].id == id)
+        }));
+        dispatch(&mut app, Message::ToggleSettled).await;
+        assert!(app.settled_expanded());
+        dispatch(&mut app, Message::SetSettled(id.clone(), false)).await;
+        assert!(app.settled_rows.is_empty());
+        assert_eq!(app.current().unwrap().updated, updated);
+        assert_eq!(app.selected.as_deref(), Some(id.as_str()));
+
+        dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
+        dispatch(&mut app, Message::Send).await;
+        assert!(app.current().unwrap().settled_at.is_none());
+        assert!(app.settled_rows.is_empty());
+        assert_eq!(app.selected.as_deref(), Some(id.as_str()));
+        let c = h.get(&id).unwrap();
+        let mut changes = h.subscribe();
+        while c.is_executing() {
+            tokio::time::timeout(Duration::from_secs(3), changes.changed())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn settlement_buttons_swap_locally_and_capture_only_their_own_clicks() {
+        use iced::advanced::Renderer as _;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let id = app.selected.clone().unwrap();
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(180., 600.);
+        for settled in [false, true] {
+            if settled {
+                dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
+                dispatch(&mut app, Message::ToggleSettled).await;
+            }
+            let title = app.current().unwrap().title.clone();
+            let mut ui = UserInterface::build(app.sidebar(), size, Cache::new(), &mut renderer);
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            // Undo occupies the same right-aligned slot as the age it replaces.
+            let action = if settled {
+                bounds.label("now")
+            } else {
+                let label = bounds.label("Settle");
+                // Tooltip reports the actual button bounds, including its SVG.
+                *bounds
+                    .containers
+                    .iter()
+                    .filter(|b| {
+                        b.x < label.x
+                            && b.y <= label.y
+                            && b.x + b.width >= label.x + label.width
+                            && b.y + b.height >= label.y + label.height
+                    })
+                    .min_by(|a, b| a.width.total_cmp(&b.width))
+                    .expect("Settle button")
+            };
+            let label = bounds.label(&title);
+            assert!(action.x >= label.x);
+            assert!(action.x + action.width <= size.width);
+            if settled {
+                let gap = action.x - (label.x + label.width);
+                assert!(
+                    gap >= 0. && gap < action.width,
+                    "compact titles should reach the age slot with only a small gap, not reserve Settle-label space: {gap}"
+                );
+            }
+            let mut images = vec![];
+            for (phase, cursor) in [
+                mouse::Cursor::Unavailable,
+                mouse::Cursor::Available(label.center()),
+                mouse::Cursor::Available(action.center()),
+                mouse::Cursor::Unavailable,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut messages = vec![];
+                ui.update(
+                    &[iced::Event::Mouse(mouse::Event::CursorMoved {
+                        position: cursor.position().unwrap_or(iced::Point::new(400., 0.)),
+                    })],
+                    cursor,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(messages.is_empty(), "row hover must remain widget-local");
+                // Iced resolves button styles on redraw. Layout sensors may also
+                // publish their initial measurement here, unrelated to hovering.
+                ui.update(
+                    &[iced::Event::Window(window::Event::RedrawRequested(
+                        iced::time::Instant::now(),
+                    ))],
+                    cursor,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                renderer.reset(iced::Rectangle::with_size(size));
+                ui.draw(
+                    &mut renderer,
+                    &theme::app(),
+                    &iced::advanced::renderer::Style {
+                        text_color: theme::TEXT,
+                    },
+                    cursor,
+                );
+                let pixels = crate::test_renderer::screenshot(
+                    &mut renderer,
+                    iced::Size::new(size.width as u32, size.height as u32),
+                    1.,
+                    theme::BACKGROUND,
+                );
+                if !settled && matches!(phase, 1 | 2) {
+                    let expected = if phase == 1 { MUTED } else { theme::TEXT }.into_rgba8();
+                    let icon_right = bounds.label("Settle").x.floor() as usize;
+                    let closest = (action.y.ceil() as usize
+                        ..(action.y + action.height).floor() as usize)
+                        .flat_map(|y| {
+                            (action.x.ceil() as usize..icon_right)
+                                .map(move |x| (y * size.width as usize + x) * 4)
+                        })
+                        .map(|offset| {
+                            (0..3)
+                                .map(|c| pixels[offset + c].abs_diff(expected[c]))
+                                .max()
+                                .unwrap()
+                        })
+                        .min()
+                        .unwrap();
+                    assert!(
+                        closest < 30,
+                        "SVG must inherit the whole button's hover color"
+                    );
+                }
+                // Sample just the trailing slot, not the row's hover background.
+                let left =
+                    (action.x + action.width - crate::session_action::WIDTH).floor() as usize;
+                let right = (action.x + action.width).ceil() as usize;
+                let top = action.y.floor() as usize;
+                let bottom = (action.y + action.height).ceil() as usize;
+                images.push(
+                    (top..bottom)
+                        .flat_map(|y| {
+                            pixels[(y * size.width as usize + left) * 4
+                                ..(y * size.width as usize + right) * 4]
+                                .iter()
+                                .copied()
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+            assert!(images[0] != images[1], "row hover replaces age with action");
+            assert!(images[1] != images[2], "button hover brightens the action");
+            assert!(images[0] == images[3], "leaving restores the age");
+            // Reproduce hovering the reserved area beside the button, including
+            // leaving the button without leaving its row.
+            let button_left = if settled {
+                action.x + action.width - crate::session_action::UNDO_SIZE
+            } else {
+                action.x
+            };
+            let beside = iced::Point::new(button_left - 1., action.center_y());
+            let mut no_tip = None;
+            for (point, show_tip) in [
+                (label.center(), false),
+                (beside, false),
+                (action.center(), true),
+                (beside, false),
+            ] {
+                let mut messages = vec![];
+                ui.update(
+                    &[
+                        iced::Event::Mouse(mouse::Event::CursorMoved { position: point }),
+                        iced::Event::Window(window::Event::RedrawRequested(
+                            iced::time::Instant::now(),
+                        )),
+                    ],
+                    mouse::Cursor::Available(point),
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                ui.draw(
+                    &mut renderer,
+                    &theme::app(),
+                    &iced::advanced::renderer::Style {
+                        text_color: theme::TEXT,
+                    },
+                    mouse::Cursor::Available(point),
+                );
+                let mut pixels = crate::test_renderer::screenshot(
+                    &mut renderer,
+                    iced::Size::new(size.width as u32, size.height as u32),
+                    1.,
+                    theme::BACKGROUND,
+                );
+                // Tooltips do not expose text operations. Compare the painted
+                // area above the slot, excluding the button's hover-color change.
+                let top = (action.center_y() - crate::session_action::HEIGHT / 2.).floor() as usize;
+                pixels.truncate(top * size.width as usize * 4);
+                if let Some(reference) = &no_tip {
+                    assert_eq!(
+                        pixels != *reference,
+                        show_tip,
+                        "tooltip must follow the button, not the row or trailing slot"
+                    );
+                } else {
+                    no_tip = Some(pixels);
+                }
+            }
+            let messages = click_at(&mut ui, &mut renderer, action.center());
+            assert!(
+                matches!(messages.as_slice(), [Message::SetSettled(clicked, value)] if clicked == &id && *value != settled),
+                "action must not select the row: {messages:?}"
+            );
+            let messages = click_at(&mut ui, &mut renderer, label.center());
+            assert!(matches!(messages.as_slice(), [Message::Select(clicked)] if clicked == &id));
+        }
+    }
+
+    #[tokio::test]
+    async fn settled_list_caps_height_scrolls_and_search_reveals_matches_temporarily() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        let mut renderer = header_renderer();
+        let count = SETTLED_VISIBLE_ROWS * 30;
+        let pitch = SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP;
+        let now = pico_core::store::now();
+        app.sessions = (0..count)
+            .map(|i| {
+                let mut session = Session::new(PathBuf::from("/project"), &app.catalog.settings);
+                session.title = format!("Filed session {i}");
+                session.updated = now;
+                session.settled_at = Some(now - i as u64 * 86400);
+                SessionSummary::from(&session)
+            })
+            .collect();
+        app.prepare_sidebar();
+        assert_eq!(app.settled_rows, (0..count).collect::<Vec<_>>());
+        assert!(app.sidebar_rows.is_empty());
+        assert!(!app.settled_expanded());
+        dispatch(&mut app, Message::Search("Filed session 17".into())).await;
+        assert!(app.settled_expanded());
+        assert!(!app.settled_rows.is_empty());
+        assert!(
+            app.settled_rows
+                .iter()
+                .all(|&i| app.sessions[i].title.contains("Filed session 17"))
+        );
+        dispatch(&mut app, Message::ToggleSettled).await;
+        assert!(!app.settled_expanded());
+        dispatch(&mut app, Message::Search(String::new())).await;
+        assert!(
+            !app.settled_expanded(),
+            "search must not change the normal expansion preference"
+        );
+        dispatch(&mut app, Message::ToggleSettled).await;
+
+        let mut cache = Cache::new();
+        for height in [800., 560.] {
+            app.window_height = height;
+            app.settled_list.offset = 0.;
+            let mut ui = UserInterface::build(
+                app.sidebar(),
+                iced::Size::new(300., height),
+                cache,
+                &mut renderer,
+            );
+            ui.operate(
+                &renderer,
+                &mut iced::advanced::widget::operation::scrollable::scroll_to::<()>(
+                    iced::advanced::widget::Id::new("settled-sessions"),
+                    scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(0.),
+                    },
+                ),
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let viewport = bounds
+                .scrolls
+                .iter()
+                .find(|(id, _)| id == &iced::advanced::widget::Id::new("settled-sessions"))
+                .unwrap()
+                .1;
+            let main = bounds
+                .scrolls
+                .iter()
+                .find(|(id, _)| id == &iced::advanced::widget::Id::new("sessions"))
+                .unwrap()
+                .1;
+            assert!(viewport.height <= pitch * SETTLED_VISIBLE_ROWS as f32);
+            assert!(viewport.height > pitch && main.height > pitch);
+            assert!(main.y + main.height <= viewport.y);
+            assert!(viewport.y + viewport.height <= height);
+            assert!(viewport.intersects(&bounds.label("Filed session 0")));
+            assert!(bounds.labels.iter().any(|(label, _)| label == "now"));
+            assert!(
+                app.settled_list.visible().len() < count / 2,
+                "virtualization must bound mounted work"
+            );
+            let mut messages = vec![];
+            let cursor = mouse::Cursor::Available(viewport.center());
+            ui.update(
+                &[iced::Event::Window(window::Event::RedrawRequested(
+                    iced::time::Instant::now(),
+                ))],
+                cursor,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            messages.clear();
+            ui.update(
+                &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Lines { x: 0., y: -3. },
+                })],
+                cursor,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| matches!(m, Message::SettledScroll(_, offset, _) if *offset > 0.))
+            );
+            assert!(
+                !messages
+                    .iter()
+                    .any(|m| matches!(m, Message::SidebarScroll(..))),
+                "wheel input over settled sessions must not scroll the main list"
+            );
+            cache = ui.into_cache();
+
+            let offset = app.settled_list.total() - viewport.height;
+            let epoch = app.sidebar_epoch;
+            dispatch(
+                &mut app,
+                Message::SettledScroll(epoch, offset, viewport.height),
+            )
+            .await;
+            let mut ui = UserInterface::build(
+                app.sidebar(),
+                iced::Size::new(300., height),
+                cache,
+                &mut renderer,
+            );
+            ui.operate(
+                &renderer,
+                &mut iced::advanced::widget::operation::scrollable::scroll_to::<()>(
+                    iced::advanced::widget::Id::new("settled-sessions"),
+                    scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(offset),
+                    },
+                ),
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let last = bounds.label(&format!("Filed session {}", count - 1));
+            assert!(viewport.intersects(&(last - iced::Vector::new(0., offset))));
+            assert!(
+                bounds
+                    .labels
+                    .iter()
+                    .any(|(label, _)| label == &format!("{}d", count - 1)),
+                "age must use settled_at, not the last submission"
+            );
+            cache = ui.into_cache();
+        }
+        // Small lists shrink to their contents rather than reserving ten rows.
+        app.sessions.truncate(2);
+        app.prepare_sidebar();
+        let mut ui = UserInterface::build(
+            app.sidebar(),
+            iced::Size::new(300., 560.),
+            cache,
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let viewport = bounds
+            .scrolls
+            .iter()
+            .find(|(id, _)| id == &iced::advanced::widget::Id::new("settled-sessions"))
+            .unwrap()
+            .1;
+        assert!((viewport.height - 2. * pitch).abs() < 1.);
     }
 
     #[tokio::test]
@@ -7896,7 +8536,7 @@ Then implement the fix.";
             ui.operate(&renderer, &mut menu_bounds);
             let option = menu_bounds.label("gpt-6-luna");
             assert!(
-                option.width >= footer_text_width("gpt-6-luna", FOOTER_MENU_TEXT_SIZE),
+                option.width >= text_width("gpt-6-luna", FOOTER_MENU_TEXT_SIZE),
                 "popup options must stay readable even with a narrow chat"
             );
             drop(ui);
@@ -8235,6 +8875,7 @@ Then implement the fix.";
                 interrupted: false,
                 needs_attention: false,
                 unchecked_completion: false,
+                settled_at: None,
             })
             .collect();
         app.prepare_sidebar();
@@ -9302,6 +9943,7 @@ Then implement the fix.";
                 interrupted: false,
                 needs_attention: false,
                 unchecked_completion: false,
+                settled_at: None,
             });
         }
         app.selected = Some(session.id.clone());

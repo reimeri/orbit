@@ -557,6 +557,51 @@ impl Harness {
         conversation.changed();
         result
     }
+    /// Serialize filing with submissions, turn starts, child starts and eviction.
+    pub fn set_settled(&self, id: &str, settled: bool) -> Result<()> {
+        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        let conversation = self.load(id)?;
+        let state = conversation.snapshot();
+        if state.child.is_some() {
+            bail!("Only main sessions can be settled");
+        }
+        if settled {
+            let children = coordinator.latest_runs(id);
+            if conversation.is_executing()
+                || children.iter().any(|r| {
+                    r.status == subagents::RunStatus::Running
+                        || self.get(&r.session_id).is_some_and(|c| c.is_executing())
+                        || (r.status.needs_attention() && !r.attention_acknowledged)
+                })
+                || state.interrupted
+                || state.needs_attention
+                || state.unchecked_completion
+                || *conversation.status.lock().expect("status lock") == "Needs attention"
+            {
+                bail!(
+                    "This session is no longer idle. Open it and finish or review its work before settling it."
+                );
+            }
+            // Finish outstanding durable delivery before filing. Stopped turns may
+            // retain queued input/notices; settling preserves them without resuming.
+            if coordinator
+                .runs
+                .values()
+                .any(|r| r.parent_id == id && !r.notified)
+            {
+                self.retry_results(&mut coordinator)
+                    .and_then(|()| self.deliver_notices(&mut coordinator, id))
+                    .context("Could not finish saving child results before settling. Keep Pico open, check disk space and permissions, then retry")?;
+            }
+        }
+        self.edit(id, |s| {
+            if settled {
+                s.settled_at.get_or_insert_with(crate::store::now);
+            } else {
+                s.settled_at = None;
+            }
+        }).context("Could not save the settlement change. It is retained in memory for the next save attempt; check available disk space and permissions, then retry")
+    }
     pub fn send_new(
         self: &Arc<Self>,
         mut session: Session,
@@ -667,6 +712,9 @@ impl Harness {
             // token between publishing a running turn and installing its token.
             conversation.turn_generation.fetch_add(1, Ordering::Release);
             state.unchecked_completion = false;
+            // All starts, including automatic child-completion wakeups, return
+            // the conversation to the main list before publishing active work.
+            state.settled_at = None;
             conversation.running.store(true, Ordering::Release);
             conversation.notifications.clear_terminal(&conversation.id);
             cancel
@@ -1207,6 +1255,171 @@ impl Drop for Harness {
 mod tests {
     use super::*;
     use std::time::Instant;
+    #[tokio::test]
+    async fn settlement_persists_retries_and_only_accepted_messages_unsettle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let h = Harness::new(store.clone(), vec![]).unwrap();
+        let mut session = Session::new(dir.path().into(), &Settings::default());
+        session.updated = 77;
+        session.draft = "Unsent draft λ".into();
+        let c = h.insert(session);
+        c.save().unwrap();
+        let revision = h.catalog_revision();
+        h.set_settled(&c.id, true).unwrap();
+        let settled_at = c.snapshot().settled_at.unwrap();
+        assert!(h.catalog_revision() > revision);
+        assert_eq!(store.load().unwrap().1[0].settled_at, Some(settled_at));
+        assert_eq!(store.load_session(&c.id).unwrap().updated, 77);
+        // Repeated clicks/retries must not restart the settlement clock.
+        h.edit(&c.id, |s| s.settled_at = Some(123)).unwrap();
+        h.set_settled(&c.id, true).unwrap();
+        h.evict_inactive(None).unwrap();
+        let c = h.load(&c.id).unwrap();
+        assert_eq!(c.snapshot().settled_at, Some(123));
+        assert_eq!(c.snapshot().draft, "Unsent draft λ");
+
+        h.set_settled(&c.id, false).unwrap();
+        assert_eq!(store.load().unwrap().1[0].settled_at, None);
+        assert_eq!(c.snapshot().updated, 77);
+        h.set_settled(&c.id, true).unwrap();
+        assert!(c.snapshot().settled_at.unwrap() >= settled_at);
+
+        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_settlement BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+        assert!(h.set_settled(&c.id, false).is_err());
+        assert!(
+            c.snapshot().settled_at.is_none(),
+            "retain the edit for save retry"
+        );
+        assert!(store.load_session(&c.id).unwrap().settled_at.is_some());
+        db.execute_batch("DROP TRIGGER fail_settlement;").unwrap();
+        h.flush().unwrap();
+        assert!(store.load_session(&c.id).unwrap().settled_at.is_none());
+        h.set_settled(&c.id, true).unwrap();
+
+        assert!(
+            h.send(&c.id, "empty", "".into(), Settings::default())
+                .is_err()
+        );
+        assert!(c.snapshot().settled_at.is_some());
+        db.execute_batch("CREATE TRIGGER fail_send BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+        assert!(
+            h.send(&c.id, "retry", "Continue".into(), Settings::default())
+                .is_err()
+        );
+        assert!(
+            c.snapshot().settled_at.is_some(),
+            "failed acceptance must not unsettle"
+        );
+        db.execute_batch("DROP TRIGGER fail_send;").unwrap();
+        // No credentials: acceptance is local, then the provider fails offline.
+        h.send(&c.id, "retry", "Continue".into(), Settings::default())
+            .unwrap();
+        assert!(c.snapshot().settled_at.is_none());
+        assert!(store.load_session(&c.id).unwrap().settled_at.is_none());
+        let mut changes = h.subscribe();
+        while c.is_executing() {
+            tokio::time::timeout(Duration::from_secs(3), changes.changed())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn settlement_rejects_unread_attention_work_questions_and_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let h = Harness::new(store, vec![]).unwrap();
+        let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+        for flag in 0..5 {
+            h.edit(&c.id, |s| {
+                s.unchecked_completion = flag == 0;
+                s.needs_attention = flag == 1;
+                s.interrupted = flag == 2;
+            })
+            .unwrap();
+            c.running.store(flag == 3, Ordering::Release);
+            c.finishing.store(flag == 4, Ordering::Release);
+            assert!(h.set_settled(&c.id, true).is_err(), "blocked state {flag}");
+            assert!(c.snapshot().settled_at.is_none());
+        }
+        c.finishing.store(false, Ordering::Release);
+        let q = c.questionnaires.as_ref().unwrap().clone();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let mut changes = h.subscribe();
+        let pending = tokio::spawn(async move {
+            q.ask(
+                "settle-question",
+                r#"{"questions":[{"id":"q","kind":"text","question":"Continue?"}]}"#,
+                &token,
+            )
+            .await
+        });
+        while !c.questionnaires.as_ref().unwrap().has_pending() {
+            tokio::time::timeout(Duration::from_secs(3), changes.changed())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(h.set_settled(&c.id, true).is_err());
+        cancel.cancel();
+        assert!(pending.await.unwrap().is_err());
+
+        let mut child = Session::new(dir.path().into(), &Settings::default());
+        child.child = Some(subagents::Child {
+            parent_id: c.id.clone(),
+            profile: subagents::Profile::Explore,
+        });
+        let child = h.insert(child);
+        let run = subagents::RunInfo {
+            run_id: "child-run".into(),
+            session_id: child.id.clone(),
+            parent_id: c.id.clone(),
+            request_id: "request".into(),
+            profile: subagents::Profile::Explore,
+            title: "Inspect".into(),
+            status: subagents::RunStatus::Running,
+            assignment: 1,
+            started: 1,
+            finished: None,
+            notified: true,
+            attention_acknowledged: false,
+        };
+        h.subagents
+            .lock()
+            .unwrap()
+            .runs
+            .insert(run.run_id.clone(), run);
+        assert!(h.set_settled(&c.id, true).is_err());
+        h.subagents
+            .lock()
+            .unwrap()
+            .runs
+            .get_mut("child-run")
+            .unwrap()
+            .status = subagents::RunStatus::Failed;
+        assert!(h.set_settled(&c.id, true).is_err());
+        h.subagents
+            .lock()
+            .unwrap()
+            .runs
+            .get_mut("child-run")
+            .unwrap()
+            .attention_acknowledged = true;
+        child.finishing.store(true, Ordering::Release);
+        assert!(
+            h.set_settled(&c.id, true).is_err(),
+            "terminal assignment still finalizing"
+        );
+        child.finishing.store(false, Ordering::Release);
+        h.set_settled(&c.id, true).unwrap();
+        assert!(c.snapshot().settled_at.is_some());
+        assert!(h.set_settled(&child.id, true).is_err());
+    }
+
     #[test]
     fn restart_finishes_abandoned_web_calls_without_replay_or_metadata_loss() {
         let dir = tempfile::tempdir().unwrap();

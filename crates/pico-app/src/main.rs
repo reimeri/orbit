@@ -15,6 +15,7 @@ mod pointer_input;
 mod questionnaire;
 mod scrollbar;
 mod search_icon;
+mod session_action;
 mod session_wave;
 mod status_circle;
 #[cfg(test)]

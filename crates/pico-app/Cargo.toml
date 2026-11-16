@@ -7,7 +7,7 @@ rust-version.workspace = true
 [dependencies]
 pico-core = { path = "../pico-core" }
 iced = { version = "0.14.0", default-features = false, features = [
-    "wgpu", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs",
+    "wgpu", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs", "svg",
 ] }
 
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
