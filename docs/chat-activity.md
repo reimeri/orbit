@@ -43,6 +43,9 @@ Settings and session-menu copy actions are unchanged.
   notice and an Open subagent action. Other warnings and the questionnaire panel
   are not hidden by this presentation.
 
+All tool rows use a solid status dot: yellow while running, green on success,
+and red on failure or interruption.
+
 The `exec_command` status dot tracks the **process**, independently of tool-call
 completion: yellow while running, green on exit zero, and red on failure or
 cancellation. Yielding a session ID does not turn the dot green. Exit updates

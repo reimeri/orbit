@@ -3611,10 +3611,8 @@ impl App {
                 let open = self.expanded.contains(&entry.id);
                 let preview = activity::tool_preview(name, input);
                 let status = activity::tool_status(*complete, *failed, *command_status);
-                let running = status == CommandStatus::Running;
                 let status_color = match status {
-                    CommandStatus::Running if name == "exec_command" => WARNING,
-                    CommandStatus::Running => ACCENT,
+                    CommandStatus::Running => WARNING,
                     CommandStatus::Succeeded => SUCCESS,
                     CommandStatus::Failed | CommandStatus::Interrupted => DANGER,
                 };
@@ -3622,13 +3620,7 @@ impl App {
                     theme::button(
                         row![
                             chevron_icon(open),
-                            text(if running && name != "exec_command" {
-                                "◌"
-                            } else {
-                                "●"
-                            })
-                            .size(11)
-                            .color(status_color),
+                            text("●").size(11).color(status_color),
                             text(activity::tool_name(name)).size(12).color(theme::TEXT),
                             ellipsized_text(&preview, 12., Some(MUTED)),
                             text(match status {
@@ -6014,19 +6006,54 @@ mod tests {
     }
 
     #[test]
-    fn command_dot_uses_process_status_after_tool_returns() {
+    fn tool_dots_share_status_style_and_track_command_processes() {
         use iced::advanced::Renderer;
         use iced_runtime::{UserInterface, user_interface::Cache};
         let app = app();
         let mut renderer = header_renderer();
-        for (status, complete, color, label) in [
-            (None, false, WARNING, "running"),
-            (Some(CommandStatus::Running), true, WARNING, "running"),
-            (Some(CommandStatus::Succeeded), true, SUCCESS, ""),
-            (Some(CommandStatus::Failed), true, DANGER, "failed"),
+        for (name, status, complete, failed, color, label) in [
             (
+                "image_gen__imagegen",
+                None,
+                false,
+                false,
+                WARNING,
+                "running",
+            ),
+            ("image_gen__imagegen", None, true, false, SUCCESS, ""),
+            ("image_gen__imagegen", None, true, true, DANGER, "failed"),
+            ("web__run", None, false, false, WARNING, "running"),
+            ("exec", None, false, false, WARNING, "running"),
+            ("exec_command", None, false, false, WARNING, "running"),
+            (
+                "exec_command",
+                Some(CommandStatus::Running),
+                true,
+                false,
+                WARNING,
+                "running",
+            ),
+            (
+                "exec_command",
+                Some(CommandStatus::Succeeded),
+                true,
+                false,
+                SUCCESS,
+                "",
+            ),
+            (
+                "exec_command",
+                Some(CommandStatus::Failed),
+                true,
+                false,
+                DANGER,
+                "failed",
+            ),
+            (
+                "exec_command",
                 Some(CommandStatus::Interrupted),
                 true,
+                false,
                 DANGER,
                 "interrupted",
             ),
@@ -6035,11 +6062,11 @@ mod tests {
                 id: "command".into(),
                 text: String::new(),
                 kind: EntryKind::Tool {
-                    name: "exec_command".into(),
+                    name: name.into(),
                     input: r#"{"cmd":"build"}"#.into(),
                     output: "Process running with session ID 123".into(),
                     complete,
-                    failed: false,
+                    failed,
                     command_status: status,
                     cell_id: None,
                     parent: Some("outer".into()),
@@ -6082,7 +6109,7 @@ mod tests {
                             .all(|(a, b)| a.abs_diff(*b) <= 10)
                     })
                 }),
-                "dot must use the theme's {status:?} color"
+                "{name} dot must use the theme's {label:?} color"
             );
         }
     }
