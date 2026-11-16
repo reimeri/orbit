@@ -828,6 +828,7 @@ mod tests {
                 output: media.description(),
                 complete: true,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 parent: None,
                 media: vec![media.clone()],
@@ -1043,6 +1044,7 @@ mod tests {
                 parent: Some("outer".into()),
                 complete: true,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 media: vec![],
                 web: Some(Metadata {
@@ -1123,6 +1125,7 @@ mod tests {
                 output: tool_notice.clone(),
                 complete: true,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 parent: Some("outer-call".into()),
                 media: vec![],

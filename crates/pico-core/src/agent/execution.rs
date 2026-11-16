@@ -226,6 +226,7 @@ async fn execute_call(
                 output: String::new(),
                 complete: false,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 parent: None,
                 media: vec![],

@@ -228,6 +228,8 @@ pub enum EntryKind {
         input: String,
         output: String,
         complete: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_status: Option<crate::shell::CommandStatus>,
         #[serde(default)]
         failed: bool,
         #[serde(default)]

@@ -29,6 +29,7 @@ use pico_core::{
     agent::Harness,
     auth::Login,
     models::{MODELS, model},
+    shell::CommandStatus,
     store::{
         Catalog, Entry, EntryKind, NewSessionDraft, Project, Session, SessionSummary, Settings,
         Store, UserMessage,
@@ -3599,38 +3600,49 @@ impl App {
                 failed,
                 media,
                 web,
+                command_status,
                 ..
             } => {
                 let open = self.expanded.contains(&entry.id);
                 let preview = activity::tool_preview(name, input);
+                let status = activity::tool_status(*complete, *failed, *command_status);
+                let running = status == CommandStatus::Running;
+                let status_color = match status {
+                    CommandStatus::Running if name == "exec_command" => WARNING,
+                    CommandStatus::Running => ACCENT,
+                    CommandStatus::Succeeded => SUCCESS,
+                    CommandStatus::Failed | CommandStatus::Interrupted => DANGER,
+                };
                 let mut block = column![
                     theme::button(
                         row![
                             chevron_icon(open),
-                            text(if *complete { "●" } else { "◌" })
-                                .size(11)
-                                .color(if *failed {
-                                    DANGER
-                                } else if *complete {
-                                    SUCCESS
-                                } else {
-                                    ACCENT
-                                }),
-                            text(activity::tool_name(name)).size(12).color(theme::TEXT),
-                            ellipsized_text(&preview, 12., Some(MUTED)),
-                            text(if *failed {
-                                "failed"
-                            } else if !*complete {
-                                "running"
+                            text(if running && name != "exec_command" {
+                                "◌"
                             } else {
-                                ""
+                                "●"
                             })
                             .size(11)
-                            .color(if *failed {
-                                DANGER
-                            } else {
-                                MUTED
+                            .color(status_color),
+                            text(activity::tool_name(name)).size(12).color(theme::TEXT),
+                            ellipsized_text(&preview, 12., Some(MUTED)),
+                            text(match status {
+                                CommandStatus::Running => "running",
+                                CommandStatus::Succeeded => "",
+                                CommandStatus::Failed => "failed",
+                                CommandStatus::Interrupted => "interrupted",
                             })
+                            .size(11)
+                            .color(
+                                if matches!(
+                                    status,
+                                    CommandStatus::Failed | CommandStatus::Interrupted
+                                ) {
+                                    DANGER
+                                } else {
+                                    MUTED
+                                }
+                            )
                         ]
                         .spacing(9)
                         .align_y(iced::Center)
@@ -4622,6 +4634,7 @@ impl App {
                         output: "Script completed\n14 tests passed".into(),
                         complete: true,
                         failed: false,
+                        command_status: None,
                         cell_id: None,
                         parent: None,
                         media: vec![],
@@ -5013,6 +5026,7 @@ impl App {
                         output: media.description(),
                         complete: true,
                         failed: false,
+                        command_status: None,
                         cell_id: None,
                         parent: None,
                         media: vec![media],
@@ -5100,6 +5114,7 @@ impl App {
                 );
                 session.entries.push(Entry {id:"smoke-web".into(),text:String::new(),kind:EntryKind::Tool {
                     name:"web__run".into(),input:r#"{"search_query":[{"q":"Rust documentation","domains":["rust-lang.org"]}]}"#.into(),
+                    command_status: None,
                     output:"Rust documentation (https://doc.rust-lang.org/book/)\nThe Rust Programming Language".into(),complete:true,failed:false, cell_id: None,parent:None,media:vec![],
                     web:Some(pico_core::web_search::Metadata{mode:pico_core::web_search::Mode::Live,searched_at:pico_core::store::now(),sources:vec![pico_core::web_search::Source{title:"The Rust Programming Language — a long source title that should fit in a constrained chat column".into(),url:"https://doc.rust-lang.org/book/".into()}],details:r#"[{"type":"text_result","url":"https://doc.rust-lang.org/book/"}]"#.into()})
                 }});
@@ -5165,6 +5180,7 @@ impl App {
                                 },
                                 complete,
                                 failed,
+                                command_status: None,
                                 cell_id: None,
                                 parent: parent.map(str::to_owned),
                                 media: vec![],
@@ -5823,6 +5839,7 @@ mod tests {
                                         output: String::new(),
                                         complete,
                                         failed: false,
+                                        command_status: None,
                                         cell_id: None,
                                         parent: None,
                                         media: vec![],
@@ -5941,6 +5958,80 @@ mod tests {
     }
 
     #[test]
+    fn command_dot_uses_process_status_after_tool_returns() {
+        use iced::advanced::Renderer;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let app = app();
+        let mut renderer = header_renderer();
+        for (status, complete, color, label) in [
+            (None, false, WARNING, "running"),
+            (Some(CommandStatus::Running), true, WARNING, "running"),
+            (Some(CommandStatus::Succeeded), true, SUCCESS, ""),
+            (Some(CommandStatus::Failed), true, DANGER, "failed"),
+            (
+                Some(CommandStatus::Interrupted),
+                true,
+                DANGER,
+                "interrupted",
+            ),
+        ] {
+            let entry = Entry {
+                id: "command".into(),
+                text: String::new(),
+                kind: EntryKind::Tool {
+                    name: "exec_command".into(),
+                    input: r#"{"cmd":"build"}"#.into(),
+                    output: "Process running with session ID 123".into(),
+                    complete,
+                    failed: false,
+                    command_status: status,
+                    cell_id: None,
+                    parent: Some("outer".into()),
+                    media: vec![],
+                    web: None,
+                },
+            };
+            let size = iced::Size::new(400., 80.);
+            let mut ui =
+                UserInterface::build(app.entry_view(&entry, 0), size, Cache::new(), &mut renderer);
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let dot = bounds.label("●");
+            if !label.is_empty() {
+                bounds.label(label);
+            }
+            renderer.reset(iced::Rectangle::with_size(size));
+            ui.draw(
+                &mut renderer,
+                &theme::app(),
+                &iced::advanced::renderer::Style {
+                    text_color: theme::TEXT,
+                },
+                mouse::Cursor::Unavailable,
+            );
+            let pixels = crate::test_renderer::screenshot(
+                &mut renderer,
+                iced::Size::new(400, 80),
+                1.,
+                theme::BACKGROUND,
+            );
+            let expected = color.into_rgba8();
+            assert!(
+                (dot.y.floor() as usize..(dot.y + dot.height).ceil() as usize).any(|y| {
+                    (dot.x.floor() as usize..(dot.x + dot.width).ceil() as usize).any(|x| {
+                        let pixel = &pixels[(y * 400 + x) * 4..][..3];
+                        pixel
+                            .iter()
+                            .zip(&expected[..3])
+                            .all(|(a, b)| a.abs_diff(*b) <= 10)
+                    })
+                }),
+                "dot must use the theme's {status:?} color"
+            );
+        }
+    }
+
+    #[test]
     fn tool_header_stays_fixed_above_padded_details_when_toggled() {
         use iced_runtime::{UserInterface, user_interface::Cache};
         let mut app = app();
@@ -5953,6 +6044,7 @@ mod tests {
                 output: "λ".into(),
                 complete: true,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 parent: Some("parent-call".into()),
                 media: vec![],
@@ -6033,6 +6125,7 @@ mod tests {
                         output: output.into(),
                         complete: true,
                         failed: false,
+                        command_status: None,
                         cell_id: None,
                         parent: Some("outer-call".into()),
                         media: vec![],
@@ -6119,6 +6212,7 @@ mod tests {
                         output: "Script completed".into(),
                         complete: true,
                         failed: false,
+                        command_status: None,
                         cell_id: None,
                         parent: None,
                         media: vec![],
@@ -6134,6 +6228,7 @@ mod tests {
                         output: String::new(),
                         complete: false,
                         failed: false,
+                        command_status: None,
                         cell_id: None,
                         parent: Some("outer".into()),
                         media: vec![],
@@ -6265,6 +6360,7 @@ mod tests {
                     output: "Agent text".into(),
                     complete: true,
                     failed: false,
+                    command_status: None,
                     cell_id: None,
                     parent: None,
                     media: vec![],
@@ -6340,6 +6436,7 @@ mod tests {
                     output: media.description(),
                     complete: true,
                     failed: false,
+                    command_status: None,
                     cell_id: None,
                     parent: None,
                     media: vec![media.clone()],
@@ -10084,6 +10181,7 @@ Then implement the fix.";
                         output: "Checked".into(),
                         complete: true,
                         failed: false,
+                        command_status: None,
                         cell_id: None,
                         parent: None,
                         media: vec![],
@@ -10700,6 +10798,7 @@ Then implement the fix.";
                     output: "long output".repeat(10000),
                     complete: true,
                     failed: false,
+                    command_status: None,
                     cell_id: None,
                     parent: None,
                     media: vec![],

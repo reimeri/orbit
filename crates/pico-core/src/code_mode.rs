@@ -62,7 +62,14 @@ pub struct ToolEvent {
 #[derive(Clone, Debug)]
 pub enum Event {
     Tool(ToolEvent),
-    Notification { parent: String, text: String },
+    CommandStatus {
+        id: String,
+        status: crate::shell::CommandStatus,
+    },
+    Notification {
+        parent: String,
+        text: String,
+    },
 }
 pub type Delegation =
     Arc<dyn Fn(&str, &str, &str, &CancellationToken) -> Result<String> + Send + Sync>;
@@ -566,7 +573,13 @@ fn run_cell(
                                     "view_image"|"image_gen__imagegen" => shell.runtime().block_on(images.as_ref().expect("validated image tool").call(&name,&args,&request,&cancellation)).map(|result| {attachments.push(result.media);display=Some(result.text);result.value.to_string()}),
                                     "exec_command" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
-                                        .and_then(|a| shell.exec(a, &cancellation)).map(|result| {command_failed=result.failed;result.text}),
+                                        .and_then(|a| {
+                                            let observer = observer.clone();
+                                            let id = request.clone();
+                                            shell.exec_observed(a, &cancellation, Some(Arc::new(move |status| {
+                                                observer(Event::CommandStatus { id: id.clone(), status })
+                                            })))
+                                        }).map(|result| {command_failed=result.failed;result.text}),
                                     "write_stdin" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|a| shell.write(a, &cancellation)).map(|result| {command_failed=result.failed;result.text}),

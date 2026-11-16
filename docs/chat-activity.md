@@ -43,11 +43,14 @@ Settings and session-menu copy actions are unchanged.
   notice and an Open subagent action. Other warnings and the questionnaire panel
   are not hidden by this presentation.
 
-A status describes a **tool call**, not a consolidated process lifecycle. A shell
-call that returns a running process ID has returned successfully; later polls are
-still separate calls. Nonzero process exits, native tool errors and code-execution
-errors carry explicit failure metadata, not guesses based on output text. No
-elapsed-time metadata or polling consolidation is introduced here.
+The `exec_command` status dot tracks the **process**, independently of tool-call
+completion: yellow while running, green on exit zero, and red on failure or
+cancellation. Yielding a session ID does not turn the dot green. Exit updates
+arrive automatically, without a `write_stdin` poll, and survive session switches.
+After an application restart, previously running commands show red/interrupted
+because their runtime tracking cannot be restored. Original tool output is retained.
+Other rows still describe tool-call status; polls remain separate calls. Status
+uses structured lifecycle events, never guesses based on command output text.
 
 ## Session attention
 

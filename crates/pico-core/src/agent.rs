@@ -202,6 +202,13 @@ impl Harness {
                                 format!("Cell notification: {text}"),
                             ));
                         }
+                        CodeEvent::CommandStatus { id, status } => {
+                            let entry = session.entries.by_id_mut(&id).expect("command tool entry");
+                            let EntryKind::Tool { command_status, .. } = &mut entry.kind else {
+                                unreachable!("command status belongs to a tool entry");
+                            };
+                            *command_status = Some(status);
+                        }
                         CodeEvent::Tool(event) => {
                             if let Some(result) = event.output {
                                 if let Some(entry) = session.entries.by_id_mut(&event.id)
@@ -230,6 +237,7 @@ impl Harness {
                                         output: String::new(),
                                         complete: false,
                                         failed: false,
+                                        command_status: None,
                                         cell_id: None,
                                         parent: Some(event.parent),
                                         media: vec![],
@@ -397,6 +405,35 @@ impl Harness {
         let session = self.store.load_session(id)?;
         let interrupted = session.interrupted;
         let conversation = self.make_conversation(session, true);
+        let running_commands: Vec<_> = conversation
+            .snapshot()
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| {
+                matches!(
+                    &entry.kind,
+                    EntryKind::Tool {
+                        command_status: Some(crate::shell::CommandStatus::Running),
+                        ..
+                    }
+                )
+                .then_some(i)
+            })
+            .collect();
+        if !running_commands.is_empty() {
+            {
+                let mut state = conversation.state.lock().expect("session lock");
+                for i in running_commands {
+                    if let EntryKind::Tool { command_status, .. } = &mut state.entries[i].kind {
+                        *command_status = Some(crate::shell::CommandStatus::Interrupted);
+                    }
+                }
+                state.entries.push(Entry::new(EntryKind::Notice,
+                    "Command tracking was interrupted by the restart. Inspect the workspace before retrying; commands may have performed side effects."));
+            }
+            conversation.save()?;
+        }
         // Runtime cells, remote web requests and questionnaire drafts do not survive restart.
         // This also covers a model turn that finished while its ask cell was pending.
         let abandoned: Vec<_> = conversation.snapshot().entries.iter().enumerate().filter_map(|(i, entry)| matches!(&entry.kind, EntryKind::Tool { name, complete: false, .. } if matches!(name.as_str(), "ask_user" | "web__run")).then_some(i)).collect();
@@ -1315,6 +1352,132 @@ mod tests {
     }
 
     #[test]
+    fn command_status_tracks_yielded_processes_without_polling() {
+        use crate::shell::CommandStatus;
+        for (tty, exit, stop) in [(false, 0, false), (true, 7, false), (false, 0, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().into()).unwrap();
+            let h = Harness::new(store.clone(), vec![]).unwrap();
+            let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+            let args = json!({
+                "cmd": format!("while [ ! -f release ]; do sleep 0.01; done; printf finished; exit {exit}"),
+                "login": false, "tty": tty, "yield_time_ms": 0
+            });
+            let result = c
+                .code
+                .exec(
+                    &format!("text(await tools.exec_command({args}));"),
+                    "outer",
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+            assert!(
+                result.contains("Process running with session ID"),
+                "{result}"
+            );
+            let snapshot = c.snapshot();
+            let entry = snapshot
+                .entries
+                .iter()
+                .find(|e| matches!(&e.kind, EntryKind::Tool { name, .. } if name == "exec_command"))
+                .unwrap();
+            let entry_id = entry.id.clone();
+            let EntryKind::Tool {
+                complete,
+                failed,
+                output,
+                command_status,
+                ..
+            } = &entry.kind
+            else {
+                unreachable!()
+            };
+            assert!(
+                *complete && !failed,
+                "invocation returned successfully while the process lives"
+            );
+            assert_eq!(*command_status, Some(CommandStatus::Running));
+            let original_output = output.clone();
+            h.evict_inactive(None).unwrap();
+            assert!(
+                c.loaded.load(Ordering::Acquire),
+                "live commands must stay observable across session switches"
+            );
+            if stop {
+                c.cancel();
+            } else {
+                std::fs::write(dir.path().join("release"), "").unwrap();
+            }
+            let expected = if stop || exit != 0 {
+                CommandStatus::Failed
+            } else {
+                CommandStatus::Succeeded
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let saved = store.load_session(&c.id).unwrap();
+                if matches!(&saved.entries.by_id(&entry_id).unwrap().kind,
+                    EntryKind::Tool { command_status: Some(status), .. } if *status == expected)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "process status was not persisted automatically"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                matches!(&c.snapshot().entries.by_id(&entry_id).unwrap().kind,
+                EntryKind::Tool { complete: true, failed: false, output, .. } if output == &original_output),
+                "exit status must not rewrite the original tool result"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_marks_only_live_command_tracking_interrupted() {
+        use crate::shell::CommandStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut session = Session::new(dir.path().into(), &Settings::default());
+        for (id, status) in [
+            ("running", CommandStatus::Running),
+            ("success", CommandStatus::Succeeded),
+            ("failed", CommandStatus::Failed),
+        ] {
+            session.entries.push(Entry {
+                id: id.into(),
+                text: String::new(),
+                kind: EntryKind::Tool {
+                    name: "exec_command".into(),
+                    input: "{}".into(),
+                    output: "original result".into(),
+                    complete: true,
+                    failed: false,
+                    command_status: Some(status),
+                    cell_id: None,
+                    parent: Some("outer".into()),
+                    media: vec![],
+                    web: None,
+                },
+            });
+        }
+        store.save_session(&session).unwrap();
+        let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        h.load(&session.id).unwrap();
+        let saved = store.load_session(&session.id).unwrap();
+        for (id, expected) in [
+            ("running", CommandStatus::Interrupted),
+            ("success", CommandStatus::Succeeded),
+            ("failed", CommandStatus::Failed),
+        ] {
+            assert!(matches!(&saved.entries.by_id(id).unwrap().kind,
+                EntryKind::Tool { command_status: Some(status), output, .. } if *status == expected && output == "original result"));
+        }
+    }
+
+    #[test]
     fn restart_finishes_abandoned_web_calls_without_replay_or_metadata_loss() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
@@ -1335,6 +1498,7 @@ mod tests {
                 output: "completed text".into(),
                 complete: true,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 parent: Some("outer".into()),
                 media: vec![],
@@ -1350,6 +1514,7 @@ mod tests {
                 output: String::new(),
                 complete: false,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 parent: Some("outer".into()),
                 media: vec![],
@@ -1638,6 +1803,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
                 output: String::new(),
                 complete: false,
                 failed: false,
+                command_status: None,
                 cell_id: None,
                 parent: Some("yielded-exec".into()),
                 media: vec![],

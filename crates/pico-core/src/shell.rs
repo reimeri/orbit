@@ -6,7 +6,7 @@ use nix::{
     unistd::Pid,
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -14,7 +14,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicI32, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -52,6 +52,16 @@ pub struct StdinArgs {
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,
 }
+/// Process lifetime, independent of whether an exec_command invocation has returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Interrupted,
+}
+pub type CommandObserver = Arc<dyn Fn(CommandStatus) -> Result<()> + Send + Sync>;
+
 pub struct CommandOutput {
     pub text: String,
     pub failed: bool,
@@ -61,6 +71,7 @@ pub struct CommandOutput {
 struct Output {
     buffer: OutputBuffer,
     exit: Option<(String, bool)>,
+    stopped: bool,
     readers: usize,
 }
 struct Process {
@@ -72,10 +83,11 @@ struct Process {
 }
 impl Process {
     fn stop(&self) {
-        let state = self.output.0.lock().expect("output lock");
+        let mut state = self.output.0.lock().expect("output lock");
         if state.exit.is_some() && state.readers == 0 {
             return;
         }
+        state.stopped = true;
         let _ = killpg(Pid::from_raw(self.pid as i32), Signal::SIGKILL);
     }
     fn read(
@@ -102,6 +114,7 @@ impl Process {
         let mut output = self.output.0.lock().expect("process output lock");
         let complete = output.exit.is_some() && output.readers == 0;
         let exit = output.exit.clone();
+        let stopped = output.stopped;
         let body = output
             .buffer
             .read(character_budget(tokens))
@@ -123,7 +136,7 @@ impl Process {
                     "Wall time: {:.3} seconds\n{status}\nOutput:\n{body}",
                     self.started.elapsed().as_secs_f64()
                 ),
-                failed: complete && exit.as_ref().is_some_and(|(_, failed)| *failed),
+                failed: complete && (stopped || exit.as_ref().is_some_and(|(_, failed)| *failed)),
             },
             complete,
         ))
@@ -198,7 +211,17 @@ fn shared_runtime() -> tokio::runtime::Handle {
         .clone()
 }
 
+// Keep the conversation resident until its final process status has been saved,
+// even if a concurrent poll already removed the process from the session map.
+struct PendingStatus(Arc<AtomicUsize>);
+impl Drop for PendingStatus {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+
 pub struct Shell {
+    pending_status: Arc<AtomicUsize>,
     cwd: PathBuf,
     processes: Mutex<HashMap<i32, Arc<Process>>>,
     next: AtomicI32,
@@ -210,6 +233,7 @@ impl Shell {
     }
     pub fn with_runtime(cwd: PathBuf, runtime: tokio::runtime::Handle) -> Self {
         Self {
+            pending_status: Arc::new(AtomicUsize::new(0)),
             runtime,
             cwd,
             processes: Mutex::new(HashMap::new()),
@@ -220,6 +244,14 @@ impl Shell {
         &self.runtime
     }
     pub fn exec(&self, args: ExecArgs, cancel: &CancellationToken) -> Result<CommandOutput> {
+        self.exec_observed(args, cancel, None)
+    }
+    pub fn exec_observed(
+        &self,
+        args: ExecArgs,
+        cancel: &CancellationToken,
+        observer: Option<CommandObserver>,
+    ) -> Result<CommandOutput> {
         if cancel.is_cancelled() {
             bail!("Execution cancelled");
         }
@@ -366,6 +398,40 @@ impl Shell {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         processes.insert(id, process.clone());
         drop(processes);
+        if let Some(observer) = observer {
+            self.pending_status.fetch_add(1, Ordering::AcqRel);
+            let pending = PendingStatus(self.pending_status.clone());
+            let started = observer(CommandStatus::Running);
+            let output = process.output.clone();
+            self.runtime.spawn(async move {
+                let _pending = pending;
+                let failed = loop {
+                    let notified = output.1.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    {
+                        let state = output.0.lock().expect("output lock");
+                        if let Some((_, failed)) = &state.exit
+                            && state.readers == 0
+                        {
+                            break *failed || state.stopped;
+                        }
+                    }
+                    notified.await;
+                };
+                if let Err(error) = observer(if failed {
+                    CommandStatus::Failed
+                } else {
+                    CommandStatus::Succeeded
+                }) {
+                    eprintln!("Could not record command exit: {error:#}");
+                }
+            });
+            if let Err(error) = started {
+                process.stop();
+                return Err(error);
+            }
+        }
         let result = process.read(
             id,
             args.yield_time_ms,
@@ -430,14 +496,16 @@ impl Shell {
         result.map(|(text, _)| text)
     }
     pub fn is_executing(&self) -> bool {
-        self.processes
-            .lock()
-            .expect("process lock")
-            .values()
-            .any(|process| {
-                let output = process.output.0.lock().expect("output lock");
-                output.exit.is_none() || output.readers > 0
-            })
+        self.pending_status.load(Ordering::Acquire) > 0
+            || self
+                .processes
+                .lock()
+                .expect("process lock")
+                .values()
+                .any(|process| {
+                    let output = process.output.0.lock().expect("output lock");
+                    output.exit.is_none() || output.readers > 0
+                })
     }
     pub fn has_work(&self) -> bool {
         !self.processes.lock().expect("process lock").is_empty()
@@ -464,6 +532,104 @@ mod tests {
             .parse()
             .unwrap()
     }
+    #[test]
+    fn command_status_includes_children_retaining_output_after_shell_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = Shell::new(dir.path().into());
+        let (events, received) = std::sync::mpsc::channel();
+        let result = shell
+            .exec_observed(
+                serde_json::from_value(serde_json::json!({
+                    "cmd": "while [ ! -f release ]; do sleep 0.01; done &",
+                    "login": false, "yield_time_ms": 0
+                }))
+                .unwrap(),
+                &CancellationToken::new(),
+                Some(Arc::new(move |status| {
+                    events.send(status).unwrap();
+                    Ok(())
+                })),
+            )
+            .unwrap();
+        let id = running_id(&result.text);
+        let process = shell.processes.lock().unwrap()[&id].clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Establish that the shell itself exited successfully, but its child still
+        // owns the output pipes, before stopping the session.
+        loop {
+            let output = process.output.0.lock().unwrap();
+            if let Some((_, failed)) = output.exit {
+                assert!(!failed);
+                assert!(output.readers > 0);
+                break;
+            }
+            drop(output);
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            CommandStatus::Running
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        shell.stop_all();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            CommandStatus::Failed
+        );
+    }
+
+    #[test]
+    fn command_status_publication_keeps_execution_live_after_result_is_consumed() {
+        let shell = Shell::new(std::env::temp_dir());
+        let (events, received) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let gate = Mutex::new(gate);
+        let output = shell
+            .exec_observed(
+                serde_json::from_value(serde_json::json!({"cmd": "exit 7", "login": false}))
+                    .unwrap(),
+                &CancellationToken::new(),
+                Some(Arc::new(move |status| {
+                    events.send(status).unwrap();
+                    if status != CommandStatus::Running {
+                        gate.lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap();
+                    }
+                    Ok(())
+                })),
+            )
+            .unwrap();
+        assert!(output.failed);
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            CommandStatus::Running
+        );
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            CommandStatus::Failed
+        );
+        assert!(
+            !shell.has_work(),
+            "the completed result was already consumed"
+        );
+        assert!(
+            shell.is_executing(),
+            "do not evict a transcript before the exit event is saved"
+        );
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shell.is_executing() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn command_and_poll_preserve_oversized_output_after_session_closes() {
         let dir = tempfile::tempdir().unwrap();

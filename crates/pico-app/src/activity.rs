@@ -1,6 +1,7 @@
 //! A display-only projection. Source entries, parent links and full text stay intact.
 use pico_core::{
     history::History,
+    shell::CommandStatus,
     store::{Entry, EntryKind},
 };
 use std::{
@@ -114,6 +115,16 @@ pub struct Projection {
     pub blocks: BTreeMap<usize, Block>,
     children: HashMap<String, usize>,
     cells: HashMap<String, String>,
+}
+/// Command state wins over invocation completion: a yielded tool can still be running.
+pub fn tool_status(complete: bool, failed: bool, command: Option<CommandStatus>) -> CommandStatus {
+    command.unwrap_or(if failed {
+        CommandStatus::Failed
+    } else if complete {
+        CommandStatus::Succeeded
+    } else {
+        CommandStatus::Running
+    })
 }
 pub fn is_activity(entry: &Entry) -> bool {
     matches!(entry.kind, EntryKind::Tool { .. } | EntryKind::Reasoning)
@@ -233,19 +244,24 @@ impl Projection {
                             input,
                             complete,
                             failed,
+                            command_status,
                             ..
                         } => {
+                            let status = tool_status(*complete, *failed, *command_status);
                             let hidden = self.hidden_wrapper(entry);
                             if hidden {
                                 block.wrappers += 1;
                             } else {
                                 summary.tools += 1;
-                                if *complete {
+                                if status != CommandStatus::Running {
                                     summary.completed += 1;
                                 } else {
                                     summary.running += 1;
                                 }
-                                if *failed {
+                                if matches!(
+                                    status,
+                                    CommandStatus::Failed | CommandStatus::Interrupted
+                                ) {
                                     summary.failed += 1;
                                 }
                                 if name == "spawn_subagent"
@@ -259,7 +275,9 @@ impl Projection {
                                     }
                                 }
                             }
-                            if !*complete && (!hidden || summary.current.is_empty()) {
+                            if status == CommandStatus::Running
+                                && (!hidden || summary.current.is_empty())
+                            {
                                 summary.current = if wrapper(entry) {
                                     tool_name(name).into()
                                 } else {
@@ -466,6 +484,7 @@ mod tests {
                 output: String::new(),
                 complete,
                 failed,
+                command_status: None,
                 cell_id: None,
                 parent: parent.map(str::to_owned),
                 media: vec![],
@@ -623,6 +642,28 @@ mod tests {
                 show_failures,
                 "{total} calls, {failed} failed, {running} running"
             );
+        }
+    }
+
+    #[test]
+    fn command_lifecycle_reprojects_completed_invocations() {
+        let mut source: History<_> =
+            vec![tool("command", "exec_command", Some("outer"), true, false)].into();
+        let mut projection = Projection::default();
+        for (status, counts) in [
+            (CommandStatus::Running, (0, 1, 0)),
+            (CommandStatus::Succeeded, (1, 0, 0)),
+            (CommandStatus::Failed, (1, 0, 1)),
+        ] {
+            if let EntryKind::Tool { command_status, .. } = &mut source[0].kind {
+                *command_status = Some(status);
+            }
+            assert_eq!(projection.sync(&source), Some(0));
+            let summary = projection.block(0).summary.as_ref().unwrap();
+            assert_eq!((summary.completed, summary.running, summary.failed), counts);
+            if status == CommandStatus::Running {
+                assert_eq!(summary.label(false), "cargo test -p core");
+            }
         }
     }
 
