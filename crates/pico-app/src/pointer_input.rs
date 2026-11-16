@@ -10,6 +10,66 @@ use iced::{
 };
 use std::cell::Cell;
 
+/// Place below a popup in a stack to dismiss it without consuming outside input.
+/// The popup must block input within its own bounds (for example with `opaque`).
+pub fn dismiss_layer(message: Message) -> Element<'static, Message> {
+    Element::new(DismissLayer(message))
+}
+
+struct DismissLayer(Message);
+
+impl Widget<Message, iced::Theme, iced::Renderer> for DismissLayer {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(limits.resolve(Length::Fill, Length::Fill, Size::ZERO))
+    }
+
+    fn update(
+        &mut self,
+        _tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        if cursor.is_over(layout.bounds())
+            && matches!(
+                event,
+                Event::Mouse(
+                    mouse::Event::ButtonPressed(mouse::Button::Left | mouse::Button::Right)
+                        | mouse::Event::WheelScrolled { .. }
+                ) | Event::Touch(touch::Event::FingerPressed { .. })
+            )
+        {
+            shell.publish(self.0.clone());
+            // Leave the event uncaptured so the same input reaches the UI below.
+        }
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        _renderer: &mut iced::Renderer,
+        _theme: &iced::Theme,
+        _style: &renderer::Style,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+    }
+}
+
 /// Requests from widgets, resolved at the root before reaching the application.
 #[derive(Clone, Debug)]
 pub enum Press {

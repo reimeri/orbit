@@ -1,0 +1,15 @@
+--- a/src/pick_list.rs
++++ b/src/pick_list.rs
+@@ -458,7 +458,11 @@
+                         shell.publish(on_close.clone());
+                     }
+ 
+-                    shell.capture_event();
++                    // Outside clicks also activate the widget beneath them.
++                    // Clicking the selector itself still only closes the menu.
++                    if cursor.is_over(layout.bounds()) {
++                        shell.capture_event();
++                    }
+                 } else if cursor.is_over(layout.bounds()) {
+                     let selected = self.selected.as_ref().map(Borrow::borrow);
+ 

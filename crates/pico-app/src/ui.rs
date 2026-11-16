@@ -10,7 +10,7 @@ use crate::{
     chevron_icon::chevron_icon,
     ellipsized_text::ellipsized_text,
     icons::{Icon, tip as icon_tip},
-    pointer_input::{Press, pointer_input},
+    pointer_input::{Press, dismiss_layer, pointer_input},
     tool_output,
 };
 #[cfg(test)]
@@ -2583,10 +2583,7 @@ impl App {
                 )
                 .into()
         } else if let Some((target, position)) = &self.context_menu {
-            let dismiss = mouse_area(space().width(Fill).height(Fill))
-                .on_press(Message::CloseMenu)
-                .on_right_press(Message::CloseMenu)
-                .on_scroll(|_| Message::CloseMenu);
+            let dismiss = dismiss_layer(Message::CloseMenu);
             let actions = match target {
                 MenuTarget::Session(id) => column![
                     theme::button(Icon::Pencil.label("Rename", 16.))
@@ -2643,10 +2640,7 @@ impl App {
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
             layers.push(dismiss).push(positioned).into()
         } else if self.footer_menu_open {
-            let dismiss = mouse_area(space().width(Fill).height(Fill))
-                .on_press(Message::CloseFooterMenu)
-                .on_right_press(Message::CloseFooterMenu)
-                .on_scroll(|_| Message::CloseFooterMenu);
+            let dismiss = dismiss_layer(Message::CloseFooterMenu);
             let right = 50.
                 + if self.settings_open || self.agents_open {
                     self.catalog
@@ -4201,8 +4195,11 @@ impl App {
             let chip = theme::button(label)
                 .width(width)
                 .padding([3, 4])
+                // While open, the dismiss layer handles this press. Do not arm
+                // the button to reopen the popup on release after a view rebuild.
                 .on_press_maybe(
-                    (!running && session.child.is_none()).then_some(Message::ToggleFooterMenu),
+                    (!open && !running && session.child.is_none())
+                        .then_some(Message::ToggleFooterMenu),
                 )
                 .style(move |theme, status| {
                     let mut style = sidebar_control(theme, status);
@@ -8922,6 +8919,133 @@ Then implement the fix.";
         }
     }
 
+    #[test]
+    fn settings_dropdown_outside_click_activates_controls() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut renderer = header_renderer();
+        // Exercise targets before and after the dropdown in widget traversal:
+        // capturing the close event must not suppress either target's press.
+        for target in ["Before", "After"] {
+            let view = row![
+                theme::button(text("Before")).on_press(Message::ToggleSettings),
+                pick_list(["Selected", "Other"], Some("Selected"), |value| {
+                    Message::ImageQuality(value.into())
+                })
+                .on_open(Message::ToggleFooterMenu)
+                .on_close(Message::CloseMenu)
+                .style(theme::pick_list)
+                .menu_style(theme::pick_list_menu),
+                theme::button(text("After")).on_press(Message::ToggleSettings),
+            ]
+            .spacing(20);
+            let mut ui = UserInterface::build(
+                view,
+                iced::Size::new(600., 300.),
+                Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let before = bounds.label("Before");
+            let after = bounds.label("After");
+            let selector =
+                iced::Point::new((before.x + before.width + after.x) / 2., before.center_y());
+            assert!(matches!(
+                click_at(&mut ui, &mut renderer, selector).as_slice(),
+                [Message::ToggleFooterMenu]
+            ));
+            let messages = click_at(&mut ui, &mut renderer, bounds.label(target).center());
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::CloseMenu, Message::ToggleSettings]
+                ),
+                "{target}: {messages:?}"
+            );
+            // Reopening, then clicking the selector itself, only closes it.
+            assert!(matches!(
+                click_at(&mut ui, &mut renderer, selector).as_slice(),
+                [Message::ToggleFooterMenu]
+            ));
+            assert!(matches!(
+                click_at(&mut ui, &mut renderer, selector).as_slice(),
+                [Message::CloseMenu]
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn context_menu_outside_click_activates_controls_and_retargets_menu() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        app.account = Some("fixture account".into());
+        let project = PathBuf::from("/outside-click-project");
+        app.catalog.projects = vec![Project {
+            path: project.clone(),
+            display_name: Some("Outside click project".into()),
+            favorite: false,
+            stashed: false,
+        }];
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(app.window_width, app.window_height);
+        for target in [
+            MenuTarget::Session("context-session".into()),
+            MenuTarget::Project(project.clone()),
+        ] {
+            // Keep the menu away from the project row and Settings header.
+            app.context_menu = Some((target, iced::Point::ORIGIN));
+            app.settings_open = true;
+            let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let close = bounds.rightmost_control_at(bounds.label("Settings").center_y());
+            let messages = click_at(&mut ui, &mut renderer, close.center());
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::CloseMenu, Message::ToggleSettings]
+                ),
+                "{messages:?}"
+            );
+            drop(ui);
+            let original = app.context_menu.clone();
+            for message in messages {
+                dispatch(&mut app, message).await;
+            }
+            assert!(app.context_menu.is_none());
+            assert!(!app.settings_open);
+
+            // One right-click should replace the old menu, not merely dismiss it.
+            app.context_menu = original;
+            let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let point = bounds.label("Outside click project").center();
+            let mut messages = Vec::new();
+            ui.update(
+                &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                    mouse::Button::Right,
+                ))],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(
+                matches!(messages.as_slice(),
+                [Message::CloseMenu, Message::ProjectMenu(path, position)]
+                if path == &project && *position == point),
+                "{messages:?}"
+            );
+            drop(ui);
+            for message in messages {
+                dispatch(&mut app, message).await;
+            }
+            assert!(matches!(&app.context_menu,
+                Some((MenuTarget::Project(path), position)) if path == &project && *position == point));
+        }
+    }
+
     #[tokio::test]
     async fn right_panel_headers_match_and_close_their_own_panel() {
         let mut app = app();
@@ -9299,14 +9423,17 @@ Then implement the fix.";
                 }
                 wide_popup_height = Some(popup.height);
             }
-            // Clicking the unified footer again dismisses the overlay, without activating the composer.
+            // Clicking the selector again dismisses without reopening on release.
             let messages = click_at(&mut ui, &mut renderer, label.center());
             assert!(
                 matches!(messages.as_slice(), [Message::CloseFooterMenu]),
                 "{messages:?}"
             );
             drop(ui);
-            dispatch(&mut app, messages.into_iter().next().unwrap()).await;
+            for message in messages {
+                dispatch(&mut app, message).await;
+            }
+            assert!(!app.footer_menu_open);
         }
     }
 
@@ -9395,6 +9522,132 @@ Then implement the fix.";
         dispatch(&mut app, messages.into_iter().next().unwrap()).await;
         assert!(!app.footer_menu_open);
         assert!(app.settings_open);
+    }
+
+    #[tokio::test]
+    async fn footer_selector_outside_click_focuses_editor_and_activates_buttons() {
+        use iced::advanced::widget::{Operation, operation::Focusable};
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        #[derive(Default)]
+        struct FocusBounds(Vec<iced::Rectangle>);
+        impl Operation for FocusBounds {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                bounds: iced::Rectangle,
+                _: &mut dyn Focusable,
+            ) {
+                self.0.push(bounds);
+            }
+        }
+
+        let mut app = app();
+        dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(app.window_width, app.window_height);
+        let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+        let mut bounds = FocusBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let [editor] = bounds.0.as_slice() else {
+            panic!("expected only the composer to be focusable: {:?}", bounds.0);
+        };
+        // The right-anchored popup overlaps the editor's right side.
+        let point = iced::Point::new(editor.x + crate::growing_editor::PADDING, editor.center_y());
+        let messages = click_at(&mut ui, &mut renderer, point);
+        let cache = ui.into_cache();
+        assert!(
+            matches!(messages.first(), Some(Message::CloseFooterMenu)),
+            "{messages:?}"
+        );
+        for message in messages {
+            dispatch(&mut app, message).await;
+        }
+        assert!(!app.footer_menu_open);
+
+        // Rebuild as the application does after dismissal, keeping widget focus.
+        // Typing must work without a second click or a programmatic focus operation.
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        let mut messages = Vec::new();
+        ui.update(
+            &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Character("x".into()),
+                modified_key: keyboard::Key::Character("x".into()),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyX),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: Some("x".into()),
+                repeat: false,
+            })],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        let cache = ui.into_cache();
+        for message in messages {
+            dispatch(&mut app, message).await;
+        }
+        assert_eq!(app.editor.text(), "x");
+
+        // A real event loop may rebuild between the selector press and release.
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let session = app.current().unwrap();
+        let selector = bounds
+            .label(&format!(
+                "{} {}",
+                model(&session.model).unwrap().name,
+                effort_name(&session.effort)
+            ))
+            .center();
+        let mut cache = ui.into_cache();
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+            let mut messages = Vec::new();
+            ui.update(
+                &[iced::Event::Mouse(event)],
+                mouse::Cursor::Available(selector),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            cache = ui.into_cache();
+            for message in messages {
+                dispatch(&mut app, message).await;
+            }
+            assert!(!app.footer_menu_open);
+        }
+
+        dispatch(&mut app, Message::ToggleSettings).await;
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let close = bounds.rightmost_control_at(bounds.label("Settings").center_y());
+        let messages = click_at(&mut ui, &mut renderer, close.center());
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::CloseFooterMenu, Message::ToggleSettings]
+            ),
+            "{messages:?}"
+        );
+        drop(ui);
+        for message in messages {
+            dispatch(&mut app, message).await;
+        }
+        assert!(!app.footer_menu_open);
+        assert!(!app.settings_open);
     }
 
     #[tokio::test]

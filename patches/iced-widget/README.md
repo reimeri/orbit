@@ -31,6 +31,14 @@ so long labels cannot paint into that gutter. Keep this width in sync with Pico'
 scrollbar::GUTTER. Like the app's scroll wrapper, it deliberately does not use
 Scrollable::spacing, which changes the available width when overflow changes.
 
+menu-click-through.patch lets outside presses close a built-in pick-list menu
+without capturing the event, so the same click also activates the underlying
+control. Presses on the selector itself remain captured to close without reopening.
+The app's context menus and model/reasoning selector use the same policy through
+`pointer_input::dismiss_layer`; modal dialogs deliberately remain blocking.
+The `settings_dropdown_outside_click_activates_controls` regression exercises
+controls on both sides of the selector in widget traversal order.
+
 When updating iced, regenerate the patch against the official release, update
 the version/hash and root lockfile, and re-enter nix develop. Never edit the
 generated symlink or registry source. Remove the patch when upstream provides
