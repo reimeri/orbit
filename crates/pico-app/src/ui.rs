@@ -3061,15 +3061,6 @@ impl App {
                 let block = self.activity.block(index);
                 let summary = block.summary.as_ref().expect("activity summary");
                 let active = block.range.end == session.entries.len() && self.running();
-                let failed_notices = block
-                    .notices
-                    .iter()
-                    .filter(|&&i| {
-                        self.subagent_notice_run(&session.entries[i])
-                            .is_some_and(|r| r.status.needs_attention())
-                    })
-                    .count();
-                let failures = summary.failed + summary.code_failures + failed_notices;
                 let working = active || summary.running > 0;
                 let mut header = row![space().width(12).height(12)]
                     .spacing(8)
@@ -3086,8 +3077,12 @@ impl App {
                     };
                     header = header.push(text(progress).size(11).color(MUTED));
                 }
-                if failures > 0 {
-                    header = header.push(text(format!("{failures} failed")).size(12).color(DANGER));
+                if summary.show_failures() {
+                    header = header.push(
+                        text(format!("{} failed", summary.failed))
+                            .size(12)
+                            .color(DANGER),
+                    );
                 }
                 theme::button(stack![
                     container(header).padding([6, 2]).width(Fill),

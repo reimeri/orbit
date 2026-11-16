@@ -18,8 +18,12 @@ Settings and session-menu copy actions are unchanged.
   reveals the right/down chevron. Finished groups always show the chevron.
 - Completed groups summarize actual tool-call counts and delegation counts. Live
   groups show the current tool/input or reasoning heading, with completed/running
-  counts kept separate from the ellipsized preview. Failure counts stay visible
-  without automatically expanding the group.
+  counts kept separate from the ellipsized preview. Completed counts include both
+  successful and failed calls. The failed count appears only for groups with more
+  than 10 actual tool calls and more than 50% of those calls failed (running calls
+  remain in the denominator). Hidden code-mode wrappers and subagent completion
+  notices do not contribute to these counts. Individual failures remain visible
+  in expanded details; failures never automatically expand the group.
 - Expanding shows compact status/name/input rows. Shell previews use the actual
   `cmd`, not a generated description. Polls remain individual `write_stdin` calls;
   nonempty stdin is explicitly identified as input rather than polling.
@@ -131,7 +135,10 @@ Manual acceptance with a live conversation:
    and completion counts, then expand directly into the actual tools.
 2. Run a command that exits nonzero, a JavaScript error before any nested tool,
    and an error after a successful nested tool. Keep the group collapsed and
-   confirm the failure count remains visible; inspect all original output.
+   confirm the failed count stays hidden for small groups; inspect all original
+   failures in expanded details. For groups exceeding 10 actual calls, confirm the
+   count appears only when more than half failed. Failed calls must still count as
+   completed in live progress.
 3. Yield a code cell and call `wait`. Check that successful observations appear
    under Execution details rather than inflating the actual-tool list.
 4. Expand consecutive thinking, select text across its original bodies, and copy.

@@ -62,13 +62,16 @@ pub struct Summary {
     pub completed: usize,
     pub running: usize,
     pub failed: usize,
-    pub code_failures: usize,
     pub reviews: usize,
     pub agents: usize,
     pub current: String,
     pub thinking: String,
 }
 impl Summary {
+    pub fn show_failures(&self) -> bool {
+        self.tools > 10 && self.failed > self.tools / 2
+    }
+
     pub fn label(&self, active: bool) -> String {
         let mut parts = Vec::new();
         if self.running > 0 || active {
@@ -112,7 +115,6 @@ pub struct Block {
     pub summary: Option<Summary>,
     pub wrappers: usize,
     pub thinking: BTreeMap<usize, Range<usize>>,
-    pub notices: Vec<usize>,
 }
 #[derive(Default)]
 pub struct Projection {
@@ -216,7 +218,6 @@ impl Projection {
                 summary: activity.then(Summary::default),
                 wrappers: 0,
                 thinking: BTreeMap::new(),
-                notices: Vec::new(),
             };
             if let Some(summary) = &mut block.summary {
                 let mut i = begin;
@@ -245,9 +246,6 @@ impl Projection {
                             let hidden = self.hidden_wrapper(entry);
                             if hidden {
                                 block.wrappers += 1;
-                                if *failed {
-                                    summary.code_failures += 1;
-                                }
                             } else {
                                 summary.tools += 1;
                                 if *complete {
@@ -285,11 +283,8 @@ impl Projection {
                                 };
                             }
                         }
-                        EntryKind::Notice => {
-                            block.notices.push(i);
-                            if summary.thinking.is_empty() {
-                                summary.thinking = "Subagent update".into();
-                            }
+                        EntryKind::Notice if summary.thinking.is_empty() => {
+                            summary.thinking = "Subagent update".into();
                         }
                         _ => {}
                     }
@@ -565,15 +560,54 @@ mod tests {
         );
         let summary = p.block(1).summary.as_ref().unwrap();
         assert_eq!(
-            (summary.tools, summary.failed, summary.code_failures),
-            (2, 0, 1)
+            (summary.tools, summary.completed, summary.failed),
+            (2, 2, 0)
         );
+        assert!(!summary.show_failures());
         assert_eq!(summary.thinking, "Checking λ cancellation");
         assert_eq!(
             p.source[1].text,
             "**Inspecting configuration**\nFull first body"
         );
     }
+    #[test]
+    fn failure_badge_requires_both_thresholds_and_completed_includes_failures() {
+        for (total, failed, running, show_failures) in [
+            (10, 10, 0, false),
+            (12, 6, 0, false),
+            (11, 5, 0, false),
+            (11, 6, 0, true),
+            (12, 7, 0, true),
+            (12, 6, 2, false),
+            (12, 7, 2, true),
+        ] {
+            let source: History<_> = (0..total)
+                .map(|i| {
+                    tool(
+                        &format!("tool-{i}"),
+                        "exec_command",
+                        None,
+                        i < total - running,
+                        i < failed,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into();
+            let mut projection = Projection::default();
+            projection.sync(&source);
+            let summary = projection.block(0).summary.as_ref().unwrap();
+            assert_eq!(summary.tools, total);
+            assert_eq!(summary.completed, total - running);
+            assert_eq!(summary.running, running);
+            assert_eq!(summary.failed, failed);
+            assert_eq!(
+                summary.show_failures(),
+                show_failures,
+                "{total} calls, {failed} failed, {running} running"
+            );
+        }
+    }
+
     #[test]
     fn yielded_children_reproject_their_parent_without_changing_group_identity() {
         let mut source: History<_> = vec![
@@ -648,7 +682,7 @@ mod tests {
         );
         assert!(rows(&p, &["wait1"], &["wait1"], &[]).contains(&Row::Entry(3)));
         assert_eq!(p.block(3).summary.as_ref().unwrap().tools, 2);
-        assert_eq!(p.block(3).summary.as_ref().unwrap().code_failures, 1);
+        assert_eq!(p.block(3).summary.as_ref().unwrap().failed, 0);
     }
 
     #[test]
