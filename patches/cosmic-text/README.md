@@ -38,3 +38,28 @@ For changes, regenerate the patch against the pinned official crate, re-enter
 for release. Nix normalizes source mtimes, so a changed generated symlink alone
 can otherwise leave stale artifacts. Preserve the rest of `target/`.
 Run `just verify`, `nix flake check`, and `just smoke-gpu` on a Wayland desktop.
+
+## Incremental paragraph shaping
+
+`incremental-shaping.patch` targets repeated shaping during edits to a long logical
+line. `BufferLine` records the earliest unchanged byte prefix across `split_off`
+and `append`; ordinary resets, new text/attributes, font invalidation and shaping
+setting changes revoke reuse. This retains the existing glyph vectors, not a
+second copy of the document or a larger global run cache.
+
+Bidi resolution, Unicode line-break segmentation and wrapping still run in full.
+A word can reuse its glyphs only when its logical byte range, blank status,
+resolved span level and paragraph direction match the previous shape and it ends
+strictly before the edit boundary. The boundary word is rebuilt; tabs are rebuilt
+before the ordinary tab-stop pass so adjusted advances are never applied twice.
+RTL glyph reversal is undone/restored around the shared paragraph build.
+
+As with the original cosmic-text buffers, owners must reset shaping when changing
+font systems/databases. Iced already resets lines on font-system revision changes;
+this patch does not introduce a second font-generation mechanism.
+
+The differential app tests compare complete edited layouts with fresh shaping,
+including combining marks, mixed/changed bidi direction, isolates, tabs, repeated
+edits before layout, same-range replacement, split/join attributes and explicit
+invalidations. The benchmark now includes repeated tail insertion and backspace;
+see `docs/editor-performance.md` for the diagnostic breakdown and remaining costs.

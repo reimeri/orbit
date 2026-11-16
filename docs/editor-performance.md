@@ -46,7 +46,7 @@ paste's final cursor; there are no machine-dependent timing assertions.
   **Native:** widget construction, tree diff and native `TextEditor::layout`.
   **Scrollbar:** the actual `State::measure`, after native layout, matching the
   production order. Diagnostic cache inspection and assertions are outside timing.
-- Phases: paste, unchanged layout, insert `x` at the paste tail, resize, then move
+- Original phases: paste, unchanged layout, insert `x` at the paste tail, resize, then move
   to document start and insert `y`. `type-start` includes navigation, not just
   insertion. Many-line fixtures end in a newline, so tail typing edits a new line;
   start typing edits an existing nonempty line. Single-paragraph edits affect the
@@ -163,7 +163,7 @@ in the application; these are not cold-start or cold-font measurements.
 
 The focused debug smoke-input case dropped from about **12.28 seconds to 2.55 ms** for initial paste/layout. The newly laid-out multiline case caches 14 native logical lines rather than all 701; the mounted case caches 7.
 
-### Remaining limit: huge single logical lines
+### Remaining limit after the first optimization: huge single logical lines
 
 A new **294,000-byte distinct-word paragraph** deliberately exceeds the useful working set of the word cache. It takes **80.1 ms** for paste/layout and **81.0 ms** for a tail edit in release. There is no baseline measurement for this additional fixture. It prevents interpreting the repeated-word speedups as a guarantee for arbitrary input.
 
@@ -174,3 +174,79 @@ Native layout still processes an entire logical line, and cache pressure can cau
 The new checks cover lossless middle/selection-replacement paste with mixed line endings; bounded newly shaped logical-line counts for large pastes and middle/end seeks; cursor preservation; preferred non-exact font weights and font removal; cached-vs-fresh bidi/cluster/attribute layout; and focused drawing plus IME commit after edit/seek/reflow. Existing growing-height, wrapped overflow, wheel/drag batching, fractional viewport, ligature/copy and questionnaire tests remain in the verification suite.
 
 See the patch maintenance notes under `patches/cosmic-text`, `patches/iced-graphics`, and `patches/iced-widget`. Cargo and the Nix package use the same checksum-pinned patched sources.
+
+## Profiling and incremental prefix shaping
+
+The next investigation isolated the remaining 294,000-byte distinct-word paragraph
+case rather than increasing the global shaping cache or rewriting the editor.
+Temporary timers measured bidi analysis/level adjustment, run-cache lookup, fresh
+run shaping, glyph copying, cache insertion, wrap planning, and glyph placement.
+Unattributed paragraph work includes Unicode segmentation, word/span traversal,
+allocation and timer overhead; allocator cost was **not** measured independently.
+The instrumentation is not part of the shipped dependency patch.
+
+Representative instrumented first tail edit in a mounted editor, milliseconds:
+
+| Component | Before | After |
+| --- | ---: | ---: |
+| Bidi analysis and level adjustment | 5.991 | 6.276 |
+| Run-key construction/cache lookup | 4.259 | 0.002 |
+| Fresh run shaping on cache misses | 54.364 | 0.017 |
+| Glyph copying from run results | 3.565 | <0.001 |
+| Run-cache insertion/eviction | 2.415 | <0.001 |
+| Remaining paragraph-build work | 12.779 | 8.218 |
+| Wrap planning/recycled-layout preparation | 1.066 | 1.084 |
+| Glyph placement/layout assembly | 4.148 | 4.097 |
+
+The original edit made **49,001 run-cache lookups**, with **14,019 misses**.
+The incremental edit made **2 lookups**, with **1 miss**. A subsequent tail
+character needed one new run; backspace reused an existing run. Timers add overhead,
+so these component samples are diagnostic—not the end-to-end speed comparison.
+
+### Smallest implemented path
+
+`incremental-shaping.patch` retains shaped words before the earliest text mutation.
+The existing line's glyph vectors are reused; there is no duplicate text snapshot
+or enlarged global cache. Each word gains its logical byte range, and each line
+tracks the unchanged prefix across split/append operations, including batched edits.
+
+Bidi and line-break analysis still run over the whole paragraph. Reuse requires
+unchanged word boundaries, blank status, resolved span level and paragraph direction.
+Words touching the edit are rebuilt, as are tab words before recalculating tab
+stops. Non-text invalidations revoke reuse. The existing owner contract for font
+changes is unchanged: iced resets all lines on font-system revision changes.
+
+Wrapping and glyph placement also still run in full. This deliberately targets
+the measured dominant cost while leaving Unicode layout and caret behavior intact.
+Edits near the beginning have little or no reusable prefix.
+
+### Uninstrumented release results
+
+Same machine, font setup and geometry; medians of three samples for the mounted
+editor. Values include edit + native layout + scrollbar measurement. The original
+`type` operation is unchanged; `type-again` and `backspace` are new follow-up steps
+(insert `z`, then remove it) and therefore have no earlier baseline.
+
+| Operation | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Initial paste | 80.978 | 84.180 |
+| First tail character | 81.483 | 19.200 |
+| Another tail character | — | 15.604 |
+| Tail backspace | — | 15.198 |
+| Resize | 6.653 | 6.331 |
+| Move to start and insert | 78.479 | 80.472 |
+
+This removes most of the repeated shaping cost, not all paragraph-sized work.
+Bidi analysis, segmentation/traversal and layout are still linear in paragraph
+size. The large fixture is still not guaranteed to fit a 16.7 ms frame budget,
+and initial paste/start edits remain roughly 80 ms. A full intra-paragraph
+viewport/checkpoint design is a separate, larger follow-up rather than part of
+this change.
+
+Differential regressions compare complete edited layouts with fresh construction
+and an empty run cache at two widths. Cases include combining marks, stable and
+changed RTL/LTR direction, isolates, tabs, differently attributed split/join text,
+explicit invalidation, and multiple unlaid edits replacing a word with another
+word at the **same byte range**. The last case detects incorrectly advancing the
+reusable prefix after a later append. Existing UI selection/caret/IME tests remain
+in the suite; benchmark timings are not hard-coded test assertions.

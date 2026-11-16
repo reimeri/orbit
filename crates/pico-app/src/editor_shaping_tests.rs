@@ -115,3 +115,156 @@ fn cached_shaping_matches_fresh_for_bidi_clusters_attributes_and_wraps() {
         }
     }
 }
+
+// Compare the complete paragraph, not just the currently visible viewport.
+// Fresh construction plus an empty run cache is the independent reference.
+fn assert_matches_fresh_line(fonts: &mut cosmic::FontSystem, line: &mut cosmic::BufferLine) {
+    for width in [113., 347.] {
+        line.reset_layout();
+        let actual = format!(
+            "{:?}",
+            line.layout(fonts, 16., Some(width), cosmic::Wrap::WordOrGlyph, None, 4)
+        );
+        let mut fresh = cosmic::BufferLine::new(
+            line.text(),
+            line.ending(),
+            line.attrs_list().clone(),
+            cosmic::Shaping::Advanced,
+        );
+        fresh.set_align(line.align());
+        fonts.shape_run_cache = cosmic::ShapeRunCache::default();
+        let expected = format!(
+            "{:?}",
+            fresh.layout(fonts, 16., Some(width), cosmic::Wrap::WordOrGlyph, None, 4)
+        );
+        assert_eq!(actual, expected, "edited paragraph must match fresh layout");
+    }
+}
+
+#[test]
+fn retained_words_match_fresh_across_grapheme_bidi_and_tab_changes() {
+    let (mut fonts, _, _) = font_fixture();
+    let attrs = cosmic::AttrsList::new(&cosmic::Attrs::new().metadata(7));
+    for (initial, additions) in [
+        ("prefix fi λ界 words e", ["\u{301}", " x", "y"]),
+        ("אב fi لَا\t(12) words ", ["ב", " \tfi", " אב"]),
+        ("(123) \t", ["אב", " fi", "\u{301}"]),
+        ("a \u{2067}אב (12)\t", ["\u{2069} L", "\t", "界"]),
+    ] {
+        let mut expected = initial.to_owned();
+        let mut line = cosmic::BufferLine::new(
+            &expected,
+            cosmic::LineEnding::None,
+            attrs.clone(),
+            cosmic::Shaping::Advanced,
+        );
+        assert_matches_fresh_line(&mut fonts, &mut line);
+        for addition in additions {
+            line.append(&cosmic::BufferLine::new(
+                addition,
+                cosmic::LineEnding::None,
+                attrs.clone(),
+                cosmic::Shaping::Advanced,
+            ));
+            expected.push_str(addition);
+            assert_eq!(line.text(), expected);
+            assert_matches_fresh_line(&mut fonts, &mut line);
+        }
+        // Remove the tail, then append before shaping: the earliest unchanged
+        // prefix must survive both mutations, not just the most recent append.
+        expected.pop();
+        let _removed = line.split_off(expected.len());
+        line.append(&cosmic::BufferLine::new(
+            " end",
+            cosmic::LineEnding::None,
+            attrs.clone(),
+            cosmic::Shaping::Advanced,
+        ));
+        expected.push_str(" end");
+        assert_eq!(line.text(), expected);
+        assert_matches_fresh_line(&mut fonts, &mut line);
+    }
+    // The replacement occupies the same byte range as the old word. Advancing
+    // the reusable prefix on the second append would paint "old" as "new".
+    let mut line = cosmic::BufferLine::new(
+        "keep old tail ",
+        cosmic::LineEnding::None,
+        attrs.clone(),
+        cosmic::Shaping::Advanced,
+    );
+    assert_matches_fresh_line(&mut fonts, &mut line);
+    let _removed = line.split_off(5);
+    for text in ["new ", "tail "] {
+        line.append(&cosmic::BufferLine::new(
+            text,
+            cosmic::LineEnding::None,
+            attrs.clone(),
+            cosmic::Shaping::Advanced,
+        ));
+    }
+    assert_eq!(line.text(), "keep new tail ");
+    assert_matches_fresh_line(&mut fonts, &mut line);
+}
+
+#[test]
+fn retained_words_invalidate_on_attribute_reset_and_preserve_split_join_attributes() {
+    let (mut fonts, preferred, _) = font_fixture();
+    let mut attrs = cosmic::AttrsList::new(&cosmic::Attrs::new().metadata(11));
+    attrs.add_span(
+        7..9,
+        &cosmic::Attrs::new()
+            .weight(cosmic::Weight::BOLD)
+            .metadata(17),
+    );
+    let mut line = cosmic::BufferLine::new(
+        "before fi after ",
+        cosmic::LineEnding::None,
+        attrs.clone(),
+        cosmic::Shaping::Advanced,
+    );
+    assert_matches_fresh_line(&mut fonts, &mut line);
+    let other_attrs = cosmic::AttrsList::new(&cosmic::Attrs::new().metadata(29));
+    line.append(&cosmic::BufferLine::new(
+        "tail λ\t",
+        cosmic::LineEnding::None,
+        other_attrs.clone(),
+        cosmic::Shaping::Advanced,
+    ));
+    let suffix = line.split_off(10);
+    line.append(&cosmic::BufferLine::new(
+        "new ",
+        cosmic::LineEnding::None,
+        other_attrs.clone(),
+        cosmic::Shaping::Advanced,
+    ));
+    line.append(&suffix);
+    assert_eq!(line.text(), "before fi new after tail λ\t");
+    assert_matches_fresh_line(&mut fonts, &mut line);
+
+    let suffix = line.split_off(line.text().len() - 1);
+    line.set_attrs_list(other_attrs.clone());
+    line.append(&suffix);
+    assert_matches_fresh_line(&mut fonts, &mut line);
+
+    // reset_new must not preserve a pending text-only reuse allowance, even
+    // when the new words happen to have the same byte ranges as the old ones.
+    line.append(&suffix);
+    line.reset_new(
+        "xxxxxx yy لَا ",
+        cosmic::LineEnding::None,
+        attrs.clone(),
+        cosmic::Shaping::Advanced,
+    );
+    assert_matches_fresh_line(&mut fonts, &mut line);
+    line.append(&cosmic::BufferLine::new(
+        " end",
+        cosmic::LineEnding::None,
+        attrs,
+        cosmic::Shaping::Advanced,
+    ));
+    // Buffer owners must invalidate shaping when fonts change (iced does this
+    // on its font-system revision). That reset also revokes prefix reuse.
+    fonts.db_mut().remove_face(preferred);
+    line.reset_shaping();
+    assert_matches_fresh_line(&mut fonts, &mut line);
+}

@@ -1,0 +1,236 @@
+--- a/src/buffer_line.rs
++++ b/src/buffer_line.rs
+@@ -14,6 +14,9 @@
+     attrs_list: AttrsList,
+     align: Option<Align>,
+     shape_opt: Cached<ShapeLine>,
++    // Bytes before this point are unchanged by text-only splits/appends.
++    // Other invalidations (fonts, attributes, shaping settings) clear reuse.
++    shape_reuse_prefix: Option<usize>,
+     layout_opt: Cached<Vec<LayoutLine>>,
+     shaping: Shaping,
+     metadata: Option<usize>,
+@@ -35,6 +38,7 @@
+             attrs_list,
+             align: None,
+             shape_opt: Cached::Empty,
++            shape_reuse_prefix: None,
+             layout_opt: Cached::Empty,
+             shaping,
+             metadata: None,
+@@ -56,6 +60,7 @@
+         self.attrs_list = attrs_list;
+         self.align = None;
+         self.shape_opt.set_unused();
++        self.shape_reuse_prefix = None;
+         self.layout_opt.set_unused();
+         self.shaping = shaping;
+         self.metadata = None;
+@@ -174,14 +179,14 @@
+             self.attrs_list.add_span(range, &attrs.as_attrs());
+         }
+ 
+-        self.reset();
++        self.reset_text_from(len);
+     }
+ 
+     /// Split off new line at index
+     pub fn split_off(&mut self, index: usize) -> Self {
+         let text = self.text.split_off(index);
+         let attrs_list = self.attrs_list.split_off(index);
+-        self.reset();
++        self.reset_text_from(index);
+ 
+         let mut new = Self::new(text, self.ending, attrs_list, self.shaping);
+         // To preserve line endings, it moves to the new line
+@@ -190,6 +195,16 @@
+         new
+     }
+ 
++    fn reset_text_from(&mut self, index: usize) {
++        let prefix = if self.shape_opt.is_used() {
++            Some(index)
++        } else {
++            self.shape_reuse_prefix.map(|old| old.min(index))
++        };
++        self.reset();
++        self.shape_reuse_prefix = prefix;
++    }
++
+     /// Reset shaping, layout, and metadata caches
+     pub fn reset(&mut self) {
+         self.metadata = None;
+@@ -198,6 +213,7 @@
+ 
+     /// Reset shaping and layout caches
+     pub fn reset_shaping(&mut self) {
++        self.shape_reuse_prefix = None;
+         self.shape_opt.set_unused();
+         self.reset_layout();
+     }
+@@ -215,7 +231,8 @@
+                 .shape_opt
+                 .take_unused()
+                 .unwrap_or_else(ShapeLine::empty);
+-            line.build(
++            line.build_with_reuse(
++                self.shape_reuse_prefix.take().unwrap_or(0),
+                 font_system,
+                 &self.text,
+                 &self.attrs_list,
+@@ -291,6 +308,7 @@
+             attrs_list: AttrsList::new(&Attrs::new()),
+             align: None,
+             shape_opt: Cached::Empty,
++            shape_reuse_prefix: None,
+             layout_opt: Cached::Empty,
+             shaping: Shaping::Advanced,
+             metadata: None,
+--- a/src/shape.rs
++++ b/src/shape.rs
+@@ -598,6 +598,8 @@
+ /// A shaped word (for word wrapping)
+ #[derive(Clone, Debug)]
+ pub struct ShapeWord {
++    // Logical byte range, including words with no rendered glyphs.
++    range: Range<usize>,
+     pub blank: bool,
+     pub glyphs: Vec<ShapeGlyph>,
+ }
+@@ -608,6 +610,7 @@
+     /// The returned word is in an invalid state until [`Self::build_in_buffer`] is called.
+     pub(crate) fn empty() -> Self {
+         Self {
++            range: 0..0,
+             blank: true,
+             glyphs: Vec::default(),
+         }
+@@ -714,6 +717,7 @@
+             }
+         }
+ 
++        self.range = word_range;
+         self.blank = blank;
+         self.glyphs = glyphs;
+     }
+@@ -782,6 +786,21 @@
+         level: unicode_bidi::Level,
+         shaping: Shaping,
+     ) {
++        self.build_with_reuse(0, font_system, line, attrs_list, span_range, line_rtl, level, shaping);
++    }
++
++    fn build_with_reuse(
++        &mut self,
++        reuse_prefix: usize,
++        font_system: &mut FontSystem,
++        line: &str,
++        attrs_list: &AttrsList,
++        span_range: Range<usize>,
++        line_rtl: bool,
++        level: unicode_bidi::Level,
++        shaping: Shaping,
++    ) {
++        let reuse_prefix = if self.level == level { reuse_prefix } else { 0 };
+         let span = &line[span_range.start..span_range.end];
+ 
+         log::trace!(
+@@ -818,31 +837,29 @@
+             }
+             if start_word < start_lb {
+                 let mut word = cached_words.pop().unwrap_or_else(ShapeWord::empty);
+-                word.build(
+-                    font_system,
+-                    line,
+-                    attrs_list,
+-                    (span_range.start + start_word)..(span_range.start + start_lb),
+-                    level,
+-                    false,
+-                    shaping,
+-                );
++                let range = (span_range.start + start_word)..(span_range.start + start_lb);
++                if range.end < reuse_prefix && word.range == range && !word.blank
++                    && !line[range.clone()].contains('\t')
++                {
++                    // The previous paragraph pass reversed glyphs in RTL lines;
++                    // undo that before the shared reversal below.
++                    if line_rtl { word.glyphs.reverse(); }
++                } else {
++                    word.build(font_system, line, attrs_list, range, level, false, shaping);
++                }
+                 words.push(word);
+             }
+             if start_lb < end_lb {
+                 for (i, c) in span[start_lb..end_lb].char_indices() {
+                     // assert!(c.is_whitespace());
+                     let mut word = cached_words.pop().unwrap_or_else(ShapeWord::empty);
+-                    word.build(
+-                        font_system,
+-                        line,
+-                        attrs_list,
+-                        (span_range.start + start_lb + i)
+-                            ..(span_range.start + start_lb + i + c.len_utf8()),
+-                        level,
+-                        true,
+-                        shaping,
+-                    );
++                    let range = (span_range.start + start_lb + i)
++                        ..(span_range.start + start_lb + i + c.len_utf8());
++                    if range.end < reuse_prefix && word.range == range && word.blank && c != '\t' {
++                        if line_rtl { word.glyphs.reverse(); }
++                    } else {
++                        word.build(font_system, line, attrs_list, range, level, true, shaping);
++                    }
+                     words.push(word);
+                 }
+             }
+@@ -940,6 +957,18 @@
+         shaping: Shaping,
+         tab_width: u16,
+     ) {
++        self.build_with_reuse(0, font_system, line, attrs_list, shaping, tab_width);
++    }
++
++    pub(crate) fn build_with_reuse(
++        &mut self,
++        reuse_prefix: usize,
++        font_system: &mut FontSystem,
++        line: &str,
++        attrs_list: &AttrsList,
++        shaping: Shaping,
++        tab_width: u16,
++    ) {
+         let mut spans = mem::take(&mut self.spans);
+ 
+         // Cache the shape spans in reverse order so they can be popped for reuse in the same order.
+@@ -953,6 +982,10 @@
+         } else {
+             bidi.paragraphs[0].level.is_rtl()
+         };
++
++        // Paragraph direction can change after an edit. Resolve bidi afresh;
++        // matching span levels/word boundaries gate any reuse below.
++        let reuse_prefix = if self.rtl == rtl { reuse_prefix } else { 0 };
+ 
+         log::trace!("Line {}: '{}'", if rtl { "RTL" } else { "LTR" }, line);
+ 
+@@ -978,7 +1011,8 @@
+                 if new_level != run_level {
+                     // End of the previous run, start of a new one.
+                     let mut span = cached_spans.pop().unwrap_or_else(ShapeSpan::empty);
+-                    span.build(
++                    span.build_with_reuse(
++                        reuse_prefix,
+                         font_system,
+                         line,
+                         attrs_list,
+@@ -993,7 +1027,8 @@
+                 }
+             }
+             let mut span = cached_spans.pop().unwrap_or_else(ShapeSpan::empty);
+-            span.build(
++            span.build_with_reuse(
++                reuse_prefix,
+                 font_system,
+                 line,
+                 attrs_list,

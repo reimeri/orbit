@@ -141,13 +141,23 @@ fn editor_stage_benchmark() {
                 if mounted {
                     fixture.layout(WIDTH);
                 }
-                for phase in ["paste", "unchanged", "type", "resize", "type-start"] {
+                for phase in [
+                    "paste",
+                    "unchanged",
+                    "type",
+                    "type-again",
+                    "backspace",
+                    "resize",
+                    "type-start",
+                ] {
                     let start = Instant::now();
                     match phase {
                         "paste" => fixture
                             .content
                             .perform(Action::Edit(Edit::Paste(payload.clone()))),
                         "type" => fixture.content.perform(Action::Edit(Edit::Insert('x'))),
+                        "type-again" => fixture.content.perform(Action::Edit(Edit::Insert('z'))),
+                        "backspace" => fixture.content.perform(Action::Edit(Edit::Backspace)),
                         // Includes navigation to the start as well as insertion.
                         "type-start" => {
                             fixture.content.perform(Action::Move(Motion::DocumentStart));
