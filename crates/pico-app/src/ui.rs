@@ -163,6 +163,7 @@ pub struct App {
     draft_dirty: bool,
     smoke: bool,
     smoke_stage: usize,
+    screenshot_check: Option<crate::screenshot_check::Check>,
     smoke_passed: Arc<AtomicBool>,
     smoke_dir: Option<PathBuf>,
     window_id: Option<window::Id>,
@@ -323,6 +324,7 @@ pub enum Message {
     Event(iced::Event),
     WindowOpened(window::Id),
     Screenshot(window::Screenshot),
+    CheckScreenshot(window::Screenshot),
     Capture,
     Exit(Result<(), String>),
 }
@@ -434,6 +436,7 @@ impl App {
             draft_dirty: false,
             smoke,
             smoke_stage: 0,
+            screenshot_check: None,
             smoke_passed,
             smoke_dir,
             window_id: None,
@@ -2279,7 +2282,38 @@ impl App {
             Message::WindowOpened(id) => {
                 self.window_id = Some(id);
                 if self.smoke {
-                    return delayed_capture();
+                    // Change the view and request capture in the same update;
+                    // no timer can hide an ordering bug in the screenshot API.
+                    self.screenshot_check = Some(Default::default());
+                    return window::screenshot(id).map(Message::CheckScreenshot);
+                }
+            }
+            Message::CheckScreenshot(screenshot) => {
+                use crate::screenshot_check::Progress;
+                match self
+                    .screenshot_check
+                    .as_mut()
+                    .expect("capture check is active")
+                    .receive(screenshot)
+                {
+                    Ok(Progress::CaptureUpdatedPair) => {
+                        let id = self.window_id.expect("smoke window is open");
+                        return Task::batch(
+                            (0..2).map(|_| window::screenshot(id).map(Message::CheckScreenshot)),
+                        );
+                    }
+                    Ok(Progress::AwaitSecond) => {}
+                    Ok(Progress::Complete) => {
+                        self.screenshot_check = None;
+                        println!(
+                            "SCREENSHOT_CHECK_OK: fresh text and content in queued native captures"
+                        );
+                        return delayed_capture();
+                    }
+                    Err(error) => {
+                        eprintln!("Screenshot ordering check failed: {error}");
+                        return iced::exit();
+                    }
                 }
             }
             Message::Capture => {
@@ -2489,6 +2523,9 @@ impl App {
         )
     }
     fn content(&self) -> Element<'_, Message> {
+        if let Some(check) = &self.screenshot_check {
+            return check.view();
+        }
         let mut center = column![self.center()].width(Fill).height(Fill);
         if let Some((notice, _)) = &self.notice {
             center = center.push(

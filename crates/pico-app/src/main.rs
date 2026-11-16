@@ -14,6 +14,7 @@ mod markdown_images;
 mod notifications;
 mod pointer_input;
 mod questionnaire;
+mod screenshot_check;
 mod scrollbar;
 mod session_action;
 mod session_wave;

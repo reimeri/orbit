@@ -1,0 +1,191 @@
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -15,6 +15,7 @@
+ use crate::core::{
+     Color, InputMethod, Padding, Point, Rectangle, Size, Text, Vector,
+ };
++use crate::futures::futures::channel::oneshot;
+ use crate::graphics::Compositor;
+ use crate::program::{self, Program};
+ use crate::runtime::window::raw_window_handle;
+@@ -80,6 +81,7 @@
+                 renderer,
+                 mouse_interaction: mouse::Interaction::None,
+                 redraw_at: None,
++                pending_screenshots: Vec::new(),
+                 preedit: None,
+                 ime_state: None,
+             },
+@@ -171,6 +173,7 @@
+     pub surface_version: u64,
+     pub renderer: P::Renderer,
+     pub redraw_at: Option<Instant>,
++    pub pending_screenshots: Vec<oneshot::Sender<crate::core::window::Screenshot>>,
+     preedit: Option<Preedit<P::Renderer>>,
+     ime_state: Option<(Rectangle, input_method::Purpose)>,
+ }
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -413,6 +413,12 @@
+                                     },
+                                 );
+                             }
++                            Control::CaptureWindow(id) => {
++                                self.process_event(
++                                    event_loop,
++                                    Event::CaptureWindow(id),
++                                );
++                            }
+                             Control::Exit => {
+                                 self.process_event(event_loop, Event::Exit);
+                                 event_loop.exit();
+@@ -473,12 +479,14 @@
+         on_open: oneshot::Sender<window::Id>,
+     },
+     EventLoopAwakened(winit::event::Event<Message>),
++    CaptureWindow(winit::window::WindowId),
+     Exit,
+ }
+ 
+ #[derive(Debug)]
+ enum Control {
+     ChangeFlow(winit::event_loop::ControlFlow),
++    CaptureWindow(winit::window::WindowId),
+     Exit,
+     Crash(Error),
+     CreateWindow {
+@@ -567,6 +575,19 @@
+ 
+         let Some(event) = event else {
+             break;
++        };
++
++        // A capture uses the normal UI update/layout/draw lifecycle, but must
++        // not wait for a Wayland frame callback (e.g. an occluded window).
++        let capture = matches!(event, Event::CaptureWindow(_));
++        let event = match event {
++            Event::CaptureWindow(window_id) => {
++                Event::EventLoopAwakened(event::Event::WindowEvent {
++                    window_id,
++                    event: event::WindowEvent::RedrawRequested,
++                })
++            }
++            event => event,
+         };
+ 
+         match event {
+@@ -784,6 +805,11 @@
+ 
+                         if physical_size.width == 0 || physical_size.height == 0
+                         {
++                            if capture {
++                                // No image can be rendered at zero size. Dropping
++                                // senders cancels requests, as closing does.
++                                window.pending_screenshots.clear();
++                            }
+                             continue;
+                         }
+ 
+@@ -802,14 +828,16 @@
+                             );
+                             layout_span.finish();
+ 
+-                            current_compositor.configure_surface(
+-                                &mut window.surface,
+-                                physical_size.width,
+-                                physical_size.height,
+-                            );
+-
+-                            window.surface_version =
+-                                window.state.surface_version();
++                            if !capture {
++                                current_compositor.configure_surface(
++                                    &mut window.surface,
++                                    physical_size.width,
++                                    physical_size.height,
++                                );
++
++                                window.surface_version =
++                                    window.state.surface_version();
++                            }
+                         }
+ 
+                         let redraw_event = core::Event::Window(
+@@ -970,13 +998,36 @@
+                             window.update_mouse(mouse_interaction);
+                         }
+ 
+-                        runtime.broadcast(subscription::Event::Interaction {
+-                            window: id,
+-                            event: redraw_event,
+-                            status: core::event::Status::Ignored,
+-                        });
++                        // Offscreen captures are not display frame events.
++                        // Broadcasting them could recurse through window::frames
++                        // subscribers that themselves request screenshots.
++                        if !capture {
++                            runtime.broadcast(subscription::Event::Interaction {
++                                window: id,
++                                event: redraw_event,
++                                status: core::event::Status::Ignored,
++                            });
++                        }
+ 
+                         window.draw_preedit();
++
++                        if capture {
++                            let bytes = current_compositor.screenshot(
++                                &mut window.renderer,
++                                window.state.viewport(),
++                                window.state.background_color(),
++                            );
++                            let screenshot = core::window::Screenshot::new(
++                                bytes,
++                                window.state.physical_size(),
++                                window.state.scale_factor(),
++                            );
++
++                            for channel in window.pending_screenshots.drain(..) {
++                                let _ = channel.send(screenshot.clone());
++                            }
++                            continue;
++                        }
+ 
+                         let present_span = debug::present(id);
+                         match current_compositor.present(
+@@ -1269,6 +1320,7 @@
+                     _ => {}
+                 }
+             }
++            Event::CaptureWindow(_) => unreachable!("capture normalized above"),
+             Event::Exit => break,
+         }
+     }
+@@ -1636,20 +1688,13 @@
+                 }
+             }
+             window::Action::Screenshot(id, channel) => {
+-                if let Some(window) = window_manager.get_mut(id)
+-                    && let Some(compositor) = compositor
+-                {
+-                    let bytes = compositor.screenshot(
+-                        &mut window.renderer,
+-                        window.state.viewport(),
+-                        window.state.background_color(),
+-                    );
+-
+-                    let _ = channel.send(core::window::Screenshot::new(
+-                        bytes,
+-                        window.state.physical_size(),
+-                        window.state.scale_factor(),
+-                    ));
++                if let Some(window) = window_manager.get_mut(id) {
++                    if window.pending_screenshots.is_empty() {
++                        control_sender
++                            .start_send(Control::CaptureWindow(window.raw.id()))
++                            .expect("Request screenshot redraw");
++                    }
++                    window.pending_screenshots.push(channel);
+                 }
+             }
+             window::Action::EnableMousePassthrough(id) => {

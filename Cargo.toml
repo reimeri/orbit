@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/pico-app", "crates/pico-core"]
 default-members = ["crates/pico-app"]
-exclude = [".build-deps/cosmic-text", ".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-graphics", ".build-deps/rquickjs-sys", ".build-deps/rquickjs-core"]
+exclude = [".build-deps/cosmic-text", ".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-winit", ".build-deps/iced-graphics", ".build-deps/rquickjs-sys", ".build-deps/rquickjs-core"]
 resolver = "3"
 
 [workspace.package]
@@ -25,6 +25,7 @@ incremental = true
 # Prepared by nix develop and the package build; see patches/*/README.md.
 winit = { path = ".build-deps/winit" }
 iced_widget = { path = ".build-deps/iced-widget" }
+iced_winit = { path = ".build-deps/iced-winit" }
 iced_graphics = { path = ".build-deps/iced-graphics" }
 rquickjs-sys = { path = ".build-deps/rquickjs-sys" }
 rquickjs-core = { path = ".build-deps/rquickjs-core" }

@@ -24,6 +24,10 @@ The flake uses an explicit source allowlist. Entering `nix develop` also prepare
 `.build-deps/winit`, a Git-ignored link to the checksum-pinned upstream source with
 our local patch applied in the Nix store. Nothing is downloaded or patched in
 Cargo's registry cache. Re-enter the shell after changing `patches/winit/`.
+Screenshot requests use a checksum-pinned iced window-shell patch to draw the
+current UI before capture without waiting for compositor presentation; see
+[the capture contract and regression check](../patches/iced-winit/README.md).
+The shell prepares `.build-deps/iced-winit` for this patch too.
 The composer also uses a checksum-pinned iced widget patch to read native editor
 scroll metrics; see [its maintenance notes](../patches/iced-widget/README.md).
 The shell prepares `.build-deps/iced-widget` alongside winit.
@@ -135,7 +139,11 @@ artifacts (e.g. Crane), but the local Cargo loop should remain unchanged.
 `scripts/test-renderer.sh` selects the pinned Mesa Lavapipe CPU Vulkan driver and
 unsets the legacy Vulkan ICD override. No desktop or physical GPU is required.
 The script unsets `DISPLAY`, launches `pico-evo --smoke-test`, and checks nonzero
-screenshot size, the RGBA byte count, and non-uniform pixels. It prints `SMOKE_OK`
+screenshot size, the RGBA byte count, and non-uniform pixels. Before the app scenes,
+a native screenshot-ordering fixture changes text and marker placement and
+immediately requests captures. It requires visible text, current marker placement,
+and both queued responses (`SCREENSHOT_CHECK_OK`), catching stale or text-less
+frames that the nonblank check alone cannot detect. It prints `SMOKE_OK`
 and exits successfully only on valid frames. The 60-second timeout reports logs
 on failure; the private compositor/runtime directory is cleaned up afterward.
 

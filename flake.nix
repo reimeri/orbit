@@ -16,6 +16,7 @@
       patchedWinit = import ./patches/winit { inherit pkgs; };
       patchedCosmicText = import ./patches/cosmic-text { inherit pkgs; };
       patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
+      patchedIcedWinit = import ./patches/iced-winit { inherit pkgs; };
       patchedIcedWidget = import ./patches/iced-widget { inherit pkgs; };
       # Never copy the reference implementation, target/, or session assets into Nix builds.
       projectSrc = lib.fileset.toSource {
@@ -31,6 +32,7 @@
         chmod u+w "$out"
         mkdir "$out/.build-deps"
         ln -s ${patchedWinit} "$out/.build-deps/winit"
+        ln -s ${patchedIcedWinit} "$out/.build-deps/iced-winit"
         ln -s ${patchedIcedWidget} "$out/.build-deps/iced-widget"
         ln -s ${patchedCosmicText} "$out/.build-deps/cosmic-text"
         ln -s ${patchedIcedGraphics} "$out/.build-deps/iced-graphics"
@@ -135,6 +137,7 @@
           done
           mkdir -p "$root/.build-deps" &&
             ln -sfnT ${patchedWinit} "$root/.build-deps/winit" &&
+            ln -sfnT ${patchedIcedWinit} "$root/.build-deps/iced-winit" &&
             ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" &&
             ln -sfnT ${patchedCosmicText} "$root/.build-deps/cosmic-text" &&
             ln -sfnT ${patchedIcedGraphics} "$root/.build-deps/iced-graphics" &&
