@@ -13,6 +13,9 @@ Do not try to directly translate the C code to Rust. Use idiomatic rust instead 
 
 ## What most likely should be overhauled
 
+See [Pico V2 and Codex differences](docs/codex-comparison.md) for the current
+agent-loop behavior, tool discovery, prewarming and incremental-request comparison.
+
 - Agent loop. It is working but we should consider overhauling it. Many harnesses have moved to using code-mode which I think should be also our target
 - Subagents. Make them closer to how they work in codex
 - Shell. We should use the same exec_command and write_stdin tool calls that the codex harness uses
