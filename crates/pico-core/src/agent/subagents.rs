@@ -818,10 +818,18 @@ mod tests {
             "wait_subagent",
             "list_subagents",
         ] {
-            assert!(
-                !instructions.contains(name),
-                "tool guidance leaked into instructions: {name}"
-            );
+            if name == "ask_user" {
+                assert_eq!(
+                    instructions.contains("tools.ask_user"),
+                    expected.contains(&name),
+                    "questionnaire guidance must match tool availability"
+                );
+            } else {
+                assert!(
+                    !instructions.contains(name),
+                    "tool guidance leaked into instructions: {name}"
+                );
+            }
             if !expected.contains(&name) {
                 assert!(
                     !description.contains(name),

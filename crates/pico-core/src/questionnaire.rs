@@ -6,8 +6,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-pub const INSTRUCTIONS: &str =
-    "\nResolve ambiguous implementation details with the user before implementing.\n";
+pub const INSTRUCTIONS: &str = "\nResolve ambiguous implementation details with the user before implementing by calling `tools.ask_user` in a code-mode cell.\n";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
