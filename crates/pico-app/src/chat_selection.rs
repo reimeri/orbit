@@ -7,11 +7,10 @@ use iced::{
     advanced::{
         Clipboard, Layout, Renderer as _, Shell, Widget,
         graphics::text::cosmic_text,
-        layout, renderer,
+        layout, mouse, renderer,
         text::{self, Paragraph as _, Span},
         widget::{Operation, Tree, tree},
     },
-    mouse,
     widget::{column, container, markdown},
 };
 use std::{
@@ -38,11 +37,120 @@ pub struct Selection {
     pub focus: Option<Position>,
     pub dragging: bool,
     moved: bool,
-    candidate: Option<(Position, f32)>,
+    candidate: Option<MotionCandidate>,
+    last_click: Option<(mouse::Click, Position)>,
+    granularity: Granularity,
+    origin: Option<(Position, Position)>,
+    pressed_at: Option<Position>,
 }
+struct MotionCandidate {
+    at: Position,
+    unit: (Position, Position),
+    distance: f32,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Granularity {
+    #[default]
+    Character,
+    Word,
+    Paragraph,
+}
+
+/// Logical boundaries, independent of visual wrapping. Tool rows share one index
+/// for the complete document, so even unmounted portions of a unit are selected.
+pub struct TextUnits {
+    words: Vec<Range<usize>>,
+    paragraphs: Vec<Range<usize>>,
+}
+
+#[derive(Clone, Copy)]
+enum Paragraphs {
+    Block,
+    BlankLines,
+    Lines,
+}
+
+impl TextUnits {
+    fn new(text: &str, offset: usize, paragraphs: Paragraphs) -> Self {
+        let words = text
+            .split_word_bound_indices()
+            .map(|(start, word)| offset + start..offset + start + word.len())
+            .collect();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        let mut chars = text.char_indices().peekable();
+        while let Some((byte, ch)) = chars.next() {
+            if matches!(
+                ch,
+                '\n' | '\r' | '\u{1c}'..='\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+            ) {
+                lines.push(start..byte);
+                start = byte + ch.len_utf8();
+                if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') {
+                    chars.next();
+                    start += 1;
+                }
+            }
+        }
+        lines.push(start..text.len());
+        let paragraphs = match paragraphs {
+            Paragraphs::Block => std::iter::once(0..text.len()).collect(),
+            Paragraphs::Lines => lines,
+            Paragraphs::BlankLines => {
+                let mut result: Vec<Range<usize>> = Vec::new();
+                let mut previous_blank = true;
+                for line in lines {
+                    let blank = text[line.clone()].trim().is_empty();
+                    if !blank && !previous_blank {
+                        result.last_mut().expect("preceding paragraph").end = line.end;
+                    } else {
+                        result.push(line);
+                    }
+                    previous_blank = blank;
+                }
+                result
+            }
+        }
+        .into_iter()
+        .map(|range| offset + range.start..offset + range.end)
+        .collect();
+        Self { words, paragraphs }
+    }
+
+    pub fn lines(text: &str) -> Self {
+        Self::new(text, 0, Paragraphs::Lines)
+    }
+
+    fn range(&self, byte: usize, granularity: Granularity) -> Range<usize> {
+        let ranges = match granularity {
+            Granularity::Character => return byte..byte,
+            Granularity::Word => &self.words,
+            Granularity::Paragraph => &self.paragraphs,
+        };
+        // A caret at the end of a line belongs to that line, not the next one.
+        let index = ranges.partition_point(|range| range.start <= byte);
+        index
+            .checked_sub(1)
+            .map_or(byte..byte, |i| ranges[i].clone())
+    }
+}
+
 impl Selection {
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+    /// A new press clears the highlight, but only a text hit may continue the
+    /// previous click sequence. Real drags break the sequence as well.
+    pub fn begin_press(&mut self) {
+        let previous = self.last_click;
+        self.clear();
+        self.last_click = previous;
+    }
+    pub fn finish_press(&mut self) {
+        if !self.dragging {
+            self.clear();
+        }
     }
     pub fn range(&self) -> Option<(Position, Position)> {
         let (a, b) = (self.anchor?, self.focus?);
@@ -60,27 +168,96 @@ impl Selection {
         self.focus = Some(at);
         self.dragging = true;
         self.moved = false;
+        self.pressed_at = Some(at);
+        self.granularity = Granularity::Character;
+        self.origin = None;
+    }
+    fn press(&mut self, at: Position, unit_byte: usize, point: Point, units: &TextUnits) {
+        let previous = self
+            .last_click
+            .filter(|(_, previous)| previous.entry == at.entry && previous.block == at.block);
+        let click = mouse::Click::new(point, mouse::Button::Left, previous.map(|(click, _)| click));
+        self.start(at);
+        self.last_click = Some((click, at));
+        self.granularity = match click.kind() {
+            mouse::click::Kind::Single => Granularity::Character,
+            mouse::click::Kind::Double => Granularity::Word,
+            mouse::click::Kind::Triple => Granularity::Paragraph,
+        };
+        if self.granularity != Granularity::Character {
+            let range = units.range(unit_byte, self.granularity);
+            let start = Position {
+                byte: range.start,
+                ..at
+            };
+            let end = Position {
+                byte: range.end,
+                ..at
+            };
+            self.anchor = Some(start);
+            self.focus = Some(end);
+            self.origin = Some((start, end));
+        }
     }
     pub fn begin_motion(&mut self) {
         self.candidate = None;
     }
     pub fn finish_motion(&mut self) -> bool {
-        if let Some((at, _)) = self.candidate.take() {
-            let changed = self.focus != Some(at);
+        if let Some(MotionCandidate {
+            at,
+            unit: (start, end),
+            ..
+        }) = self.candidate.take()
+        {
+            let previous = (self.anchor, self.focus);
             self.extend(at);
+            if let Some((origin_start, origin_end)) = self.origin {
+                if start < origin_start {
+                    self.anchor = Some(origin_end);
+                    self.focus = Some(start);
+                } else {
+                    self.anchor = Some(origin_start);
+                    self.focus = Some(end.max(origin_end));
+                }
+            }
+            let changed = previous != (self.anchor, self.focus);
+            if changed {
+                // Extending the selected range ends a click sequence. Caret jitter
+                // inside the initial word/paragraph does not, though `moved` still
+                // suppresses link activation just as it does for character drags.
+                self.last_click = None;
+            }
             changed
         } else {
             false
         }
     }
-    fn offer(&mut self, at: Position, distance: f32) {
-        if self.candidate.is_none_or(|(_, best)| distance < best) {
-            self.candidate = Some((at, distance));
+    fn offer(&mut self, at: Position, unit_byte: usize, units: &TextUnits, distance: f32) {
+        if self
+            .candidate
+            .as_ref()
+            .is_none_or(|best| distance < best.distance)
+        {
+            let range = units.range(unit_byte, self.granularity);
+            self.candidate = Some(MotionCandidate {
+                at,
+                unit: (
+                    Position {
+                        byte: range.start,
+                        ..at
+                    },
+                    Position {
+                        byte: range.end,
+                        ..at
+                    },
+                ),
+                distance,
+            });
         }
     }
     fn extend(&mut self, at: Position) {
         self.focus = Some(at);
-        self.moved |= self.anchor != self.focus;
+        self.moved |= self.pressed_at != Some(at);
     }
     fn local_range(&self, entry: usize, block: usize, bytes: Range<usize>) -> Range<usize> {
         let Some((a, b)) = self.range() else {
@@ -189,7 +366,7 @@ impl<'a> Viewer<'a> {
                 block,
                 byte: 0,
             },
-            None,
+            SelectableText::Block,
         )
     }
 }
@@ -306,7 +483,7 @@ pub fn plain(
         Font::DEFAULT,
         selection,
         at,
-        None,
+        SelectableText::Plain,
     )
 }
 
@@ -316,6 +493,7 @@ pub fn tool_row(
     at: Position,
     height: f32,
     heading: bool,
+    units: Arc<TextUnits>,
 ) -> Element<'static, Message> {
     let mut span = Span::new(value.to_owned());
     span.color = heading.then_some(crate::theme::MUTED);
@@ -332,8 +510,14 @@ pub fn tool_row(
         },
         selection,
         at,
-        Some(height),
+        SelectableText::Row { height, units },
     )
+}
+
+enum SelectableText {
+    Block,
+    Plain,
+    Row { height: f32, units: Arc<TextUnits> },
 }
 
 fn selectable(
@@ -342,9 +526,20 @@ fn selectable(
     font: Font,
     selection: Shared,
     at: Position,
-    row_height: Option<f32>,
+    kind: SelectableText,
 ) -> Element<'static, Message> {
     let content: String = spans.iter().map(|s| s.text.as_ref()).collect();
+    let (row_height, units) = match kind {
+        SelectableText::Row { height, units } => (Some(height), units),
+        SelectableText::Block => (
+            None,
+            Arc::new(TextUnits::new(&content, at.byte, Paragraphs::Block)),
+        ),
+        SelectableText::Plain => (
+            None,
+            Arc::new(TextUnits::new(&content, at.byte, Paragraphs::BlankLines)),
+        ),
+    };
     let line_height = row_height
         .map(|h| text::LineHeight::Absolute(h.into()))
         .unwrap_or_default();
@@ -357,6 +552,7 @@ fn selectable(
         height: row_height.map_or(Length::Shrink, Length::Fixed),
         spans,
         content,
+        units,
         size,
         font,
         line_height,
@@ -370,6 +566,7 @@ struct Selectable {
     height: Length,
     spans: Arc<[Span<'static, String>]>,
     content: String,
+    units: Arc<TextUnits>,
     size: Pixels,
     font: Font,
     line_height: text::LineHeight,
@@ -383,8 +580,12 @@ struct State {
     spans: Arc<[Span<'static, String>]>,
     pressed_link: Option<String>,
 }
+struct Hit {
+    byte: usize,
+    unit_byte: usize,
+}
 impl Selectable {
-    fn hit(&self, state: &State, point: Point) -> Option<usize> {
+    fn hit(&self, state: &State, point: Point) -> Option<Hit> {
         // Iced's generic hit_test drops the hard-line index. Use the renderer's
         // shaped buffer so hard breaks, wrapping, bidi and Unicode agree with paint.
         let buffer = state.paragraph.buffer();
@@ -394,14 +595,25 @@ impl Selectable {
             .map(|l| l.text().len() + l.ending().as_str().len())
             .sum();
         let byte = offset + hit.index;
-        Some(
-            self.content
+        let byte = self
+            .content
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain([self.content.len()])
+            .min_by_key(|i| i.abs_diff(byte))
+            .expect("end boundary");
+        // The trailing half of a glyph hits the caret *after* it. Unit selection
+        // must still select that glyph's word (also for RTL text and ligatures).
+        let unit_byte = if hit.affinity == cosmic_text::Affinity::Before && byte > offset {
+            self.content[..byte]
                 .grapheme_indices(true)
-                .map(|(i, _)| i)
-                .chain([self.content.len()])
-                .min_by_key(|i| i.abs_diff(byte))
-                .expect("end boundary"),
-        )
+                .next_back()
+                .expect("preceding grapheme")
+                .0
+        } else {
+            byte
+        };
+        Some(Hit { byte, unit_byte })
     }
     fn link(&self, state: &State, point: Point) -> Option<String> {
         state
@@ -491,12 +703,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             let x = p.x.clamp(bounds.x, bounds.x + bounds.width);
             let y = p.y.clamp(bounds.y, bounds.y + bounds.height);
             let distance = (p.x - x).powi(2) + (p.y - y).powi(2);
-            if let Some(byte) = self.hit(state, Point::new(x - bounds.x, y - bounds.y)) {
+            if let Some(hit) = self.hit(state, Point::new(x - bounds.x, y - bounds.y)) {
                 self.selection.borrow_mut().offer(
                     Position {
-                        byte: self.at.byte + byte,
+                        byte: self.at.byte + hit.byte,
                         ..self.at
                     },
+                    self.at.byte + hit.unit_byte,
+                    &self.units,
                     distance,
                 );
             }
@@ -505,12 +719,17 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 state.pressed_link = None;
                 if let Some(point) = position
-                    && let Some(byte) = self.hit(state, Point::new(point.x, point.y))
+                    && let Some(hit) = self.hit(state, Point::new(point.x, point.y))
                 {
-                    self.selection.borrow_mut().start(Position {
-                        byte: self.at.byte + byte,
-                        ..self.at
-                    });
+                    self.selection.borrow_mut().press(
+                        Position {
+                            byte: self.at.byte + hit.byte,
+                            ..self.at
+                        },
+                        self.at.byte + hit.unit_byte,
+                        cursor.position().expect("hit has a cursor"),
+                        &self.units,
+                    );
                     state.pressed_link = self.link(state, Point::new(point.x, point.y));
                     shell.capture_event();
                     shell.request_redraw();
@@ -522,10 +741,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                     && position.is_some_and(|p| {
                         let point = Point::new(p.x, p.y);
                         self.link(state, point).as_ref() == Some(&link)
-                            && self.hit(state, point).is_some_and(|byte| {
-                                self.selection.borrow().anchor
+                            && self.hit(state, point).is_some_and(|hit| {
+                                self.selection.borrow().pressed_at
                                     == Some(Position {
-                                        byte: self.at.byte + byte,
+                                        byte: self.at.byte + hit.byte,
                                         ..self.at
                                     })
                             })
@@ -758,6 +977,400 @@ pub(crate) mod tests {
         }
     }
 
+    fn clicks(
+        ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
+        renderer: &mut iced::Renderer,
+        at: Point,
+        count: usize,
+        hold: bool,
+    ) {
+        let events: Vec<_> = (0..count).flat_map(|_| [press(), release()]).collect();
+        let mut messages = Vec::new();
+        ui.update(
+            &events[..events.len() - usize::from(hold)],
+            mouse::Cursor::Available(at),
+            renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+    }
+
+    fn copied(selection: &Shared, viewer: &Viewer<'_>) -> String {
+        copy_blocks(
+            &selection.borrow(),
+            [(
+                viewer.entry,
+                viewer
+                    .blocks
+                    .borrow()
+                    .iter()
+                    .map(|b| Block {
+                        text: b.text.clone(),
+                        separator: b.separator,
+                    })
+                    .collect(),
+            )],
+        )
+    }
+
+    #[test]
+    fn units_follow_unicode_words_and_logical_not_visual_lines() {
+        let text = "can't foo_bar café e\u{301} 👩‍💻  ...";
+        let offset = 19;
+        let units = TextUnits::new(text, offset, Paragraphs::Block);
+        for expected in ["can't", "foo_bar", "café", "e\u{301}", "👩‍💻", "  ", "."] {
+            let start = text.find(expected).unwrap();
+            let range = units.range(offset + start, Granularity::Word);
+            assert_eq!(&text[range.start - offset..range.end - offset], expected);
+        }
+        let text = "first\r\nstill first\r\n \t\r\nsecond\nline";
+        let units = TextUnits::new(text, 0, Paragraphs::BlankLines);
+        for (needle, expected) in [("still", "first\r\nstill first"), ("line", "second\nline")] {
+            let range = units.range(text.find(needle).unwrap(), Granularity::Paragraph);
+            assert_eq!(&text[range], expected);
+        }
+        let lines = TextUnits::lines(text);
+        assert_eq!(
+            &text[lines.range(text.find("still").unwrap(), Granularity::Paragraph)],
+            "still first"
+        );
+    }
+
+    #[test]
+    fn double_click_uses_the_glyph_under_pointer_not_the_nearest_caret() {
+        let selection = Shared::default();
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            pointer_input(
+                selectable(
+                    Arc::from([Span::new("a bc.".to_owned())]),
+                    20.into(),
+                    Font::MONOSPACE,
+                    selection.clone(),
+                    Position {
+                        entry: 0,
+                        block: 0,
+                        byte: 0,
+                    },
+                    SelectableText::Block,
+                ),
+                false,
+                selection.clone(),
+            ),
+            Size::new(300., 100.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = TextBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let bounds = bounds.0[0].1;
+        let cell = bounds.width / 5.;
+        for (x, expected) in [(0.8, "a"), (1.2, " "), (3.8, "bc"), (4.2, ".")] {
+            selection.borrow_mut().clear();
+            let at = Point::new(bounds.x + x * cell, bounds.center_y());
+            clicks(&mut ui, &mut renderer, at, 2, false);
+            assert_eq!(
+                copy_blocks(
+                    &selection.borrow(),
+                    [(
+                        0,
+                        vec![Block {
+                            text: "a bc.".into(),
+                            separator: ""
+                        }]
+                    )]
+                ),
+                expected
+            );
+        }
+        // Cross a glyph midpoint while holding the second press: its nearest
+        // caret changes, but the word does not. The next click is still a triple.
+        selection.borrow_mut().clear();
+        let at = Point::new(bounds.x + 2.49 * cell, bounds.center_y());
+        let jitter = Point::new(bounds.x + 2.51 * cell, bounds.center_y());
+        clicks(&mut ui, &mut renderer, at, 2, true);
+        send(&mut ui, &mut renderer, motion(jitter), jitter);
+        send(&mut ui, &mut renderer, release(), jitter);
+        clicks(&mut ui, &mut renderer, jitter, 1, false);
+        assert_eq!(
+            copy_blocks(
+                &selection.borrow(),
+                [(
+                    0,
+                    vec![Block {
+                        text: "a bc.".into(),
+                        separator: ""
+                    }]
+                )]
+            ),
+            "a bc."
+        );
+        drop(ui);
+        let text = "אבג דהו";
+        let mut ui = UserInterface::build(
+            pointer_input(
+                plain(
+                    text,
+                    20.,
+                    None,
+                    selection.clone(),
+                    Position {
+                        entry: 0,
+                        block: 0,
+                        byte: 0,
+                    },
+                ),
+                false,
+                selection.clone(),
+            ),
+            Size::new(300., 100.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = TextBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let bounds = bounds.0[0].1;
+        for (x, expected) in [
+            (bounds.x + 0.1, "דהו"),
+            (bounds.x + bounds.width - 0.1, "אבג"),
+        ] {
+            selection.borrow_mut().clear();
+            clicks(
+                &mut ui,
+                &mut renderer,
+                Point::new(x, bounds.center_y()),
+                2,
+                false,
+            );
+            assert_eq!(
+                copy_blocks(
+                    &selection.borrow(),
+                    [(
+                        0,
+                        vec![Block {
+                            text: text.into(),
+                            separator: ""
+                        }]
+                    )]
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn multiclick_markdown_drag_reverses_by_units_and_resets_after_other_interactions() {
+        let selection = Shared::default();
+        let content = markdown::Content::parse(
+            "Before\n\nca**fé** with words that wrap onto another row.  \nHard break.\n\nAfter\n\n```text\ncode first\ncode second\n```\n",
+        );
+        let viewer = Viewer::new(selection.clone(), 0);
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            pointer_input(
+                markdown::view_with(
+                    content.items(),
+                    markdown::Settings::from(iced::Theme::Dark),
+                    &viewer,
+                ),
+                false,
+                selection.clone(),
+            ),
+            Size::new(210., 600.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = TextBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let point = |prefix: &str| {
+            let bounds = bounds
+                .0
+                .iter()
+                .find(|(text, _)| text.starts_with(prefix))
+                .unwrap()
+                .1;
+            Point::new(bounds.x + 1., bounds.y + 5.)
+        };
+        let at = point("café");
+        let paragraph = "café with words that wrap onto another row.\nHard break.";
+        clicks(&mut ui, &mut renderer, at, 2, true);
+        assert_eq!(copied(&selection, &viewer), "café");
+        for (target, expected) in [
+            ("Before", "Before\n\ncafé"),
+            (
+                "After",
+                "café with words that wrap onto another row.\nHard break.\n\nAfter",
+            ),
+            ("café", "café"),
+        ] {
+            let end = point(target);
+            send(&mut ui, &mut renderer, motion(end), end);
+            assert_eq!(copied(&selection, &viewer), expected);
+        }
+        send(&mut ui, &mut renderer, release(), at);
+        // A completed drag must not count as the first click of a new sequence.
+        clicks(&mut ui, &mut renderer, at, 1, false);
+        assert!(selection.borrow().range().is_none());
+        selection.borrow_mut().clear();
+        clicks(&mut ui, &mut renderer, at, 3, true);
+        assert_eq!(copied(&selection, &viewer), paragraph);
+        for (target, expected) in [
+            ("Before", format!("Before\n\n{paragraph}")),
+            ("After", format!("{paragraph}\n\nAfter")),
+            ("café", paragraph.to_owned()),
+        ] {
+            let end = point(target);
+            send(&mut ui, &mut renderer, motion(end), end);
+            assert_eq!(copied(&selection, &viewer), expected);
+        }
+        send(&mut ui, &mut renderer, release(), at);
+        assert_eq!(copied(&selection, &viewer), paragraph);
+        let messages = send(
+            &mut ui,
+            &mut renderer,
+            key(
+                keyboard::Key::Character("c".into()),
+                keyboard::key::Code::KeyC,
+            ),
+            at,
+        );
+        assert!(matches!(messages.as_slice(), [Message::CopySelection]));
+        // Clicking outside text breaks the sequence, even if the next text click
+        // returns immediately to the same coordinates.
+        clicks(&mut ui, &mut renderer, Point::new(205., 590.), 1, false);
+        clicks(&mut ui, &mut renderer, at, 1, false);
+        assert!(selection.borrow().range().is_none());
+        selection.borrow_mut().invalidate_entry(0);
+        clicks(&mut ui, &mut renderer, at, 1, false);
+        assert!(selection.borrow().range().is_none());
+        selection.borrow_mut().clear();
+        clicks(&mut ui, &mut renderer, point("code second"), 3, false);
+        assert_eq!(copied(&selection, &viewer), "code second");
+    }
+
+    #[test]
+    fn triple_click_plain_text_selects_blank_line_delimited_paragraph() {
+        let selection = Shared::default();
+        let text = "First\ncontinued\n\nSecond";
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            pointer_input(
+                plain(
+                    text,
+                    20.,
+                    None,
+                    selection.clone(),
+                    Position {
+                        entry: 0,
+                        block: 0,
+                        byte: 0,
+                    },
+                ),
+                false,
+                selection.clone(),
+            ),
+            Size::new(400., 200.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = TextBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let bounds = bounds.0[0].1;
+        clicks(
+            &mut ui,
+            &mut renderer,
+            Point::new(bounds.x + 1., bounds.y + bounds.height * 1.5 / 4.),
+            3,
+            false,
+        );
+        assert_eq!(
+            copy_blocks(
+                &selection.borrow(),
+                [(
+                    0,
+                    vec![Block {
+                        text: text.into(),
+                        separator: ""
+                    }]
+                )]
+            ),
+            "First\ncontinued"
+        );
+    }
+
+    #[test]
+    fn tool_multiclick_selects_unmounted_word_and_logical_line_across_reflow() {
+        let selection = Shared::default();
+        let word = "éclair".repeat(500);
+        let line = format!("prefix {word} suffix");
+        let source = format!("{line}\r\nshort\nlast");
+        let mut output = crate::tool_output::Output::new("test", "cmd", &source, false);
+        let display = crate::tool_output::display("test", "cmd", &source, false);
+        let mut renderer = renderer();
+        output.update(crate::tool_output::Event::Resize(320.));
+        let mut ui = UserInterface::build(
+            pointer_input(
+                output.view("tool", selection.clone(), 0),
+                false,
+                selection.clone(),
+            ),
+            Size::new(320., 340.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = TextBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let (row, bounds) = bounds
+            .0
+            .iter()
+            .find(|(text, _)| text.starts_with("prefix "))
+            .unwrap();
+        assert!(row.len() < word.len());
+        let at = Point::new(
+            bounds.x + bounds.width * 9. / row.chars().count() as f32,
+            bounds.center_y(),
+        );
+        let copy = || {
+            copy_blocks(
+                &selection.borrow(),
+                [(
+                    0,
+                    vec![Block {
+                        text: display.clone(),
+                        separator: "",
+                    }],
+                )],
+            )
+        };
+        clicks(&mut ui, &mut renderer, at, 2, false);
+        assert_eq!(copy(), word);
+        selection.borrow_mut().clear();
+        clicks(&mut ui, &mut renderer, at, 3, false);
+        assert_eq!(copy(), line);
+        let cache = ui.into_cache();
+        output.update(crate::tool_output::Event::Resize(150.));
+        output.update(crate::tool_output::Event::Scroll(680.));
+        let mut ui = UserInterface::build(
+            pointer_input(
+                output.view("tool", selection.clone(), 0),
+                false,
+                selection.clone(),
+            ),
+            Size::new(150., 340.),
+            cache,
+            &mut renderer,
+        );
+        ui.draw(
+            &mut renderer,
+            &crate::theme::app(),
+            &renderer::Style {
+                text_color: Color::WHITE,
+            },
+            mouse::Cursor::Unavailable,
+        );
+        assert_eq!(copy(), line);
+    }
+
     #[test]
     fn shared_paragraph_matches_rich_text_pixels() {
         use iced::widget::rich_text;
@@ -803,7 +1416,7 @@ pub(crate) mod tests {
                                 block: 0,
                                 byte: 0,
                             },
-                            None,
+                            SelectableText::Block,
                         )
                     };
                     let mut ui = UserInterface::build(
@@ -1078,6 +1691,15 @@ pub(crate) mod tests {
         assert!(
             matches!(send(&mut ui, &mut renderer, release(), at).as_slice(), [Message::Link(url)] if url == "https://example.com")
         );
+        // Multi-clicks select text but do not defer or suppress link activation.
+        for expected in ["link", "link words"] {
+            send(&mut ui, &mut renderer, press(), at);
+            assert!(
+                matches!(send(&mut ui, &mut renderer, release(), at).as_slice(), [Message::Link(url)] if url == "https://example.com")
+            );
+            assert_eq!(copied(&selection, &viewer), expected);
+        }
+        selection.borrow_mut().clear();
         send(&mut ui, &mut renderer, press(), at);
         let end = Point::new(60., 10.);
         send(&mut ui, &mut renderer, motion(end), end);
@@ -1133,6 +1755,7 @@ pub(crate) mod tests {
                 },
                 17.,
                 false,
+                Arc::new(TextUnits::lines(source)),
             ),
             false,
             selection.clone(),
@@ -1255,108 +1878,116 @@ pub(crate) mod tests {
 
     #[test]
     fn wheel_drag_rehits_virtual_tool_rows_without_pointer_motion() {
-        let selection = Shared::default();
-        let source: String = (0..120).map(|i| format!("line {i:03}\n")).collect();
-        let mut output = crate::tool_output::Output::new("test", "cmd", &source, false);
-        let mut renderer = renderer();
-        let view = pointer_input(
-            output.view("tool", selection.clone(), 0),
-            false,
-            selection.clone(),
-        );
-        let mut ui = UserInterface::build(
-            view,
-            Size::new(320., 340.),
-            user_interface::Cache::new(),
-            &mut renderer,
-        );
-        let at = Point::new(0., 8.);
-        send(&mut ui, &mut renderer, press(), at);
-        let messages = send(
-            &mut ui,
-            &mut renderer,
-            Event::Mouse(mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Pixels { x: 0., y: -680. },
-            }),
-            at,
-        );
-        let cache = ui.into_cache();
-        for message in messages {
-            if let Message::ToolOutput(_, event) = message {
-                output.update(event);
+        for click_count in 1..=3 {
+            let selection = Shared::default();
+            let source: String = (0..120).map(|i| format!("line {i:03}\n")).collect();
+            let mut output = crate::tool_output::Output::new("test", "cmd", &source, false);
+            let mut renderer = renderer();
+            let view = pointer_input(
+                output.view("tool", selection.clone(), 0),
+                false,
+                selection.clone(),
+            );
+            let mut ui = UserInterface::build(
+                view,
+                Size::new(320., 340.),
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let at = Point::new(0., 8.);
+            clicks(&mut ui, &mut renderer, at, click_count, true);
+            let messages = send(
+                &mut ui,
+                &mut renderer,
+                Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Pixels { x: 0., y: -680. },
+                }),
+                at,
+            );
+            let cache = ui.into_cache();
+            for message in messages {
+                if let Message::ToolOutput(_, event) = message {
+                    output.update(event);
+                }
             }
-        }
-        let view = pointer_input(
-            output.view("tool", selection.clone(), 0),
-            false,
-            selection.clone(),
-        );
-        let mut ui = UserInterface::build(view, Size::new(320., 340.), cache, &mut renderer);
-        send(
-            &mut ui,
-            &mut renderer,
-            Event::Window(iced::window::Event::RedrawRequested(
-                iced::time::Instant::now(),
-            )),
-            at,
-        );
-        let display = crate::tool_output::display("test", "cmd", &source, false);
-        #[derive(Default)]
-        struct ScrolledText {
-            translation: iced::Vector,
-            rows: Vec<(String, Rectangle)>,
-        }
-        impl Operation for ScrolledText {
-            fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
-                visit(self);
-            }
-            fn scrollable(
-                &mut self,
-                _: Option<&iced::advanced::widget::Id>,
-                _: Rectangle,
-                _: Rectangle,
+            let view = pointer_input(
+                output.view("tool", selection.clone(), 0),
+                false,
+                selection.clone(),
+            );
+            let mut ui = UserInterface::build(view, Size::new(320., 340.), cache, &mut renderer);
+            send(
+                &mut ui,
+                &mut renderer,
+                Event::Window(iced::window::Event::RedrawRequested(
+                    iced::time::Instant::now(),
+                )),
+                at,
+            );
+            let display = crate::tool_output::display("test", "cmd", &source, false);
+            #[derive(Default)]
+            struct ScrolledText {
                 translation: iced::Vector,
-                _: &mut dyn iced::advanced::widget::operation::Scrollable,
-            ) {
-                self.translation = translation;
+                rows: Vec<(String, Rectangle)>,
             }
-            fn text(
-                &mut self,
-                _: Option<&iced::advanced::widget::Id>,
-                mut bounds: Rectangle,
-                text: &str,
-            ) {
-                bounds.x -= self.translation.x;
-                bounds.y -= self.translation.y;
-                self.rows.push((text.to_owned(), bounds));
+            impl Operation for ScrolledText {
+                fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+                    visit(self);
+                }
+                fn scrollable(
+                    &mut self,
+                    _: Option<&iced::advanced::widget::Id>,
+                    _: Rectangle,
+                    _: Rectangle,
+                    translation: iced::Vector,
+                    _: &mut dyn iced::advanced::widget::operation::Scrollable,
+                ) {
+                    self.translation = translation;
+                }
+                fn text(
+                    &mut self,
+                    _: Option<&iced::advanced::widget::Id>,
+                    mut bounds: Rectangle,
+                    text: &str,
+                ) {
+                    bounds.x -= self.translation.x;
+                    bounds.y -= self.translation.y;
+                    self.rows.push((text.to_owned(), bounds));
+                }
             }
+            let mut painted = ScrolledText::default();
+            ui.operate(&renderer, &mut painted);
+            let (row, _) = painted
+                .rows
+                .iter()
+                .find(|(text, bounds)| text.starts_with("line ") && bounds.contains(at))
+                .expect("scroll must expose a numbered source row under the stationary pointer");
+            let expected_end = display.find(row.trim_end()).unwrap()
+                + match click_count {
+                    1 => 0,
+                    2 => "line".len(),
+                    3 => row.trim_end().len(),
+                    _ => unreachable!(),
+                };
+            assert!(
+                expected_end > selection.borrow().anchor.unwrap().byte,
+                "scroll must advance the selection"
+            );
+            assert_eq!(selection.borrow().focus.unwrap().byte, expected_end);
+            send(&mut ui, &mut renderer, release(), at);
+            assert_eq!(
+                copy_blocks(
+                    &selection.borrow(),
+                    [(
+                        0,
+                        vec![Block {
+                            text: display.clone(),
+                            separator: "\n\n"
+                        }]
+                    )]
+                ),
+                &display[..expected_end]
+            );
         }
-        let mut painted = ScrolledText::default();
-        ui.operate(&renderer, &mut painted);
-        let (row, _) = painted
-            .rows
-            .iter()
-            .find(|(text, bounds)| text.starts_with("line ") && bounds.contains(at))
-            .expect("scroll must expose a numbered source row under the stationary pointer");
-        let expected_end = display.find(row.trim_end()).unwrap();
-        assert!(
-            expected_end > selection.borrow().anchor.unwrap().byte,
-            "scroll must advance the selection"
-        );
-        assert_eq!(selection.borrow().focus.unwrap().byte, expected_end);
-        send(&mut ui, &mut renderer, release(), at);
-        assert_eq!(
-            copy_blocks(
-                &selection.borrow(),
-                [(
-                    0,
-                    vec![Block {
-                        text: display.clone(),
-                        separator: "\n\n"
-                    }]
-                )]
-            ),
-            &display[..expected_end]
-        );
     }
 }

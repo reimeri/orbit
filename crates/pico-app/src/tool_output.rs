@@ -9,7 +9,7 @@ use iced::{
     Element,
     widget::{sensor, space},
 };
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 use unicode_width::UnicodeWidthChar;
 
 const LINE_HEIGHT: f32 = 17.;
@@ -33,6 +33,7 @@ pub struct Output {
     input: String,
     output: String,
     display: String,
+    units: Arc<chat_selection::TextUnits>,
     rows: Vec<Range<usize>>,
     columns: usize,
     offset: f32,
@@ -109,6 +110,7 @@ impl Output {
             input: input.into(),
             output: output.into(),
             display: String::new(),
+            units: Arc::new(chat_selection::TextUnits::lines("")),
             rows: vec![],
             columns: 80,
             offset: 0.,
@@ -130,6 +132,7 @@ impl Output {
     }
     fn rebuild(&mut self) {
         (self.display, self.headings) = document(&self.name, &self.input, &self.output, self.raw);
+        self.units = Arc::new(chat_selection::TextUnits::lines(&self.display));
         self.reflow();
     }
     fn reflow(&mut self) {
@@ -218,6 +221,7 @@ impl Output {
                     self.headings
                         .iter()
                         .any(|heading| heading.contains(&range.start)),
+                    self.units.clone(),
                 ),
             ));
         }

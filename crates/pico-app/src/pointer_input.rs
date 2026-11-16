@@ -146,12 +146,15 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
                 shell.request_redraw();
             }
         }
+        if matches!(event, Event::Window(iced::window::Event::Unfocused)) {
+            self.selection.borrow_mut().clear();
+            shell.request_redraw();
+        }
         if matches!(
             event,
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-                | Event::Window(iced::window::Event::Unfocused)
         ) {
-            self.selection.borrow_mut().clear();
+            self.selection.borrow_mut().begin_press();
             shell.request_redraw();
         }
         // TextInput already supports Ctrl+Backspace. Normalize Ctrl+W here so
@@ -214,6 +217,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             }
             message => message,
         });
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+        ) {
+            self.selection.borrow_mut().finish_press();
+        }
         if crate::chat_selection::selection_motion(event)
             && self.selection.borrow_mut().finish_motion()
         {

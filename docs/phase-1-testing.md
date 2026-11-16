@@ -37,7 +37,16 @@ Check:
   blocks (including blank lines), Unicode, notices and expanded thinking/tool
   details. While holding the mouse button, wheel-scroll the chat or a large tool
   output, then release and copy; offscreen selected text must be included.
-- Clicking a link still opens confirmation; dragging over it only selects text.
+- Double-click a word (including accented/RTL text and a word spanning Markdown
+  formatting), then Ctrl+C. Triple-click a wrapped paragraph: all its visual lines
+  should be selected, but not the neighboring paragraph. In code/tool output,
+  triple-click selects the logical source line, even if it wraps beyond the visible
+  rows. Plain messages use blank-line-separated paragraphs.
+- Hold the second/third press and drag backward, forward, and back into the starting
+  unit: selection extends by whole words/paragraphs/lines without losing the original
+  unit. Repeat while wheel-scrolling a large output, then release and copy.
+- Clicking a link still opens confirmation immediately, even during multi-clicks;
+  dragging over it only selects text. There is no multi-click activation delay.
   Click the composer and verify its own selection/Copy works normally. Changing
   sessions or collapsing content clears the chat selection. A streaming update
   to selected content also clears it, rather than keeping stale text offsets.

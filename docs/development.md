@@ -245,6 +245,15 @@ motion and scroll-induced redraws update selection locally, without idle app
 messages. Interaction tests cover cross-message dragging, hard breaks/Unicode,
 links, stationary-pointer wheel scrolling and streaming Markdown reparses.
 
+Double-click selects a Unicode word (including across Markdown spans); triple-click
+selects a Markdown paragraph, a blank-line-delimited plain-text paragraph, or a
+logical code/tool-output line. Dragging after either gesture extends by whole
+units in either direction. Click sequences use iced's timing/distance rules and
+reset after drags, unrelated clicks or selection invalidation. Links still
+activate immediately on release, including during multi-clicks; no delay is added.
+Tool output shares a logical boundary index across visible rows, so wrapped words
+and lines can be selected beyond the mounted viewport without shaping extra text.
+
 A local before/after check using the same debug build profile, wgpu on the Wayland
 desktop, isolated state and a two-message idle session measured **2.00% → 0.13% of
 one CPU** over 15 seconds after a three-second warm-up. This is one local sample,
