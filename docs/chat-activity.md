@@ -16,7 +16,8 @@ Settings and session-menu copy actions are unchanged.
   disclosure slot shows the footer's animated status circle, using the same clock;
   hovering anywhere on the group header
   reveals the right/down chevron. Finished groups always show the chevron.
-- Completed groups summarize actual tool-call counts and delegation counts. Live
+- Completed groups summarize actual tool-call counts and delegation counts by
+  explicit profile (for example, “1 review · 2 explore”). Live
   groups show the current tool/input or reasoning heading, with completed/running
   counts kept separate from the ellipsized preview. Completed counts include both
   successful and failed calls. The failed count appears only for groups with more

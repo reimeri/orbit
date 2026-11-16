@@ -63,7 +63,7 @@ pub struct Summary {
     pub running: usize,
     pub failed: usize,
     pub reviews: usize,
-    pub agents: usize,
+    pub explores: usize,
     pub current: String,
     pub thinking: String,
 }
@@ -94,18 +94,10 @@ impl Summary {
             parts.push("Activity".into());
         }
         if self.reviews > 0 {
-            parts.push(format!(
-                "{} review{}",
-                self.reviews,
-                if self.reviews == 1 { "" } else { "s" }
-            ));
+            parts.push(format!("{} review", self.reviews));
         }
-        if self.agents > 0 {
-            parts.push(format!(
-                "{} subagent{}",
-                self.agents,
-                if self.agents == 1 { "" } else { "s" }
-            ));
+        if self.explores > 0 {
+            parts.push(format!("{} explore", self.explores));
         }
         parts.join(" · ")
     }
@@ -256,14 +248,14 @@ impl Projection {
                                 if *failed {
                                     summary.failed += 1;
                                 }
-                                if name == "spawn_subagent" {
-                                    if serde_json::from_str::<serde_json::Value>(input)
-                                        .ok()
-                                        .is_some_and(|v| v["type"] == "review")
-                                    {
-                                        summary.reviews += 1;
-                                    } else {
-                                        summary.agents += 1;
+                                if name == "spawn_subagent"
+                                    && let Ok(input) =
+                                        serde_json::from_str::<serde_json::Value>(input)
+                                {
+                                    match input["type"].as_str() {
+                                        Some("review") => summary.reviews += 1,
+                                        Some("explore") => summary.explores += 1,
+                                        _ => {}
                                     }
                                 }
                             }
@@ -570,6 +562,32 @@ mod tests {
             "**Inspecting configuration**\nFull first body"
         );
     }
+    #[test]
+    fn group_labels_count_subagents_by_explicit_profile() {
+        let source: History<_> = ["explore", "review", "explore"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, profile)| {
+                let mut entry = tool(&format!("spawn-{i}"), "spawn_subagent", None, true, false);
+                if let EntryKind::Tool { input, .. } = &mut entry.kind {
+                    *input = serde_json::json!({
+                        "type": profile,
+                        "title": "Inspect implementation",
+                        "task": "Inspect the relevant code"
+                    })
+                    .to_string();
+                }
+                entry
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let mut projection = Projection::default();
+        projection.sync(&source);
+        let summary = projection.block(0).summary.as_ref().unwrap();
+        assert_eq!(summary.label(false), "3 tool calls · 1 review · 2 explore");
+        assert_eq!(summary.label(true), "Working · 1 review · 2 explore");
+    }
+
     #[test]
     fn failure_badge_requires_both_thresholds_and_completed_includes_failures() {
         for (total, failed, running, show_failures) in [
