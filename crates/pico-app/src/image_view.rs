@@ -1,4 +1,5 @@
 //! Images decode off the UI thread. Chat uses static thumbnails; only the modal animates.
+use crate::icons::{Icon, tip as icon_tip};
 use crate::theme;
 #[cfg(test)]
 use iced::Color;
@@ -149,12 +150,13 @@ impl Viewer {
             .height(72)
             .style(theme::attachment_button)
             .on_press(crate::ui::Message::OpenImage(media.clone()));
-        let remove = container(
-            theme::button(text("×").size(14))
+        let remove = container(icon_tip(
+            theme::button(container(Icon::X.view(14.)).center_y(20))
                 .padding([0, 5])
                 .style(theme::attachment_remove)
                 .on_press(crate::ui::Message::RemoveAttachment(index)),
-        )
+            "Remove attachment",
+        ))
         .width(72)
         .height(72)
         .align_x(iced::Right)
@@ -304,15 +306,23 @@ impl Viewer {
                 .spacing(8)
                 .align_x(iced::Center);
                 if animated {
-                    body = body.push(
+                    body = body.push(icon_tip(
                         theme::button(
-                            container(text(if self.playing { "❚❚" } else { "▶" }).size(16))
-                                .center_x(20)
-                                .center_y(20),
+                            container(
+                                (if self.playing {
+                                    Icon::Pause
+                                } else {
+                                    Icon::Play
+                                })
+                                .view(16.),
+                            )
+                            .center_x(20)
+                            .center_y(20),
                         )
                         .padding(6)
                         .on_press(crate::ui::Message::Image(Message::Toggle)),
-                    );
+                        if self.playing { "Pause" } else { "Play" },
+                    ));
                 }
                 body.into()
             }

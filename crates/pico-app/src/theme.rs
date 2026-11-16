@@ -118,6 +118,21 @@ pub fn text_button(theme: &Theme, status: button_widget::Status) -> button_widge
     style
 }
 
+/// Destructive menu action without a filled button background.
+pub fn danger_text(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
+    let mut style = text_button(theme, status);
+    if !matches!(status, button_widget::Status::Disabled) {
+        style.text_color = theme.palette().danger.scale_alpha(
+            if matches!(status, button_widget::Status::Hovered) {
+                1.
+            } else {
+                0.8
+            },
+        );
+    }
+    style
+}
+
 pub fn menu_button(
     theme: &Theme,
     status: button_widget::Status,

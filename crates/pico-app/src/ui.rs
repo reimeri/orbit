@@ -9,6 +9,7 @@ use crate::{
     chat_selection::{self, Position},
     chevron_icon::chevron_icon,
     ellipsized_text::ellipsized_text,
+    icons::{Icon, tip as icon_tip},
     pointer_input::{Press, pointer_input},
     tool_output,
 };
@@ -2493,10 +2494,14 @@ impl App {
             center = center.push(
                 container(
                     row![
-                        text(format!("Info · {notice}")).size(13).width(Fill),
-                        theme::button("×")
-                            .on_press(Message::NoticeDismiss)
-                            .style(theme::text_button)
+                        Icon::Info.colored(16., ACCENT),
+                        text(notice).size(13).width(Fill),
+                        icon_tip(
+                            theme::button(container(Icon::X.view(16.)).center_x(20).center_y(22))
+                                .on_press(Message::NoticeDismiss)
+                                .style(theme::text_button),
+                            "Dismiss notice"
+                        )
                     ]
                     .spacing(12)
                     .align_y(iced::Center),
@@ -2509,6 +2514,7 @@ impl App {
             center = center.push(
                 container(
                     row![
+                        Icon::CircleAlert.colored(16., DANGER),
                         text(error).size(13).width(Fill),
                         theme::button("Dismiss").on_press(Message::ErrorDismiss)
                     ]
@@ -2549,11 +2555,20 @@ impl App {
                     tooltip::Position::Left,
                 )
                 .style(card),
-                theme::button(container(text("⚙").size(24)).center_x(Fill).center_y(34))
+                tooltip(
+                    theme::button(
+                        container(Icon::Settings.view(24.))
+                            .center_x(Fill)
+                            .center_y(34)
+                    )
                     .width(Fill)
                     .padding(0)
                     .on_press(Message::ToggleSettings)
-                    .style(theme::text_button)
+                    .style(theme::text_button),
+                    text("Settings").size(12),
+                    tooltip::Position::Left,
+                )
+                .style(card)
             ]
             .spacing(12)
             .width(Fill),
@@ -2588,18 +2603,19 @@ impl App {
                 .on_scroll(|_| Message::CloseMenu);
             let actions = match target {
                 MenuTarget::Session(id) => column![
-                    theme::button("Rename")
+                    theme::button(Icon::Pencil.label("Rename", 16.))
                         .width(Fill)
                         .on_press(Message::Rename(id.clone()))
                         .style(theme::text_button),
-                    theme::button("Copy session ID")
+                    theme::button(Icon::Copy.label("Copy session ID", 16.))
                         .width(Fill)
                         .on_press(Message::CopySessionId(id.clone()))
                         .style(theme::text_button),
-                    theme::button("Delete")
+                    widget::rule::horizontal(1),
+                    theme::button(Icon::Trash2.label("Delete", 16.))
                         .width(Fill)
                         .on_press(Message::Delete(id.clone()))
-                        .style(theme::text_button),
+                        .style(theme::danger_text),
                 ],
                 MenuTarget::Project(path) => {
                     let stashed = self
@@ -2608,26 +2624,35 @@ impl App {
                         .iter()
                         .any(|p| p.path == *path && p.stashed);
                     column![
-                        theme::button("Rename")
+                        theme::button(Icon::Pencil.label("Rename", 16.))
                             .width(Fill)
                             .on_press(Message::RenameProject(path.clone()))
                             .style(theme::text_button),
-                        theme::button(if stashed { "Restore" } else { "Stash" })
-                            .width(Fill)
-                            .on_press(Message::StashProject(path.clone()))
-                            .style(theme::text_button),
-                        theme::button("Delete")
+                        theme::button(
+                            (if stashed {
+                                Icon::ArchiveRestore
+                            } else {
+                                Icon::Archive
+                            })
+                            .label(if stashed { "Restore" } else { "Stash" }, 16.)
+                        )
+                        .width(Fill)
+                        .on_press(Message::StashProject(path.clone()))
+                        .style(theme::text_button),
+                        widget::rule::horizontal(1),
+                        theme::button(Icon::Trash2.label("Delete", 16.))
                             .width(Fill)
                             .on_press(Message::DeleteProject(path.clone()))
-                            .style(theme::text_button),
+                            .style(theme::danger_text),
                     ]
                 }
             };
+            let menu_width = 200.;
             let menu = container(actions.spacing(4))
                 .padding(6)
-                .width(170)
+                .width(menu_width)
                 .style(card);
-            let x = position.x.min(self.window_width - 180.).max(0.);
+            let x = position.x.min(self.window_width - menu_width - 10.).max(0.);
             let y = position.y.min(self.window_height - 140.).max(0.);
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
             layers.push(dismiss).push(positioned).into()
@@ -2679,9 +2704,9 @@ impl App {
 
     fn sidebar_header(&self) -> Element<'_, Message> {
         let icon: Element<_> = if self.search_active {
-            text("×").size(14).into()
+            Icon::X.view(14.)
         } else {
-            crate::search_icon::search_icon()
+            Icon::Search.view(14.)
         };
         let control = theme::button(container(icon).center_x(18).center_y(24))
             .padding(0)
@@ -2737,7 +2762,7 @@ impl App {
             .style(card),
             center,
             tooltip(
-                theme::button(container(text("+").size(16)).center_x(18).center_y(24))
+                theme::button(container(Icon::Plus.view(16.)).center_x(18).center_y(24))
                     .padding(0)
                     .width(18)
                     .height(24)
@@ -2947,7 +2972,7 @@ impl App {
                             age,
                             crate::session_action::WIDTH,
                             row![
-                                crate::session_action::check_icon(SETTLE_FONT_SIZE),
+                                Icon::Check.view(SETTLE_FONT_SIZE),
                                 text("Settle").size(SETTLE_FONT_SIZE),
                             ]
                             .spacing(4)
@@ -3034,7 +3059,7 @@ impl App {
             row![
                 text("Settled").size(12).width(Fill),
                 text(self.settled_rows.len().to_string()).size(11),
-                crate::chevron_icon::chevron_icon(expanded, MUTED),
+                crate::chevron_icon::chevron_icon(expanded),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -3085,7 +3110,7 @@ impl App {
                     content,
                     age,
                     trailing_width,
-                    crate::session_action::undo_icon(),
+                    Icon::Undo2.view(crate::session_action::UNDO_SIZE),
                     "Unsettle session",
                     Message::SetSettled(session.id.clone(), false),
                 );
@@ -3217,7 +3242,7 @@ impl App {
             };
             let header = widget::responsive(move |size| {
                 let compact = size.width < 640.;
-                let mut back = row![crate::chevron_icon::back_arrow_icon(theme::TEXT)]
+                let mut back = row![Icon::ArrowLeft.view(12.)]
                     .spacing(8)
                     .align_y(iced::Center);
                 if !compact {
@@ -3246,7 +3271,7 @@ impl App {
                 )
                 .style(card);
                 let stop = tooltip(
-                    theme::button(container(text("■").size(16)).center_x(32).center_y(32))
+                    theme::button(container(Icon::Square.view(16.)).center_x(32).center_y(32))
                         .padding(0)
                         .on_press_maybe(running.then(|| Message::StopAgent(session.id.clone())))
                         .style(theme::text_button),
@@ -3257,7 +3282,7 @@ impl App {
                 // Equal side widths keep the title at the actual header center.
                 let side_width = if compact { 60. } else { 170. };
                 row![
-                    container(back).width(side_width),
+                    container(icon_tip(back, "Back to main agent")).width(side_width),
                     title,
                     container(row![status, stop].spacing(4).align_y(iced::Center))
                         .align_right(side_width),
@@ -3412,7 +3437,7 @@ impl App {
                 container(
                     theme::button(
                         row![
-                            chevron_icon(self.execution.contains(&entry.id), MUTED),
+                            chevron_icon(self.execution.contains(&entry.id)),
                             text(format!(
                                 "Execution details · {wrappers} code-mode call{}",
                                 if wrappers == 1 { "" } else { "s" }
@@ -3441,7 +3466,7 @@ impl App {
                 container(
                     theme::button(
                         row![
-                            chevron_icon(self.expanded.contains(&entry.id), MUTED),
+                            chevron_icon(self.expanded.contains(&entry.id)),
                             ellipsized_text(&preview, 12., Some(MUTED))
                         ]
                         .spacing(8)
@@ -3487,7 +3512,7 @@ impl App {
         let mut block = column![
             theme::button(
                 row![
-                    chevron_icon(open, MUTED),
+                    chevron_icon(open),
                     text("●").size(11).color(color),
                     ellipsized_text(&label, 12., Some(MUTED))
                 ]
@@ -3503,7 +3528,7 @@ impl App {
         if open {
             if let Some(run) = run {
                 block = block.push(
-                    theme::button("Open subagent ↗")
+                    theme::button(Icon::ArrowUpRight.label("Open subagent", 16.))
                         .style(theme::text_button)
                         .on_press(Message::Select(run.session_id)),
                 );
@@ -3544,7 +3569,7 @@ impl App {
                 let mut block = column![
                     theme::button(
                         row![
-                            chevron_icon(open, MUTED),
+                            chevron_icon(open),
                             text(if *complete { "●" } else { "◌" })
                                 .size(11)
                                 .color(if *failed {
@@ -3603,12 +3628,9 @@ impl App {
                     let raw = self.raw_tool_inputs.contains(&entry.id);
                     details = details.push(
                         theme::button(
-                            row![
-                                chevron_icon(raw, MUTED),
-                                text("Raw input").size(11).color(MUTED)
-                            ]
-                            .spacing(6)
-                            .align_y(iced::Center),
+                            row![chevron_icon(raw), text("Raw input").size(11).color(MUTED)]
+                                .spacing(6)
+                                .align_y(iced::Center),
                         )
                         .padding([2, 0])
                         .style(theme::text_button)
@@ -3786,10 +3808,27 @@ impl App {
         .padding([6, 10])
         .width(Fill)
         .style(theme::text_button);
-        let favorite = theme::button(text(if project.favorite { "★" } else { "☆" }).size(18))
+        let favorite = icon_tip(
+            theme::button(
+                container(
+                    (if project.favorite {
+                        Icon::StarFilled
+                    } else {
+                        Icon::Star
+                    })
+                    .view(18.),
+                )
+                .center_y(24),
+            )
             .on_press(Message::Favorite(project.path.clone()))
             .padding([3, 8])
-            .style(theme::text_button);
+            .style(theme::text_button),
+            if project.favorite {
+                "Remove from favorites"
+            } else {
+                "Add to favorites"
+            },
+        );
         mouse_area(row![open, favorite].align_y(iced::Center))
             .on_right_press(Message::Press(Press::ProjectMenu(project.path.clone())))
             .into()
@@ -3819,7 +3858,7 @@ impl App {
             ]
             .spacing(10),
             projects,
-            theme::button(text("+ Add project").size(13))
+            theme::button(Icon::FolderPlus.label("Add project", 13.))
                 .on_press_maybe(self.harness.as_ref().map(|_| Message::AddProject))
                 .padding([6, 10])
                 .style(theme::text_button)
@@ -3828,11 +3867,12 @@ impl App {
         if stashed_count > 0 {
             content = content.push(
                 theme::button(
-                    text(format!(
-                        "{}  Stashed projects ({stashed_count})",
-                        if self.stashed_open { "▾" } else { "▸" }
-                    ))
-                    .size(13),
+                    row![
+                        chevron_icon(self.stashed_open),
+                        text(format!("Stashed projects ({stashed_count})")).size(13)
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center),
                 )
                 .on_press(Message::ToggleStashed)
                 .padding([6, 10])
@@ -3846,7 +3886,7 @@ impl App {
             content=content.push(text("Add a local folder to begin. Pico can read and edit files and run commands in your projects.").size(13).color(MUTED));
         }
         if self.account.is_none() {
-            content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).color(MUTED),theme::button("Open Settings →").on_press(Message::ToggleSettings).style(theme::text_button)].spacing(10)).padding(18).style(card));
+            content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).color(MUTED),theme::button(Icon::Settings.label("Open Settings", 16.)).on_press(Message::ToggleSettings).style(theme::text_button)].spacing(10)).padding(18).style(card));
         }
         container(scroll(
             container(content)
@@ -3890,7 +3930,7 @@ impl App {
             SettingsTab::Account => {
                 if let Some(account) = &self.account {
                     settings = settings.push(text(account).size(14)).push(
-                        theme::button("Sign out")
+                        theme::button(Icon::LogOut.label("Sign out", 16.))
                             .on_press(Message::Logout)
                             .style(secondary),
                     );
@@ -3898,7 +3938,7 @@ impl App {
                     settings = settings.push(text("Finish sign-in in your browser.").size(14));
                     if let Some(url) = &self.login_url {
                         settings = settings.push(
-                            theme::button("Copy login URL")
+                            theme::button(Icon::Copy.label("Copy login URL", 16.))
                                 .on_press(Message::Copy(url.clone()))
                                 .style(theme::text_button),
                         );
@@ -3912,7 +3952,7 @@ impl App {
                     settings = settings
                         .push(text("Use your ChatGPT subscription.").size(13).color(MUTED))
                         .push(
-                            theme::button("Sign in with ChatGPT")
+                            theme::button(Icon::LogIn.label("Sign in with ChatGPT", 16.))
                                 .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
                                 .padding(10),
                         );
@@ -3933,7 +3973,7 @@ impl App {
                     .push(text("Codex uses your ChatGPT subscription. API generations are billed separately. Pico never switches billing automatically.").size(12).color(MUTED))
                     .push(text("API model · generation and editing").size(12))
                     .push(text_input(DEFAULT_API_MODEL,&self.settings.images.model).style(theme::input).on_input(Message::ImageModel).padding(8))
-                    .push(theme::button("Reset API model to current default").on_press(Message::ResetImageModel).style(theme::text_button))
+                    .push(theme::button(Icon::RotateCcw.label("Reset API model to current default", 16.)).on_press(Message::ResetImageModel).style(theme::text_button))
                     .push(text("Quality · both backends").size(12))
                     .push(pick_list(QUALITIES,Some(self.settings.images.quality.as_str()),|q|Message::ImageQuality(q.into())).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
                     .push(text("Size is automatic. GIF and quality availability depend on your model and account. Unsupported choices return an error, never a silent downgrade.").size(12).color(MUTED));
@@ -4350,10 +4390,11 @@ impl App {
             let item = theme::button(
                 row![
                     ellipsized_text(option, FOOTER_MENU_TEXT_SIZE, None),
-                    text(if chosen { "✓" } else { "" })
-                        .size(FOOTER_MENU_TEXT_SIZE)
-                        .color(ACCENT)
-                        .width(16),
+                    if chosen {
+                        Icon::Check.colored(16., ACCENT)
+                    } else {
+                        space().width(16).height(16).into()
+                    },
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -4456,7 +4497,7 @@ impl App {
                 );
                 if matches!(modal, Modal::AddProject) {
                     content = content.push(
-                        theme::button("Browse folders…")
+                        theme::button(Icon::FolderOpen.label("Browse folders…", 16.))
                             .on_press(Message::Browse)
                             .style(secondary),
                     );
@@ -5384,9 +5425,12 @@ fn footer_tip<'a>(
 fn right_panel_header(title: &str, on_close: Message) -> Element<'_, Message> {
     row![
         text(title).size(22).width(Fill),
-        theme::button("×")
-            .on_press(on_close)
-            .style(theme::text_button),
+        icon_tip(
+            theme::button(container(Icon::X.view(16.)).center_x(20).center_y(22))
+                .on_press(on_close)
+                .style(theme::text_button),
+            "Close panel"
+        ),
     ]
     .align_y(iced::Center)
     .into()
@@ -7880,13 +7924,7 @@ Then implement the fix.";
             assert!(title.y > profile.y);
             assert!(title.x + title.width <= metadata.x);
             assert!((status.x + status.width - metadata.x - metadata.width).abs() <= 1.);
-            for label in [
-                "Agents",
-                "Completed",
-                "Explore",
-                "Inspect cancellation",
-                "■",
-            ] {
+            for label in ["Agents", "Completed", "Explore", "Inspect cancellation"] {
                 let rect = bounds.label(label);
                 assert!(
                     rect.x >= 0. && rect.x + rect.width <= width,
@@ -7915,8 +7953,8 @@ Then implement the fix.";
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
-            let stop = bounds.label("■");
             let status = bounds.label("●");
+            let stop = bounds.rightmost_control_at(status.center_y());
             assert_eq!(status.center_y(), stop.center_y());
             assert!(status.x + status.width < stop.x);
             assert!(stop.x + stop.width <= width);
@@ -8398,6 +8436,19 @@ Then implement the fix.";
                 .unwrap()
                 .center()
         }
+        // Locate icon-only controls by their relationship to the visible layout,
+        // not by font glyphs or implementation-specific SVG paths.
+        fn rightmost_control_at(&self, y: f32) -> iced::Rectangle {
+            *self
+                .containers
+                .iter()
+                .filter(|bounds| (bounds.center_y() - y).abs() < 0.5)
+                .max_by(|a, b| {
+                    a.x.total_cmp(&b.x)
+                        .then_with(|| b.width.total_cmp(&a.width))
+                })
+                .expect("control at row center")
+        }
         fn label(&self, value: &str) -> iced::Rectangle {
             self.labels
                 .iter()
@@ -8406,6 +8457,136 @@ Then implement the fix.";
                 .1
         }
     }
+    #[tokio::test]
+    async fn context_menu_icons_keep_labels_aligned_and_actions_reachable() {
+        let mut app = app();
+        let project = PathBuf::from("/icon-menu-project");
+        app.catalog.projects = vec![Project {
+            path: project.clone(),
+            display_name: None,
+            favorite: false,
+            stashed: false,
+        }];
+        let mut renderer = header_renderer();
+        for (width, height) in [(900., 620.), (360., 280.)] {
+            app.window_width = width;
+            app.window_height = height;
+            for kind in 0..3 {
+                app.catalog.projects[0].stashed = kind == 2;
+                let target = if kind == 0 {
+                    MenuTarget::Session("icon-menu-session".into())
+                } else {
+                    MenuTarget::Project(project.clone())
+                };
+                let middle = match kind {
+                    0 => "Copy session ID",
+                    1 => "Stash",
+                    _ => "Restore",
+                };
+                app.context_menu = Some((target, iced::Point::new(width - 1., height - 1.)));
+                let mut ui = iced_runtime::UserInterface::build(
+                    app.view(),
+                    iced::Size::new(width, height),
+                    iced_runtime::user_interface::Cache::new(),
+                    &mut renderer,
+                );
+                let mut bounds = UiBounds::default();
+                ui.operate(&renderer, &mut bounds);
+                use iced::advanced::Renderer as _;
+                ui.update(
+                    &[iced::Event::Window(window::Event::RedrawRequested(
+                        iced::time::Instant::now(),
+                    ))],
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Vec::new(),
+                );
+                renderer.reset(iced::Rectangle::with_size(iced::Size::new(width, height)));
+                ui.draw(
+                    &mut renderer,
+                    &theme::app(),
+                    &iced::advanced::renderer::Style {
+                        text_color: theme::TEXT,
+                    },
+                    mouse::Cursor::Unavailable,
+                );
+                let pixels = crate::test_renderer::screenshot(
+                    &mut renderer,
+                    iced::Size::new(width as u32, height as u32),
+                    1.,
+                    theme::BACKGROUND,
+                );
+                let rename = bounds.label("Rename");
+                for label in ["Rename", middle, "Delete"] {
+                    let text = bounds.label(label);
+                    assert_eq!(text.x, rename.x, "menu label column");
+                    assert_eq!(text.height, rename.height, "menu labels must not wrap");
+                    assert!(text.x >= 0. && text.x + text.width <= width);
+                    assert!(text.y >= 0. && text.y + text.height <= height);
+                    // Click the icon side of the action rather than only its label.
+                    let button = bounds
+                        .containers
+                        .iter()
+                        .filter(|b| {
+                            b.x < text.x
+                                && b.x + b.width >= text.x + text.width
+                                && (b.center_y() - text.center_y()).abs() < 0.5
+                        })
+                        .min_by(|a, b| a.width.total_cmp(&b.width))
+                        .unwrap();
+                    assert!(button.x >= 0. && button.x + button.width <= width);
+                    assert!(
+                        button.y >= 0. && button.y + button.height <= height,
+                        "menu {kind} {label}: button {button:?}, text {text:?}, viewport {width}x{height}"
+                    );
+                    // Both the icon column and the text must actually paint, not
+                    // merely report correct layout bounds to widget operations.
+                    for region in [
+                        text,
+                        iced::Rectangle {
+                            x: button.x,
+                            y: text.y,
+                            width: text.x - button.x,
+                            height: text.height,
+                        },
+                    ] {
+                        let mut colors = (region.y.ceil() as u32
+                            ..(region.y + region.height).floor() as u32)
+                            .flat_map(|y| {
+                                (region.x.ceil() as u32..(region.x + region.width).floor() as u32)
+                                    .map(move |x| ((y * width as u32 + x) * 4) as usize)
+                            })
+                            .map(|offset| &pixels[offset..offset + 3]);
+                        let first = colors.next().expect("nonempty painted region");
+                        assert!(
+                            colors.any(|color| color != first),
+                            "menu {kind}: {label} must paint text and icon"
+                        );
+                    }
+                    let messages = click_at(
+                        &mut ui,
+                        &mut renderer,
+                        iced::Point::new((button.x + text.x) / 2., text.center_y()),
+                    );
+                    match (kind, label, messages.as_slice()) {
+                        (0, "Rename", [Message::Rename(id)])
+                        | (0, "Copy session ID", [Message::CopySessionId(id)])
+                        | (0, "Delete", [Message::Delete(id)]) => {
+                            assert_eq!(id, "icon-menu-session")
+                        }
+                        (1 | 2, "Rename", [Message::RenameProject(path)])
+                        | (1 | 2, "Stash" | "Restore", [Message::StashProject(path)])
+                        | (1 | 2, "Delete", [Message::DeleteProject(path)]) => {
+                            assert_eq!(path, &project)
+                        }
+                        _ => panic!("wrong action for menu {kind}: {label}"),
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn right_panel_headers_match_and_close_their_own_panel() {
         let mut app = app();
@@ -8428,7 +8609,7 @@ Then implement the fix.";
                 let mut bounds = UiBounds::default();
                 ui.operate(&renderer, &mut bounds);
                 let title = bounds.label(title);
-                let close = bounds.label("×");
+                let close = bounds.rightmost_control_at(title.center_y());
                 assert_eq!(title.x, RIGHT_PANEL_PADDING);
                 // The title is centered within the taller close-button row.
                 assert!(title.y >= RIGHT_PANEL_PADDING);
@@ -8710,8 +8891,7 @@ Then implement the fix.";
                     .any(|b| b.x > footer.x + footer.width
                         && b.x + b.width == width
                         && b.y == 0.
-                        && b.height == height
-                        && b.contains(bounds.label("⚙").center()))
+                        && b.height == height)
             );
             let has_tps = bounds
                 .labels
@@ -8892,7 +9072,14 @@ Then implement the fix.";
                 [Message::ToggleSearch]
             ));
             assert!(matches!(
-                click_at(&mut ui, &mut renderer, bounds.label("+").center()).as_slice(),
+                click_at(
+                    &mut ui,
+                    &mut renderer,
+                    bounds
+                        .rightmost_control_at(bounds.leftmost_control().y)
+                        .center()
+                )
+                .as_slice(),
                 [Message::New]
             ));
             let messages = click_at(
@@ -9001,7 +9188,9 @@ Then implement the fix.";
             .unwrap()
             .1;
         let search = bounds.leftmost_control();
-        let new = bounds.label("+").center();
+        let new = bounds
+            .rightmost_control_at(bounds.leftmost_control().y)
+            .center();
         assert!(
             matches!(click_at(&mut ui, &mut renderer, iced::Point::new(favorites.x + 1., favorites.center_y())).as_slice(), [Message::Create(p)] if p == Path::new("/project-0"))
         );
@@ -9219,7 +9408,7 @@ Then implement the fix.";
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
             assert!(matches!(
-                click_at(&mut ui, &mut renderer, bounds.label("×").center()).as_slice(),
+                click_at(&mut ui, &mut renderer, bounds.leftmost_control()).as_slice(),
                 [Message::ToggleSearch]
             ));
             messages.into_iter().next().unwrap()
@@ -10419,7 +10608,7 @@ Then implement the fix.";
                 matches!(click_at(&mut ui, &mut renderer, beta.center()).as_slice(),
                 [Message::Create(path)] if path == Path::new("/project-1"))
             );
-            let star = bounds.label("★");
+            let star = bounds.rightmost_control_at(beta.center_y());
             assert!((star.center_y() - beta.center_y()).abs() < 1.);
             assert!(
                 matches!(click_at(&mut ui, &mut renderer, star.center()).as_slice(),

@@ -10,7 +10,6 @@ use iced::{
 };
 
 use crate::theme;
-use iced::advanced::svg::{self, Renderer as _};
 
 pub const WIDTH: f32 = 64.;
 pub const AGE_SIZE: f32 = 10.;
@@ -54,60 +53,6 @@ pub fn row<'a, Message: Clone + 'a>(
         action: action.into(),
         width,
     })
-}
-
-pub fn check_icon<'a, Message: 'a>(size: f32) -> Element<'a, Message> {
-    icon(include_bytes!("icons/check.svg"), size)
-}
-
-pub fn undo_icon<'a, Message: 'a>() -> Element<'a, Message> {
-    icon(include_bytes!("icons/undo.svg"), UNDO_SIZE)
-}
-
-fn icon<'a, Message: 'a>(bytes: &'static [u8], size: f32) -> Element<'a, Message> {
-    Element::new(Icon {
-        handle: svg::Handle::from_memory(bytes),
-        size,
-    })
-}
-
-/// Use Iced's native SVG renderer with the enclosing button's text color.
-/// A checkmark must brighten when hovering its label, not only the SVG itself.
-struct Icon {
-    handle: svg::Handle,
-    size: f32,
-}
-
-impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Icon {
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Fixed(self.size), Length::Fixed(self.size))
-    }
-
-    fn layout(
-        &mut self,
-        _tree: &mut Tree,
-        _renderer: &iced::Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        layout::Node::new(limits.resolve(self.size, self.size, Size::ZERO))
-    }
-
-    fn draw(
-        &self,
-        _tree: &Tree,
-        renderer: &mut iced::Renderer,
-        _theme: &iced::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        _cursor: mouse::Cursor,
-        _viewport: &Rectangle,
-    ) {
-        renderer.draw_svg(
-            svg::Svg::new(self.handle.clone()).color(style.text_color),
-            layout.bounds(),
-            layout.bounds(),
-        );
-    }
 }
 
 struct SessionAction<'a, Message> {

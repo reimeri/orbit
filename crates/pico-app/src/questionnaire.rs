@@ -1,4 +1,5 @@
 //! V1-style composer replacement. Drafts live in the app, never in session storage.
+use crate::icons::Icon;
 use crate::scrollbar::scroll;
 use crate::theme::{self, DANGER, MUTED};
 use iced::{
@@ -357,7 +358,7 @@ impl Draft {
                     let mut option_row = row![label].align_y(iced::Center);
                     if index < self.options().len() {
                         option_row = option_row.push(
-                            theme::button(text("Edit").size(12))
+                            theme::button(Icon::Pencil.label("Edit", 12.))
                                 .padding([7, 10])
                                 .on_press(message(Action::Edit(index)))
                                 .style(theme::sidebar_control),
@@ -452,14 +453,14 @@ impl Draft {
                 .spacing(8)
             } else {
                 row![
-                    theme::button("Back")
+                    theme::button(Icon::ArrowLeft.label("Back", 16.))
                         .on_press_maybe((self.current > 0).then(|| message(Action::Back)))
                         .style(theme::text_button),
                     space().width(Fill),
                     theme::button(if self.current + 1 == self.answers.len() {
-                        "Submit"
+                        Icon::Check.label("Submit", 16.)
                     } else {
-                        "Next"
+                        Icon::ArrowRight.label("Next", 16.)
                     })
                     .on_press_maybe(self.answered(self.current).then(|| message(Action::Next)))
                     .style(theme::text_button)
