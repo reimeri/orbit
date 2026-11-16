@@ -57,6 +57,10 @@ reconnection. Smoke mode never connects to the desktop notification service.
 
 ## Sidebar status and unchecked completion
 
+The sidebar lists **Needs attention** (pending questions and errors) first, then
+**Working**, then **Sessions** (including unchecked completions). Ordering within
+each section is unchanged.
+
 Session rows have a subtle blue moving wave while the main agent or its children
 are working. A pending questionnaire takes priority and freezes the wave in yellow;
 otherwise unacknowledged errors/interruption (including child failures) freeze it in

@@ -803,7 +803,7 @@ impl App {
             sections[status.section()].push(SidebarRow::Session(index, status));
         }
         self.sidebar_rows.clear();
-        for (name, section) in ["WORKING", "NEEDS ATTENTION", "SESSIONS"]
+        for (name, section) in ["NEEDS ATTENTION", "WORKING", "SESSIONS"]
             .into_iter()
             .zip(sections)
         {
@@ -5240,12 +5240,12 @@ impl App {
                 self.sessions.clear();
                 self.sidebar_rows.clear();
                 for (title, status) in [
-                    ("Working — animated blue wave", SessionStatus::Working),
                     (
                         "Questionnaire — frozen yellow wave",
                         SessionStatus::Question,
                     ),
                     ("Error — frozen red wave", SessionStatus::Error),
+                    ("Working — animated blue wave", SessionStatus::Working),
                     ("Completed — not yet checked", SessionStatus::Unchecked),
                     ("Checked — ordinary session age", SessionStatus::Idle),
                 ] {
@@ -5254,10 +5254,10 @@ impl App {
                     session.title = title.into();
                     let index = self.sessions.len();
                     self.sessions.push(SessionSummary::from(&session));
-                    if index != 2 && index != 4 {
-                        let heading = ["WORKING", "NEEDS ATTENTION", "SESSIONS"][status.section()];
+                    if index != 1 && index != 4 {
+                        let heading = ["NEEDS ATTENTION", "WORKING", "SESSIONS"][status.section()];
                         self.sidebar_rows
-                            .push(SidebarRow::Heading(heading, if index == 0 { 1 } else { 2 }));
+                            .push(SidebarRow::Heading(heading, if index == 2 { 1 } else { 2 }));
                     }
                     self.sidebar_rows.push(SidebarRow::Session(index, status));
                 }

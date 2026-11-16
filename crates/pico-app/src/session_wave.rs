@@ -31,8 +31,8 @@ pub enum Status {
 impl Status {
     pub fn section(self) -> usize {
         match self {
-            Self::Working => 0,
-            Self::Question | Self::Error => 1,
+            Self::Question | Self::Error => 0,
+            Self::Working => 1,
             Self::Unchecked | Self::Idle => 2,
         }
     }
