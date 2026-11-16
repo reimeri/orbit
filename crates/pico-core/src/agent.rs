@@ -1,11 +1,12 @@
 pub mod attention;
+mod execution;
 mod naming;
 pub mod notifications;
 pub mod subagents;
 use crate::{
     auth::Auth,
     code_mode::{CodeMode, Event as CodeEvent},
-    provider::{Delta, Provider},
+    provider::Provider,
     shell::Shell,
     store::{Entry, EntryKind, Session, SessionSummary, Settings, Store},
 };
@@ -425,8 +426,14 @@ impl Harness {
             }
             conversation.save()?;
         }
-        if interrupted {
-            conversation.state.lock().expect("session lock").entries.push(Entry::new(EntryKind::Notice,"Previous turn was interrupted. Send a new message to continue; commands already executed are not undone."));
+        if interrupted || conversation.snapshot().in_progress_response.is_some() {
+            {
+                let mut state = conversation.state.lock().expect("session lock");
+                repair_calls(&mut state);
+                state.needs_attention = true;
+                state.entries.push(Entry::new(EntryKind::Notice,"Previous turn was interrupted. Send a new message to continue; commands already executed are not undone."));
+            }
+            conversation.save()?;
         }
         Ok(conversation)
     }
@@ -894,54 +901,27 @@ impl Harness {
             }
             *conversation.status.lock().expect("status lock") = "Thinking…".into();
             conversation.changed();
-            let target = conversation.clone();
             let result = self
-                .provider
-                .respond(
-                    &snapshot,
-                    &instructions,
-                    cancel,
-                    &move |delta| match delta {
-                        Delta::Status(status) => {
-                            *target.status.lock().expect("status lock") = status;
-                            target.changed();
-                        }
-                        Delta::Text {
-                            id,
-                            text,
-                            reasoning,
-                        } => {
-                            *target.status.lock().expect("status lock") = if reasoning {
-                                "Thinking…"
-                            } else {
-                                "Writing…"
-                            }
-                            .into();
-                            let mut s = target.state.lock().expect("session lock");
-                            if let Some(entry) = s.entries.by_id_mut(&id) {
-                                entry.text.push_str(&text);
-                            } else {
-                                s.entries.push(Entry {
-                                    id,
-                                    text,
-                                    kind: if reasoning {
-                                        EntryKind::Reasoning
-                                    } else {
-                                        EntryKind::Assistant
-                                    },
-                                });
-                            }
-                            target.changed();
-                        }
-                    },
-                )
+                .respond_and_execute(conversation, &snapshot, &instructions, cancel)
                 .await;
             let response = match result {
                 Ok(response) => response,
                 Err(error)
                     if error.is::<crate::provider::ContextLimit>()
+                        && conversation
+                            .state
+                            .lock()
+                            .expect("session lock")
+                            .in_progress_response
+                            .as_ref()
+                            .is_some_and(|response| response.items.is_empty())
                         && compacted_size != Some(snapshot.input.len()) =>
                 {
+                    conversation
+                        .state
+                        .lock()
+                        .expect("session lock")
+                        .in_progress_response = None;
                     *conversation.status.lock().expect("status lock") =
                         "Recovering context capacity…".into();
                     conversation.changed();
@@ -960,123 +940,19 @@ impl Harness {
                 Err(error) => return Err(error),
             };
             let final_text = subagents::final_response(&response.output);
-            let calls: Vec<_> = response
-                .output
-                .iter()
-                .filter(|v| {
-                    matches!(
-                        v["type"].as_str(),
-                        Some("function_call" | "custom_tool_call")
-                    )
-                })
-                .cloned()
-                .collect();
+            let has_calls = response.output.iter().any(execution::is_tool_call);
             {
                 let mut s = conversation.state.lock().expect("session lock");
-                reconcile_text(&mut s, &response.output);
-                conversation
-                    .turn_usage
-                    .lock()
-                    .expect("turn usage lock")
-                    .record_response(&response);
-                s.usage.record_response(response.usage);
                 s.input.extend(response.output);
+                let progress = s.in_progress_response.take().expect("active response");
+                s.input
+                    .extend(progress.results.into_iter().map(|(_, value)| value));
                 conversation.changed();
             }
             conversation.save_async().await?;
-            for call in &calls {
-                if cancel.is_cancelled() {
-                    bail!("Turn cancelled");
-                }
-                let name = call["name"]
-                    .as_str()
-                    .context("Missing tool name")?
-                    .to_owned();
-                let call_id = call["call_id"]
-                    .as_str()
-                    .context("Missing tool call ID")?
-                    .to_owned();
-                let input = if call["type"] == "custom_tool_call" {
-                    call["input"].as_str()
-                } else {
-                    call["arguments"].as_str()
-                }
-                .context("Missing tool input")?
-                .to_owned();
-                *conversation.status.lock().expect("status lock") = format!("Running {name}…");
-                {
-                    let mut s = conversation.state.lock().expect("session lock");
-                    s.entries.push(Entry {
-                        id: call_id.clone(),
-                        text: String::new(),
-                        kind: EntryKind::Tool {
-                            name: name.clone(),
-                            input: input.clone(),
-                            output: String::new(),
-                            complete: false,
-                            failed: false,
-                            cell_id: None,
-                            parent: None,
-                            media: vec![],
-                            web: None,
-                        },
-                    });
-                    conversation.changed();
-                }
-                conversation.save_async().await?;
-                let conv = conversation.clone();
-                let token = cancel.clone();
-                let parent = call_id.clone();
-                let result = tokio::task::spawn_blocking(move || match name.as_str() {
-                    "exec" => conv.code.exec_output(&input, &parent, &token),
-                    "wait" => conv.code.wait_output(&input, &token),
-                    _ => bail!("Unknown tool {name}; only exec and wait are top-level tools"),
-                })
-                .await?;
-                let output = result.unwrap_or_else(|e| {
-                    let mut output = crate::media::Output::text(format!("Tool error: {e:#}"));
-                    output.failed = true;
-                    output
-                });
-                {
-                    let mut s = conversation.state.lock().expect("session lock");
-                    if let Some(entry) = s.entries.by_id_mut(&call_id)
-                        && let EntryKind::Tool {
-                            output: result,
-                            media,
-                            complete,
-                            failed,
-                            cell_id,
-                            ..
-                        } = &mut entry.kind
-                    {
-                        *failed = output.failed;
-                        *cell_id = output.cell_id.clone();
-                        *result = output.summary();
-                        *media = output.media();
-                        *complete = true;
-                    }
-                    s.input.push(json!({"type":if call["type"] == "custom_tool_call" { "custom_tool_call_output" } else { "function_call_output" },"call_id":call_id,"output":output.history()}));
-                    conversation.changed();
-                }
-                conversation.save_async().await?;
-                // A yielded cell is not permission to continue past unanswered questions.
-                // Reuse the conversation's change signal; subscribe before checking so
-                // submission/cancellation cannot be missed between the check and await.
-                if let Some(questions) = &conversation.questionnaires {
-                    let mut changes = conversation.changes.subscribe();
-                    while questions.has_pending() {
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => bail!("Turn cancelled"),
-                            changed = changes.changed() => { changed?; }
-                        }
-                    }
-                }
-            }
             // A steering message accepted during streaming/tool execution is consumed at this boundary.
             let state = conversation.state.lock().expect("session lock");
-            if calls.is_empty()
+            if !has_calls
                 && state.pending.is_empty()
                 && state.pending_tool_outputs.is_empty()
                 && state.subagent_notices.is_empty()
@@ -1135,6 +1011,16 @@ impl Harness {
     }
 }
 fn repair_calls(session: &mut Session) {
+    // Completed response items survive stream failure/restart even if response.completed
+    // never arrived. Preserve successful results before repairing uncertain executions.
+    if let Some(progress) = session.in_progress_response.take() {
+        let output: Vec<_> = progress.items.into_iter().map(|(_, value)| value).collect();
+        reconcile_text(session, &output);
+        session.input.extend(output);
+        session
+            .input
+            .extend(progress.results.into_iter().map(|(_, value)| value));
+    }
     let completed: HashSet<_> = session
         .input
         .iter()

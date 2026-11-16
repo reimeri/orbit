@@ -27,7 +27,7 @@ Responses tools, with built-ins available through JavaScript's `tools` object.
 
 | Area | Pico V2 | Public Codex |
 | --- | --- | --- |
-| Tool dispatch | Waits for the entire model response to complete, then processes top-level tool calls sequentially in response order. | Can dispatch completed tool calls while the response is still streaming; tools may run concurrently or exclusively according to their capabilities. |
+| Tool dispatch | Starts completed top-level calls while the response is still streaming, in response order. `exec` and `wait` invocations are exclusive; yielded cells can continue running. | Can dispatch completed tool calls while the response is still streaming; tools may run concurrently or exclusively according to their capabilities. Its code-mode `exec` and `wait` are exclusive. |
 | Steering | Saves messages accepted during a turn and consumes them at the next loop boundary, after the current response and its returned calls. Does not preempt the active model request. | Has sampling interruption/draining and follow-up machinery for incoming messages; behavior depends on the execution path. |
 | Recovery | Retries connection/setup failures and selected HTTP errors. A stream interruption ends the turn with a recoverable error rather than automatically retrying generation. Incomplete tool calls are not executed. | Has stream-level retry and transport fallback, while treating some provider outcomes as terminal rather than retryable. |
 | Transport | Uses HTTP/SSE and sends the current accumulated input context on each request. | Also supports persistent WebSockets, preconnection, request prewarming and incremental continuation. |
@@ -35,18 +35,31 @@ Responses tools, with built-ins available through JavaScript's `tools` object.
 
 **Sequential dispatch does not mean Pico has no concurrency.** A JavaScript cell
 can run nested calls with `Promise.all`, yielded cells can remain running, shell
-sessions can outlive a call, and subagents run asynchronously. The distinction is
-how separate top-level calls from one model response are dispatched. Pico currently
-advertises `parallel_tool_calls: true` but processes those calls sequentially.
+sessions can outlive a call, and subagents run asynchronously. Pico advertises
+`parallel_tool_calls: true`, allowing the model to return multiple calls, but
+serializes its two top-level tools. That matches the pinned Codex
+code-mode handlers: [`exec`][codex-exec] and [`wait`][codex-wait] inherit the
+[executor's non-parallel default][codex-executor]. This is invocation exclusivity,
+not a prohibition on concurrent work inside or beyond a yielded cell.
 
-Pico saves tool-call state before execution. Recovery pairs unfinished calls with
-an explicit interrupted result rather than blindly repeating potentially completed
-side effects. Stop cancels ongoing work; it does not undo completed commands.
+Pico dispatches from validated `response.output_item.done` events, never from partial
+arguments. A durable in-progress response retains completed items and tool results
+before the final response arrives. Calls are saved before execution; results are
+saved as invocations finish or yield. Final reconciliation does not dispatch a call
+twice, and model context retains response-item order followed by tool-result order.
+
+Recovery pairs unfinished calls with an explicit interrupted result rather than
+blindly repeating potentially completed side effects. Stream failure stops new
+dispatch, cancels that response's active work and settles its invocation before
+repairing history. Completed results survive failure/restart; interrupted streams
+are not automatically replayed. Context-limit recovery cannot compact and retry a
+stale snapshot after completed response items have arrived. Stop cancels ongoing
+work; it does not undo completed commands.
 Fallback compaction preserves historical context and oversized output references
 rather than treating a summary as the only surviving copy.
 
 Implementation references: Pico's [agent loop](../crates/pico-core/src/agent.rs),
-[provider](../crates/pico-core/src/provider.rs) and [code-mode contract](code-mode.md);
+[early execution](../crates/pico-core/src/agent/execution.rs), [provider](../crates/pico-core/src/provider.rs) and [code-mode contract](code-mode.md);
 Codex's [turn execution][codex-turn], [tool scheduling][codex-parallel],
 [retry handling][codex-retry] and [background compaction][codex-compaction].
 
@@ -196,8 +209,10 @@ machinery. Pico's subagents are read-only **by instruction**, not filesystem
 isolation. They use fixed profiles, isolated context, no nested delegation and
 idle-child continuation; see [subagent contracts](subagents.md).
 
-The most direct loop-behavior gaps are streaming/parallel top-level tool dispatch,
-preemptive steering and automatic stream recovery. Prewarming and incremental
+The remaining direct loop-behavior gaps include preemptive steering and automatic
+stream recovery. Early exclusive dispatch now matches the code-mode-only top-level
+scheduling needed by Pico; it does not implement Codex's general capability-based
+scheduler for other top-level tool catalogs. Prewarming and incremental
 requests are primarily performance work. Deferred discovery primarily matters if
 the tool ecosystem grows. These distinctions do not require replacing the basic
 agent-loop architecture, and do not by themselves establish a model-quality gap.
@@ -211,3 +226,7 @@ agent-loop architecture, and do not by themselves establish a model-quality gap.
 [codex-client]: https://github.com/openai/codex/blob/0d07dae8c9f7b0cd390aa4340fc1376b9d7c2e33/codex-rs/core/src/client.rs
 [api-websocket]: https://developers.openai.com/api/docs/guides/websocket-mode
 [api-state]: https://developers.openai.com/api/docs/guides/conversation-state
+
+[codex-exec]: https://github.com/openai/codex/blob/0d07dae8c9f7b0cd390aa4340fc1376b9d7c2e33/codex-rs/core/src/tools/code_mode/execute_handler.rs
+[codex-wait]: https://github.com/openai/codex/blob/0d07dae8c9f7b0cd390aa4340fc1376b9d7c2e33/codex-rs/core/src/tools/code_mode/wait_handler.rs
+[codex-executor]: https://github.com/openai/codex/blob/0d07dae8c9f7b0cd390aa4340fc1376b9d7c2e33/codex-rs/tools/src/tool_executor.rs

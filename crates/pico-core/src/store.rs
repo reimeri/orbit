@@ -281,6 +281,14 @@ impl Usage {
         self.total_cached = total_cached;
     }
 }
+/// A response may execute tools before its final output arrives. Keep the raw
+/// completed items and results durable until they can be committed in model order.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct InProgressResponse {
+    pub items: im::OrdMap<usize, Value>,
+    pub results: im::OrdMap<usize, Value>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -310,6 +318,8 @@ pub struct Session {
     pub pending: Vec<UserMessage>,
     pub pending_submissions: Vec<String>,
     pub pending_tool_outputs: Vec<Value>,
+    #[serde(default)]
+    pub in_progress_response: Option<InProgressResponse>,
     pub interrupted: bool,
     pub needs_attention: bool,
     /// A successful main turn completed since the session was last opened.
@@ -343,6 +353,7 @@ impl Session {
             pending: vec![],
             pending_submissions: vec![],
             pending_tool_outputs: vec![],
+            in_progress_response: None,
             interrupted: false,
             needs_attention: false,
             unchecked_completion: false,

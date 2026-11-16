@@ -84,6 +84,34 @@ ID for retry after fixing disk space or permissions; do not rerun the command.
 The app cancels process groups on Stop and exit. Deliberately daemonized/re-parented processes can escape process-group
 cleanup; this is not a sandbox or a process supervisor.
 
+## Early execution and recovery
+
+Completed top-level calls start while the model response is still streaming. Pico
+waits for the complete output-item event, not just parseable argument text. Calls
+execute in response order with at most one `exec`/`wait` invocation active. Missing
+earlier output items hold later calls until their ordering is resolved. A yielded
+cell releases the invocation slot while its background work continues; nested
+`Promise.all` concurrency is unchanged. Unanswered questionnaires retain the
+existing post-tool barrier.
+
+Completed response items and tool results are journaled durably until the response
+is committed to context. Calls are saved before execution, and results before the
+next invocation. Final response reconciliation does not rerun early calls. Images
+emitted by an earlier invocation are available to subsequent image-edit requests
+even before the model response finishes.
+
+On stream failure or Stop, no more calls are admitted. Active response work is
+cancelled and its invocation settled before interrupted-call repair. Text and media
+already buffered by the active cell are drained into its interrupted result, not
+discarded. Completed results survive, and calls with uncertain side effects receive an explicit
+interrupted result rather than being replayed. Restart repairs the same journal.
+If storage fails, execution stops and unsaved results remain in memory for a save
+retry; keep Pico open and fix disk space/permissions before continuing.
+
+This does not change SSE transport, steering boundaries, or add automatic replay
+of interrupted model responses. The next model request still waits for the current
+response and its invocations to finish, including questionnaire barriers.
+
 ## Reference provenance
 
 The top-level grammar/schema and execution semantics were checked against the

@@ -660,15 +660,8 @@ pub(super) fn final_response(output: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-        sync::mpsc,
-    };
-    struct Request {
-        body: Value,
-        reply: mpsc::UnboundedSender<String>,
-    }
+    use crate::test_support::StreamingRequest as Request;
+    use tokio::sync::mpsc;
     struct Fixture {
         _dir: tempfile::TempDir,
         h: Arc<Harness>,
@@ -703,72 +696,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}", listener.local_addr().unwrap());
-            let (tx, requests) = mpsc::unbounded_channel();
-            let server = tokio::spawn(async move {
-                loop {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        let mut bytes = vec![];
-                        let end = loop {
-                            let mut buffer = [0; 4096];
-                            let n = socket.read(&mut buffer).await.unwrap();
-                            if n == 0 {
-                                return;
-                            }
-                            bytes.extend_from_slice(&buffer[..n]);
-                            if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
-                                break end + 4;
-                            }
-                        };
-                        let header = std::str::from_utf8(&bytes[..end]).unwrap();
-                        let length: usize = header
-                            .lines()
-                            .find_map(|s| {
-                                s.to_ascii_lowercase()
-                                    .strip_prefix("content-length: ")
-                                    .map(str::to_owned)
-                            })
-                            .unwrap()
-                            .parse()
-                            .unwrap();
-                        while bytes.len() < end + length {
-                            let mut buffer = [0; 4096];
-                            let n = socket.read(&mut buffer).await.unwrap();
-                            if n == 0 {
-                                return;
-                            }
-                            bytes.extend_from_slice(&buffer[..n]);
-                        }
-                        let (reply, mut rx) = mpsc::unbounded_channel();
-                        if tx
-                            .send(Request {
-                                body: serde_json::from_slice(&bytes[end..end + length]).unwrap(),
-                                reply,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                        if socket
-                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                        while let Some(body) = rx.recv().await {
-                            let chunk = format!("{:x}\r\n{body}\r\n", body.len());
-                            if socket.write_all(chunk.as_bytes()).await.is_err() {
-                                return;
-                            }
-                        }
-                        let _ = socket.write_all(b"0\r\n\r\n").await;
-                    });
-                }
-            });
+            let (endpoint, requests, server) = crate::test_support::streaming_server().await;
             let provider = Provider::fixture(store.clone(), endpoint);
             let h = Harness::with_provider(store.clone(), vec![], provider).unwrap();
             let mut session = Session::new(dir.path().into(), &Settings::default());

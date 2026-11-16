@@ -210,6 +210,7 @@ impl CodeMode {
         });
         self.observe(
             &cell_id,
+            cell,
             pragma.yield_time_ms.unwrap_or(10_000),
             pragma.max_output_tokens.unwrap_or(10_000),
             cancel,
@@ -221,16 +222,19 @@ impl CodeMode {
     }
     pub fn wait_output(&self, args: &str, cancel: &CancellationToken) -> Result<Output> {
         let args: Wait = serde_json::from_str(args)?;
+        let cell = self
+            .cells
+            .lock()
+            .expect("cell lock")
+            .get(&args.cell_id)
+            .cloned()
+            .context("Unknown or already closed cell")?;
         if args.terminate.unwrap_or(false) {
-            let cells = self.cells.lock().expect("cell lock");
-            cells
-                .get(&args.cell_id)
-                .context("Unknown or already closed cell")?
-                .cancel
-                .cancel();
+            cell.cancel.cancel();
         }
         self.observe(
             &args.cell_id,
+            cell,
             args.yield_time_ms.unwrap_or(10_000),
             args.max_tokens.unwrap_or(10_000),
             cancel,
@@ -239,79 +243,97 @@ impl CodeMode {
     fn observe(
         &self,
         id: &str,
+        cell: Arc<Cell>,
         ms: u64,
         tokens: usize,
         cancel: &CancellationToken,
     ) -> Result<Output> {
-        let cell = self
-            .cells
-            .lock()
-            .expect("cell lock")
-            .get(id)
-            .cloned()
-            .context("Unknown or already closed cell")?;
-        self.shell.runtime().block_on(async {
-            let deadline=tokio::time::Instant::now()+Duration::from_millis(ms.min(300_000));
+        let interrupted = self.shell.runtime().block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(ms.min(300_000));
+            let mut interrupted = false;
             loop {
-                let notified=cell.state.1.notified();
-                { let state=cell.state.0.lock().expect("cell state");if state.done || state.yielded {break;} }
+                let notified = cell.state.1.notified();
+                {
+                    let state = cell.state.0.lock().expect("cell state");
+                    if state.done || (!interrupted && state.yielded) {
+                        break;
+                    }
+                }
                 tokio::select! {
                     biased;
-                    _=cancel.cancelled()=>{cell.cancel.cancel();self.cells.lock().expect("cell lock").remove(id);bail!("Execution cancelled");}
-                    _=tokio::time::sleep_until(deadline)=>break,
-                    _=notified=>{}
+                    _ = cancel.cancelled(), if !interrupted => {
+                        cell.cancel.cancel();
+                        interrupted = true;
+                        // Wait for the cell to finish emitting before draining its output.
+                        // Returning an error here would discard buffered text and media.
+                    }
+                    _ = tokio::time::sleep_until(deadline), if !interrupted => break,
+                    _ = notified => {}
                 }
             }
-            Ok::<_,anyhow::Error>(())
-        })?;
-        let mut state = cell.state.0.lock().expect("cell state");
-        state.yielded = false;
-        let mut budget = character_budget(tokens);
-        let mut pending = Vec::new();
-        for part in &mut state.parts {
-            pending.push(match part {
-                BufferedPart::Text(buffer) => {
-                    let text = buffer.prepare_read(budget).with_context(|| {
-                        format!("Could not return cell output; retry wait with cell_id {id}")
-                    })?;
-                    budget = budget.saturating_sub(text.chars().count());
-                    Part::InputText { text }
-                }
-                BufferedPart::Media(media) => Part::PicoMedia {
-                    media: media.clone(),
-                },
-            });
-        }
-        let output = state.output.prepare_read(budget).with_context(|| {
-            format!("Could not return cell output; retry wait with cell_id {id}")
-        })?;
-        if !output.is_empty() {
-            pending.push(Part::InputText { text: output });
-        }
-        state.parts.clear();
-        state.output = OutputBuffer::default();
-        let status = if state.done {
-            self.cells.lock().expect("cell lock").remove(id);
-            match &state.error {
-                Some(e) => format!(
-                    "Script failed: {}",
-                    crate::output::preserve_text(e, character_budget(tokens))
-                ),
-                None => "Script completed".into(),
+            interrupted
+        });
+        let result = (|| {
+            let mut state = cell.state.0.lock().expect("cell state");
+            state.yielded = false;
+            let mut budget = character_budget(tokens);
+            let mut pending = Vec::new();
+            for part in &mut state.parts {
+                pending.push(match part {
+                    BufferedPart::Text(buffer) => {
+                        let text = buffer.prepare_read(budget).with_context(|| {
+                            format!("Could not return cell output; retry wait with cell_id {id}")
+                        })?;
+                        budget = budget.saturating_sub(text.chars().count());
+                        Part::InputText { text }
+                    }
+                    BufferedPart::Media(media) => Part::PicoMedia {
+                        media: media.clone(),
+                    },
+                });
             }
-        } else {
-            format!("Script running with cell ID {id}")
-        };
-        let mut parts = vec![Part::InputText {
-            text: format!("{status}\nOutput:"),
-        }];
-        parts.extend(pending);
-        Ok(Output {
-            parts,
-            failed: state.error.is_some(),
-            cell_id: Some(id.to_owned()),
-        })
+            let output = state.output.prepare_read(budget).with_context(|| {
+                format!("Could not return cell output; retry wait with cell_id {id}")
+            })?;
+            if !output.is_empty() {
+                pending.push(Part::InputText { text: output });
+            }
+            state.parts.clear();
+            state.output = OutputBuffer::default();
+            let status = if state.done {
+                self.cells.lock().expect("cell lock").remove(id);
+                match &state.error {
+                    Some(e) => format!(
+                        "Script failed: {}",
+                        crate::output::preserve_text(e, character_budget(tokens))
+                    ),
+                    None if interrupted => "Script cancelled".into(),
+                    None => "Script completed".into(),
+                }
+            } else {
+                format!("Script running with cell ID {id}")
+            };
+            let mut parts = vec![Part::InputText {
+                text: format!("{status}\nOutput:"),
+            }];
+            parts.extend(pending);
+            Ok(Output {
+                parts,
+                failed: interrupted || state.error.is_some(),
+                cell_id: Some(id.to_owned()),
+            })
+        })();
+        if result.is_err() {
+            // Stop may have removed the ID while this observation was active. Failed
+            // output preservation must still leave its unread buffers available to wait.
+            self.cells
+                .lock()
+                .expect("cell lock")
+                .insert(id.to_owned(), cell);
+        }
+        result
     }
+
     pub fn is_executing(&self) -> bool {
         self.active_cells.load(Ordering::Acquire) > 0
             || self.workers.load(Ordering::Acquire) > 0

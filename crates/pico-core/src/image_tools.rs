@@ -234,15 +234,16 @@ impl ImageTools {
         settings.validate()?;
         let mut images = Vec::new();
         if let Some(count) = args.num_last_images_to_include {
-            for m in media::recent(
-                (self.history)()?
-                    .input
+            let session = (self.history)()?;
+            // Earlier calls in this response can already have emitted images even
+            // though the model response has not yet been committed to input.
+            let history = session.input.iter().chain(
+                session
+                    .in_progress_response
                     .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter(),
-                count,
-            )? {
+                    .flat_map(|progress| progress.items.values().chain(progress.results.values())),
+            );
+            for m in media::recent(history.cloned(), count)? {
                 if m.mime == "image/gif" {
                     bail!(
                         "Recent image is a GIF. Create and reference a regular-grid spritesheet for GIF editing, not the animation itself. No request was sent"
@@ -604,6 +605,43 @@ mod tests {
                 .starts_with("data:image/png;base64,")
         );
         task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn recent_image_edit_includes_results_from_the_still_streaming_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tools = fixture(dir.path(), true);
+        api(&tools);
+        let mut session = (tools.history)().unwrap();
+        let older = tools.media.image(&gif()).unwrap();
+        let latest = tools.media.image(&png()).unwrap();
+        session
+            .input
+            .push(json!({"type":"custom_tool_call_output", "call_id":"old",
+            "output":[{"type":"pico_media","media":older}]}));
+        let mut progress = crate::store::InProgressResponse::default();
+        progress.results.insert(
+            0,
+            json!({"type":"custom_tool_call_output", "call_id":"early",
+            "output":[{"type":"pico_media","media":latest}]}),
+        );
+        session.in_progress_response = Some(progress);
+        tools.history = Arc::new(move || Ok(session.clone()));
+        let (url, mut requests, server) = server(vec![(200, response(&png()))]).await;
+        tools.api_endpoint = url;
+        tools.call("image_gen__imagegen",
+            r#"{"prompt":"edit the image just returned","output_path":"edited.png","num_last_images_to_include":1}"#,
+            "edit", &CancellationToken::new()).await.unwrap();
+        let request = requests.recv().await.unwrap();
+        assert!(request.starts_with("POST /edits"));
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["images"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            media::parse_data_url(body["images"][0]["image_url"].as_str().unwrap())
+                .unwrap()
+                .1,
+            png()
+        );
+        server.await.unwrap();
     }
     #[tokio::test]
     async fn codex_uses_oauth_and_never_api_key_and_http_failure_is_not_replayed() {

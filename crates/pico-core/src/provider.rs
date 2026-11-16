@@ -23,6 +23,10 @@ pub enum Delta {
         reasoning: bool,
     },
     Status(String),
+    OutputItem {
+        index: usize,
+        item: Value,
+    },
 }
 #[derive(Debug)]
 pub struct Response {
@@ -389,8 +393,8 @@ impl Provider {
                     "ChatGPT request failed ({status}): {error}. Check model/access in Settings, then retry."
                 );
             }
-            // Never automatically replay a response after any streaming content. In particular,
-            // a truncated function call must not execute or be guessed from partial arguments.
+            // Never replay an interrupted stream: completed calls may already be executing.
+            // Partial arguments never release a call.
             let mut stream = response.bytes_stream();
             let mut decoder = Sse::default();
             let mut response_stream = ResponseStream::default();
@@ -486,8 +490,69 @@ impl Sse {
 struct ResponseStream {
     first_token: Option<Instant>,
     summary_indices: std::collections::HashMap<String, u64>,
+    completed_items: std::collections::BTreeMap<usize, Value>,
 }
+fn is_tool_call(item: &Value) -> bool {
+    matches!(
+        item["type"].as_str(),
+        Some("function_call" | "custom_tool_call")
+    )
+}
+
+fn validate_output_item(item: &Value) -> Result<()> {
+    item["type"].as_str().context("Output item missing type")?;
+    if is_tool_call(item) {
+        for field in [
+            "call_id",
+            "name",
+            if item["type"] == "custom_tool_call" {
+                "input"
+            } else {
+                "arguments"
+            },
+        ] {
+            item[field]
+                .as_str()
+                .with_context(|| format!("Completed tool call missing {field}"))?;
+        }
+        if item["call_id"] == ""
+            || item["name"] == ""
+            || item
+                .get("status")
+                .is_some_and(|status| status != "completed")
+        {
+            bail!("Invalid or incomplete tool call; earlier completed calls may have executed");
+        }
+    }
+    Ok(())
+}
+
 impl ResponseStream {
+    fn complete_item(
+        &mut self,
+        index: usize,
+        item: Value,
+        emit: &(dyn Fn(Delta) + Send + Sync),
+    ) -> Result<()> {
+        validate_output_item(&item)?;
+        if let Some(previous) = self.completed_items.get(&index) {
+            if previous != &item {
+                bail!("Provider changed an already completed output item");
+            }
+            return Ok(());
+        }
+        if is_tool_call(&item)
+            && self
+                .completed_items
+                .values()
+                .any(|previous| is_tool_call(previous) && previous["call_id"] == item["call_id"])
+        {
+            bail!("Provider returned duplicate tool call IDs");
+        }
+        self.completed_items.insert(index, item.clone());
+        emit(Delta::OutputItem { index, item });
+        Ok(())
+    }
     fn event(
         &mut self,
         event: Value,
@@ -542,6 +607,12 @@ impl ResponseStream {
                     reasoning,
                 });
             }
+            "response.output_item.done" => {
+                let index = event["output_index"]
+                    .as_u64()
+                    .context("Completed output item missing output index")?;
+                self.complete_item(usize::try_from(index)?, event["item"].clone(), emit)?;
+            }
             "response.completed" => {
                 let response = &event["response"];
                 if response["status"] != "completed" {
@@ -553,24 +624,22 @@ impl ResponseStream {
                     .clone();
                 let mut call_ids = std::collections::HashSet::new();
                 for item in &output {
-                    if matches!(
-                        item["type"].as_str(),
-                        Some("function_call" | "custom_tool_call")
-                    ) && (item["call_id"].as_str().is_none()
-                        || !call_ids.insert(item["call_id"].as_str())
-                        || item["name"].as_str().is_none()
-                        || (if item["type"] == "custom_tool_call" {
-                            item["input"].as_str()
-                        } else {
-                            item["arguments"].as_str()
-                        })
-                        .is_none()
-                        || item["status"].as_str().is_some_and(|s| s != "completed"))
-                    {
+                    validate_output_item(item)?;
+                    if is_tool_call(item) && !call_ids.insert(item["call_id"].as_str()) {
+                        bail!("Provider returned duplicate tool call IDs");
+                    }
+                }
+                // Validate the whole reconciliation before releasing any remaining calls.
+                for (&index, item) in &self.completed_items {
+                    if output.get(index) != Some(item) {
                         bail!(
-                            "Invalid or incomplete tool call; no calls from this response were executed"
+                            "Completed response disagrees with an already received output item. Earlier tools may have executed; inspect their results before retrying."
                         );
                     }
+                }
+                // The final response is also authoritative for items not delivered separately.
+                for (index, item) in output.iter().enumerate() {
+                    self.complete_item(index, item.clone(), emit)?;
                 }
                 return Ok(Some(Response {
                     streaming_time: self.first_token.map_or(Duration::ZERO, |start| now - start),
@@ -1277,6 +1346,70 @@ mod tests {
                 .input,
             42
         );
+    }
+    #[test]
+    fn only_completed_items_release_calls_and_conflicting_items_are_rejected() {
+        let events = std::sync::Mutex::new(Vec::new());
+        let emit = |delta| {
+            if let Delta::OutputItem { index, item } = delta {
+                events.lock().unwrap().push((index, item));
+            }
+        };
+        let now = Instant::now();
+        let call = json!({"type":"function_call","id":"wait-item","call_id":"wait",
+            "name":"wait","arguments":"{\"cell_id\":\"cell\"}","status":"completed"});
+        let mut stream = ResponseStream::default();
+        // Even complete-looking arguments are inert until the output item is done.
+        stream
+            .event(
+                json!({"type":"response.output_item.added","output_index":0,"item":call}),
+                &emit,
+                now,
+            )
+            .unwrap();
+        stream.event(json!({"type":"response.function_call_arguments.done","item_id":"wait-item","arguments":call["arguments"]}), &emit, now).unwrap();
+        assert!(events.lock().unwrap().is_empty());
+        stream
+            .event(
+                json!({"type":"response.output_item.done","output_index":0,"item":call}),
+                &emit,
+                now,
+            )
+            .unwrap();
+        assert_eq!(*events.lock().unwrap(), [(0, call.clone())]);
+        let mut duplicate = call.clone();
+        duplicate["id"] = json!("another-item");
+        assert!(
+            stream
+                .event(
+                    json!({"type":"response.output_item.done","output_index":1,"item":duplicate}),
+                    &emit,
+                    now
+                )
+                .is_err()
+        );
+        let mut changed = call.clone();
+        changed["arguments"] = json!("{\"cell_id\":\"other\"}");
+        assert!(
+            stream
+                .event(
+                    json!({"type":"response.output_item.done","output_index":0,"item":changed}),
+                    &emit,
+                    now
+                )
+                .is_err()
+        );
+        assert!(stream.event(json!({"type":"response.completed","response":{"status":"completed","output":[changed]}}), &emit, now).is_err());
+        stream.event(json!({"type":"response.completed","response":{"status":"completed","output":[call]}}), &emit, now).unwrap();
+        assert_eq!(events.lock().unwrap().len(), 1);
+
+        for malformed in [
+            json!({"type":"custom_tool_call","call_id":"bad","name":"exec","input":"text('partial')","status":"in_progress"}),
+            json!({"type":"function_call","call_id":"bad","name":"wait","arguments":{}}),
+        ] {
+            assert!(ResponseStream::default().event(json!({"type":"response.output_item.done","output_index":0,"item":malformed}), &emit, now).is_err());
+        }
+        assert_eq!(events.lock().unwrap().len(), 1);
     }
     #[test]
     fn terminal_failure_cannot_release_tool_calls() {
