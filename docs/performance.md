@@ -341,3 +341,8 @@ The subsequent minimal implementation reuses the existing activity redraws:
 sidebar waves no longer request their own frames. The activity timer also remains
 active for prepared Working rows, covering finalization and child work. This is
 the report's `tick-driven` approach, not the larger widget-local-clock redesign.
+
+## Large text editor input
+
+See [editor performance](editor-performance.md) for the opt-in paste/layout/
+scrollbar benchmark, debug and release baselines, and proposed follow-up work.

@@ -57,3 +57,23 @@ because Nix normalizes source mtimes. This invalidates only this dependency,
 not the entire `target/` cache. Remove the patch when upstream provides
 equivalent behavior. Run `just verify`, `nix flake check`, and
 `just smoke-gpu` (on a Wayland desktop) after changes.
+
+## Editor performance patch
+
+`editor-performance.patch` enables cosmic-text's bounded/direction-aware shaping
+cache (see `../cosmic-text/README.md`), defers shaping of initial text until native
+layout, and sets metrics and viewport size together. Previously setting metrics
+first caused a new editor to shape its entire document with unbounded dimensions.
+
+`Editor::scroll_to` measures the destination logical line and seeks within its
+height without moving the cursor. It is used by Pico's estimated-height scrollbar;
+ordinary wheel input and keyboard caret reveal still use native editor actions.
+
+When checking release benchmarks after a patch change, use the matching targeted
+invalidation, `cargo clean --release -p iced_graphics`, as well as re-entering
+`nix develop`. Debug and release artifacts are separate.
+
+An edit followed by a seek before the next layout can leave the caret's logical
+line unshaped and offscreen. Selection geometry returns no paint regions for that
+case instead of forcing layout or panicking; existing cached caret geometry is
+preserved. A focused draw regression covers the edit/seek/reflow sequence.

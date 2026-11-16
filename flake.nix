@@ -14,6 +14,7 @@
       fontConfig = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
       patchedQuickjs = import ./patches/quickjs { inherit pkgs; };
       patchedWinit = import ./patches/winit { inherit pkgs; };
+      patchedCosmicText = import ./patches/cosmic-text { inherit pkgs; };
       patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
       patchedIcedWidget = import ./patches/iced-widget { inherit pkgs; };
       # Never copy the reference implementation, target/, or session assets into Nix builds.
@@ -31,6 +32,7 @@
         mkdir "$out/.build-deps"
         ln -s ${patchedWinit} "$out/.build-deps/winit"
         ln -s ${patchedIcedWidget} "$out/.build-deps/iced-widget"
+        ln -s ${patchedCosmicText} "$out/.build-deps/cosmic-text"
         ln -s ${patchedIcedGraphics} "$out/.build-deps/iced-graphics"
         ln -s ${patchedQuickjs.sys} "$out/.build-deps/rquickjs-sys"
         ln -s ${patchedQuickjs.core} "$out/.build-deps/rquickjs-core"
@@ -134,6 +136,7 @@
           mkdir -p "$root/.build-deps" &&
             ln -sfnT ${patchedWinit} "$root/.build-deps/winit" &&
             ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" &&
+            ln -sfnT ${patchedCosmicText} "$root/.build-deps/cosmic-text" &&
             ln -sfnT ${patchedIcedGraphics} "$root/.build-deps/iced-graphics" &&
             ln -sfnT ${patchedQuickjs.sys} "$root/.build-deps/rquickjs-sys" &&
             ln -sfnT ${patchedQuickjs.core} "$root/.build-deps/rquickjs-core" || {

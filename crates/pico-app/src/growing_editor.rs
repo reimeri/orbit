@@ -1,11 +1,9 @@
-//! A bounded, growing editor with a scrollbar driven by its actual shaped text.
+//! A growing editor with native viewport measurements and estimated offscreen heights.
 use crate::{scrollbar, theme};
 use iced::{
     Element, Event, Length, Rectangle, Size, Theme,
     advanced::{
-        Clipboard, Layout, Renderer as _, Shell, Widget,
-        graphics::text as graphics_text,
-        layout, renderer,
+        Clipboard, Layout, Renderer as _, Shell, Widget, layout, renderer,
         text::highlighter::PlainText,
         widget::{Operation, Tree, tree},
     },
@@ -19,7 +17,7 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
     max_height: f32,
-    on_action: impl Fn(text_editor::Action) -> Message + 'a,
+    on_scroll: impl Fn(ScrollTo) -> Message + 'a,
     scroll_lines: fn(&Message) -> Option<i32>,
 ) -> Element<'a, Message> {
     Element::new(GrowingEditor {
@@ -31,7 +29,7 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
             .max_height(max_height),
         content,
         max_height,
-        on_action: Box::new(on_action),
+        on_scroll: Box::new(on_scroll),
         scroll_lines,
     })
 }
@@ -40,19 +38,28 @@ struct GrowingEditor<'a, Message> {
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
     max_height: f32,
-    on_action: Box<dyn Fn(text_editor::Action) -> Message + 'a>,
+    on_scroll: Box<dyn Fn(ScrollTo) -> Message + 'a>,
     scroll_lines: fn(&Message) -> Option<i32>,
+}
+
+/// An absolute native scroll request, applied in message order alongside edits
+/// and wheel actions. Seeking never moves the caret or selection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollTo {
+    line: usize,
+    fraction: f32,
+}
+
+impl ScrollTo {
+    pub fn apply(self, content: &mut text_editor::Content) {
+        content.with_editor_mut(|editor| editor.scroll_to(self.line, self.fraction));
+    }
 }
 
 #[derive(Default)]
 struct State {
-    // Cache offscreen line layouts too: a logical line may wrap into many rows.
-    lines: Vec<graphics_text::cosmic_text::BufferLine>,
-    key: Option<(
-        Option<f32>,
-        graphics_text::cosmic_text::Metrics,
-        graphics_text::Version,
-    )>,
+    // Estimated cumulative row counts, not cloned/shaped offscreen text.
+    row_ends: Vec<f32>,
     line_height: f32,
     content_height: f32,
     offset: f32,
@@ -71,41 +78,32 @@ impl State {
         content.with_editor(|editor| {
             let buffer = editor.buffer();
             let metrics = buffer.metrics();
-            let mut fonts = graphics_text::font_system().write().expect("font system");
-            let key = (buffer.size().0, metrics, fonts.version());
-            if self.key != Some(key) {
-                self.lines.clear();
-                self.key = Some(key);
-            }
-            self.lines.truncate(buffer.lines.len());
-            let mut rows = 0;
-            let mut offset_rows = 0;
+            let width = buffer.size().0.expect("laid-out editor width");
+            self.row_ends.clear();
+            let mut rows = 0.;
+            let mut offset_rows = 0.;
             for (i, line) in buffer.lines.iter().enumerate() {
-                if i == self.lines.len() {
-                    self.lines.push(line.clone());
-                } else if self.lines[i].text() != line.text()
-                    || self.lines[i].attrs_list() != line.attrs_list()
-                {
-                    self.lines[i] = line.clone();
+                if i == buffer.scroll().line {
+                    offset_rows = rows;
                 }
-                let count = self.lines[i]
-                    .layout(
-                        fonts.raw(),
-                        metrics.font_size,
-                        buffer.size().0,
-                        buffer.wrap(),
-                        buffer.monospace_width(),
-                        buffer.tab_width(),
-                    )
-                    .len();
+                // Reading an existing layout is cheap. Never shape text just
+                // for a thumb: long offscreen lines use a rough width estimate.
+                // Native layout invalidates these measurements on reflow/edit.
+                let count = line.layout_opt().as_ref().map_or_else(
+                    || {
+                        (line.text().len() as f32 * metrics.font_size * 0.5
+                            / width.max(metrics.font_size))
+                        .ceil()
+                        .max(1.)
+                    },
+                    |layout| layout.len() as f32,
+                );
                 rows += count;
-                if i < buffer.scroll().line {
-                    offset_rows += count;
-                }
+                self.row_ends.push(rows);
             }
             self.line_height = metrics.line_height;
-            self.content_height = rows as f32 * metrics.line_height;
-            self.offset = offset_rows as f32 * metrics.line_height + buffer.scroll().vertical;
+            self.content_height = rows * metrics.line_height;
+            self.offset = offset_rows * metrics.line_height + buffer.scroll().vertical;
         });
     }
 
@@ -243,21 +241,38 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
                 } else {
                     0.
                 };
-                let delta = (target - state.offset) / state.line_height;
-                // Endpoints must reach the native clamp even when a short
-                // window leaves a fractional number of visible text rows.
-                let lines = if top <= bar.track.y {
-                    delta.floor()
-                } else if top >= bar.track.y + travel {
-                    delta.ceil()
-                } else {
-                    delta.round()
-                } as i32;
-                if lines != 0 {
-                    shell.publish((self.on_action)(text_editor::Action::Scroll { lines }));
-                    // Events may be batched before the next layout; don't apply
-                    // the same relative scroll repeatedly in that batch.
-                    state.offset += lines as f32 * state.line_height;
+                if target != state.offset {
+                    // A relative pixel scroll would shape all intervening
+                    // lines. Seek by logical line instead; native layout then
+                    // measures/clamps only the destination viewport. Endpoints
+                    // remain exact even when intermediate heights are estimates.
+                    let request = if top <= bar.track.y {
+                        ScrollTo {
+                            line: 0,
+                            fraction: 0.,
+                        }
+                    } else if top >= bar.track.y + travel {
+                        ScrollTo {
+                            line: state.row_ends.len() - 1,
+                            fraction: 1.,
+                        }
+                    } else {
+                        let row = target / state.line_height;
+                        let line = state.row_ends.partition_point(|&end| end <= row);
+                        let start = if line == 0 {
+                            0.
+                        } else {
+                            state.row_ends[line - 1]
+                        };
+                        ScrollTo {
+                            line,
+                            fraction: (row - start) / (state.row_ends[line] - start),
+                        }
+                    };
+                    shell.publish((self.on_scroll)(request));
+                    // Suppress duplicate batched motion. The next layout uses
+                    // the actual native position, including any end clamping.
+                    state.offset = target;
                 }
                 shell.capture_event();
                 shell.request_redraw();
@@ -355,24 +370,31 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::advanced::graphics::text as graphics_text;
     use iced::{Point, advanced::clipboard, keyboard};
     use text_editor::{Action, Content, Edit, Motion};
 
     const LINE_HEIGHT: f32 = 19.5;
     const VISIBLE_ROWS: usize = 10;
 
-    fn view(content: &Content) -> Element<'_, Action> {
+    #[derive(Debug, Clone, PartialEq)]
+    enum Message {
+        Editor(Action),
+        Scroll(ScrollTo),
+    }
+
+    fn view(content: &Content) -> Element<'_, Message> {
         growing_editor(
             text_editor(content)
                 .size(15)
                 .line_height(iced::widget::text::LineHeight::Absolute(LINE_HEIGHT.into()))
                 .min_height(2. * LINE_HEIGHT)
-                .on_action(|action| action),
+                .on_action(Message::Editor),
             content,
             VISIBLE_ROWS as f32 * LINE_HEIGHT + 2. * PADDING,
-            |action| action,
+            Message::Scroll,
             |action| match action {
-                Action::Scroll { lines } => Some(*lines),
+                Message::Editor(Action::Scroll { lines }) => Some(*lines),
                 _ => None,
             },
         )
@@ -426,7 +448,7 @@ mod tests {
             )
         }
 
-        fn events(&mut self, node: &layout::Node, events: &[(Event, Point)]) -> Vec<Action> {
+        fn events(&mut self, node: &layout::Node, events: &[(Event, Point)]) -> Vec<Message> {
             let mut messages = Vec::new();
             {
                 let mut view = view(&self.content);
@@ -444,7 +466,10 @@ mod tests {
                 }
             }
             for message in &messages {
-                self.content.perform(message.clone());
+                match message {
+                    Message::Editor(action) => self.content.perform(action.clone()),
+                    Message::Scroll(scroll) => scroll.apply(&mut self.content),
+                }
             }
             messages
         }
@@ -855,6 +880,254 @@ mod tests {
     }
 
     #[test]
+    fn large_paste_and_seeks_shape_only_the_destination_viewport() {
+        let value = (0..4000)
+            .map(|i| {
+                if i % 19 == 0 {
+                    format!("Wrapped line {i}: {}", "asymmetric λ words ".repeat(40))
+                } else {
+                    format!("Short line {i}: λ")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for mounted in [false, true] {
+            let mut editor = Editor::new("");
+            if mounted {
+                editor.layout(400.);
+            }
+            editor
+                .content
+                .perform(Action::Edit(Edit::Paste(std::sync::Arc::new(
+                    value.clone(),
+                ))));
+            let mut node = editor.layout(400.);
+            let cached = |editor: &Editor| {
+                editor.content.with_editor(|editor| {
+                    editor
+                        .buffer()
+                        .lines
+                        .iter()
+                        .filter(|line| line.layout_opt().is_some())
+                        .count()
+                })
+            };
+            assert!(
+                cached(&editor) < 64,
+                "paste must not shape the offscreen document"
+            );
+            assert!(
+                editor
+                    .content
+                    .with_editor(|editor| editor.buffer().scroll().line)
+                    > 3900
+            );
+            let cursor = editor.content.cursor();
+            for fraction in [0., 0.5, 1.] {
+                let before = cached(&editor);
+                let bar = editor.bar(&node).unwrap();
+                let point = Point::new(
+                    bar.track.center_x(),
+                    bar.track.y + (fraction * bar.track.height).min(bar.track.height - 0.5),
+                );
+                editor.events(&node, &[(press(), point), (release(), point)]);
+                node = editor.layout(400.);
+                assert!(
+                    cached(&editor) <= before + 64,
+                    "seek must not shape intervening lines"
+                );
+                assert_eq!(editor.content.cursor(), cursor);
+                let bar = editor.bar(&node).unwrap();
+                if fraction == 0. {
+                    assert_eq!(bar.thumb.y, bar.track.y);
+                } else if fraction == 1. {
+                    assert!(
+                        (bar.thumb.y + bar.thumb.height - bar.track.y - bar.track.height).abs()
+                            < 0.01
+                    );
+                } else {
+                    let line = editor
+                        .content
+                        .with_editor(|editor| editor.buffer().scroll().line);
+                    assert!(
+                        (800..3200).contains(&line),
+                        "middle seek must reach the document interior"
+                    );
+                }
+            }
+            assert_eq!(editor.content.text(), value);
+        }
+
+        // Opening a persisted draft must also defer shaping until layout.
+        let content: Content = Content::with_text(&value);
+        content.with_editor(|editor| {
+            assert!(
+                editor
+                    .buffer()
+                    .lines
+                    .iter()
+                    .all(|line| line.layout_opt().is_none())
+            )
+        });
+    }
+
+    #[test]
+    fn focused_draw_after_seek_and_reflow_does_not_shape_or_move_offscreen_caret() {
+        use iced::advanced::graphics::core::{InputMethod, input_method};
+        use iced::advanced::{Renderer as _, text::Editor as _};
+        let mut editor = Editor::new(&"A wrapped line with asymmetric words λ.\n".repeat(1000));
+        let node = editor.layout(400.);
+        editor.events(
+            &node,
+            &[
+                (press(), Point::new(35., 20.)),
+                (release(), Point::new(35., 20.)),
+            ],
+        );
+        // Editing invalidates the caret line. A following seek in the same
+        // batch cancels cursor reveal before the next layout.
+        editor.content.perform(Action::Edit(Edit::Insert('x')));
+        let cursor = editor.content.cursor();
+        ScrollTo {
+            line: 1000,
+            fraction: 1.,
+        }
+        .apply(&mut editor.content);
+        editor.layout(400.);
+        let node = editor.layout(180.);
+        editor.content.with_editor(|native| {
+            assert!(
+                native.buffer().lines[cursor.position.line]
+                    .layout_opt()
+                    .is_none()
+            );
+        });
+        let bounds = node.bounds();
+        editor.renderer.reset(bounds);
+        view(&editor.content).as_widget().draw(
+            &editor.tree,
+            &mut editor.renderer,
+            &theme::app(),
+            &renderer::Style {
+                text_color: theme::TEXT,
+            },
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &bounds,
+        );
+        editor.content.with_editor(|native| {
+            assert!(native.buffer().lines[cursor.position.line].layout_opt().is_none(),
+                "drawing must not shape the offscreen caret line");
+            assert!(matches!(native.selection(), iced::advanced::text::editor::Selection::Range(regions) if regions.is_empty()),
+                "an offscreen caret has no visible paint geometry");
+        });
+        // Offscreen paint geometry must not disable input-method composition.
+        {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            view(&editor.content).as_widget_mut().update(
+                &mut editor.tree,
+                &Event::Window(iced::window::Event::RedrawRequested(
+                    std::time::Instant::now(),
+                )),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &editor.renderer,
+                &mut clipboard::Null,
+                &mut shell,
+                &bounds,
+            );
+            assert!(
+                matches!(shell.input_method(), InputMethod::Enabled { cursor, .. }
+                if bounds.contains(cursor.position())),
+                "IME needs a bounded enabled anchor"
+            );
+        }
+        assert_eq!(editor.content.cursor(), cursor);
+        let pixels = crate::test_renderer::screenshot(
+            &mut editor.renderer,
+            Size::new(bounds.width.ceil() as u32, bounds.height.ceil() as u32),
+            1.,
+            theme::BACKGROUND,
+        );
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel != &pixels[..4])
+        );
+        let mut expected = editor.content.text();
+        assert_eq!(cursor.position.line, 0);
+        expected.insert(cursor.position.column, '界');
+        editor.events(
+            &node,
+            &[
+                (
+                    Event::InputMethod(input_method::Event::Opened),
+                    Point::ORIGIN,
+                ),
+                (
+                    Event::InputMethod(input_method::Event::Preedit("界".into(), None)),
+                    Point::ORIGIN,
+                ),
+                (
+                    Event::InputMethod(input_method::Event::Commit("界".into())),
+                    Point::ORIGIN,
+                ),
+            ],
+        );
+        editor.layout(180.);
+        assert_eq!(editor.content.text(), expected);
+        editor.content.with_editor(|native| {
+            assert_eq!(
+                native.buffer().scroll().line,
+                0,
+                "IME commit must reveal the caret"
+            );
+            assert!(
+                native
+                    .buffer()
+                    .lines
+                    .iter()
+                    .filter(|line| line.layout_opt().is_some())
+                    .count()
+                    < 64
+            );
+        });
+    }
+
+    #[test]
+    fn bulk_paste_preserves_middle_lines_suffix_endings_and_selection_replacement() {
+        for inserted in ["first\r\nλ界\r\nlast", "first\nλ界\nlast\n"] {
+            let mut editor = Editor::new("prefix-REPLACE-tail\nuntouched λ");
+            editor.content.move_to(text_editor::Cursor {
+                position: text_editor::Position {
+                    line: 0,
+                    column: 14,
+                },
+                selection: Some(text_editor::Position { line: 0, column: 7 }),
+            });
+            editor
+                .content
+                .perform(Action::Edit(Edit::Paste(std::sync::Arc::new(
+                    inserted.into(),
+                ))));
+            editor.layout(400.);
+            // The original first line's LF ending still terminates the suffix;
+            // inserted interior lines retain their CRLF/LF endings.
+            let expected = format!("prefix-{inserted}-tail\nuntouched λ");
+            assert_eq!(editor.content.text(), expected);
+            assert!(editor.content.cursor().selection.is_none());
+            editor.content.perform(Action::Edit(Edit::Insert('!')));
+            assert_eq!(
+                editor.content.text(),
+                format!("prefix-{inserted}!-tail\nuntouched λ")
+            );
+        }
+    }
+
+    #[test]
     fn editor_reserves_the_same_gutter_before_and_after_overflow() {
         let mut editor = Editor::new("Short draft");
         for value in [
@@ -945,9 +1218,10 @@ mod tests {
         );
         assert_eq!(
             messages,
-            [Action::Scroll {
-                lines: (editor.content.line_count() - VISIBLE_ROWS) as i32
-            }]
+            [Message::Scroll(ScrollTo {
+                line: editor.content.line_count() - 1,
+                fraction: 1.,
+            })]
         );
         assert_eq!(editor.content.cursor(), cursor);
         let node = editor.layout(400.);
@@ -985,7 +1259,10 @@ mod tests {
                 Point::new(35., 20.),
             )],
         );
-        assert_eq!(messages, [Action::Move(Motion::DocumentEnd)]);
+        assert_eq!(
+            messages,
+            [Message::Editor(Action::Move(Motion::DocumentEnd))]
+        );
         let node = editor.layout(400.);
         let bar = editor.bar(&node).unwrap();
         assert_eq!(
@@ -1077,3 +1354,11 @@ mod tests {
         assert_eq!(editor.content.text(), value);
     }
 }
+
+#[cfg(test)]
+#[path = "growing_editor_benchmark.rs"]
+mod benchmark;
+
+#[cfg(test)]
+#[path = "editor_shaping_tests.rs"]
+mod shaping_tests;

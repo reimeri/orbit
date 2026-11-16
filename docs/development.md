@@ -27,6 +27,9 @@ Cargo's registry cache. Re-enter the shell after changing `patches/winit/`.
 The composer also uses a checksum-pinned iced widget patch to read native editor
 scroll metrics; see [its maintenance notes](../patches/iced-widget/README.md).
 The shell prepares `.build-deps/iced-widget` alongside winit.
+Editor paste, initialization, font fallback and bounded shaping-cache patches also
+prepare `.build-deps/cosmic-text`; see [maintenance](../patches/cosmic-text/README.md)
+and [editor benchmarks](editor-performance.md).
 Caret positioning and selection highlighting inside ligatures use a
 checksum-pinned iced graphics patch;
 see [its maintenance notes](../patches/iced-graphics/README.md). The shell also
@@ -375,7 +378,10 @@ configuration state, without touching the desktop clipboard or real sessions.
 The composer starts at two visual lines, grows to ten, and then scrolls internally.
 A scrollbar in its right padding appears only for overflow; it supports thumb
 dragging and track clicks without changing the text selection. Native wheel and
-cursor scrolling update the same thumb. Width/font changes and deletion remeasure
+cursor scrolling update the same thumb. Scrollbar height uses cached native rows
+and estimates for unmeasured offscreen text; it refines as content is visited.
+Absolute scrollbar seeks shape the destination logical line and viewport, preserving the
+caret/selection and avoiding work proportional to the distance scrolled. Width/font changes and deletion remeasure
 wrapped rows and hide the scrollbar when the text fits again.
 
 The composer regression tests exercise retained widget state, dragging (including

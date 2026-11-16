@@ -1,0 +1,14 @@
+--- a/src/text_editor.rs
++++ b/src/text_editor.rs
+@@ -427,6 +427,11 @@
+         read(&self.0.borrow().editor)
+     }
+ 
++    /// Updates the underlying renderer editor (for native scrollbar seeking).
++    pub fn with_editor_mut<T>(&mut self, update: impl FnOnce(&mut R::Editor) -> T) -> T {
++        update(&mut self.0.get_mut().editor)
++    }
++
+     /// Returns the current cursor position of the [`Content`].
+     pub fn cursor(&self) -> Cursor {
+         self.0.borrow().editor.cursor()

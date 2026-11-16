@@ -1,0 +1,115 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -64,6 +64,7 @@
+ 
+ [dependencies.cosmic-text]
+ version = "0.15"
++features = ["shape-run-cache"]
+ 
+ [dependencies.half]
+ version = "2.2"
+--- a/src/text/editor.rs
++++ b/src/text/editor.rs
+@@ -38,6 +38,25 @@
+         buffer_from_editor(&self.internal().editor)
+     }
+ 
++    /// Scroll to a logical line and a fraction of its laid-out height, without
++    /// moving the caret or shaping intervening offscreen lines.
++    pub fn scroll_to(&mut self, line: usize, fraction: f32) {
++        self.with_internal_mut(|internal| {
++            let mut fonts = text::font_system().write().expect("Write font system");
++            let buffer = buffer_mut_from_editor(&mut internal.editor);
++            let line = line.min(buffer.lines.len() - 1);
++            let line_height = buffer.metrics().line_height;
++            let height: f32 = buffer.line_layout(fonts.raw(), line)
++                .expect("valid scroll line")
++                .iter()
++                .map(|row| row.line_height_opt.unwrap_or(line_height))
++                .sum();
++            internal.editor.set_scroll(cosmic_text::Scroll::new(
++                line, height * fraction.clamp(0.0, 1.0), 0.0,
++            ));
++        });
++    }
++
+     /// Creates a [`Weak`] reference to the [`Editor`].
+     ///
+     /// This is useful to avoid cloning the [`Editor`] when
+@@ -93,11 +112,10 @@
+             line_height: 1.0,
+         });
+ 
+-        let mut font_system =
+-            text::font_system().write().expect("Write font system");
+-
+-        buffer.set_text(
+-            font_system.raw(),
++        let font_system =
++            text::font_system().read().expect("Read font system");
++
++        buffer.set_text_unshaped(
+             text,
+             &cosmic_text::Attrs::new(),
+             cosmic_text::Shaping::Advanced,
+@@ -188,6 +206,12 @@
+                     .collect();
+ 
+                 Selection::Range(regions)
++            }
++            // An edit followed by a seek may leave the caret line unshaped.
++            // Visible lines are laid out by the buffer; don't shape an offscreen
++            // caret just to draw it. Retain geometry for already cached lines.
++            _ if buffer.lines[cursor.line].layout_opt().is_none() => {
++                Selection::Range(Vec::new())
+             }
+             _ => {
+                 let line_height = buffer.metrics().line_height;
+@@ -575,38 +599,20 @@
+                 internal.topmost_line_changed = Some(0);
+             }
+ 
+-            let metrics = buffer.metrics();
++            // Apply metrics and viewport together. set_metrics alone shapes
++            // using the previous size (unbounded on a new editor).
+             let new_line_height = new_line_height.to_absolute(new_size);
+-
+-            if new_size.0 != metrics.font_size
+-                || new_line_height.0 != metrics.line_height
+-            {
+-                log::trace!("Updating `Metrics` of `Editor`...");
+-
+-                buffer.set_metrics(
+-                    font_system.raw(),
+-                    cosmic_text::Metrics::new(new_size.0, new_line_height.0),
+-                );
+-            }
++            buffer.set_metrics_and_size(
++                font_system.raw(),
++                cosmic_text::Metrics::new(new_size.0, new_line_height.0),
++                Some(new_bounds.width),
++                Some(new_bounds.height),
++            );
++            internal.bounds = new_bounds;
+ 
+             let new_wrap = text::to_wrap(new_wrapping);
+-
+             if new_wrap != buffer.wrap() {
+-                log::trace!("Updating `Wrap` strategy of `Editor`...");
+-
+                 buffer.set_wrap(font_system.raw(), new_wrap);
+-            }
+-
+-            if new_bounds != internal.bounds {
+-                log::trace!("Updating size of `Editor`...");
+-
+-                buffer.set_size(
+-                    font_system.raw(),
+-                    Some(new_bounds.width),
+-                    Some(new_bounds.height),
+-                );
+-
+-                internal.bounds = new_bounds;
+             }
+ 
+             if let Some(topmost_line_changed) =

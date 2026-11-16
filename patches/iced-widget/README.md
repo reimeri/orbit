@@ -10,10 +10,12 @@ underlying renderer editor. Pico's composer needs its actual shaped buffer and
 scroll offset: logical line counts or accumulated wheel deltas cannot represent
 wrapped lines or cursor-driven scrolling correctly.
 
-growing_editor.rs uses the buffer's native metrics and layout parameters,
-caches offscreen line layouts, and sends ordinary Action::Scroll messages for
-thumb dragging and track clicks. It does not change the editor's text, selection,
-keyboard handling, or scroll model.
+The editor-performance.patch adds mutable renderer access for absolute native
+scroll requests, applied in application-message order with edits and wheel actions.
+`growing_editor.rs` reads already-cached native line layouts, estimates unmeasured
+offscreen heights, and sends logical-line/fraction seeks for track/drag actions.
+It never shapes offscreen text just to draw the scrollbar, and seeking does not
+move the caret or selection. Wheel input and keyboard reveal remain native.
 
 pick-list-f32.patch removes the obsolete std::f32 import so f32::INFINITY
 resolves to the primitive type’s associated constant instead of the deprecated
@@ -34,3 +36,7 @@ the version/hash and root lockfile, and re-enter nix develop. Never edit the
 generated symlink or registry source. Remove the patch when upstream provides
 equivalent read access. Run just verify, nix flake check, and just smoke-gpu
 from the Nix environment after patch changes.
+
+The existing input-method fallback anchors empty paint geometry at the text
+viewport origin while keeping the focused editor enabled. This lets IME commits
+reveal an offscreen caret without requiring offscreen measurement.

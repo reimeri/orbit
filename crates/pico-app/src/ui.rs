@@ -243,6 +243,7 @@ pub enum Message {
     ToggleSearch,
     Favorite(PathBuf),
     Editor(text_editor::Action),
+    EditorScroll(crate::growing_editor::ScrollTo),
     DeletePreviousWord,
     Questionnaire(String, questionnaire::Message),
     Send,
@@ -1034,6 +1035,7 @@ impl App {
             && matches!(
                 message,
                 Message::Editor(_)
+                    | Message::EditorScroll(_)
                     | Message::Questionnaire(_, _)
                     | Message::DeletePreviousWord
                     | Message::Send
@@ -1058,6 +1060,7 @@ impl App {
             && matches!(
                 message,
                 Message::Editor(_)
+                    | Message::EditorScroll(_)
                     | Message::Questionnaire(_, _)
                     | Message::DeletePreviousWord
                     | Message::Send
@@ -1480,7 +1483,7 @@ impl App {
                         .map(move |message| Message::Questionnaire(id.clone(), message));
                 }
             }
-            Message::Editor(_) | Message::DeletePreviousWord => {
+            Message::Editor(_) | Message::EditorScroll(_) | Message::DeletePreviousWord => {
                 if self.active_questionnaire.is_some()
                     || self.io_busy
                     || self.closing
@@ -1495,6 +1498,10 @@ impl App {
                         let edit = action.is_edit();
                         self.editor.perform(action);
                         edit
+                    }
+                    Message::EditorScroll(scroll) => {
+                        scroll.apply(&mut self.editor);
+                        false
                     }
                     Message::DeletePreviousWord => {
                         questionnaire::delete_previous_word(&mut self.editor);
@@ -3036,7 +3043,7 @@ impl App {
             editor,
             &self.editor,
             COMPOSER_MAX_LINES as f32 * line_height + 2. * crate::growing_editor::PADDING,
-            Message::Editor,
+            Message::EditorScroll,
             |message| match message {
                 Message::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
                 _ => None,

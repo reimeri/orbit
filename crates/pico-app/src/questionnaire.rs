@@ -27,6 +27,7 @@ pub enum Action {
     Next,
     Back,
     Editor(text_editor::Action),
+    Scroll(crate::growing_editor::ScrollTo),
     DeleteWord,
 }
 #[derive(Clone, Debug)]
@@ -250,6 +251,11 @@ impl Draft {
             {
                 self.answers[self.current].editor.perform(action)
             }
+            Action::Scroll(scroll)
+                if self.text_open() && self.answers[self.current].replace.is_none() =>
+            {
+                scroll.apply(&mut self.answers[self.current].editor)
+            }
             Action::DeleteWord
                 if self.text_open() && self.answers[self.current].replace.is_none() =>
             {
@@ -405,7 +411,7 @@ impl Draft {
                     editor,
                     &a.editor,
                     editor_height,
-                    move |action| message(Action::Editor(action)),
+                    move |scroll| message(Action::Scroll(scroll)),
                     |message| match &message.action {
                         Action::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
                         _ => None,
@@ -1068,8 +1074,7 @@ mod tests {
                     );
                     assert_eq!(messages.len(), 1);
                     assert_eq!(messages[0].question, question);
-                    assert!(matches!(messages[0].action,
-                        Action::Editor(text_editor::Action::Scroll { lines }) if lines > 0));
+                    assert!(matches!(messages[0].action, Action::Scroll(_)));
                 }
                 cache = ui.into_cache();
                 for message in messages {
@@ -1077,6 +1082,12 @@ mod tests {
                 }
                 assert_eq!(draft.current, question);
                 assert_eq!(draft.answers[question].editor.cursor(), cursor);
+                if overflowing {
+                    draft.answers[question].editor.with_editor(|editor| {
+                        let scroll = editor.buffer().scroll();
+                        assert!(scroll.line > 0 || scroll.vertical > 0.);
+                    });
+                }
                 assert_eq!(draft.value(question).as_deref(), Some(value.as_str()));
             }
         }

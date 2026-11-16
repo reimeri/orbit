@@ -1,0 +1,200 @@
+--- a/src/buffer.rs
++++ b/src/buffer.rs
+@@ -681,6 +681,19 @@
+         shaping: Shaping,
+         alignment: Option<Align>,
+     ) {
++        self.set_text_unshaped(text, attrs, shaping, alignment);
++        self.shape_until_scroll(font_system, false);
++    }
++
++    /// Replace text without shaping it. The caller must shape after supplying
++    /// the intended metrics and viewport, before accessing layout runs.
++    pub fn set_text_unshaped(
++        &mut self,
++        text: &str,
++        attrs: &Attrs,
++        shaping: Shaping,
++        alignment: Option<Align>,
++    ) {
+         self.lines.clear();
+         for (range, ending) in LineIter::new(text) {
+             self.lines.push(BufferLine::new(
+@@ -714,7 +727,7 @@
+         }
+ 
+         self.scroll = Scroll::default();
+-        self.shape_until_scroll(font_system, false);
++        self.redraw = true;
+     }
+ 
+     /// Set text of buffer, using an iterator of styled spans (pairs of text and attributes)
+--- a/src/edit/editor.rs
++++ b/src/edit/editor.rs
+@@ -102,6 +102,12 @@
+             auto_indent: false,
+             change: None,
+         }
++    }
++
++    /// Scroll independently of the caret, cancelling pending cursor reveal.
++    pub fn set_scroll(&mut self, scroll: crate::Scroll) {
++        self.cursor_moved = false;
++        self.with_buffer_mut(|buffer| buffer.set_scroll(scroll));
+     }
+ 
+     /// Draw the editor
+@@ -441,6 +447,10 @@
+                     Shaping::Advanced,
+                 ));
+             }
++            // Build the suffix backwards as before, but shift the existing
++            // buffer only once. Inserting each line at the same Vec index
++            // makes multiline paste quadratic in the number of new lines.
++            let mut inserted = Vec::with_capacity(lines_iter.len());
+             // Add last line
+             if let Some((range, ending)) = lines_iter.next_back() {
+                 let data_line = &data[range];
+@@ -452,7 +462,7 @@
+                     Shaping::Advanced,
+                 );
+                 tmp.append(&after);
+-                buffer.lines.insert(insert_line, tmp);
++                inserted.push(tmp);
+                 cursor.line += 1;
+             } else {
+                 line.append(&after);
+@@ -467,9 +477,12 @@
+                     final_attrs.split_off(remaining_split_len),
+                     Shaping::Advanced,
+                 );
+-                buffer.lines.insert(insert_line, tmp);
++                inserted.push(tmp);
+                 cursor.line += 1;
+             }
++
++            inserted.reverse();
++            buffer.lines.splice(insert_line..insert_line, inserted);
+ 
+             assert_eq!(remaining_split_len, 0);
+ 
+--- a/src/font/fallback/mod.rs
++++ b/src/font/fallback/mod.rs
+@@ -424,7 +424,9 @@
+             while self.script_i.1 < script_families.len() {
+                 let script_family = script_families[self.script_i.1];
+                 self.script_i.1 += 1;
+-                for m_key in font_match_keys_iter(false) {
++                // Prefer the requested fallback family even when its nearest
++                // weight is not exact (including variable font default weights).
++                for m_key in self.font_match_keys.iter() {
+                     if self.face_contains_family(m_key.id, script_family) {
+                         if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
+                             return Some(font);
+@@ -447,7 +449,7 @@
+         while self.common_i < common_families.len() {
+             let common_family = common_families[self.common_i];
+             self.common_i += 1;
+-            for m_key in font_match_keys_iter(false) {
++            for m_key in self.font_match_keys.iter() {
+                 if self.face_contains_family(m_key.id, common_family) {
+                     if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
+                         return Some(font);
+--- a/src/font/system.rs
++++ b/src/font/system.rs
+@@ -243,6 +243,8 @@
+     /// Get a mutable reference to the database.
+     pub fn db_mut(&mut self) -> &mut fontdb::Database {
+         self.font_matches_cache.clear();
++        #[cfg(feature = "shape-run-cache")]
++        { self.shape_run_cache = crate::ShapeRunCache::default(); }
+         &mut self.db
+     }
+ 
+--- a/src/shape.rs
++++ b/src/shape.rs
+@@ -425,6 +425,7 @@
+ 
+     let run_range = start_run..end_run;
+     let mut key = ShapeRunKey {
++        rtl: span_rtl,
+         text: line[run_range.clone()].to_string(),
+         default_attrs: AttrsOwned::new(&attrs_list.defaults()),
+         attrs_spans: Vec::new(),
+--- a/src/shape_run_cache.rs
++++ b/src/shape_run_cache.rs
+@@ -7,6 +7,8 @@
+ /// Key for caching shape runs.
+ #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+ pub struct ShapeRunKey {
++    /// Direction is part of shaping, including mirrored punctuation.
++    pub rtl: bool,
+     pub text: String,
+     pub default_attrs: AttrsOwned,
+     pub attrs_spans: Vec<(Range<usize>, AttrsOwned)>,
+@@ -16,13 +18,14 @@
+ #[derive(Clone, Default)]
+ pub struct ShapeRunCache {
+     age: u64,
+-    cache: HashMap<ShapeRunKey, (u64, Vec<ShapeGlyph>)>,
++    bytes: usize,
++    cache: HashMap<ShapeRunKey, (u64, Vec<ShapeGlyph>, usize)>,
+ }
+ 
+ impl ShapeRunCache {
+     /// Get cache item, updating age if found
+     pub fn get(&mut self, key: &ShapeRunKey) -> Option<&Vec<ShapeGlyph>> {
+-        self.cache.get_mut(key).map(|(age, glyphs)| {
++        self.cache.get_mut(key).map(|(age, glyphs, _)| {
+             *age = self.age;
+             &*glyphs
+         })
+@@ -30,13 +33,45 @@
+ 
+     /// Insert cache item with current age
+     pub fn insert(&mut self, key: ShapeRunKey, glyphs: Vec<ShapeGlyph>) {
+-        self.cache.insert(key, (self.age, glyphs));
++        // Bound both owned payload and map overhead. Oversized runs are still
++        // shaped normally; only their optional memoization is skipped.
++        const MAX_BYTES: usize = 4 * 1024 * 1024;
++        const MAX_ENTRIES: usize = 4096;
++        let attrs_bytes = |attrs: &AttrsOwned| {
++            let family = match &attrs.family_owned {
++                crate::FamilyOwned::Name(name) => name.len(),
++                _ => 0,
++            };
++            family + attrs.font_features.features.capacity() * core::mem::size_of::<crate::Feature>()
++        };
++        let bytes = core::mem::size_of::<ShapeRunKey>() + key.text.capacity()
++            + key.attrs_spans.capacity() * core::mem::size_of::<(Range<usize>, AttrsOwned)>()
++            + attrs_bytes(&key.default_attrs)
++            + key.attrs_spans.iter().map(|(_, attrs)| attrs_bytes(attrs)).sum::<usize>()
++            + glyphs.capacity() * core::mem::size_of::<ShapeGlyph>();
++        if bytes > MAX_BYTES {
++            return;
++        }
++        if let Some((_, _, old_bytes)) = self.cache.remove(&key) {
++            self.bytes -= old_bytes;
++        }
++        if self.bytes + bytes > MAX_BYTES || self.cache.len() >= MAX_ENTRIES {
++            self.cache.clear();
++            self.bytes = 0;
++        }
++        self.bytes += bytes;
++        self.cache.insert(key, (self.age, glyphs, bytes));
+     }
+ 
+     /// Remove anything in the cache with an age older than `keep_ages`
+     pub fn trim(&mut self, keep_ages: u64) {
+-        self.cache
+-            .retain(|_key, (age, _glyphs)| *age + keep_ages >= self.age);
++        let mut removed_bytes = 0;
++        self.cache.retain(|_key, (age, _glyphs, bytes)| {
++            let keep = *age + keep_ages >= self.age;
++            if !keep { removed_bytes += *bytes; }
++            keep
++        });
++        self.bytes -= removed_bytes;
+         // Increase age
+         self.age += 1;
+     }
