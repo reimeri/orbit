@@ -3373,7 +3373,8 @@ impl App {
             .height(Fill)
             .into();
         }
-        let mut compose = column![].spacing(10);
+        // Keep editor state when the attachment strip is inserted or removed.
+        let mut compose = widget::keyed_column([]).spacing(10);
         if !self.attachments.is_empty() {
             let images = row(self
                 .attachments
@@ -3381,9 +3382,9 @@ impl App {
                 .enumerate()
                 .map(|(index, media)| self.image_view.attachment(media, index)))
             .spacing(8);
-            compose = compose.push(crate::scrollbar::horizontal(images));
+            compose = compose.push("attachments", crate::scrollbar::horizontal(images));
         }
-        compose = compose.push(self.composer_editor(running));
+        compose = compose.push("editor", self.composer_editor(running));
         column![
             chat,
             container(
@@ -7604,6 +7605,85 @@ mod tests {
         app.notice.as_mut().unwrap().1 = std::time::Instant::now() - NOTICE_DURATION;
         dispatch(&mut app, Message::NoticeTick).await;
         assert!(app.notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn image_paste_preserves_composer_focus_across_attachment_changes() {
+        use iced::advanced::widget::{Operation, operation::Focusable};
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        struct FocusComposer;
+        impl Operation for FocusComposer {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                _: iced::Rectangle,
+                state: &mut dyn Focusable,
+            ) {
+                state.focus();
+            }
+        }
+
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        let image = pico_core::media::MediaStore::new(root.join("focus-images"))
+            .image(include_bytes!("fixtures/media.png"))
+            .unwrap();
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(930., 800.);
+        let mut ui = UserInterface::build(app.center(), size, Cache::new(), &mut renderer);
+        ui.operate(&renderer, &mut FocusComposer);
+        let mut cache = ui.into_cache();
+
+        // Keep the real widget cache through the first image, another image,
+        // and removal of the strip. Typing must work without refocusing.
+        for change in 0..4 {
+            match change {
+                0 | 1 => {
+                    app.importing = 1;
+                    app.io_busy = true;
+                    dispatch(
+                        &mut app,
+                        Message::AttachmentLoaded(Ok(crate::attachments::Input::Image(
+                            image.clone(),
+                        ))),
+                    )
+                    .await;
+                }
+                _ => dispatch(&mut app, Message::RemoveAttachment(0)).await,
+            }
+            assert_eq!(app.attachments.len(), [1, 2, 1, 0][change]);
+            let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+            let mut messages = Vec::new();
+            ui.update(
+                &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Character("x".into()),
+                    modified_key: keyboard::Key::Character("x".into()),
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyX),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::empty(),
+                    text: Some("x".into()),
+                    repeat: false,
+                })],
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            cache = ui.into_cache();
+            assert!(
+                matches!(messages.as_slice(), [Message::Editor(_)]),
+                "composer must still accept typing after attachment change {change}"
+            );
+            for message in messages {
+                dispatch(&mut app, message).await;
+            }
+            assert_eq!(app.editor.text(), "x".repeat(change + 1));
+        }
     }
 
     #[tokio::test]
