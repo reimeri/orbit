@@ -122,7 +122,8 @@ pub struct App {
     markdown_images: crate::markdown_images::Cache,
     api_key_draft: String,
     api_key_configured: bool,
-    context_menu: Option<(String, iced::Point)>,
+    context_menu: Option<(MenuTarget, iced::Point)>,
+    stashed_open: bool,
     footer_menu: Option<FooterMenu>,
     selected: Option<String>,
     search: String,
@@ -186,10 +187,17 @@ struct FooterMenu {
     focused: usize,
 }
 #[derive(Clone, Debug)]
+enum MenuTarget {
+    Session(String),
+    Project(PathBuf),
+}
+#[derive(Clone, Debug)]
 enum Modal {
     Image(pico_core::media::Media),
     MarkdownImage(Arc<crate::markdown_images::Loaded>),
     AddProject,
+    RenameProject(PathBuf),
+    DeleteProject(PathBuf),
     Rename(String),
     Delete(String),
     Logout,
@@ -238,6 +246,12 @@ pub enum Message {
     AgeTick,
     Press(Press),
     SessionMenu(String, iced::Point),
+    ProjectMenu(PathBuf, iced::Point),
+    RenameProject(PathBuf),
+    StashProject(PathBuf),
+    DeleteProject(PathBuf),
+    ProjectDeleted(PathBuf, Result<(), String>),
+    ToggleStashed,
     CopySessionId(String),
     CloseMenu,
     FooterMenu(FooterControl),
@@ -382,6 +396,7 @@ impl App {
             api_key_draft: String::new(),
             api_key_configured: false,
             context_menu: None,
+            stashed_open: false,
             footer_menu: None,
             selected,
             search: String::new(),
@@ -1077,6 +1092,9 @@ impl App {
         Task::batch([task, close].into_iter().chain(self.tasks.drain(..)))
     }
     fn update_inner(&mut self, message: Message) -> Task<Message> {
+        if self.io_busy && matches!(message, Message::Favorite(_) | Message::StashProject(_)) {
+            return Task::none();
+        }
         if (self.closing || self.close_requested)
             && matches!(
                 message,
@@ -1094,6 +1112,7 @@ impl App {
                     | Message::SessionEffort(_)
                     | Message::ToggleSessionFast
                     | Message::Favorite(_)
+                    | Message::StashProject(_)
                     | Message::ApplySettings
                     | Message::Font(_)
                     | Message::ChatWidth(_)
@@ -1425,7 +1444,54 @@ impl App {
             }
             Message::GitTick => return self.refresh_git(),
             Message::SessionMenu(id, position) => {
-                self.context_menu = Some((id, position));
+                self.context_menu = Some((MenuTarget::Session(id), position));
+            }
+            Message::ProjectMenu(path, position) => {
+                self.context_menu = Some((MenuTarget::Project(path), position));
+            }
+            Message::ToggleStashed => self.stashed_open = !self.stashed_open,
+            Message::RenameProject(path) => {
+                self.context_menu = None;
+                if let Some(project) = self.catalog.projects.iter().find(|p| p.path == path) {
+                    self.modal_input = project.name();
+                    self.modal = Some(Modal::RenameProject(path));
+                    return widget::operation::focus("modal-input");
+                }
+            }
+            Message::StashProject(path) => {
+                self.context_menu = None;
+                if let Some(project) = self.catalog.projects.iter_mut().find(|p| p.path == path) {
+                    project.stashed = !project.stashed;
+                    self.save_catalog(false);
+                }
+            }
+            Message::DeleteProject(path) => {
+                self.context_menu = None;
+                self.modal = Some(Modal::DeleteProject(path));
+            }
+            Message::ProjectDeleted(path, result) => {
+                self.io_busy = false;
+                let selected_deleted = self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|id| self.harness.as_ref().is_some_and(|h| h.get(id).is_none()));
+                if selected_deleted {
+                    self.draft_dirty = false;
+                    self.selected = None;
+                }
+                if result.is_ok() {
+                    self.catalog.projects.retain(|p| p.path != path);
+                    if self.new_draft.project.as_ref() == Some(&path) {
+                        self.new_draft.project = None;
+                        self.draft_session = None;
+                    }
+                    self.modal = None;
+                }
+                self.refresh();
+                if selected_deleted {
+                    self.restore_draft();
+                }
+                self.fail(result);
             }
             Message::CopySessionId(id) => {
                 self.context_menu = None;
@@ -2238,6 +2304,8 @@ impl App {
                         self.catalog.projects.push(Project {
                             path,
                             favorite: false,
+                            display_name: None,
+                            stashed: false,
                         });
                         self.save_catalog(false);
                     }
@@ -2250,6 +2318,41 @@ impl App {
                     ))
                 }
             },
+            Some(Modal::RenameProject(path)) => {
+                let name = self.modal_input.trim().to_owned();
+                if name.is_empty() {
+                    self.error = Some("Enter a project name.".into());
+                } else if let Some(project) =
+                    self.catalog.projects.iter_mut().find(|p| p.path == path)
+                {
+                    project.display_name = Some(name);
+                    self.save_catalog(false);
+                    self.modal = None;
+                }
+            }
+            Some(Modal::DeleteProject(path)) => {
+                if let Some(h) = &self.harness {
+                    let h = h.clone();
+                    let mut catalog = self.catalog.clone();
+                    catalog.projects.retain(|p| p.path != path);
+                    let mut draft = self.new_draft.clone();
+                    if draft.project.as_ref() == Some(&path) {
+                        draft.project = None;
+                    }
+                    self.io_busy = true;
+                    self.tasks.push(self.io.run(move || {
+                        let result = (|| {
+                            h.remove_project(&path)?;
+                            h.store.save_new_draft(&draft)?;
+                            if catalog.selected.as_ref().is_some_and(|id| h.get(id).is_none()) {
+                                catalog.selected = None;
+                            }
+                            h.store.save_catalog(&catalog)
+                        })().map_err(|e| format!("Could not finish deleting this project: {e:#}. Fix the problem and retry."));
+                        Message::ProjectDeleted(path, result)
+                    }));
+                }
+            }
             Some(Modal::Rename(id)) => {
                 let title = self.modal_input.trim().to_owned();
                 if !title.is_empty()
@@ -2478,13 +2581,13 @@ impl App {
                         .center_y(Fill),
                 )
                 .into()
-        } else if let Some((id, position)) = &self.context_menu {
+        } else if let Some((target, position)) = &self.context_menu {
             let dismiss = mouse_area(space().width(Fill).height(Fill))
                 .on_press(Message::CloseMenu)
                 .on_right_press(Message::CloseMenu)
                 .on_scroll(|_| Message::CloseMenu);
-            let menu = container(
-                column![
+            let actions = match target {
+                MenuTarget::Session(id) => column![
                     theme::button("Rename")
                         .width(Fill)
                         .on_press(Message::Rename(id.clone()))
@@ -2496,13 +2599,34 @@ impl App {
                     theme::button("Delete")
                         .width(Fill)
                         .on_press(Message::Delete(id.clone()))
-                        .style(theme::text_button)
-                ]
-                .spacing(4),
-            )
-            .padding(6)
-            .width(170)
-            .style(card);
+                        .style(theme::text_button),
+                ],
+                MenuTarget::Project(path) => {
+                    let stashed = self
+                        .catalog
+                        .projects
+                        .iter()
+                        .any(|p| p.path == *path && p.stashed);
+                    column![
+                        theme::button("Rename")
+                            .width(Fill)
+                            .on_press(Message::RenameProject(path.clone()))
+                            .style(theme::text_button),
+                        theme::button(if stashed { "Restore" } else { "Stash" })
+                            .width(Fill)
+                            .on_press(Message::StashProject(path.clone()))
+                            .style(theme::text_button),
+                        theme::button("Delete")
+                            .width(Fill)
+                            .on_press(Message::DeleteProject(path.clone()))
+                            .style(theme::text_button),
+                    ]
+                }
+            };
+            let menu = container(actions.spacing(4))
+                .padding(6)
+                .width(170)
+                .style(card);
             let x = position.x.min(self.window_width - 180.).max(0.);
             let y = position.y.min(self.window_height - 140.).max(0.);
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
@@ -2580,7 +2704,7 @@ impl App {
                 .iter()
                 .filter(|p| p.favorite)
                 .map(|p| {
-                    theme::button(project_badge(&p.path))
+                    theme::button(project_badge_named(&p.path, &p.name()))
                         .padding(0)
                         .on_press(Message::Create(p.path.clone()))
                         .style(theme::text_button)
@@ -2750,12 +2874,8 @@ impl App {
                 SidebarRow::Session(session_index, status) => {
                     let session = &self.sessions[*session_index];
                     let active = self.parent_id() == Some(session.id.as_str());
-                    let project = session
-                        .project
-                        .file_name()
-                        .unwrap_or(session.project.as_os_str())
-                        .to_string_lossy();
-                    let badge = project_badge(&session.project);
+                    let project = self.project_name(&session.project);
+                    let badge = project_badge_named(&session.project, &project);
                     // `updated` changes on accepted user submissions, not agent activity.
                     let children = self
                         .harness
@@ -2940,7 +3060,10 @@ impl App {
                 let content = mouse_area(
                     theme::button(
                         row![
-                            project_badge(&session.project),
+                            project_badge_named(
+                                &session.project,
+                                &self.project_name(&session.project)
+                            ),
                             ellipsized_text(&session.title, 13., None),
                             crate::session_action::slot(trailing_width),
                         ]
@@ -3635,47 +3758,90 @@ impl App {
             }
         }
     }
+    fn project_name(&self, path: &Path) -> String {
+        self.catalog
+            .projects
+            .iter()
+            .find(|p| p.path == path)
+            .map(Project::name)
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+    }
+
+    fn project_row(&self, project: &Project) -> Element<'_, Message> {
+        let name = project.name();
+        let open = theme::button(
+            row![
+                project_badge_named(&project.path, &name),
+                ellipsized_text(&name, 13., None),
+            ]
+            .spacing(12)
+            .align_y(iced::Center),
+        )
+        .on_press(Message::Create(project.path.clone()))
+        .padding([6, 10])
+        .width(Fill)
+        .style(theme::text_button);
+        let favorite = theme::button(text(if project.favorite { "★" } else { "☆" }).size(18))
+            .on_press(Message::Favorite(project.path.clone()))
+            .padding([3, 8])
+            .style(theme::text_button);
+        mouse_area(row![open, favorite].align_y(iced::Center))
+            .on_right_press(Message::Press(Press::ProjectMenu(project.path.clone())))
+            .into()
+    }
+
     fn new_session(&self) -> Element<'_, Message> {
-        let mut projects = column![].spacing(10);
+        let mut projects = column![].spacing(2);
+        let mut stashed = column![].spacing(2);
         let mut ordered: Vec<_> = self.catalog.projects.iter().collect();
         ordered.sort_by_key(|p| !p.favorite);
+        let stashed_count = ordered.iter().filter(|p| p.stashed).count();
         for project in ordered {
-            projects = projects.push(
-                row![
-                    theme::button(
-                        column![
-                            text(project.name()).size(17),
-                            text(project.path.display().to_string())
-                                .size(12)
-                                .color(MUTED)
-                        ]
-                        .spacing(7)
-                    )
-                    .on_press(Message::Create(project.path.clone()))
-                    .padding(16)
-                    .width(Fill)
-                    .style(secondary),
-                    theme::button(text(if project.favorite { "★" } else { "☆" }).size(22))
-                        .on_press(Message::Favorite(project.path.clone()))
-                        .style(theme::text_button)
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-            );
+            if project.stashed {
+                if self.stashed_open {
+                    stashed = stashed.push(self.project_row(project));
+                }
+            } else {
+                projects = projects.push(self.project_row(project));
+            }
         }
         let mut content = column![
-            text("PICO / V2").size(12).color(ACCENT),
-            text("Start something new.").size(32),
-            text("Choose a project. Your conversations and work stay together.")
-                .size(15)
-                .color(MUTED),
+            column![
+                text("New session").size(18),
+                text("Choose a project to get started")
+                    .size(13)
+                    .color(MUTED),
+            ]
+            .spacing(10),
             projects,
-            theme::button("+  Add project")
+            theme::button(text("+ Add project").size(13))
                 .on_press_maybe(self.harness.as_ref().map(|_| Message::AddProject))
-                .padding(12)
-                .style(secondary)
+                .padding([6, 10])
+                .style(theme::text_button)
         ]
-        .spacing(22);
+        .spacing(14);
+        if stashed_count > 0 {
+            content = content.push(
+                theme::button(
+                    text(format!(
+                        "{}  Stashed projects ({stashed_count})",
+                        if self.stashed_open { "▾" } else { "▸" }
+                    ))
+                    .size(13),
+                )
+                .on_press(Message::ToggleStashed)
+                .padding([6, 10])
+                .style(theme::text_button),
+            );
+            if self.stashed_open {
+                content = content.push(stashed);
+            }
+        }
         if self.catalog.projects.is_empty() {
             content=content.push(text("Add a local folder to begin. Pico can read and edit files and run commands in your projects.").size(13).color(MUTED));
         }
@@ -3688,7 +3854,6 @@ impl App {
                 .padding(iced::Padding::new(36.).right(36. - crate::scrollbar::GUTTER)),
         ))
         .center_x(Fill)
-        .center_y(Fill)
         .height(Fill)
         .width(Fill)
         .into()
@@ -4241,6 +4406,16 @@ impl App {
                 "Choose a local folder. Commands run without approval prompts and can access files outside this folder.",
                 "Add project",
             ),
+            Modal::RenameProject(_) => (
+                "Rename project",
+                "Change the display name in Pico. The folder on disk is not renamed.",
+                "Rename",
+            ),
+            Modal::DeleteProject(_) => (
+                "Delete project?",
+                "Permanently delete this project from Pico and all its saved conversations, including subagents and results. Files in the project folder are not deleted. Stop all running sessions first.",
+                "Delete project",
+            ),
             Modal::Rename(_) => (
                 "Rename session",
                 "Give this conversation a useful title.",
@@ -4270,7 +4445,7 @@ impl App {
         let mut content =
             column![text(title).size(24), text(body).size(14).color(MUTED)].spacing(18);
         match modal {
-            Modal::AddProject | Modal::Rename(_) => {
+            Modal::AddProject | Modal::Rename(_) | Modal::RenameProject(_) => {
                 content = content.push(
                     text_input("", &self.modal_input)
                         .style(theme::input)
@@ -4286,6 +4461,12 @@ impl App {
                             .style(secondary),
                     );
                 }
+            }
+            Modal::DeleteProject(path) => {
+                if let Some(project) = self.catalog.projects.iter().find(|p| p.path == *path) {
+                    content = content.push(text(project.name()).size(16));
+                }
+                content = content.push(text(path.display().to_string()).size(13).color(MUTED));
             }
             Modal::Link(url) => content = content.push(text(url.clone()).size(13)),
             _ => {}
@@ -4337,6 +4518,8 @@ impl App {
                 self.catalog.projects.push(Project {
                     path: path.clone(),
                     favorite: true,
+                    display_name: None,
+                    stashed: false,
                 });
                 let mut s = Session::new(path, &self.catalog.settings);
                 s.title = "Phase 1 rendered-window check".into();
@@ -4420,7 +4603,7 @@ impl App {
                 self.context_menu = self
                     .selected
                     .clone()
-                    .map(|id| (id, iced::Point::new(160., 260.)));
+                    .map(|id| (MenuTarget::Session(id), iced::Point::new(160., 260.)));
             }
             5 => {
                 self.context_menu = None;
@@ -5036,10 +5219,38 @@ impl App {
                 ]);
             }
 
+            49 => {
+                self.current_session = None;
+                self.selected = None;
+                self.draft_session = None;
+                self.modal = None;
+                self.context_menu = None;
+                self.account = Some("Smoke fixture".into());
+                self.catalog.projects = (0..12)
+                    .map(|i| Project {
+                        path: PathBuf::from(format!("/tmp/smoke-project-{i}")),
+                        display_name: Some(format!("Project {i}")),
+                        favorite: i % 3 == 0,
+                        stashed: i >= 9,
+                    })
+                    .collect();
+            }
+            50 => {
+                self.stashed_open = true;
+                self.context_menu = Some((
+                    MenuTarget::Project(PathBuf::from("/tmp/smoke-project-9")),
+                    iced::Point::new(660., 400.),
+                ));
+            }
+            51 => {
+                self.context_menu = None;
+                self.modal = Some(Modal::DeleteProject(PathBuf::from("/tmp/smoke-project-9")));
+            }
+
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, picker, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, compact project picker/stash/context menu/delete confirmation, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -5190,14 +5401,10 @@ fn delayed_capture() -> Task<Message> {
         |_| Message::Capture,
     )
 }
-fn project_badge(path: &Path) -> Element<'static, Message> {
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy();
+fn project_badge_named(path: &Path, name: &str) -> Element<'static, Message> {
     let color = project_color(path);
     container(
-        text(project_initials(&name))
+        text(project_initials(name))
             .size(8)
             .line_height(text::LineHeight::Absolute(10.into()))
             .color(color),
@@ -8660,10 +8867,14 @@ Then implement the fix.";
             Project {
                 path: PathBuf::from("/not-starred"),
                 favorite: false,
+                display_name: None,
+                stashed: false,
             },
             Project {
                 path: path.clone(),
                 favorite: true,
+                display_name: None,
+                stashed: false,
             },
         ];
         let mut renderer = header_renderer();
@@ -8736,6 +8947,8 @@ Then implement the fix.";
         app.catalog.projects.push(Project {
             path: path.clone(),
             favorite: true,
+            display_name: None,
+            stashed: false,
         });
         stored_session(&mut app, path).await;
         let mut renderer = header_renderer();
@@ -8768,6 +8981,8 @@ Then implement the fix.";
             .map(|i| Project {
                 path: PathBuf::from(format!("/project-{i}")),
                 favorite: true,
+                display_name: None,
+                stashed: false,
             })
             .collect();
         let mut renderer = header_renderer();
@@ -9201,7 +9416,7 @@ Then implement the fix.";
         dispatch(&mut app, Message::ToggleSearch).await;
         dispatch(&mut app, Message::Search("no matches".into())).await;
         app.modal = Some(Modal::AddProject);
-        app.context_menu = Some((other.id.clone(), iced::Point::ORIGIN));
+        app.context_menu = Some((MenuTarget::Session(other.id.clone()), iced::Point::ORIGIN));
         dispatch(&mut app, escape.clone()).await;
         assert!(app.context_menu.is_none());
         assert!(app.modal.is_some());
@@ -10022,6 +10237,224 @@ Then implement the fix.";
             cache = ui.into_cache();
         }
     }
+    #[tokio::test]
+    async fn project_management_persists_names_stash_and_retries_deletion_without_touching_files() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        let path = root.join("managed-project");
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("keep.txt");
+        std::fs::write(&file, "project source").unwrap();
+        dispatch(&mut app, Message::AddProject).await;
+        dispatch(&mut app, Message::ModalInput(path.display().to_string())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        stored_session(&mut app, path.clone()).await;
+        let first = app.selected.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let second = app.selected.clone().unwrap();
+        stored_session(&mut app, root.join("other-project")).await;
+        let other = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+
+        dispatch(&mut app, Message::RenameProject(path.clone())).await;
+        dispatch(&mut app, Message::ModalInput("   ".into())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(app.modal.is_some());
+        assert!(app.error.is_some());
+        dispatch(&mut app, Message::ErrorDismiss).await;
+        dispatch(&mut app, Message::ModalInput("  My workspace λ  ".into())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(
+            displayed_text(app.sidebar(), iced::Size::new(300., 700.)).contains("My workspace λ")
+        );
+        dispatch(&mut app, Message::Favorite(path.clone())).await;
+        dispatch(&mut app, Message::StashProject(path.clone())).await;
+        let saved = h.store.load().unwrap().0.projects.remove(0);
+        assert_eq!(saved.name(), "My workspace λ");
+        assert_eq!(saved.path, path);
+        assert!(saved.stashed && saved.favorite);
+        assert_eq!(
+            app.sessions.len(),
+            3,
+            "stashing must not hide conversations"
+        );
+        assert_eq!(app.selected.as_ref(), Some(&other));
+        dispatch(&mut app, Message::StashProject(path.clone())).await;
+        assert!(!h.store.load().unwrap().0.projects[0].stashed);
+
+        dispatch(&mut app, Message::DeleteProject(path.clone())).await;
+        dispatch(&mut app, Message::Dismiss).await;
+        assert!(
+            h.store.load_session(&first).is_ok(),
+            "cancel is non-destructive"
+        );
+        // Failed SQLite deletion leaves all sessions and the project available for retry.
+        let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
+        sqlite::fail_writes(&db, "sessions", "fixture project delete failure");
+        dispatch(&mut app, Message::DeleteProject(path.clone())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("fixture project delete failure")
+        );
+        assert!(app.modal.is_some());
+        assert_eq!(h.store.load().unwrap().0.projects.len(), 1);
+        assert!(h.store.load_session(&first).is_ok());
+        assert!(h.store.load_session(&second).is_ok());
+        sqlite::allow_writes(&db, "sessions");
+        dispatch(&mut app, Message::ErrorDismiss).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(app.catalog.projects.is_empty());
+        assert!(h.store.load().unwrap().0.projects.is_empty());
+        assert!(h.store.load_session(&first).is_err());
+        assert!(h.store.load_session(&second).is_err());
+        assert!(h.store.load_session(&other).is_ok());
+        assert_eq!(app.selected.as_ref(), Some(&other));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "project source");
+        assert!(app.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn project_deletion_recovers_catalog_failure_and_detaches_saved_draft() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::AddProject).await;
+        dispatch(&mut app, Message::ModalInput(root.display().to_string())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Paste(
+                Arc::new("Unsent draft".into()),
+            ))),
+        )
+        .await;
+        dispatch(&mut app, Message::SaveDraft).await;
+        stored_session(&mut app, root.clone()).await;
+        let id = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        let settings = h.store.root().join("settings.json");
+        let backup = h.store.root().join("settings.backup");
+        std::fs::rename(&settings, &backup).unwrap();
+        std::fs::create_dir(&settings).unwrap();
+        dispatch(&mut app, Message::DeleteProject(root.clone())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(app.error.is_some());
+        assert!(app.modal.is_some(), "keep confirmation available for retry");
+        assert_eq!(app.catalog.projects.len(), 1);
+        assert!(h.store.load_session(&id).is_err());
+        assert!(app.selected.is_none());
+        assert!(app.current_session.is_none());
+        assert!(app.editor.text().is_empty());
+        std::fs::remove_dir(&settings).unwrap();
+        std::fs::rename(&backup, &settings).unwrap();
+        dispatch(&mut app, Message::ErrorDismiss).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(app.error.is_none());
+        assert!(app.catalog.projects.is_empty());
+        assert!(app.new_draft.project.is_none());
+        let draft = h.store.load_new_draft().unwrap();
+        assert!(draft.project.is_none());
+        assert_eq!(
+            draft.message, "Unsent draft",
+            "deletion must not discard unsent text"
+        );
+        assert!(h.store.load().unwrap().0.selected.is_none());
+    }
+
+    #[tokio::test]
+    async fn compact_project_rows_route_clicks_and_restore_stashed_projects() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let mut app = app();
+        app.account = Some("fixture account".into());
+        app.catalog.projects = ["Alpha project", "Beta project", "Stashed project", "A long project name with asymmetric Unicode λ that must remain on a single row even in a narrow picker"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| Project {
+                path: PathBuf::from(format!("/project-{i}")),
+                display_name: Some(name.into()),
+                favorite: i == 1,
+                stashed: i == 2,
+            })
+            .collect();
+        let mut renderer = header_renderer();
+        let mut heading_y = None;
+        for (width, height) in [(350., 700.), (650., 700.), (650., 1000.)] {
+            let mut ui = UserInterface::build(
+                pointer_input(app.new_session(), false, app.chat_selection.clone()),
+                iced::Size::new(width, height),
+                Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let heading = bounds.label("New session");
+            if let Some(y) = heading_y {
+                assert_eq!(
+                    heading.y, y,
+                    "the picker stays top-aligned as the window grows"
+                );
+            }
+            heading_y = Some(heading.y);
+            let alpha = bounds.label("Alpha project");
+            let beta = bounds.label("Beta project");
+            assert!(beta.y < alpha.y, "favorites remain first");
+            assert!(
+                alpha.y - beta.y < beta.height * 2.5,
+                "rows must stay single-line and compact"
+            );
+            assert!(alpha.x >= 0. && alpha.x + alpha.width <= width);
+            let long = bounds.label(&app.catalog.projects[3].name());
+            assert_eq!(long.height, alpha.height, "long names must not grow a row");
+            assert!(long.x + long.width <= width);
+            assert!(
+                !bounds
+                    .labels
+                    .iter()
+                    .any(|(label, _)| label == "Stashed project")
+            );
+            assert!(
+                matches!(click_at(&mut ui, &mut renderer, beta.center()).as_slice(),
+                [Message::Create(path)] if path == Path::new("/project-1"))
+            );
+            let star = bounds.label("★");
+            assert!((star.center_y() - beta.center_y()).abs() < 1.);
+            assert!(
+                matches!(click_at(&mut ui, &mut renderer, star.center()).as_slice(),
+                [Message::Favorite(path)] if path == Path::new("/project-1"))
+            );
+            let mut messages = Vec::new();
+            ui.update(
+                &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                    mouse::Button::Right,
+                ))],
+                mouse::Cursor::Available(alpha.center()),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(matches!(messages.as_slice(),
+                [Message::ProjectMenu(path, position)] if path == Path::new("/project-0") && *position == alpha.center()));
+        }
+        dispatch(&mut app, Message::ToggleStashed).await;
+        assert!(
+            displayed_text(app.new_session(), iced::Size::new(500., 700.))
+                .contains("Stashed project")
+        );
+        dispatch(
+            &mut app,
+            Message::ProjectMenu(PathBuf::from("/project-2"), iced::Point::new(300., 200.)),
+        )
+        .await;
+        let menu = displayed_text(app.view(), iced::Size::new(1000., 800.));
+        assert!(menu.contains("Restore") && menu.contains("Rename") && menu.contains("Delete"));
+        dispatch(&mut app, Message::StashProject(PathBuf::from("/project-2"))).await;
+        assert!(app.context_menu.is_none());
+        assert!(!app.catalog.projects[2].stashed);
+    }
+
     #[tokio::test]
     async fn session_menu_targets_the_clicked_session_and_releases_deleted_output() {
         let mut app = app();

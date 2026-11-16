@@ -32,9 +32,16 @@ pub fn id() -> String {
 pub struct Project {
     pub path: PathBuf,
     pub favorite: bool,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub stashed: bool,
 }
 impl Project {
     pub fn name(&self) -> String {
+        if let Some(name) = &self.display_name {
+            return name.clone();
+        }
         self.path
             .file_name()
             .unwrap_or(self.path.as_os_str())

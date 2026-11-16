@@ -429,6 +429,16 @@ impl Shell {
         }
         result.map(|(text, _)| text)
     }
+    pub fn is_executing(&self) -> bool {
+        self.processes
+            .lock()
+            .expect("process lock")
+            .values()
+            .any(|process| {
+                let output = process.output.0.lock().expect("output lock");
+                output.exit.is_none() || output.readers > 0
+            })
+    }
     pub fn has_work(&self) -> bool {
         !self.processes.lock().expect("process lock").is_empty()
     }

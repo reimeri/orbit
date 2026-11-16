@@ -5,6 +5,11 @@ use crate::store::{id, now};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+enum Deletion<'a> {
+    Session(&'a str),
+    Project(&'a std::path::Path),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Profile {
@@ -529,36 +534,58 @@ impl Harness {
         self.changes.send_replace(());
     }
     pub fn remove(&self, session: &str) -> Result<()> {
+        self.remove_sessions(Deletion::Session(session))
+    }
+
+    /// Delete every conversation in a project as one database transaction.
+    /// The coordinator guard excludes turn/child starts for the entire operation.
+    pub fn remove_project(&self, project: &std::path::Path) -> Result<()> {
+        self.remove_sessions(Deletion::Project(project))
+    }
+
+    fn remove_sessions(&self, target: Deletion<'_>) -> Result<()> {
         let mut coordinator = self.subagents.lock().expect("subagent lock");
-        if self.load(session)?.snapshot().child.is_some() {
-            bail!("Delete children together with their parent");
-        }
-        let children: HashSet<_> = coordinator
-            .runs
-            .values()
-            .filter(|r| r.parent_id == session)
-            .map(|r| r.session_id.clone())
-            .collect();
+        let project_deletion = matches!(target, Deletion::Project(_));
+        let parents: HashSet<String> = match target {
+            Deletion::Session(session) => {
+                if self.load(session)?.snapshot().child.is_some() {
+                    bail!("Delete children together with their parent");
+                }
+                [session.to_owned()].into()
+            }
+            Deletion::Project(project) => self
+                .summaries()
+                .into_iter()
+                .filter(|s| s.project == project && s.child.is_none())
+                .map(|s| s.id)
+                .collect(),
+        };
+        let mut ids = parents.clone();
+        ids.extend(
+            coordinator
+                .runs
+                .values()
+                .filter(|r| parents.contains(&r.parent_id))
+                .map(|r| r.session_id.clone()),
+        );
         if coordinator
             .runs
             .values()
-            .any(|r| r.parent_id == session && r.status == RunStatus::Running)
-            || children
-                .iter()
-                .chain(std::iter::once(&session.to_owned()))
-                .any(|id| {
-                    self.get(id)
-                        .is_some_and(|c| c.is_running() || c.finishing.load(Ordering::Acquire))
+            .any(|r| parents.contains(&r.parent_id) && r.status == RunStatus::Running)
+            || ids.iter().any(|id| {
+                self.get(id).is_some_and(|c| {
+                    if project_deletion {
+                        c.is_executing()
+                    } else {
+                        c.is_turn_active()
+                    }
                 })
+            })
         {
-            bail!("Stop the parent and all its children before deleting this session");
+            bail!("Stop all running sessions and their subagents before deleting. Then retry.");
         }
         let _loading = self.loading.lock().expect("loading lock");
-        let family: Vec<_> = children
-            .iter()
-            .chain(std::iter::once(&session.to_owned()))
-            .filter_map(|id| self.get(id))
-            .collect();
+        let family: Vec<_> = ids.iter().filter_map(|id| self.get(id)).collect();
         // Exclude late native callbacks: none can recreate a just-deleted row.
         let _saved: Vec<_> = family
             .iter()
@@ -573,7 +600,7 @@ impl Harness {
         {
             let mut db = self.store.db.lock().expect("database lock");
             let tx = db.transaction()?;
-            for id in children.iter().chain(std::iter::once(&session.to_owned())) {
+            for id in &ids {
                 tx.execute("DELETE FROM sessions WHERE id=?1", [id])?;
             }
             tx.commit()?;
@@ -583,7 +610,7 @@ impl Harness {
         }
         drop(media_leases);
         let mut cleanup_errors = Vec::new();
-        for id in children.iter().chain(std::iter::once(&session.to_owned())) {
+        for id in &ids {
             if let Some(c) = self.get(id) {
                 c.deleted.store(true, Ordering::Release);
                 c.naming_cancel.cancel();
@@ -601,10 +628,12 @@ impl Harness {
                 .remove(id);
             self.summaries.lock().expect("summary lock").remove(id);
         }
-        coordinator.runs.retain(|_, r| r.parent_id != session);
+        coordinator
+            .runs
+            .retain(|_, r| !parents.contains(&r.parent_id));
         coordinator
             .unsaved
-            .retain(|_, (r, _, _)| r.parent_id != session);
+            .retain(|_, (r, _, _)| !parents.contains(&r.parent_id));
         self.catalog_revision.fetch_add(1, Ordering::Release);
         self.changes.send_replace(());
         if !cleanup_errors.is_empty() {
@@ -1341,6 +1370,108 @@ mod tests {
         }
         assert!(f.h.store.load_session(&seventh.session_id).is_ok());
         assert!(f.requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn project_deletion_is_atomic_includes_children_and_preserves_other_projects() {
+        let mut f = Fixture::new().await;
+        let project = f.h.load(&f.parent).unwrap().snapshot().project;
+        let second = Session::new(project.clone(), &Settings::default());
+        let second_id = second.id.clone();
+        f.h.store.save_session(&second).unwrap();
+        f.h.insert(second);
+        let other = Session::new(project.join("other-project"), &Settings::default());
+        let other_id = other.id.clone();
+        f.h.store.save_session(&other).unwrap();
+        f.h.insert(other);
+
+        let child = f
+            .spawn(Profile::Explore, None, "delete project fixture")
+            .unwrap();
+        let _request = f.request().await;
+        assert!(
+            f.h.remove_project(&project)
+                .unwrap_err()
+                .to_string()
+                .contains("Stop")
+        );
+        for id in [&f.parent, &second_id, &child.session_id, &other_id] {
+            assert!(f.h.store.load_session(id).is_ok());
+        }
+        f.h.stop(&f.parent);
+        until(|| f.h.all().iter().all(|c| !c.is_executing())).await;
+        let background = f.h.get(&second_id).unwrap();
+        let execution = background.clone();
+        tokio::task::spawn_blocking(move || {
+            execution.code.exec(
+                r#"// @exec: {"yield_time_ms": 1}
+await new Promise(r => setTimeout(r, 60000));"#,
+                "background",
+                &CancellationToken::new(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!background.is_running());
+        assert!(background.is_executing());
+        assert!(f.h.remove_project(&project).is_err());
+        assert!(
+            background.is_executing(),
+            "refusal must not cancel outstanding work"
+        );
+        f.h.stop(&second_id);
+        until(|| !background.is_executing()).await;
+        // A yielded shell can outlive both its JavaScript cell and the model turn.
+        let execution = background.clone();
+        let output = tokio::task::spawn_blocking(move || execution.code.exec(
+            r#"text(await tools.exec_command({cmd:"while [ ! -f release-shell ]; do sleep 0.01; done; printf done", login:false, yield_time_ms:1}));"#,
+            "background-shell", &CancellationToken::new()
+        )).await.unwrap().unwrap();
+        assert!(output.contains("Script completed"), "{output}");
+        assert!(
+            output.contains("Process running with session ID"),
+            "{output}"
+        );
+        assert!(!background.is_running());
+        assert!(background.is_executing());
+        assert!(f.h.remove_project(&project).is_err());
+        assert!(background.is_executing());
+        std::fs::write(project.join("release-shell"), "").unwrap();
+        until(|| !background.is_executing()).await;
+        assert!(
+            background.code.has_work(),
+            "completed, unread shell output is retained but must not block deletion"
+        );
+        let db = rusqlite::Connection::open(f.h.store.root().join("sessions.sqlite3")).unwrap();
+        // Fail after a delete has already occurred inside the transaction.
+        db.execute_batch(
+            "CREATE TRIGGER reject_project_delete AFTER DELETE ON sessions
+            WHEN (SELECT count(*) FROM sessions) < 3
+            BEGIN SELECT RAISE(FAIL, 'fixture deletion failure'); END;",
+        )
+        .unwrap();
+        assert!(f.h.remove_project(&project).is_err());
+        for id in [&f.parent, &second_id, &child.session_id, &other_id] {
+            assert!(f.h.get(id).is_some());
+            assert!(f.h.store.load_session(id).is_ok());
+        }
+        db.execute_batch("DROP TRIGGER reject_project_delete")
+            .unwrap();
+        f.h.remove_project(&project).unwrap();
+        for id in [&f.parent, &second_id, &child.session_id] {
+            assert!(f.h.get(id).is_none());
+            assert!(f.h.store.load_session(id).is_err());
+        }
+        assert!(f.h.subagent_runs(&f.parent).is_empty());
+        let (_, summaries, _) = f.h.store.load().unwrap();
+        assert_eq!(
+            summaries.iter().map(|s| &s.id).collect::<Vec<_>>(),
+            vec![&other_id]
+        );
+        // Retrying a completed deletion is harmless.
+        f.h.remove_project(&project).unwrap();
+        assert!(f.h.store.load_session(&other_id).is_ok());
     }
 
     #[tokio::test]

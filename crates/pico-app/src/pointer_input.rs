@@ -15,6 +15,7 @@ use std::cell::Cell;
 pub enum Press {
     Resize(bool),
     SessionMenu(String),
+    ProjectMenu(std::path::PathBuf),
 }
 
 pub fn pointer_input(
@@ -213,6 +214,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
                         Message::ResizeStart(right, position)
                     }
                     Press::SessionMenu(id) => Message::SessionMenu(id, position),
+                    Press::ProjectMenu(path) => Message::ProjectMenu(path, position),
                 }
             }
             message => message,

@@ -313,7 +313,9 @@ impl CodeMode {
         })
     }
     pub fn is_executing(&self) -> bool {
-        self.active_cells.load(Ordering::Acquire) > 0 || self.workers.load(Ordering::Acquire) > 0
+        self.active_cells.load(Ordering::Acquire) > 0
+            || self.workers.load(Ordering::Acquire) > 0
+            || self.shell.is_executing()
     }
     pub fn has_work(&self) -> bool {
         !self.cells.lock().expect("cell lock").is_empty()

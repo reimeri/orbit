@@ -505,3 +505,25 @@ continuation, hover/click routing and bounded-list regressions. The window smoke
 also renders the expanded list at its beginning and end. For manual acceptance,
 settle an open checked session, expand/collapse the section, browse more than ten
 rows, undo another session, and send a new message in the settled conversation.
+
+## Compact project picker
+
+The new-session picker uses compact badge/name/favorite rows and the shared V2
+theme. Right-click a row to rename its
+Pico display name, stash/restore it, or delete it. Stashing only moves the picker
+entry into the collapsed Stashed projects section; conversations remain in the
+sidebar. Names, favorites and stash state persist in the catalog.
+
+Project deletion requires confirmation, refuses active turns/background tools or
+pending questions, and deletes all matching conversation families in one SQLite
+transaction. It never deletes the project folder. The catalog is saved after the
+conversation deletion; if that later write fails, the project remains available
+for a retry with a clear error. Unsent new-session text/images are preserved, but
+their deleted project association is cleared.
+
+Run `just test project_` for persistence, failure/retry, family deletion,
+background-work refusal, compact layout and click-routing regressions. The window
+smoke includes populated and expanded-stash pickers, the project context menu and
+delete confirmation. Manual acceptance: right-click a scrolled project row, rename
+it, stash/restore it, toggle its star, and cancel/confirm deletion of a disposable
+project after stopping its sessions.

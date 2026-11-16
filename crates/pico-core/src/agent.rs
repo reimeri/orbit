@@ -437,11 +437,19 @@ impl Harness {
         let updates: Vec<_> = self
             .all()
             .into_iter()
-            .map(|c| SessionSummary::from(&*c.state.lock().expect("session lock")))
+            .map(|c| {
+                let summary = SessionSummary::from(&*c.state.lock().expect("session lock"));
+                (c, summary)
+            })
             .collect();
         let mut summaries = self.summaries.lock().expect("summary lock");
-        for summary in updates {
-            summaries.insert(summary.id.clone(), summary);
+        for (conversation, summary) in updates {
+            // Deletion marks the conversation before removing its cached summary.
+            // Check under this lock so a refresh collected before deletion cannot
+            // reinsert a stale sidebar row after the delete commits.
+            if !conversation.deleted.load(Ordering::Acquire) {
+                summaries.insert(summary.id.clone(), summary);
+            }
         }
         summaries.values().cloned().collect()
     }
