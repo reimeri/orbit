@@ -499,7 +499,7 @@ Row hover swaps the settlement age for Undo. Search includes settled sessions an
 temporarily expands matching results without changing the normal expansion state.
 
 An optional `settled_at` timestamp in both session metadata and sidebar summaries
-is the entire durable state. Undo preserves the last-submission ordering; accepted
+is the entire durable state. Undo preserves the activity ordering; accepted
 messages and automatic turn starts clear settlement. Filing is serialized with
 turn/child starts and retries outstanding child-result delivery before saving.
 Paused input and notices are preserved, not resumed or discarded by settlement.
@@ -535,3 +535,14 @@ smoke includes populated and expanded-stash pickers, the project context menu an
 delete confirmation. Manual acceptance: right-click a scrolled project row, rename
 it, stash/restore it, toggle its star, and cancel/confirm deletion of a disposable
 project after stopping its sessions.
+
+### Session age
+
+Sidebar age and ordering restart on accepted user messages (including steering),
+successfully submitted questionnaire answers, and successful main-session
+completion. Streaming and ordinary tool activity do not reset the age, nor do
+failed submissions, stopped turns or errors. Completion waits for pending
+questions and child work to finish. Completion age is saved with the other
+completion metadata by ordinary session saves; answer age is saved with its tool
+result and retained in memory for retry if storage fails. Settled rows continue
+to show time since settlement instead.

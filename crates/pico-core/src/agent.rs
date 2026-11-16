@@ -184,6 +184,7 @@ impl Harness {
         let saved = persisted.then(|| session.clone());
         let conversation = Arc::new_cyclic(|weak: &std::sync::Weak<Conversation>| {
             let target = weak.clone();
+            let harness = self.weak.clone();
             let observer = Arc::new(move |event: CodeEvent| -> Result<()> {
                 let Some(conversation) = target.upgrade() else {
                     return Ok(());
@@ -211,6 +212,14 @@ impl Harness {
                         }
                         CodeEvent::Tool(event) => {
                             if let Some(result) = event.output {
+                                // A successful ask_user result is accepted human input,
+                                // not ordinary tool activity. Save its age with the answer.
+                                if event.name == "ask_user" && !event.failed {
+                                    session.updated = crate::store::now();
+                                    if let Some(harness) = harness.upgrade() {
+                                        harness.catalog_revision.fetch_add(1, Ordering::Release);
+                                    }
+                                }
                                 if let Some(entry) = session.entries.by_id_mut(&event.id)
                                     && let EntryKind::Tool {
                                         output,
@@ -844,6 +853,7 @@ impl Harness {
                                 // This sidebar hint uses ordinary session saves (eviction,
                                 // edits, shutdown), not a separate completion transaction.
                                 state.unchecked_completion = true;
+                                state.updated = crate::store::now();
                                 conversation.notifications.publish(&state, notifications::Kind::Finished);
                             }
                         }
@@ -1756,6 +1766,11 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             std::thread::sleep(Duration::from_millis(1));
         }
         let pending = q.pending().pop().unwrap();
+        h.edit(&id, |s| s.updated = 77).unwrap();
+        let revision = h.catalog_revision();
+        let answered_after = crate::store::now();
+        assert!(q.submit(&pending.id, vec![]).is_err());
+        assert_eq!(c.snapshot().updated, 77);
         h.evict_inactive(None).unwrap();
         assert!(h.get(&id).is_some());
         let stored = store.load_session(&id).unwrap();
@@ -1784,11 +1799,14 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             .unwrap();
         assert!(output.contains("fixture result failure"), "{output}");
         let snapshot = c.snapshot();
+        assert!((answered_after..=crate::store::now()).contains(&snapshot.updated));
+        assert!(h.catalog_revision() > revision);
         assert!(
             matches!(&snapshot.entries.by_id(&pending.id).unwrap().kind, EntryKind::Tool { output, complete:true, .. } if output.contains("Retain this answer λ"))
         );
         crate::test_support::sqlite::allow_writes(&db, "sessions");
         h.flush().unwrap();
+        assert_eq!(store.load_session(&id).unwrap().updated, snapshot.updated);
         assert!(
             matches!(&store.load_session(&id).unwrap().entries.by_id(&pending.id).unwrap().kind, EntryKind::Tool { output, complete:true, .. } if output.contains("Retain this answer λ"))
         );
@@ -1910,6 +1928,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let mut session = Session::new(dir.path().into(), &Settings::default());
         let id = session.id.clone();
         session.interrupted = true;
+        session.updated = 77;
         session
             .entries
             .push(Entry::new(EntryKind::Assistant, "original"));
@@ -1929,11 +1948,13 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             .is_err()
         );
         assert!(!c.is_running());
+        assert_eq!(c.snapshot().updated, 77);
         assert!(
             c.snapshot().pending.is_empty(),
             "failed acceptance must not be published"
         );
         crate::test_support::sqlite::allow_writes(&db, "sessions");
+        let sent_after = crate::store::now();
         h.send(
             &id,
             "submission-1",
@@ -1941,6 +1962,11 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             Settings::default(),
         )
         .unwrap();
+        assert!((sent_after..=crate::store::now()).contains(&c.snapshot().updated));
+        assert_eq!(
+            store.load_session(&id).unwrap().updated,
+            c.snapshot().updated
+        );
         let deadline = Instant::now() + Duration::from_secs(3);
         while c.is_running() {
             assert!(Instant::now() < deadline);

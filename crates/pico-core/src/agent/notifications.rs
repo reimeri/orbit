@@ -118,10 +118,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let (url, _requests, server) = crate::test_support::server(vec![
-            (200, crate::test_support::completed(json!([{"type":"message","id":"final","phase":"final_answer","content":[{"type":"output_text","text":"Private response, not notification content"}]}]))),
-            (400, "Private provider error".into()),
-        ]).await;
+        let (url, mut requests, server) = crate::test_support::gated_server().await;
         let h =
             Harness::with_provider(store.clone(), vec![], Provider::fixture(store.clone(), url))
                 .unwrap();
@@ -131,7 +128,18 @@ mod tests {
         let c = h.insert(session);
         h.send(&id, "first", "Work".into(), Settings::default())
             .unwrap();
+        let (_, reply) = tokio::time::timeout(Duration::from_secs(3), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // Age the running session without sleeping across wall-clock seconds.
+        h.edit(&id, |s| s.updated = 77).unwrap();
+        let completed_after = crate::store::now();
+        reply.send((200, crate::test_support::completed(json!([{"type":"message","id":"final","phase":"final_answer","content":[{"type":"output_text","text":"Private response, not notification content"}]}])))).unwrap();
         settled(&c, &h).await;
+        let completed_at = c.snapshot().updated;
+        assert!((completed_after..=crate::store::now()).contains(&completed_at));
+        assert_eq!(h.summaries()[0].updated, completed_at);
         let events = h.take_notifications();
         assert_eq!(events.len(), 1);
         let done = &events[0];
@@ -145,6 +153,7 @@ mod tests {
         assert!(h.get(&id).is_none());
         // Ordinary eviction saves the sidebar hint; no completion-specific commit.
         assert!(store.load_session(&id).unwrap().unchecked_completion);
+        assert_eq!(store.load_session(&id).unwrap().updated, completed_at);
         let restarted = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
         assert!(restarted.summaries()[0].unchecked_completion);
         assert!(restarted.load(&id).unwrap().snapshot().unchecked_completion);
@@ -154,14 +163,21 @@ mod tests {
         assert!(!h.notification_is_current(done));
         assert!(!h.get(&id).unwrap().snapshot().unchecked_completion);
         assert!(!store.load_session(&id).unwrap().unchecked_completion);
+        let (_, reply) = tokio::time::timeout(Duration::from_secs(3), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        h.edit(&id, |s| s.updated = 88).unwrap();
+        reply.send((400, "Private provider error".into())).unwrap();
         settled(&h.get(&id).unwrap(), &h).await;
+        assert_eq!(h.get(&id).unwrap().snapshot().updated, 88);
         let errors = h.take_notifications();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, Kind::Failed);
         assert_ne!(errors[0].id, done.id);
         assert!(h.get(&id).unwrap().snapshot().needs_attention);
         assert!(!h.get(&id).unwrap().snapshot().unchecked_completion);
-        server.await.unwrap();
+        server.abort();
         let restarted = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
         restarted.load(&id).unwrap();
         assert!(restarted.take_notifications().is_empty());

@@ -303,6 +303,7 @@ pub struct Session {
     /// Explicit renames win even if the chosen text equals the automatic fallback.
     #[serde(default)]
     pub title_manually_set: bool,
+    /// Sidebar age/order: last accepted message, answer, or successful completion.
     pub updated: u64,
     pub model: String,
     pub effort: String,

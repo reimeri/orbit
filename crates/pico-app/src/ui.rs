@@ -2939,7 +2939,7 @@ impl App {
                     let active = self.parent_id() == Some(session.id.as_str());
                     let project = self.project_name(&session.project);
                     let badge = project_badge_named(&session.project, &project);
-                    // `updated` changes on accepted user submissions, not agent activity.
+                    // Age restarts on accepted input and successful completion, not streaming.
                     let children = self
                         .harness
                         .as_ref()
