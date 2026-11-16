@@ -100,8 +100,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        // Footer menus own keyboard input, not the editor that may still have focus.
-        // The window subscription handles navigation after we stop child delivery.
+        // An open footer picker blocks typing/submission in the editor underneath.
+        // The window subscription handles Escape; other picker keystrokes are ignored.
         if self.capture_keyboard && matches!(event, Event::Keyboard(_) | Event::InputMethod(_)) {
             shell.capture_event();
             return;

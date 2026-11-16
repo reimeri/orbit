@@ -76,7 +76,6 @@ const SETTLED_ROW_GAP: f32 = 3.;
 const SETTLED_VISIBLE_ROWS: usize = 10;
 const RIGHT_PANEL_PADDING: f32 = 18.;
 const FOOTER_MENU_TEXT_SIZE: f32 = 12.;
-const FAST_OPTION: &str = "Fast mode";
 const CHAT_OVERSCAN: f32 = 120.;
 const COMPOSER_LINE_HEIGHT_FACTOR: f32 = 1.3;
 const COMPOSER_MIN_LINES: usize = 2;
@@ -126,7 +125,7 @@ pub struct App {
     api_key_configured: bool,
     context_menu: Option<(MenuTarget, iced::Point)>,
     stashed_open: bool,
-    footer_menu: Option<FooterMenu>,
+    footer_menu_open: bool,
     selected: Option<String>,
     search: String,
     search_active: bool,
@@ -180,14 +179,9 @@ pub enum SettingsTab {
     Models,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FooterControl {
+enum FooterControl {
     Model,
     Effort,
-}
-struct FooterMenu {
-    control: FooterControl,
-    options: Vec<String>,
-    focused: usize,
 }
 #[derive(Clone, Debug)]
 enum MenuTarget {
@@ -257,7 +251,7 @@ pub enum Message {
     ToggleStashed,
     CopySessionId(String),
     CloseMenu,
-    FooterMenu(FooterControl),
+    ToggleFooterMenu,
     CloseFooterMenu,
     ToolOutput(String, tool_output::Event),
     CopySelection,
@@ -284,7 +278,8 @@ pub enum Message {
     Model(String),
     ModelEffort(String, String),
     ModelFast(String, bool),
-    ToggleSessionFast,
+    SessionFast(bool),
+    SessionSettingsEdited(Result<(), String>),
     NoticeDismiss,
     NoticeTick,
     SessionModel(String),
@@ -401,7 +396,7 @@ impl App {
             api_key_configured: false,
             context_menu: None,
             stashed_open: false,
-            footer_menu: None,
+            footer_menu_open: false,
             selected,
             search: String::new(),
             search_active: false,
@@ -532,7 +527,7 @@ impl App {
                 && !self.settings_open
                 && !self.search_active
                 && self.modal.is_none()
-                && self.footer_menu.is_none()
+                && !self.footer_menu_open
                 && self.context_menu.is_none()
             {
                 let id = id.clone();
@@ -964,7 +959,7 @@ impl App {
             && self.modal.is_none()
             && self.active_questionnaire.is_none()
             && self.context_menu.is_none()
-            && self.footer_menu.is_none()
+            && !self.footer_menu_open
     }
     fn import_file(&mut self, path: PathBuf) {
         if !self.can_attach() {
@@ -986,7 +981,7 @@ impl App {
     }
     fn select(&mut self, selection: Selection) {
         self.chat_selection.borrow_mut().clear();
-        self.footer_menu = None;
+        self.footer_menu_open = false;
         if self.io_busy {
             return;
         }
@@ -1086,7 +1081,7 @@ impl App {
             self.image_view.close();
         }
         if self.modal.is_some() || self.context_menu.is_some() {
-            self.footer_menu = None;
+            self.footer_menu_open = false;
         }
         let close = if self.close_requested && !self.io_busy && !self.closing {
             self.close_requested = false;
@@ -1115,7 +1110,7 @@ impl App {
                     | Message::SaveDraft
                     | Message::SessionModel(_)
                     | Message::SessionEffort(_)
-                    | Message::ToggleSessionFast
+                    | Message::SessionFast(_)
                     | Message::Favorite(_)
                     | Message::StashProject(_)
                     | Message::ApplySettings
@@ -1136,8 +1131,8 @@ impl App {
                     | Message::Send
                     | Message::SessionModel(_)
                     | Message::SessionEffort(_)
-                    | Message::ToggleSessionFast
-                    | Message::FooterMenu(_)
+                    | Message::SessionFast(_)
+                    | Message::ToggleFooterMenu
             )
         {
             return Task::none();
@@ -1503,40 +1498,12 @@ impl App {
                 return iced::clipboard::write(id);
             }
             Message::CloseMenu => self.context_menu = None,
-            Message::CloseFooterMenu => self.footer_menu = None,
-            Message::FooterMenu(control) => {
-                if self
-                    .footer_menu
-                    .as_ref()
-                    .is_some_and(|menu| menu.control == control)
-                {
-                    self.footer_menu = None;
-                } else if !self.running()
-                    && let Some(session) = self.current()
-                {
-                    let (options, selected) = match control {
-                        FooterControl::Model => (model_options(), &session.model),
-                        FooterControl::Effort => (
-                            model(&session.model)
-                                .expect("catalog model")
-                                .efforts
-                                .iter()
-                                .copied()
-                                .chain([FAST_OPTION])
-                                .map(str::to_owned)
-                                .collect(),
-                            &session.effort,
-                        ),
-                    };
-                    let focused = options
-                        .iter()
-                        .position(|option| option == selected)
-                        .unwrap_or(0);
-                    self.footer_menu = Some(FooterMenu {
-                        control,
-                        options,
-                        focused,
-                    });
+            Message::CloseFooterMenu => self.footer_menu_open = false,
+            Message::ToggleFooterMenu => {
+                if self.footer_menu_open {
+                    self.footer_menu_open = false;
+                } else if !self.running() && self.current().is_some() {
+                    self.footer_menu_open = true;
                 }
             }
             Message::ToolOutput(id, event) => {
@@ -1598,7 +1565,7 @@ impl App {
                 if self.io_busy
                     || self.modal.is_some()
                     || self.context_menu.is_some()
-                    || self.footer_menu.is_some()
+                    || self.footer_menu_open
                     || self.search_active
                     || self.active_questionnaire.as_ref() != Some(&id)
                 {
@@ -1787,21 +1754,24 @@ impl App {
                 self.catalog.settings.resume_last = value;
                 self.save_catalog(false);
             }
+            Message::SessionSettingsEdited(result) => {
+                self.io_busy = false;
+                self.fail(result);
+                self.refresh();
+            }
             Message::SessionModel(value) => {
-                self.footer_menu = None;
-                if self.io_busy {
+                if self.io_busy || self.running() {
                     return Task::none();
                 }
                 let settings = self.catalog.settings.clone();
                 if let Some(draft) = &mut self.draft_session {
                     draft.select_model(&value, &settings);
-                } else if !self.running()
-                    && let (Some(h), Some(id)) = (&self.harness, &self.selected)
-                {
+                } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
                     let h = h.clone();
                     let id = id.clone();
+                    self.io_busy = true;
                     self.tasks.push(self.io.run(move || {
-                        Message::Edited(
+                        Message::SessionSettingsEdited(
                             h.edit(&id, |s| s.select_model(&value, &settings))
                                 .map_err(|e| format!("{e:#}")),
                         )
@@ -1809,38 +1779,36 @@ impl App {
                 }
             }
             Message::SessionEffort(value) => {
-                self.footer_menu = None;
-                if self.io_busy {
+                if self.io_busy || self.running() {
                     return Task::none();
                 }
                 if let Some(draft) = &mut self.draft_session {
                     draft.effort = value;
-                } else if !self.running()
-                    && let (Some(h), Some(id)) = (&self.harness, &self.selected)
-                {
+                } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
                     let h = h.clone();
                     let id = id.clone();
+                    self.io_busy = true;
                     self.tasks.push(self.io.run(move || {
-                        Message::Edited(
+                        Message::SessionSettingsEdited(
                             h.edit(&id, |s| s.effort = value)
                                 .map_err(|e| format!("{e:#}")),
                         )
                     }));
                 }
             }
-            Message::ToggleSessionFast => {
-                self.footer_menu = None;
+            Message::SessionFast(value) => {
                 if self.io_busy || self.running() {
                     return Task::none();
                 }
                 if let Some(draft) = &mut self.draft_session {
-                    draft.fast = !draft.fast;
+                    draft.fast = value;
                 } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
                     let h = h.clone();
                     let id = id.clone();
+                    self.io_busy = true;
                     self.tasks.push(self.io.run(move || {
-                        Message::Edited(
-                            h.edit(&id, |s| s.fast = !s.fast)
+                        Message::SessionSettingsEdited(
+                            h.edit(&id, |s| s.fast = value)
                                 .map_err(|e| format!("{e:#}")),
                         )
                     }));
@@ -2224,29 +2192,9 @@ impl App {
                     }
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                    if let Some(menu) = &mut self.footer_menu {
-                        use keyboard::key::Named;
-                        match key.as_ref() {
-                            keyboard::Key::Named(Named::Escape) => self.footer_menu = None,
-                            keyboard::Key::Named(Named::ArrowUp) => {
-                                menu.focused =
-                                    (menu.focused + menu.options.len() - 1) % menu.options.len();
-                            }
-                            keyboard::Key::Named(Named::ArrowDown) => {
-                                menu.focused = (menu.focused + 1) % menu.options.len();
-                            }
-                            keyboard::Key::Named(Named::Enter | Named::Tab) => {
-                                let value = menu.options[menu.focused].clone();
-                                let message = match menu.control {
-                                    FooterControl::Model => Message::SessionModel(value),
-                                    FooterControl::Effort if value == FAST_OPTION => {
-                                        Message::ToggleSessionFast
-                                    }
-                                    FooterControl::Effort => Message::SessionEffort(value),
-                                };
-                                return self.update_inner(message);
-                            }
-                            _ => {}
+                    if self.footer_menu_open {
+                        if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                            self.footer_menu_open = false;
                         }
                         return Task::none();
                     }
@@ -2519,7 +2467,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         pointer_input(
             self.content(),
-            self.footer_menu.is_some(),
+            self.footer_menu_open,
             self.chat_selection.clone(),
         )
     }
@@ -2694,7 +2642,7 @@ impl App {
             let y = position.y.min(self.window_height - 140.).max(0.);
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
             layers.push(dismiss).push(positioned).into()
-        } else if let Some(menu) = &self.footer_menu {
+        } else if self.footer_menu_open {
             let dismiss = mouse_area(space().width(Fill).height(Fill))
                 .on_press(Message::CloseFooterMenu)
                 .on_right_press(Message::CloseFooterMenu)
@@ -2712,7 +2660,7 @@ impl App {
             // Anchor at the chat's right edge, but let a popup extend over the
             // left sidebar when the center is too narrow to read its choices.
             let positioned = row![
-                container(column![space().height(Fill), self.footer_popup(menu)])
+                container(column![space().height(Fill), self.footer_popup()])
                     .align_right(Fill)
                     .padding(iced::Padding {
                         top: 0.,
@@ -3351,12 +3299,12 @@ impl App {
                         && !self.closing
                         && self.modal.is_none()
                         && self.context_menu.is_none()
-                        && self.footer_menu.is_none()
+                        && !self.footer_menu_open
                         && !self.search_active,
                     !self.settings_open
                         && !self.search_active
                         && self.modal.is_none()
-                        && self.footer_menu.is_none()
+                        && !self.footer_menu_open
                         && self.context_menu.is_none(),
                 )
                 .map(move |message| Message::Questionnaire(id.clone(), message));
@@ -4223,12 +4171,10 @@ impl App {
             compact_tokens(session.usage.total_cached),
             compact_tokens(session.usage.total_input),
         );
-        let effort_label = if session.fast {
-            format!("{} · Fast", session.effort)
-        } else {
-            session.effort.clone()
-        };
-        let layout = FooterLayout::new(width, &session.model, &effort_label);
+        let model_label = model(&session.model).expect("catalog model").name;
+        let effort_label = effort_name(&session.effort);
+        let selector_label = format!("{model_label} {effort_label}");
+        let layout = FooterLayout::new(width, &selector_label, session.fast);
         let mut hidden = Vec::new();
         if !layout.git
             && let Some(git) = self.git_info()
@@ -4244,16 +4190,19 @@ impl App {
         if !layout.cache {
             hidden.push(format!("Cache: {cache:.0}%\n{cache_details}"));
         }
-        let control = |kind, label: &str, width| {
-            let open = self
-                .footer_menu
-                .as_ref()
-                .is_some_and(|menu| menu.control == kind);
-            let chip = theme::button(ellipsized_text(label, 11., None))
+        let control = |width| {
+            let open = self.footer_menu_open;
+            let mut label = row![ellipsized_text(&selector_label, 11., None)]
+                .spacing(4)
+                .align_y(iced::Center);
+            if session.fast {
+                label = label.push(Icon::Zap.view(12.));
+            }
+            let chip = theme::button(label)
                 .width(width)
                 .padding([3, 4])
                 .on_press_maybe(
-                    (!running && session.child.is_none()).then_some(Message::FooterMenu(kind)),
+                    (!running && session.child.is_none()).then_some(Message::ToggleFooterMenu),
                 )
                 .style(move |theme, status| {
                     let mut style = sidebar_control(theme, status);
@@ -4262,16 +4211,15 @@ impl App {
                     }
                     style
                 });
-            if running {
-                footer_tip(
-                    chip,
-                    "Stop the current turn before changing model or effort.".into(),
-                )
-            } else if text_width(label, 11.) > width - 8. {
-                footer_tip(chip, label.into())
+            let details = if running {
+                "Stop the current turn before changing model or effort.".into()
             } else {
-                chip.into()
-            }
+                format!(
+                    "{selector_label} · {}",
+                    if session.fast { "Fast" } else { "Standard" }
+                )
+            };
+            footer_tip(chip, details)
         };
         let mut info = row![footer_tip(
             crate::status_circle::status_circle(running, self.tick),
@@ -4296,16 +4244,14 @@ impl App {
             // At the minimum window size, two maximized sidebars leave only 112px.
             // Collapse all metadata into the status target instead of losing controls.
             let details = format!("{status}\n{path}\n\n{}", hidden.join("\n\n"));
-            let controls_width = (width - 44.).max(0.);
+            let controls_width = (width - 24.).max(0.);
             return container(
                 row![
                     footer_tip(
                         crate::status_circle::status_circle(running, self.tick),
                         details
                     ),
-                    control(FooterControl::Model, &session.model, controls_width * 0.65),
-                    footer_separator(),
-                    control(FooterControl::Effort, &effort_label, controls_width * 0.35),
+                    control(controls_width),
                 ]
                 .spacing(2)
                 .align_y(iced::Center),
@@ -4396,17 +4342,7 @@ impl App {
         }
         info = info
             .push(space().width(Fill))
-            .push(control(
-                FooterControl::Model,
-                &session.model,
-                layout.model_width,
-            ))
-            .push(footer_separator())
-            .push(control(
-                FooterControl::Effort,
-                &effort_label,
-                layout.effort_width,
-            ));
+            .push(control(layout.selector_width));
         container(info)
             .padding([6, 14])
             .height(36)
@@ -4414,55 +4350,113 @@ impl App {
             .into()
     }
 
-    fn footer_popup<'a>(&'a self, menu: &'a FooterMenu) -> Element<'a, Message> {
+    fn footer_options(&self, control: FooterControl) -> Vec<String> {
+        match control {
+            FooterControl::Model => model_options(),
+            FooterControl::Effort => model(&self.current().expect("footer session").model)
+                .expect("catalog model")
+                .efforts
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        }
+    }
+
+    fn footer_popup(&self) -> Element<'_, Message> {
         let session = self.current().expect("footer menu has a session");
-        let selected = match menu.control {
-            FooterControl::Model => &session.model,
-            FooterControl::Effort => &session.effort,
+        let enabled = !self.io_busy && !self.running();
+        let list_height = (self.window_height - 170.).clamp(60., 240.);
+        let heading_height = 28.;
+        let column_spacing = 6.;
+        let choices = |control, title| {
+            let mut options = column![].spacing(2);
+            for option in self.footer_options(control) {
+                let (label, chosen, message) = match control {
+                    FooterControl::Model => (
+                        model(&option).expect("catalog model").name,
+                        option == session.model,
+                        Message::SessionModel(option.clone()),
+                    ),
+                    FooterControl::Effort => (
+                        effort_name(&option),
+                        option == session.effort,
+                        Message::SessionEffort(option.clone()),
+                    ),
+                };
+                let item = theme::button(
+                    row![
+                        ellipsized_text(label, FOOTER_MENU_TEXT_SIZE, None),
+                        if chosen {
+                            Icon::Check.colored(16., ACCENT)
+                        } else {
+                            space().width(16).height(16).into()
+                        },
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center),
+                )
+                .width(Fill)
+                .height(30)
+                .padding([6, 8])
+                .on_press_maybe(enabled.then_some(message))
+                .style(move |theme, status| theme::menu_button(theme, status, chosen));
+                options = options.push(item);
+            }
+            column![
+                container(text(title).size(12).color(MUTED))
+                    .height(heading_height)
+                    .padding([6, 8]),
+                scroll(options).height(list_height),
+            ]
+            .spacing(column_spacing)
         };
-        let mut options = column![].spacing(2);
-        for (index, option) in menu.options.iter().enumerate() {
-            let chosen = if option == FAST_OPTION {
-                session.fast
+        let mut speed = row![].spacing(2);
+        for (label, fast) in [("Standard", false), ("Fast", true)] {
+            let chosen = session.fast == fast;
+            let label = if fast {
+                Icon::Zap.label(label, 12.)
             } else {
-                option == selected
+                text(label).size(12).into()
             };
-            let focused = menu.focused == index;
-            let message = match menu.control {
-                FooterControl::Model => Message::SessionModel(option.clone()),
-                FooterControl::Effort if option == FAST_OPTION => Message::ToggleSessionFast,
-                FooterControl::Effort => Message::SessionEffort(option.clone()),
-            };
-            let item = theme::button(
-                row![
-                    ellipsized_text(option, FOOTER_MENU_TEXT_SIZE, None),
-                    if chosen {
-                        Icon::Check.colored(16., ACCENT)
-                    } else {
-                        space().width(16).height(16).into()
-                    },
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-            )
-            .width(Fill)
-            .height(30)
-            .padding([6, 8])
-            .on_press(message)
-            .style(move |theme, status| theme::menu_button(theme, status, focused || chosen));
-            options = options.push(
-                if text_width(option, FOOTER_MENU_TEXT_SIZE) > 228. - crate::scrollbar::GUTTER {
-                    footer_tip(item, option.clone())
-                } else {
-                    item.into()
-                },
+            speed = speed.push(
+                theme::button(label)
+                    .padding([5, 8])
+                    .on_press_maybe(enabled.then_some(Message::SessionFast(fast)))
+                    .style(move |theme, status| theme::menu_button(theme, status, chosen)),
             );
         }
+        // The popup may extend over the left sidebar, but never beyond the window.
+        let right = 50.
+            + if self.settings_open || self.agents_open {
+                self.catalog
+                    .settings
+                    .settings_width
+                    .min(self.window_width * 0.4)
+                    + 5.
+            } else {
+                0.
+            };
         opaque(
-            container(scroll(options).height((menu.options.len() as f32 * 32. - 2.).min(240.)))
-                .padding(6)
-                .width(280)
-                .style(footer_surface),
+            container(
+                column![
+                    row![
+                        choices(FooterControl::Model, "Model").width(iced::Length::FillPortion(3)),
+                        widget::rule::vertical(1),
+                        choices(FooterControl::Effort, "Reasoning")
+                            .width(iced::Length::FillPortion(2)),
+                    ]
+                    // The fill-height divider must not make this shrink-sized popup
+                    // absorb the overlay's spare height on tall windows.
+                    .height(heading_height + column_spacing + list_height)
+                    .spacing(6),
+                    widget::rule::horizontal(1),
+                    speed,
+                ]
+                .spacing(8),
+            )
+            .padding(6)
+            .width((self.window_width - right - 28.).min(480.))
+            .style(card),
         )
     }
     fn modal_view(&self, modal: &Modal) -> Element<'_, Message> {
@@ -4839,13 +4833,11 @@ impl App {
             }
             17 => {
                 self.settings_open = false;
-                let _ = self.update_inner(Message::FooterMenu(FooterControl::Model));
+                let _ = self.update_inner(Message::ToggleFooterMenu);
             }
-            18 => {
-                let _ = self.update_inner(Message::FooterMenu(FooterControl::Effort));
-            }
+            18 => {} // Keep the picker open across another redraw.
             19 => {
-                self.footer_menu = None;
+                self.footer_menu_open = false;
                 self.settings_open = true;
                 self.settings_tab = SettingsTab::General;
             }
@@ -4859,10 +4851,10 @@ impl App {
                     })
                     .expect("smoke fast");
                 self.refresh();
-                let _ = self.update_inner(Message::FooterMenu(FooterControl::Effort));
+                let _ = self.update_inner(Message::ToggleFooterMenu);
             }
             22 => {
-                self.footer_menu = None;
+                self.footer_menu_open = false;
                 self.settings_open = false;
                 self.agents_open = true;
             }
@@ -5364,8 +5356,7 @@ impl Drop for App {
 }
 // Budget against the center column, not the window (both sidebars can resize).
 struct FooterLayout {
-    model_width: f32,
-    effort_width: f32,
+    selector_width: f32,
     path_width: f32,
     git: bool,
     usage: bool,
@@ -5373,11 +5364,10 @@ struct FooterLayout {
     cache: bool,
 }
 impl FooterLayout {
-    fn new(width: f32, model: &str, effort: &str) -> Self {
-        let model_width = (text_width(model, 11.).ceil() + 8.).min((width * 0.3).clamp(40., 180.));
-        let effort_width =
-            (text_width(effort, 11.).ceil() + 8.).min((width * 0.2).clamp(28., 110.));
-        let available = width - model_width - effort_width - 88.;
+    fn new(width: f32, label: &str, fast: bool) -> Self {
+        let selector_width =
+            (text_width(label, 11.).ceil() + 8. + if fast { 16. } else { 0. }).min(width * 0.5);
+        let available = width - selector_width - 88.;
         let usage = available >= 260.;
         let git = available >= 420.;
         let rate = available >= 500.;
@@ -5388,8 +5378,7 @@ impl FooterLayout {
             - if rate { 76. } else { 0. }
             - if cache { 76. } else { 0. };
         Self {
-            model_width,
-            effort_width,
+            selector_width,
             path_width,
             git,
             usage,
@@ -5623,6 +5612,18 @@ fn external(destination: impl Into<OsString>) -> Task<Message> {
         },
         Message::External,
     )
+}
+
+fn effort_name(effort: &str) -> &'static str {
+    match effort {
+        "none" => "None",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra High",
+        "max" => "Max",
+        _ => unreachable!("catalog effort"),
+    }
 }
 
 fn model_options() -> Vec<String> {
@@ -7629,24 +7630,12 @@ mod tests {
         dispatch(&mut app, Message::SessionModel("gpt-6-luna".into())).await;
         assert_eq!(app.current().unwrap().effort, "medium");
         assert!(!app.current().unwrap().fast);
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
         assert!(
-            app.footer_menu
-                .as_ref()
-                .unwrap()
-                .options
+            app.footer_options(FooterControl::Effort)
                 .contains(&"none".into())
         );
-        let fast_index = app
-            .footer_menu
-            .as_ref()
-            .unwrap()
-            .options
-            .iter()
-            .position(|s| s == FAST_OPTION)
-            .unwrap();
-        app.footer_menu.as_mut().unwrap().focused = fast_index;
-        dispatch(&mut app, footer_key(keyboard::key::Named::Enter)).await;
+        dispatch(&mut app, Message::SessionFast(true)).await;
         assert!(app.current().unwrap().fast);
         assert_eq!(app.current().unwrap().effort, "medium");
         // The persisted session uses a retired model and must recover without losing history.
@@ -7673,7 +7662,7 @@ mod tests {
         assert_eq!(app.editor.text(), "Keep this draft");
         assert!(app.notice.as_ref().unwrap().0.contains("retired-sol"));
         dispatch(&mut app, Message::SessionEffort("high".into())).await;
-        dispatch(&mut app, Message::ToggleSessionFast).await;
+        dispatch(&mut app, Message::SessionFast(false)).await;
         assert!(!h.store.load_session(&id).unwrap().fast);
         dispatch(&mut app, Message::NoticeDismiss).await;
         dispatch(&mut app, Message::New).await;
@@ -7681,17 +7670,13 @@ mod tests {
         assert!(app.notice.is_none());
         assert_eq!(app.current().unwrap().effort, "high");
         assert!(!app.current().unwrap().fast);
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
         assert!(
-            !app.footer_menu
-                .as_ref()
-                .unwrap()
-                .options
+            !app.footer_options(FooterControl::Effort)
                 .contains(&"none".into())
         );
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
         assert_eq!(
-            app.footer_menu.as_ref().unwrap().options,
+            app.footer_options(FooterControl::Model),
             MODELS
                 .iter()
                 .map(|model| model.id.to_owned())
@@ -9168,13 +9153,6 @@ Then implement the fix.";
     #[tokio::test]
     async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
         let mut app = app();
-        // This layout fixture uses the plain effort chip, independently of saved defaults.
-        app.catalog
-            .settings
-            .models
-            .get_mut(&app.catalog.settings.model)
-            .unwrap()
-            .fast = false;
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
         app.git.insert(
             app.current().unwrap().project.clone(),
@@ -9186,7 +9164,13 @@ Then implement the fix.";
         );
         app.settings_open = true;
         let mut renderer = header_renderer();
-        for (width, height, left, right) in [(1600., 800., 260., 320.), (860., 560., 344., 344.)] {
+        let mut wide_popup_height = None;
+        for (width, height, left, right, fast) in [
+            (1600., 800., 260., 320., false),
+            (1600., 1400., 260., 320., true),
+            (860., 560., 344., 344., true),
+        ] {
+            dispatch(&mut app, Message::SessionFast(fast)).await;
             app.window_width = width;
             app.window_height = height;
             app.catalog.settings.sidebar_width = left;
@@ -9199,35 +9183,29 @@ Then implement the fix.";
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
-            let model = bounds.label(&app.current().unwrap().model);
-            let effort = bounds.label(&app.current().unwrap().effort);
+            let session = app.current().unwrap();
+            let label = bounds.label(&format!(
+                "{} {}",
+                model(&session.model).unwrap().name,
+                effort_name(&session.effort)
+            ));
             let footer = bounds
                 .containers
                 .iter()
-                .filter(|b| {
-                    b.y > 0.
-                        && b.y + b.height == height
-                        && b.contains(model.center())
-                        && b.contains(effort.center())
-                })
+                .filter(|b| b.y > 0. && b.y + b.height == height && b.contains(label.center()))
                 .min_by(|a, b| a.height.total_cmp(&b.height))
-                .expect("bottom-anchored footer containing both controls");
+                .expect("bottom-anchored footer containing the unified selector");
             assert!(
                 footer.height < height / 4.,
                 "footer must not take a fill-height share"
             );
             assert!(footer.x > left && footer.x + footer.width < width - right);
-            for control in [model, effort] {
-                assert!(
-                    control.width > 0. && control.height > 0.,
-                    "control must remain clickable"
-                );
-                assert!(
-                    control.x >= footer.x && control.x + control.width <= footer.x + footer.width
-                );
-                assert!(control.y >= footer.y && control.y + control.height <= height);
-            }
-            assert!(model.x + model.width <= effort.x);
+            assert!(
+                label.width > 0. && label.height > 0.,
+                "selector must remain clickable"
+            );
+            assert!(label.x >= footer.x && label.x + label.width <= footer.x + footer.width);
+            assert!(label.y >= footer.y && label.y + label.height <= height);
             assert!(
                 bounds
                     .containers
@@ -9261,8 +9239,16 @@ Then implement the fix.";
             } else {
                 assert!(!bounds.labels.iter().any(|(label, _)| label == "+12345"));
             }
+            for fraction in [0.25, 0.75] {
+                let point = iced::Point::new(label.x + label.width * fraction, label.center_y());
+                let messages = click_at(&mut ui, &mut renderer, point);
+                assert!(
+                    matches!(messages.as_slice(), [Message::ToggleFooterMenu]),
+                    "{messages:?}"
+                );
+            }
             drop(ui);
-            dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
+            dispatch(&mut app, Message::ToggleFooterMenu).await;
             let mut ui = iced_runtime::UserInterface::build(
                 app.view(),
                 iced::Size::new(width, height),
@@ -9271,43 +9257,130 @@ Then implement the fix.";
             );
             let mut menu_bounds = UiBounds::default();
             ui.operate(&renderer, &mut menu_bounds);
-            let option = menu_bounds.label("gpt-6-luna");
+            let option = menu_bounds.label("GPT-6-Luna");
             assert!(
-                option.width >= text_width("gpt-6-luna", FOOTER_MENU_TEXT_SIZE),
+                option.width >= text_width("GPT-6-Luna", FOOTER_MENU_TEXT_SIZE),
                 "popup options must stay readable even with a narrow chat"
             );
+            let reasoning = menu_bounds.label("Reasoning");
+            let speed = menu_bounds.label("Standard");
+            assert!(option.x + option.width <= reasoning.x);
+            assert!(speed.y > reasoning.y);
+            assert!(
+                menu_bounds
+                    .containers
+                    .iter()
+                    .any(|b| b.contains(option.center())
+                        && b.contains(reasoning.center())
+                        && b.contains(speed.center())
+                        && b.x >= 0.
+                        && b.y >= 0.
+                        && b.x + b.width <= width
+                        && b.y + b.height <= height
+                        && b.width < width
+                        && b.height < height)
+            );
+            let popup = menu_bounds
+                .containers
+                .iter()
+                .filter(|b| {
+                    b.contains(option.center())
+                        && b.contains(reasoning.center())
+                        && b.contains(speed.center())
+                })
+                .min_by(|a, b| a.height.total_cmp(&b.height))
+                .unwrap();
+            if width == 1600. {
+                if let Some(previous) = wide_popup_height {
+                    assert_eq!(
+                        popup.height, previous,
+                        "once choices fit, a taller window must not stretch the popup"
+                    );
+                }
+                wide_popup_height = Some(popup.height);
+            }
+            // Clicking the unified footer again dismisses the overlay, without activating the composer.
+            let messages = click_at(&mut ui, &mut renderer, label.center());
+            assert!(
+                matches!(messages.as_slice(), [Message::CloseFooterMenu]),
+                "{messages:?}"
+            );
             drop(ui);
-            dispatch(&mut app, Message::CloseFooterMenu).await;
+            dispatch(&mut app, messages.into_iter().next().unwrap()).await;
         }
     }
 
     #[tokio::test]
-    async fn footer_menus_select_with_keyboard_and_dismiss_without_closing_settings() {
+    async fn footer_selector_ignores_navigation_keys_and_selects_with_mouse() {
         use keyboard::key::Named;
         let mut app = app();
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
         app.settings_open = true;
-        let old_model = app.current().unwrap().model.clone();
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
-        let menu = app.footer_menu.as_ref().unwrap();
-        assert_eq!(menu.options[menu.focused], old_model);
-        let expected = menu.options[(menu.focused + 1) % menu.options.len()].clone();
-        dispatch(&mut app, footer_key(Named::ArrowDown)).await;
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
+        let session = app.current().unwrap();
+        let before = (session.model.clone(), session.effort.clone(), session.fast);
+        for key in [
+            Named::Tab,
+            Named::ArrowDown,
+            Named::Enter,
+            Named::ArrowUp,
+            Named::ArrowLeft,
+            Named::ArrowRight,
+            Named::Space,
+        ] {
+            dispatch(&mut app, footer_key(key)).await;
+            let session = app.current().unwrap();
+            assert_eq!(
+                (&session.model, &session.effort, session.fast),
+                (&before.0, &before.1, before.2)
+            );
+            assert!(app.footer_menu_open);
+        }
+        let mut reverse_tab = footer_key(Named::Tab);
+        if let Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modifiers,
+            ..
+        })) = &mut reverse_tab
+        {
+            *modifiers = keyboard::Modifiers::SHIFT;
+        }
+        dispatch(&mut app, reverse_tab).await;
         dispatch(&mut app, footer_key(Named::Enter)).await;
-        assert_eq!(app.current().unwrap().model, expected);
-        assert!(app.footer_menu.is_none());
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
+        let session = app.current().unwrap();
+        assert_eq!(
+            (&session.model, &session.effort, session.fast),
+            (&before.0, &before.1, before.2)
+        );
+        for label in ["GPT-6-Luna", "None", "High", "Fast", "Standard"] {
+            let messages = {
+                let mut renderer = header_renderer();
+                let mut ui = iced_runtime::UserInterface::build(
+                    app.view(),
+                    iced::Size::new(1200., 800.),
+                    iced_runtime::user_interface::Cache::new(),
+                    &mut renderer,
+                );
+                let mut bounds = UiBounds::default();
+                ui.operate(&renderer, &mut bounds);
+                click_at(&mut ui, &mut renderer, bounds.label(label).center())
+            };
+            assert_eq!(messages.len(), 1, "{messages:?}");
+            dispatch(&mut app, messages.into_iter().next().unwrap()).await;
+            let session = app.current().unwrap();
+            match label {
+                "GPT-6-Luna" => assert_eq!(session.model, "gpt-6-luna"),
+                "None" => assert_eq!(session.effort, "none"),
+                "High" => assert_eq!(session.effort, "high"),
+                "Fast" => assert!(session.fast),
+                "Standard" => assert!(!session.fast),
+                _ => unreachable!(),
+            }
+            assert!(app.footer_menu_open);
+        }
         dispatch(&mut app, footer_key(Named::Escape)).await;
-        assert!(app.footer_menu.is_none());
+        assert!(!app.footer_menu_open);
         assert!(app.settings_open);
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
-        let menu = app.footer_menu.as_ref().unwrap();
-        let expected =
-            menu.options[(menu.focused + menu.options.len() - 1) % menu.options.len()].clone();
-        dispatch(&mut app, footer_key(Named::ArrowUp)).await;
-        dispatch(&mut app, footer_key(Named::Tab)).await;
-        assert_eq!(app.current().unwrap().effort, expected);
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
         let messages = {
             let mut renderer = header_renderer();
             let mut ui = iced_runtime::UserInterface::build(
@@ -9320,47 +9393,112 @@ Then implement the fix.";
         };
         assert!(matches!(messages.as_slice(), [Message::CloseFooterMenu]));
         dispatch(&mut app, messages.into_iter().next().unwrap()).await;
-        assert!(app.footer_menu.is_none());
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Effort)).await;
-        let messages = {
-            let mut renderer = header_renderer();
-            let mut ui = iced_runtime::UserInterface::build(
-                app.view(),
-                iced::Size::new(1200., 800.),
-                iced_runtime::user_interface::Cache::new(),
-                &mut renderer,
-            );
-            let mut bounds = UiBounds::default();
-            ui.operate(&renderer, &mut bounds);
-            let mut messages = Vec::new();
-            ui.update(
-                &[
-                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-                ],
-                mouse::Cursor::Available(
-                    bounds
-                        .labels
-                        .iter()
-                        .rev()
-                        .find(|(label, _)| label == "high")
-                        .unwrap()
-                        .1
-                        .center(),
-                ),
-                &mut renderer,
-                &mut iced::advanced::clipboard::Null,
-                &mut messages,
-            );
-            messages
-        };
+        assert!(!app.footer_menu_open);
+        assert!(app.settings_open);
+    }
+
+    #[tokio::test]
+    async fn footer_selector_persists_changes_and_refreshes_model_defaults() {
+        let mut app = app();
+        app.catalog
+            .settings
+            .models
+            .get_mut("gpt-6-luna")
+            .unwrap()
+            .effort = "none".into();
+        app.catalog
+            .settings
+            .models
+            .get_mut("gpt-6-luna")
+            .unwrap()
+            .fast = false;
+        app.catalog
+            .settings
+            .models
+            .get_mut("gpt-6-astra")
+            .unwrap()
+            .effort = "max".into();
+        app.catalog
+            .settings
+            .models
+            .get_mut("gpt-6-astra")
+            .unwrap()
+            .fast = true;
+        stored_session(&mut app, PathBuf::from("/footer-persist")).await;
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
+        dispatch(&mut app, Message::SessionModel("gpt-6-luna".into())).await;
+        assert_eq!(app.current().unwrap().effort, "none");
+        assert!(!app.current().unwrap().fast);
         assert!(
-            matches!(messages.as_slice(), [Message::SessionEffort(value)] if value == "high"),
-            "unexpected popup messages: {messages:?}"
+            app.footer_options(FooterControl::Effort)
+                .contains(&"none".into())
         );
-        dispatch(&mut app, messages.into_iter().next().unwrap()).await;
-        assert_eq!(app.current().unwrap().effort, "high");
-        assert!(app.footer_menu.is_none());
+        dispatch(&mut app, Message::SessionEffort("max".into())).await;
+        dispatch(&mut app, Message::SessionModel("gpt-6-astra".into())).await;
+        assert_eq!(app.current().unwrap().effort, "max");
+        assert!(app.current().unwrap().fast);
+        assert!(
+            !app.footer_options(FooterControl::Effort)
+                .contains(&"none".into())
+        );
+        dispatch(&mut app, Message::SessionEffort("low".into())).await;
+        dispatch(&mut app, Message::SessionFast(false)).await;
+        // Choosing the already-active speed must not toggle it.
+        dispatch(&mut app, Message::SessionFast(false)).await;
+        assert!(app.footer_menu_open);
+        let saved = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .store
+            .load_session(app.selected.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(saved.model, "gpt-6-astra");
+        assert_eq!(saved.effort, "low");
+        assert!(!saved.fast);
+        assert_eq!(app.catalog.settings.models["gpt-6-astra"].effort, "max");
+        assert!(app.catalog.settings.models["gpt-6-astra"].fast);
+    }
+
+    #[tokio::test]
+    async fn footer_selector_recovers_failed_write_and_can_dismiss_during_save() {
+        use keyboard::key::Named;
+        let mut app = app();
+        stored_session(&mut app, PathBuf::from("/footer-write-failure")).await;
+        let h = app.harness.as_ref().unwrap().clone();
+        let id = app.selected.clone().unwrap();
+        let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
+        sqlite::fail_writes(&db, "sessions", "fixture footer write failure");
+        dispatch(&mut app, Message::SessionModel("gpt-6-luna".into())).await;
+        assert!(!app.io_busy);
+        assert!(app.footer_menu_open);
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("fixture footer write failure")
+        );
+        // Unsaved choices remain in memory; another selection retries persistence.
+        assert_eq!(app.current().unwrap().model, "gpt-6-luna");
+        sqlite::allow_writes(&db, "sessions");
+        dispatch(&mut app, Message::ErrorDismiss).await;
+        let save = app.update(Message::SessionEffort("none".into()));
+        assert!(app.io_busy);
+        dispatch(&mut app, footer_key(Named::Tab)).await;
+        assert!(app.footer_menu_open);
+        dispatch(&mut app, footer_key(Named::Escape)).await;
+        assert!(!app.footer_menu_open);
+        drain(&mut app, save).await;
+        assert!(!app.io_busy);
+        assert!(
+            !app.footer_menu_open,
+            "finishing a save must not reopen a dismissed popup"
+        );
+        let saved = h.store.load_session(&id).unwrap();
+        assert_eq!(saved.model, "gpt-6-luna");
+        assert_eq!(saved.effort, "none");
+        assert!(app.error.is_none());
     }
 
     #[tokio::test]
@@ -9375,15 +9513,15 @@ Then implement the fix.";
             .unwrap();
         running.running.store(true, Ordering::Release);
         stored_session(&mut app, PathBuf::from("/idle")).await;
-        dispatch(&mut app, Message::FooterMenu(FooterControl::Model)).await;
-        assert!(app.footer_menu.is_some());
+        dispatch(&mut app, Message::ToggleFooterMenu).await;
+        assert!(app.footer_menu_open);
         dispatch(
             &mut app,
             Message::Event(iced::Event::Window(window::Event::CloseRequested)),
         )
         .await;
         assert!(matches!(app.modal, Some(Modal::Quit)));
-        assert!(app.footer_menu.is_none());
+        assert!(!app.footer_menu_open);
         dispatch(&mut app, footer_key(keyboard::key::Named::Escape)).await;
         assert!(app.modal.is_none());
         running.running.store(false, Ordering::Release);
@@ -10837,10 +10975,7 @@ Then implement the fix.";
                 (false, true, false),
             ),
             (Message::Dismiss, (false, false, false)),
-            (
-                Message::FooterMenu(FooterControl::Model),
-                (false, false, true),
-            ),
+            (Message::ToggleFooterMenu, (false, false, true)),
             (Message::CloseFooterMenu, (false, false, false)),
         ] {
             let transition = format!("{message:?}");
@@ -10849,7 +10984,7 @@ Then implement the fix.";
                 (
                     app.context_menu.is_some(),
                     app.modal.is_some(),
-                    app.footer_menu.is_some()
+                    app.footer_menu_open
                 ),
                 expected_popups,
                 "{transition}",

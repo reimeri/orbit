@@ -24,7 +24,6 @@ const RIGHT_PANEL: Color = Color::from_rgb8(24, 27, 31);
 const SECONDARY: Color = Color::from_rgb8(43, 49, 58);
 const SECONDARY_HOVER: Color = Color::from_rgb8(55, 62, 74);
 const POPOVER: Color = Color::from_rgb8(30, 30, 36);
-const MENU_SELECTED: Color = Color::from_rgb8(42, 42, 52);
 const SEARCH: Color = Color::from_rgb8(39, 42, 48);
 pub const ERROR_SURFACE: Color = Color::from_rgb8(66, 39, 43);
 pub const SCRIM: Color = Color::from_rgba(0., 0., 0., 0.65);
@@ -139,13 +138,13 @@ pub fn menu_button(
     selected: bool,
 ) -> button_widget::Style {
     let mut style = text_button(theme, status);
-    if selected
-        || matches!(
-            status,
-            button_widget::Status::Hovered | button_widget::Status::Pressed
-        )
-    {
-        style.background = Some(MENU_SELECTED.into());
+    if matches!(
+        status,
+        button_widget::Status::Hovered | button_widget::Status::Pressed
+    ) {
+        style.background = Some(SECONDARY_HOVER.into());
+    } else if selected {
+        style.background = Some(SECONDARY.into());
     }
     style
 }

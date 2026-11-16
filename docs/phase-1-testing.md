@@ -180,9 +180,21 @@ lose details; the original transcript remains the source of truth.
 - Set Astra to Max/Fast on and Luna to None/Fast off, then Save. Choose
   Astra as the default in General and apply. A new session starts with Astra,
   Max and Fast. Switch to Luna in the footer: effort becomes None, Fast turns off.
-- Open the effort menu: Astra/Sol have low, medium, high, xhigh, max; Luna also
-  has none. Toggle Fast using the mouse and keyboard. The footer indicates Fast
-  when enabled. Model/effort/Fast changes are unavailable during an active turn.
+- Click anywhere on the combined model/reasoning footer button. The popup has
+  models on the left, supported reasoning levels on the right, and Standard/Fast
+  along the bottom. Astra/Sol have Low, Medium, High, Extra High, Max; Luna also
+  has None. Changing model refreshes these choices and applies its saved defaults.
+- Changes leave the popup open. Selections are mouse-only: Tab, arrows, Enter and
+  Space do not navigate, select, or type/send in the composer behind the popup.
+  Escape, clicking outside, or clicking the footer button dismisses it without
+  changing the composer or closing Settings.
+- Select Standard/Fast with the mouse. Selecting an already-active
+  speed is a no-op, not a toggle. Fast uses the Lucide lightning icon; the combined
+  footer button shows that icon only when Fast is enabled. Model/effort/Fast changes
+  are unavailable during an active turn or while a setting is being saved.
+- With both sidebars expanded, check that the unified footer target stays contained
+  and the popup's two columns remain readable and within the window. The popup may
+  extend over the left sidebar when the center is narrow.
 - Save an existing session with non-default effort/Fast, restart, and reopen it:
   its selections persist. Changing model defaults does not overwrite it.
 - In isolated test state, open a saved session with a retired model. Expect the
