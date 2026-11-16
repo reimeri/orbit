@@ -32,6 +32,13 @@ Check:
 - Actual files exist in the project and tests really ran. Errors, if any, are
   visible and the agent can correct them.
 - Markdown/code blocks render; Copy works; links require confirmation.
+- Confirm a local Markdown link such as `[report](docs/report.pdf)`,
+  `[report](/tmp/report.pdf)`, or `[report](file:///tmp/report.pdf)`: it opens
+  with `xdg-open` in the default application. Relative paths use the conversation's
+  project folder, not Pico's launch directory; URL-encoded spaces are decoded.
+  Cancel leaves the file unopened. Web links still open in the browser; unsupported
+  schemes are rejected. If launching fails, the error identifies the destination
+  and suggests opening it manually or checking its default application.
 - Drag to select part of a message, then across paragraphs and messages in either
   direction. Ctrl+C copies the displayed text, not Markdown markup. Check code
   blocks (including blank lines), Unicode, notices and expanded thinking/tool

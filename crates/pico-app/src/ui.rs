@@ -37,6 +37,7 @@ use pico_core::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -2436,10 +2437,10 @@ impl App {
             Some(Modal::Quit) => return self.quit(),
             Some(Modal::Link(url)) => {
                 self.modal = None;
-                if url.starts_with("https://") || url.starts_with("http://") {
-                    return external(url);
+                match link_destination(&url, self.current().map(|s| s.project.as_path())) {
+                    Ok(destination) => return external(destination),
+                    Err(error) => self.error = Some(error),
                 }
-                self.error = Some("Only http and https links can be opened from chat.".into());
             }
             None => {}
         }
@@ -4531,8 +4532,8 @@ impl App {
                 "Stop and quit",
             ),
             Modal::Link(_) => (
-                "Open link in browser?",
-                "This link came from the conversation. Check its destination before opening it.",
+                "Open link?",
+                "This link came from the conversation. Check its destination before opening it in the default application.",
                 "Open link",
             ),
         };
@@ -5576,10 +5577,57 @@ fn age(updated: u64) -> String {
         format!("{}d", seconds / 86400)
     }
 }
-fn external(url: String) -> Task<Message> {
+/// Resolve Markdown destinations without letting arbitrary URI schemes reach xdg-open.
+fn link_destination(destination: &str, workspace: Option<&Path>) -> Result<OsString, String> {
+    if destination.is_empty() {
+        return Err("The link destination is empty.".into());
+    }
+    let url = match url::Url::parse(destination) {
+        Ok(url) => url,
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            let base = if Path::new(destination).is_absolute() {
+                Path::new("/")
+            } else {
+                workspace.ok_or("Select a conversation to open project-relative links.")?
+            };
+            url::Url::from_directory_path(base)
+                .map_err(|()| "The conversation project must be an absolute path.")?
+                .join(destination)
+                .map_err(|error| format!("Invalid link destination: {error}"))?
+        }
+        Err(error) => return Err(format!("Invalid link destination: {error}")),
+    };
+    match url.scheme() {
+        "http" | "https" => Ok(url.as_str().into()),
+        "file" => url
+            .to_file_path()
+            .map(PathBuf::into_os_string)
+            .map_err(|()| "Only local file:// URLs can be opened.".into()),
+        _ => Err("Use a local path, file:// URL, or http/https link.".into()),
+    }
+}
+
+fn external(destination: impl Into<OsString>) -> Task<Message> {
+    let destination = destination.into();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move||std::process::Command::new("xdg-open").arg(&url).status().map_err(|e|format!("Could not open browser: {e}. Copy the login URL from Settings and open it manually.")).and_then(|status|if status.success(){Ok(())}else{Err("Browser launch failed. Copy the login URL from Settings and open it manually.".into())})).await.map_err(|e|e.to_string())?
+            tokio::task::spawn_blocking(move || {
+                let recovery = format!(
+                    "Open {} manually, or check its default application with xdg-open.",
+                    destination.to_string_lossy()
+                );
+                let status = std::process::Command::new("xdg-open")
+                    .arg(&destination)
+                    .status()
+                    .map_err(|error| format!("Could not launch xdg-open: {error}. {recovery}"))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("xdg-open failed ({status}). {recovery}"))
+                }
+            })
+            .await
+            .map_err(|error| format!("Could not finish opening the link: {error}. Try again."))?
         },
         Message::External,
     )
@@ -6319,6 +6367,60 @@ mod tests {
         assert!(
             matches!(&saved.entries[3].kind, EntryKind::Tool { failed: true, parent: Some(parent), output, .. } if parent == "outer" && output.ends_with("complete output β"))
         );
+    }
+
+    #[test]
+    fn chat_link_destinations_resolve_local_paths_and_restrict_schemes() {
+        let project = Path::new("/work/project");
+        for (link, expected) in [
+            ("docs/report%20λ.pdf", "/work/project/docs/report λ.pdf"),
+            ("../shared/readme.md", "/work/shared/readme.md"),
+            ("./-report.txt", "/work/project/-report.txt"),
+            ("/tmp/report%20one.pdf", "/tmp/report one.pdf"),
+            ("file:///tmp/report%20two.pdf", "/tmp/report two.pdf"),
+            ("file://localhost/tmp/report.pdf", "/tmp/report.pdf"),
+            (
+                "https://example.org/docs?q=one#section",
+                "https://example.org/docs?q=one#section",
+            ),
+            ("http://example.org/", "http://example.org/"),
+        ] {
+            assert_eq!(
+                link_destination(link, Some(project)).unwrap(),
+                OsString::from(expected),
+                "{link}"
+            );
+        }
+        assert_eq!(
+            link_destination("/tmp/absolute.txt", None).unwrap(),
+            OsString::from("/tmp/absolute.txt")
+        );
+        assert!(link_destination("relative.txt", None).is_err());
+        for link in [
+            "",
+            "javascript:alert(1)",
+            "data:text/plain,hello",
+            "mailto:user@example.org",
+            "file://remote-host/tmp/report.pdf",
+            "//remote-host/tmp/report.pdf",
+        ] {
+            assert!(link_destination(link, Some(project)).is_err(), "{link}");
+        }
+    }
+
+    #[tokio::test]
+    async fn local_chat_links_keep_confirmation_and_invalid_links_report_errors() {
+        let mut app = app();
+        dispatch(&mut app, Message::Link("docs/report.pdf".into())).await;
+        assert!(matches!(&app.modal, Some(Modal::Link(link)) if link == "docs/report.pdf"));
+        dispatch(&mut app, Message::Dismiss).await;
+        assert!(app.modal.is_none());
+        assert!(app.error.is_none());
+
+        dispatch(&mut app, Message::Link("javascript:alert(1)".into())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(app.modal.is_none());
+        assert!(app.error.as_ref().unwrap().contains("Use a local path"));
     }
 
     #[tokio::test]
