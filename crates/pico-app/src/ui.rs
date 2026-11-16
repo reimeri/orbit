@@ -52,7 +52,6 @@ use unicode_segmentation::UnicodeSegmentation;
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum TranscriptKey {
     Top,
-    Empty,
     Entry {
         session: String,
         entry: String,
@@ -3187,78 +3186,82 @@ impl App {
         let Some(session) = self.current() else {
             return self.new_session();
         };
-        let epoch = self.view_epoch;
-        let range = self.transcript.visible();
-        let mut children: Vec<(TranscriptKey, Element<'_, Message>)> = vec![(
-            TranscriptKey::Top,
-            space().height(self.transcript.prefix(range.start)).into(),
-        )];
-        if session.entries.is_empty() {
-            children.push((
-                TranscriptKey::Empty,
-                container(
-                    column![
-                        text("What are we building?").size(28),
-                        text("Ask Pico to explore, implement, debug, or test this project.")
-                            .color(MUTED),
-                        text("Commands run with your user permissions, without approval prompts.")
-                            .size(12)
+        let chat: Element<'_, Message> = if session.entries.is_empty() && session.child.is_none() {
+            let name = self.project_name(&session.project);
+            container(
+                column![
+                    text("What are we building?").size(36).align_x(iced::Center),
+                    row![
+                        project_badge_sized(&session.project, &name, 32.),
+                        crate::ellipsized_text::shrinking_ellipsized_text(&name, 24., Some(MUTED)),
                     ]
-                    .spacing(14),
-                )
-                .padding([40, 0])
-                .into(),
-            ));
-        }
-        for &index in &self.transcript.order[range.clone()] {
-            let projected = ActivityRow::from_id(index);
-            let entry = &session.entries[projected.source()];
-            // Resize-only sensors measure every mounted row, even outside the
-            // viewport. Adding on_show would gate measurements on visibility,
-            // mixing real scroll offsets with stale height estimates.
-            let row = widget::sensor(self.activity_row(projected))
-                .on_resize(move |size| Message::RowSize(epoch, index, size.height));
+                    .spacing(12)
+                    .align_y(iced::Center),
+                ]
+                .spacing(18)
+                .align_x(iced::Center),
+            )
+            .padding(24)
+            .center_x(Fill)
+            .center_y(Fill)
+            .into()
+        } else {
+            let epoch = self.view_epoch;
+            let range = self.transcript.visible();
+            let mut children: Vec<(TranscriptKey, Element<'_, Message>)> = vec![(
+                TranscriptKey::Top,
+                space().height(self.transcript.prefix(range.start)).into(),
+            )];
+            for &index in &self.transcript.order[range.clone()] {
+                let projected = ActivityRow::from_id(index);
+                let entry = &session.entries[projected.source()];
+                // Resize-only sensors measure every mounted row, even outside the
+                // viewport. Adding on_show would gate measurements on visibility,
+                // mixing real scroll offsets with stale height estimates.
+                let row = widget::sensor(self.activity_row(projected))
+                    .on_resize(move |size| Message::RowSize(epoch, index, size.height));
+                children.push((
+                    TranscriptKey::Entry {
+                        session: session.id.clone(),
+                        entry: entry.id.clone(),
+                        role: index - projected.source(),
+                    },
+                    column![row, space().height(projected.spacing(&session.entries))].into(),
+                ));
+            }
             children.push((
-                TranscriptKey::Entry {
-                    session: session.id.clone(),
-                    entry: entry.id.clone(),
-                    role: index - projected.source(),
-                },
-                column![row, space().height(projected.spacing(&session.entries))].into(),
+                TranscriptKey::Bottom,
+                space()
+                    .height((self.transcript.total() - self.transcript.prefix(range.end)).max(0.))
+                    .into(),
             ));
-        }
-        children.push((
-            TranscriptKey::Bottom,
-            space()
-                .height((self.transcript.total() - self.transcript.prefix(range.end)).max(0.))
-                .into(),
-        ));
-        let transcript = crate::keyed_column::keyed_column(children);
-        // The shared gutter replaces part of the existing transcript padding;
-        // keep the text width and centered alignment unchanged.
-        let transcript = container(transcript)
-            .max_width(self.catalog.settings.chat_width - crate::scrollbar::GUTTER)
-            .width(Fill)
-            .padding(iced::Padding {
-                top: 20.,
-                bottom: 20.,
-                left: 26.,
-                right: 26. - crate::scrollbar::GUTTER,
-            });
-        let content = crate::transcript_viewport::observe(
-            container(transcript).center_x(Fill),
-            epoch,
-            move |offset, height, content_height| {
-                Message::Scroll(
-                    epoch,
-                    offset,
-                    height,
-                    offset + height >= content_height - 40.,
-                )
-            },
-        );
-        let chat = scroll(content).id("chat").height(Fill);
-        let chat = container(chat).padding(iced::Padding::ZERO.right(6));
+            let transcript = crate::keyed_column::keyed_column(children);
+            // The shared gutter replaces part of the existing transcript padding;
+            // keep the text width and centered alignment unchanged.
+            let transcript = container(transcript)
+                .max_width(self.catalog.settings.chat_width - crate::scrollbar::GUTTER)
+                .width(Fill)
+                .padding(iced::Padding {
+                    top: 20.,
+                    bottom: 20.,
+                    left: 26.,
+                    right: 26. - crate::scrollbar::GUTTER,
+                });
+            let content = crate::transcript_viewport::observe(
+                container(transcript).center_x(Fill),
+                epoch,
+                move |offset, height, content_height| {
+                    Message::Scroll(
+                        epoch,
+                        offset,
+                        height,
+                        offset + height >= content_height - 40.,
+                    )
+                },
+            );
+            let chat = scroll(content).id("chat").height(Fill);
+            container(chat).padding(iced::Padding::ZERO.right(6)).into()
+        };
         let running = self.running();
         if let Some(child) = &session.child {
             use pico_core::agent::subagents::RunStatus;
@@ -5499,15 +5502,19 @@ fn delayed_capture() -> Task<Message> {
     )
 }
 fn project_badge_named(path: &Path, name: &str) -> Element<'static, Message> {
+    project_badge_sized(path, name, 16.)
+}
+
+fn project_badge_sized(path: &Path, name: &str, size: f32) -> Element<'static, Message> {
     let color = project_color(path);
     container(
         text(project_initials(name))
-            .size(8)
-            .line_height(text::LineHeight::Absolute(10.into()))
+            .size(size / 2.)
+            .line_height(text::LineHeight::Absolute((size * 0.625).into()))
             .color(color),
     )
-    .center_x(16)
-    .center_y(16)
+    .center_x(size)
+    .center_y(size)
     .style(move |_| container::Style {
         background: Some(
             Color {
@@ -9234,6 +9241,93 @@ Then implement the fix.";
         assert!(app.sessions.is_empty());
         dispatch(&mut app, Message::New).await;
         assert!(app.selected.is_none(), "+ must open the project chooser");
+    }
+
+    #[tokio::test]
+    async fn empty_workspace_welcome_centers_above_composer_and_fits_long_names() {
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        let mut app = app();
+        let path = PathBuf::from("/workspace-path");
+        app.catalog.projects = vec![Project {
+            path: path.clone(),
+            display_name: Some("Custom workspace".into()),
+            favorite: false,
+            stashed: false,
+        }];
+        dispatch(&mut app, Message::Create(path)).await;
+        let mut renderer = header_renderer();
+        for (width, height, name, draft) in [
+            (900., 700., "Custom workspace", ""),
+            (900., 1000., "Custom workspace", ""),
+            (
+                360.,
+                700.,
+                "An unusually long workspace display name with Unicode λ",
+                "",
+            ),
+            (
+                900.,
+                700.,
+                "Custom workspace",
+                "A growing draft\nwith multiple\nlines of text\nabove the footer",
+            ),
+        ] {
+            app.catalog.projects[0].display_name = Some(name.into());
+            app.editor = text_editor::Content::with_text(draft);
+            let mut ui = UserInterface::build(
+                app.center(),
+                iced::Size::new(width, height),
+                Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let title = bounds.label("What are we building?");
+            let workspace = bounds.label(name);
+            let initials = bounds.label(&project_initials(name));
+            let badge = *bounds
+                .containers
+                .iter()
+                .filter(|rect| rect.width == rect.height && rect.contains(initials.center()))
+                .min_by(|a, b| a.width.total_cmp(&b.width))
+                .expect("workspace badge");
+            let welcome = bounds
+                .containers
+                .iter()
+                .find(|rect| rect.y == 0. && rect.width == width && rect.height < height)
+                .expect("welcome area above the composer");
+            let row_left = badge.x.min(workspace.x);
+            let row_right = (badge.x + badge.width).max(workspace.x + workspace.width);
+            let block_bottom = (badge.y + badge.height).max(workspace.y + workspace.height);
+            assert!((title.center_x() - width / 2.).abs() < 1.);
+            assert!(((row_left + row_right) / 2. - width / 2.).abs() < 1.);
+            assert!(
+                ((title.y + block_bottom) / 2. - welcome.center_y()).abs() < 1.,
+                "the whole welcome block must center in the space above the composer"
+            );
+            assert!(workspace.y > title.y + title.height);
+            assert!((badge.center_y() - workspace.center_y()).abs() < 1.);
+            assert_eq!(initials.center(), badge.center());
+            assert!(
+                title.height > workspace.height,
+                "workspace is a smaller subtitle"
+            );
+            assert!(row_left >= 0. && row_right <= width, "long names must fit");
+        }
+
+        app.draft_session.as_mut().unwrap().entries.push(Entry::new(
+            EntryKind::User {
+                images: vec![],
+                steering: false,
+            },
+            "Start building",
+        ));
+        let text = displayed_text(app.center(), iced::Size::new(900., 700.));
+        assert!(
+            !text.contains("What are we building?"),
+            "the welcome must disappear once the conversation starts"
+        );
     }
 
     #[tokio::test]
