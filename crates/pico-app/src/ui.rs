@@ -3121,7 +3121,7 @@ impl App {
             .padding(iced::Padding {
                 top: 4.,
                 right: theme::SCROLLBAR_EDGE_INSET,
-                bottom: 14.,
+                bottom: 4.,
                 left: 8.,
             })
             .width(
@@ -4263,7 +4263,10 @@ impl App {
         let Some(session) = self.current() else {
             return container(
                 row![
-                    text("Pico V2").size(11).color(MUTED),
+                    text("Pico V2")
+                        .size(11)
+                        .color(MUTED)
+                        .wrapping(text::Wrapping::None),
                     space().width(Fill),
                     text(if self.account.is_some() {
                         "ChatGPT connected"
@@ -4271,11 +4274,12 @@ impl App {
                         "Not signed in"
                     })
                     .size(11)
-                    .color(MUTED),
+                    .color(MUTED)
+                    .wrapping(text::Wrapping::None),
                 ]
                 .align_y(iced::Center),
             )
-            .padding([8, 14])
+            .padding([9, 14])
             .height(36)
             .into();
         };
@@ -9784,6 +9788,11 @@ Then implement the fix.";
                 "footer must not take a fill-height share"
             );
             assert!(footer.x > left && footer.x + footer.width < width - right);
+            let settled = bounds.label("Settled");
+            assert!(
+                (settled.center_y() - label.center_y()).abs() < 1.,
+                "collapsed Settled header must align with the footer text: {settled:?}, {label:?}"
+            );
             assert!(
                 label.width > 0. && label.height > 0.,
                 "selector must remain clickable"
@@ -9832,6 +9841,34 @@ Then implement the fix.";
                 );
             }
             drop(ui);
+            let session_id = app.selected.take();
+            let current_session = app.current_session.take();
+            let draft_session = app.draft_session.take();
+            for (account, status) in [
+                (None, "Not signed in"),
+                (Some("fixture account".into()), "ChatGPT connected"),
+            ] {
+                app.account = account;
+                let mut ui = iced_runtime::UserInterface::build(
+                    app.view(),
+                    iced::Size::new(width, height),
+                    iced_runtime::user_interface::Cache::new(),
+                    &mut renderer,
+                );
+                let mut picker_bounds = UiBounds::default();
+                ui.operate(&renderer, &mut picker_bounds);
+                for text in ["Pico V2", status] {
+                    let idle_label = picker_bounds.label(text);
+                    assert!(
+                        (idle_label.center_y() - label.center_y()).abs() < 0.5,
+                        "no-session footer must align with session footer: {idle_label:?}, {label:?}"
+                    );
+                }
+            }
+            app.selected = session_id;
+            app.current_session = current_session;
+            app.draft_session = draft_session;
+            app.account = None;
             dispatch(&mut app, Message::ToggleFooterMenu).await;
             let mut ui = iced_runtime::UserInterface::build(
                 app.view(),
