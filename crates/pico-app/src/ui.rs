@@ -130,6 +130,7 @@ pub struct App {
     search: String,
     search_active: bool,
     editor: text_editor::Content,
+    file_completion: crate::file_completion::Completion,
     attachments: Vec<pico_core::media::Media>,
     importing: usize,
     questionnaires: HashMap<String, questionnaire::Draft>,
@@ -209,6 +210,7 @@ pub enum Selection {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    FileCompletion(crate::file_completion::Message),
     Notification(crate::notifications::Message),
     Image(crate::image_view::Message),
     OpenImage(pico_core::media::Media),
@@ -401,6 +403,7 @@ impl App {
             search: String::new(),
             search_active: false,
             editor: text_editor::Content::new(),
+            file_completion: Default::default(),
             questionnaires: HashMap::new(),
             active_questionnaire: None,
             chat_selection: Default::default(),
@@ -704,8 +707,9 @@ impl App {
                 .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
             for &index in &visible {
                 let entry = &session.entries[index];
-                if let EntryKind::User { images, .. } = &entry.kind {
+                if let EntryKind::User { images, files, .. } = &entry.kind {
                     visible_media.extend(images.iter().cloned());
+                    visible_media.extend(files.iter().filter_map(|file| file.image.clone()));
                 }
                 // User text is literal, including newlines and Markdown syntax.
                 if matches!(entry.kind, EntryKind::Assistant | EntryKind::Reasoning) {
@@ -921,6 +925,21 @@ impl App {
         true
     }
     fn restore_draft(&mut self) {
+        let workspace = self
+            .current()
+            .filter(|s| s.child.is_none())
+            .map(|s| (s.id.clone(), s.project.clone()));
+        let cache = if self.smoke {
+            self.smoke_dir
+                .as_ref()
+                .expect("smoke directory")
+                .join("file-cache")
+        } else {
+            pico_core::file_index::cache_dir()
+        };
+        if let Err(error) = self.file_completion.workspace(workspace, cache) {
+            self.error = Some(format!("Could not start file search: {error:#}"));
+        }
         self.editor = text_editor::Content::with_text(if self.draft_session.is_some() {
             &self.new_draft.message
         } else {
@@ -938,6 +957,7 @@ impl App {
     }
     fn composer_message(&self) -> UserMessage {
         UserMessage {
+            files: vec![],
             text: self.editor.text(),
             images: self.attachments.clone(),
         }
@@ -989,6 +1009,7 @@ impl App {
             self.chat_positions
                 .insert(id.clone(), (self.transcript.offset, self.auto_scroll));
         }
+        self.file_completion.dismiss();
         let draft = self.take_draft();
         let settings = self.catalog.settings.clone();
         let mut new_draft = self.new_draft.clone();
@@ -1194,6 +1215,7 @@ impl App {
                             .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
                                 Arc::new(text),
                             )));
+                        self.file_completion.edited(&self.editor);
                         if self.draft_session.is_some() {
                             self.new_draft.message = self.editor.text();
                             self.new_draft_dirty = true;
@@ -1360,6 +1382,7 @@ impl App {
                 self.io_busy = false;
                 match result {
                     Ok(()) => {
+                        self.error = None;
                         if self.draft_session.as_ref().is_some_and(|s| s.id == id) {
                             self.draft_session = None;
                             self.new_draft = NewSessionDraft::default();
@@ -1370,6 +1393,7 @@ impl App {
                         self.submissions.remove(&id);
                         if self.selected.as_ref() == Some(&id) && self.composer_message() == text {
                             self.editor = text_editor::Content::new();
+                            self.file_completion.edited(&self.editor);
                             self.attachments.clear();
                             self.draft_dirty = false;
                         }
@@ -1591,6 +1615,29 @@ impl App {
                         .map(move |message| Message::Questionnaire(id.clone(), message));
                 }
             }
+            Message::FileCompletion(message) => {
+                let result = matches!(&message, crate::file_completion::Message::Results(_));
+                if !result && !self.file_completion_enabled() {
+                    return Task::none();
+                }
+                let refocus = matches!(
+                    &message,
+                    crate::file_completion::Message::Accept { .. }
+                        | crate::file_completion::Message::Refresh
+                        | crate::file_completion::Message::Ignored
+                );
+                if self.file_completion.update(message, &mut self.editor) {
+                    if self.draft_session.is_some() {
+                        self.new_draft.message = self.editor.text();
+                        self.new_draft_dirty = true;
+                    } else {
+                        self.draft_dirty = true;
+                    }
+                }
+                if refocus {
+                    return widget::operation::focus("composer");
+                }
+            }
             Message::Editor(_) | Message::EditorScroll(_) | Message::DeletePreviousWord => {
                 if self.active_questionnaire.is_some()
                     || self.io_busy
@@ -1617,6 +1664,7 @@ impl App {
                     }
                     _ => unreachable!("editor message"),
                 };
+                self.file_completion.edited(&self.editor);
                 if edit && self.draft_session.is_some() {
                     self.new_draft.message = self.editor.text();
                     self.new_draft_dirty = true;
@@ -1625,6 +1673,7 @@ impl App {
                 }
             }
             Message::Send => {
+                self.file_completion.dismiss();
                 if self.active_questionnaire.is_some()
                     || self.modal.is_some()
                     || self.context_menu.is_some()
@@ -2199,6 +2248,12 @@ impl App {
                         return Task::none();
                     }
                     if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                        // One central Escape handler preserves modal/search shortcuts
+                        // even when their native text inputs capture the key.
+                        if self.file_completion_enabled() && self.file_completion.is_open() {
+                            self.file_completion.dismiss();
+                            return Task::none();
+                        }
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
                             self.modal = None;
@@ -2461,6 +2516,11 @@ impl App {
         if !self.smoke {
             subscriptions.push(self.notifications.subscription().map(Message::Notification));
         }
+        subscriptions.push(
+            self.file_completion
+                .subscription()
+                .map(Message::FileCompletion),
+        );
         subscriptions.push(self.image_view.subscription().map(Message::Image));
         Subscription::batch(subscriptions)
     }
@@ -3327,6 +3387,12 @@ impl App {
             .spacing(8);
             compose = compose.push("attachments", crate::scrollbar::horizontal(images));
         }
+        if self.file_completion.is_open() && self.file_completion_enabled() {
+            compose = compose.push(
+                "file-completion",
+                self.file_completion.view().map(Message::FileCompletion),
+            );
+        }
         compose = compose.push("editor", self.composer_editor(running));
         column![
             chat,
@@ -3342,9 +3408,20 @@ impl App {
         .height(Fill)
         .into()
     }
+    fn file_completion_enabled(&self) -> bool {
+        !self.io_busy
+            && !self.closing
+            && !self.close_requested
+            && self.modal.is_none()
+            && self.context_menu.is_none()
+            && self.active_questionnaire.is_none()
+            && !self.footer_menu_open
+            && !self.search_active
+    }
     fn composer_editor(&self, running: bool) -> Element<'_, Message> {
         let line_height = self.catalog.settings.font_size * COMPOSER_LINE_HEIGHT_FACTOR;
         let editor = text_editor(&self.editor)
+            .id("composer")
             .style(theme::editor)
             .placeholder(if self.io_busy || self.closing {
                 "Saving…"
@@ -3354,7 +3431,21 @@ impl App {
                 "Message Pico…"
             })
             .on_action(Message::Editor)
-            .key_binding(composer_key_binding)
+            .key_binding(|event| {
+                if self.file_completion_enabled()
+                    && self.file_completion.is_open()
+                    && event.key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                {
+                    // Let the central handler dismiss the picker without the
+                    // native Unfocus binding taking focus away from the composer.
+                    return None;
+                }
+                self.file_completion_enabled()
+                    .then(|| self.file_completion.binding(&event))
+                    .flatten()
+                    .map(|message| text_editor::Binding::Custom(Message::FileCompletion(message)))
+                    .or_else(|| composer_key_binding(event))
+            })
             .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
             .min_height(COMPOSER_MIN_LINES as f32 * line_height)
             .size(self.catalog.settings.font_size);
@@ -3724,7 +3815,12 @@ impl App {
             }
             _ => {
                 let mut content = column![].spacing(8);
-                if let EntryKind::User { images, steering } = &entry.kind {
+                if let EntryKind::User {
+                    images,
+                    files,
+                    steering,
+                } = &entry.kind
+                {
                     if *steering {
                         content = content.push(
                             text("Steering · waiting for the next boundary")
@@ -3734,6 +3830,16 @@ impl App {
                     }
                     for media in images {
                         content = content.push(self.image_view.thumbnail(media));
+                    }
+                    for file in files {
+                        content = content.push(
+                            text(format!("{} · {} bytes captured", file.name, file.bytes))
+                                .size(11)
+                                .color(MUTED),
+                        );
+                        if let Some(image) = &file.image {
+                            content = content.push(self.image_view.thumbnail(image));
+                        }
                     }
                 }
                 if let Some(markdown) = self.markdown.get(&entry.id) {
@@ -4607,7 +4713,7 @@ impl App {
                 s.usage.total_cached = 126_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
-                    Entry::new(EntryKind::User { images: vec![], steering: false }, "Inspect this project and run its tests."),
+                    Entry::new(EntryKind::User { files: vec![],  images: vec![], steering: false }, "Inspect this project and run its tests."),
                     Entry::new(
                         EntryKind::Assistant,
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Pico V2\"); }\n```\n\n[Documentation](https://openai.com)",
@@ -4871,6 +4977,7 @@ impl App {
                 child.effort = "high".into();
                 child.entries.push(Entry::new(
                     EntryKind::User {
+                        files: vec![],
                         images: vec![],
                         steering: false,
                     },
@@ -5175,7 +5282,7 @@ impl App {
                         }
                     };
                 session.entries = vec![
-                    Entry::new(EntryKind::User { images: vec![], steering: false }, "Check the implementation and run validation."),
+                    Entry::new(EntryKind::User { files: vec![],  images: vec![], steering: false }, "Check the implementation and run validation."),
                     Entry { id: "activity-reason".into(), kind: EntryKind::Reasoning, text: "**Inspecting the build configuration**\n\nReviewing the existing Nix development environment.".into() },
                     Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
                     tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),
@@ -5327,10 +5434,36 @@ impl App {
                 self.modal = Some(Modal::DeleteProject(PathBuf::from("/tmp/smoke-project-9")));
             }
 
+            52 => {
+                self.modal = None;
+                self.context_menu = None;
+                self.stashed_open = false;
+                self.settled_open = false;
+                self.settings_open = false;
+                self.agents_open = false;
+                self.sessions.clear();
+                let root = self.smoke_dir.as_ref().unwrap().clone();
+                for name in ["smoke-file one.rs", "smoke-file two.rs", "smoke-file λ.md"] {
+                    std::fs::write(root.join(name), "file tag smoke fixture").unwrap();
+                }
+                let mut session = Session::new(root, &self.catalog.settings);
+                session.draft = "Compare @smoke-file".into();
+                self.selected = Some(session.id.clone());
+                self.sessions.push(SessionSummary::from(&session));
+                self.prepare_sidebar();
+                self.current_session = Some(session);
+                self.rebuild_transcript();
+                self.restore_draft();
+                self.editor
+                    .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                self.file_completion.edited(&self.editor);
+                self.prepare_visible();
+            }
+
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, compact project picker/stash/context menu/delete confirmation, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar/file-tag completion, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, compact project picker/stash/context menu/delete confirmation, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -7642,6 +7775,7 @@ mod tests {
         session.fast = false;
         session.entries.push(Entry::new(
             EntryKind::User {
+                files: vec![],
                 images: vec![],
                 steering: false,
             },
@@ -7795,6 +7929,213 @@ mod tests {
             }
             assert_eq!(app.editor.text(), "x".repeat(change + 1));
         }
+    }
+
+    #[tokio::test]
+    async fn file_picker_escape_is_local_but_hidden_picker_does_not_capture_modal_escape() {
+        use iced::advanced::widget::{Operation, operation::Focusable};
+        use iced::futures::{StreamExt, stream};
+        use iced_runtime::futures::subscription;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        struct Focus;
+        impl Operation for Focus {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                _: iced::Rectangle,
+                state: &mut dyn Focusable,
+            ) {
+                state.focus();
+            }
+        }
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(root)).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('@'))),
+        )
+        .await;
+        let mut renderer = header_renderer();
+        let mut cache = Cache::new();
+        for modal in [true, false] {
+            app.modal = modal.then_some(Modal::AddProject);
+            let field: Element<'_, Message> = if modal {
+                text_input("Modal input", "fixture")
+                    .id("modal-input")
+                    .on_input(Message::ModalInput)
+                    .into()
+            } else {
+                app.composer_editor(false)
+            };
+            let mut ui =
+                UserInterface::build(field, iced::Size::new(600., 200.), cache, &mut renderer);
+            ui.operate(&renderer, &mut Focus);
+            let Message::Event(event) = footer_key(keyboard::key::Named::Escape) else {
+                unreachable!()
+            };
+            let mut messages = Vec::new();
+            let (_, statuses) = ui.update(
+                std::slice::from_ref(&event),
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            cache = ui.into_cache();
+            assert!(messages.is_empty(), "the central handler owns Escape");
+            assert_eq!(
+                statuses,
+                vec![if modal {
+                    iced::event::Status::Captured
+                } else {
+                    iced::event::Status::Ignored
+                }]
+            );
+            let mut routed = Vec::new();
+            for recipe in subscription::into_recipes(window_events()) {
+                let input = stream::iter([subscription::Event::Interaction {
+                    window: window::Id::unique(),
+                    event: event.clone(),
+                    status: statuses[0],
+                }])
+                .boxed();
+                routed.extend(recipe.stream(input).collect::<Vec<_>>().await);
+            }
+            assert!(
+                matches!(routed.as_slice(), [Message::Event(_)]),
+                "captured text-input Escape must still reach the central handler"
+            );
+            for message in routed {
+                dispatch(&mut app, message).await;
+            }
+            assert!(app.modal.is_none());
+            assert_eq!(
+                app.file_completion.is_open(),
+                modal,
+                "hidden picker must not consume modal Escape; visible picker must dismiss before app-wide actions"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn file_completion_and_failed_send_preserve_the_authored_draft() {
+        use iced::futures::{StreamExt, stream};
+        use iced_runtime::futures::subscription;
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        std::fs::write(root.join("source notes.md"), "tagged contents").unwrap();
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        dispatch(
+            &mut app,
+            Message::Editor(text_editor::Action::Edit(text_editor::Edit::Paste(
+                Arc::new("Compare @source".into()),
+            ))),
+        )
+        .await;
+        assert!(app.file_completion.is_open());
+        let mut messages = stream::select_all(
+            subscription::into_recipes(app.file_completion.subscription())
+                .into_iter()
+                .map(|recipe| recipe.stream(stream::pending().boxed())),
+        );
+        tokio::time::timeout(Duration::from_secs(10),async {
+            loop {
+                let message=messages.next().await.unwrap();
+                let ready=matches!(&message,crate::file_completion::Message::Results(r) if !r.pending && r.paths.contains(&"@\"source notes.md\"".to_owned()));
+                dispatch(&mut app,Message::FileCompletion(message)).await;
+                if ready {break;}
+            }
+        }).await.unwrap();
+        // Clicking a picker row takes focus away from the editor before acceptance.
+        // Exercise the returned focus operation on the retained native editor tree.
+        use iced_runtime::{UserInterface, user_interface::Cache};
+        let size = iced::Size::new(600., 200.);
+        let mut renderer = header_renderer();
+        let mut ui = UserInterface::build(
+            app.composer_editor(false),
+            size,
+            Cache::new(),
+            &mut renderer,
+        );
+        ui.operate(
+            &renderer,
+            &mut iced::advanced::widget::operation::focusable::focus("composer".into()),
+        );
+        ui.update(
+            &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                mouse::Button::Left,
+            ))],
+            mouse::Cursor::Available(iced::Point::new(size.width + 1., size.height + 1.)),
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Vec::new(),
+        );
+        let cache = ui.into_cache();
+        let accept = app.file_completion.accept_selected();
+        let task = app.update(Message::FileCompletion(accept));
+        let mut ui = UserInterface::build(app.composer_editor(false), size, cache, &mut renderer);
+        if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Widget(mut operation) = action {
+                    ui.operate(&renderer, operation.as_mut());
+                }
+            }
+        }
+        let mut messages = Vec::new();
+        ui.update(
+            &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Character(" ".into()),
+                modified_key: keyboard::Key::Character(" ".into()),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Space),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: Some(" ".into()),
+                repeat: false,
+            })],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        drop(ui);
+        assert!(
+            matches!(messages.as_slice(), [Message::Editor(_)]),
+            "typing must continue after a mouse acceptance"
+        );
+        assert_eq!(app.editor.text(), "Compare @\"source notes.md\"");
+        assert!(!app.file_completion.is_open());
+        for message in messages {
+            dispatch(&mut app, message).await;
+        }
+        assert!(app.editor.text().ends_with(' '));
+        let draft = app.editor.text();
+        std::fs::remove_file(root.join("source notes.md")).unwrap();
+        dispatch(&mut app, Message::Send).await;
+        assert_eq!(app.editor.text(), draft);
+        assert!(
+            app.error
+                .as_ref()
+                .is_some_and(|error| error.contains("Could not attach"))
+        );
+        std::fs::write(root.join("source notes.md"), "restored contents").unwrap();
+        dispatch(&mut app, Message::Send).await;
+        assert!(app.editor.text().is_empty());
+        let saved = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .store
+            .load_session(app.selected.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(saved.entries[0].text, draft);
+        let EntryKind::User { files, .. } = &saved.entries[0].kind else {
+            panic!("user entry")
+        };
+        assert_eq!(files[0].inline.as_deref(), Some("restored contents"));
     }
 
     #[tokio::test]
@@ -8065,6 +8406,7 @@ Then implement the fix.";
             .edit(&id, |s| {
                 s.entries.push(Entry::new(
                     EntryKind::User {
+                        files: vec![],
                         images: vec![],
                         steering: false,
                     },
@@ -8115,6 +8457,7 @@ Then implement the fix.";
         child.effort = "high".into();
         child.entries.push(Entry::new(
             EntryKind::User {
+                files: vec![],
                 images: vec![],
                 steering: false,
             },
@@ -9918,6 +10261,7 @@ Then implement the fix.";
 
         app.draft_session.as_mut().unwrap().entries.push(Entry::new(
             EntryKind::User {
+                files: vec![],
                 images: vec![],
                 steering: false,
             },
@@ -10850,6 +11194,7 @@ Then implement the fix.";
         let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
         session.entries.push(Entry::new(
             EntryKind::User {
+                files: vec![],
                 images: vec![],
                 steering: false,
             },
@@ -10979,6 +11324,7 @@ Then implement the fix.";
         for (kind, text) in [
             (
                 EntryKind::User {
+                    files: vec![],
                     images: vec![],
                     steering: false,
                 },
@@ -10991,6 +11337,7 @@ Then implement the fix.";
             ),
             (
                 EntryKind::User {
+                    files: vec![],
                     images: vec![],
                     steering: false,
                 },

@@ -344,6 +344,10 @@ fn extension(format: ImageFormat) -> &'static str {
 /// Only the provider boundary materializes media bytes, never SQLite or text budgeting.
 pub fn project(value: &mut Value, audio_supported: bool) -> Result<()> {
     match value {
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("pico_file") => {
+            let file: crate::file_tags::Attachment = serde_json::from_value(map["file"].clone())?;
+            *value = json!({"type":"input_text", "text":file.project()?});
+        }
         Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("pico_media") => {
             let media: Media = serde_json::from_value(map["media"].clone())?;
             *value = if let Some(prepared) = &media.prepared {

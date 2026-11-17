@@ -1,0 +1,45 @@
+sample=1 paths=10000 build_ms=3.701 bytes=351970
+sample=1 paths=10000 query=file0001234 median_ms=0.253 hits=1
+sample=1 paths=10000 query=d13/ median_ms=0.003 hits=24
+sample=1 paths=10000 query=1234 median_ms=0.250 hits=1
+sample=1 paths=10000 query=no-match median_ms=0.216 hits=0
+sample=1 paths=100000 build_ms=44.710 bytes=3519700
+sample=1 paths=100000 query=file0001234 median_ms=2.614 hits=1
+sample=1 paths=100000 query=d13/ median_ms=0.003 hits=24
+sample=1 paths=100000 query=1234 median_ms=2.487 hits=20
+sample=1 paths=100000 query=no-match median_ms=2.184 hits=0
+sample=1 paths=1000000 build_ms=564.010 bytes=35197063
+sample=1 paths=1000000 query=file0001234 median_ms=30.717 hits=1
+sample=1 paths=1000000 query=d13/ median_ms=0.003 hits=24
+sample=1 paths=1000000 query=1234 median_ms=1.806 hits=24
+sample=1 paths=1000000 query=no-match median_ms=26.987 hits=0
+sample=2 paths=10000 build_ms=3.457 bytes=351970
+sample=2 paths=10000 query=file0001234 median_ms=0.267 hits=1
+sample=2 paths=10000 query=d13/ median_ms=0.003 hits=24
+sample=2 paths=10000 query=1234 median_ms=0.248 hits=1
+sample=2 paths=10000 query=no-match median_ms=0.216 hits=0
+sample=2 paths=100000 build_ms=42.552 bytes=3519700
+sample=2 paths=100000 query=file0001234 median_ms=2.607 hits=1
+sample=2 paths=100000 query=d13/ median_ms=0.003 hits=24
+sample=2 paths=100000 query=1234 median_ms=2.474 hits=20
+sample=2 paths=100000 query=no-match median_ms=2.184 hits=0
+sample=2 paths=1000000 build_ms=554.744 bytes=35197063
+sample=2 paths=1000000 query=file0001234 median_ms=30.533 hits=1
+sample=2 paths=1000000 query=d13/ median_ms=0.003 hits=24
+sample=2 paths=1000000 query=1234 median_ms=1.801 hits=24
+sample=2 paths=1000000 query=no-match median_ms=26.882 hits=0
+sample=3 paths=10000 build_ms=3.552 bytes=351970
+sample=3 paths=10000 query=file0001234 median_ms=0.266 hits=1
+sample=3 paths=10000 query=d13/ median_ms=0.003 hits=24
+sample=3 paths=10000 query=1234 median_ms=0.243 hits=1
+sample=3 paths=10000 query=no-match median_ms=0.214 hits=0
+sample=3 paths=100000 build_ms=43.018 bytes=3519700
+sample=3 paths=100000 query=file0001234 median_ms=2.609 hits=1
+sample=3 paths=100000 query=d13/ median_ms=0.003 hits=24
+sample=3 paths=100000 query=1234 median_ms=2.480 hits=20
+sample=3 paths=100000 query=no-match median_ms=2.184 hits=0
+sample=3 paths=1000000 build_ms=556.457 bytes=35197063
+sample=3 paths=1000000 query=file0001234 median_ms=30.588 hits=1
+sample=3 paths=1000000 query=d13/ median_ms=0.003 hits=24
+sample=3 paths=1000000 query=1234 median_ms=1.809 hits=24
+sample=3 paths=1000000 query=no-match median_ms=26.767 hits=0

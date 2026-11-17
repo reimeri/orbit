@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         session.entries.push(Entry::new(
             if i % 3 == 0 {
                 EntryKind::User {
+                    files: vec![],
                     images: vec![],
                     steering: false,
                 }

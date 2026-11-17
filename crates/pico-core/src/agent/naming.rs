@@ -6,8 +6,9 @@ impl Harness {
     pub(super) fn name_session(
         self: &Arc<Self>,
         conversation: &Arc<Conversation>,
-        message: UserMessage,
+        mut message: UserMessage,
     ) {
+        message.files.clear();
         // Set before spawning so an idle session cannot be evicted underneath the result.
         conversation.naming.store(true, Ordering::Release);
         let harness = self.clone();

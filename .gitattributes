@@ -1,2 +1,4 @@
 # Unified patches contain significant blank context lines.
 patches/**/*.patch whitespace=-blank-at-eol
+# Preserve complete benchmark stdout, including Cargo's final blank line.
+docs/benchmarks/file-tags-2026-11-17/*.log whitespace=-blank-at-eof

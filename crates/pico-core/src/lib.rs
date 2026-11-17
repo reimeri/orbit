@@ -5,6 +5,8 @@ pub use tokio_util::sync::CancellationToken;
 pub mod agent;
 pub mod auth;
 pub mod code_mode;
+pub mod file_index;
+pub mod file_tags;
 pub mod history;
 pub mod image_tools;
 pub mod markdown_image;

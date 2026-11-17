@@ -546,3 +546,16 @@ questions and child work to finish. Completion age is saved with the other
 completion metadata by ordinary session saves; answer age is saved with its tool
 result and retained in memory for retry if storage fails. Settled rows continue
 to show time since settlement instead.
+
+## Workspace file tags
+
+The composer now completes `@` file tags through a core-owned asynchronous filename
+index. File contents are captured on send with workspace containment, durable
+replay data and lossless overflow preservation. See [file tags](file-tags.md) for
+syntax, cache/watch lifecycle, V1 differences, regression coverage and the opt-in
+large-project benchmarks. Index workers are separate from serialized UI storage
+jobs; keep discovery/search and file contents out of the UI thread.
+
+Test captures share one GPU engine; capture prepare/render/readback is serialized
+in `test_renderer.rs` because cloned iced MSAA pipelines share resizeable targets.
+CPU fixture work remains parallel, and pixel/validation assertions are unchanged.

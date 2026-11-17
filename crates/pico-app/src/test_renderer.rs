@@ -1,9 +1,12 @@
-//! One graphics device per test process; each fixture owns its renderer state.
+//! One graphics device per test process; each fixture owns its recorded renderer state.
+//! Engine clones still share MSAA targets, so capture preparation/render/readback is serialized.
 //! Automated checks select Lavapipe in scripts/test-renderer.sh, never in the app.
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use iced::advanced::graphics::{Antialiasing, Shell, color};
 use iced_wgpu::{Engine, wgpu};
+
+static CAPTURE: Mutex<()> = Mutex::new(());
 
 static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     pollster::block_on(async {
@@ -57,6 +60,10 @@ pub fn screenshot(
     scale: f32,
     background: iced::Color,
 ) -> Vec<u8> {
+    // iced_wgpu's cloned triangle pipelines share resizeable MSAA targets. The
+    // internal per-operation locks do not protect a whole prepare/render pair:
+    // another fixture can resize the target between them (or overwrite pixels).
+    let _capture = CAPTURE.lock().expect("render-test capture lock");
     iced::advanced::renderer::Headless::screenshot(renderer, size, scale, background)
 }
 

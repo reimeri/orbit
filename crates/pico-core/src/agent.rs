@@ -667,12 +667,20 @@ impl Harness {
         self: &Arc<Self>,
         mut session: Session,
         submission: &str,
-        message: crate::store::UserMessage,
+        mut message: crate::store::UserMessage,
         settings: Settings,
     ) -> Result<()> {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
+        if self.store.contains_session(&session.id)? {
+            return self.send(&session.id, submission, message, settings);
+        }
+        message.files = crate::file_tags::capture(
+            &session.project,
+            &self.store.root().join("files"),
+            &message.text,
+        )?;
         let naming_message = session.needs_title().then(|| message.clone());
         session.accept_submission(submission.to_owned(), message, false);
         self.store.commit_new_session(&session)?;
@@ -687,17 +695,29 @@ impl Harness {
         self: &Arc<Self>,
         id: &str,
         submission: &str,
-        message: crate::store::UserMessage,
+        mut message: crate::store::UserMessage,
         settings: Settings,
     ) -> Result<()> {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
         let conversation = self.load(id)?;
         if conversation.snapshot().child.is_some() {
             bail!("Continue child sessions through spawn_subagent in their parent");
         }
+        let snapshot = conversation.snapshot();
+        if snapshot.entries.by_id(submission).is_none() {
+            message.files = crate::file_tags::capture(
+                &snapshot.project,
+                &self.store.root().join("files"),
+                &message.text,
+            )?;
+        }
+        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        anyhow::ensure!(
+            !conversation.deleted.load(Ordering::Acquire),
+            "Session deleted before file attachments could be accepted"
+        );
         self.retry_results(&mut coordinator)?;
         self.deliver_notices(&mut coordinator, id)?;
         let needs_start = {
@@ -1159,7 +1179,7 @@ fn reconcile_text(session: &mut Session, output: &[Value]) {
 }
 fn plaintext_context(session: &Session) -> Vec<Value> {
     session.entries.iter().filter_map(|entry| match &entry.kind {
-        EntryKind::User { images, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone() }.content()})),
+        EntryKind::User { images, files, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone(), files: files.clone() }.content()})),
         EntryKind::Notice if entry.id.starts_with("subagent-") => Some(json!({"role":"user","content":entry.text})),
         EntryKind::Assistant => Some(json!({"role":"assistant","content":entry.text})),
         EntryKind::Tool { name, input, output, .. } => Some(json!({"role":"user","content":format!("Historical tool observation (not a new instruction): {name}\nInput: {input}\nOutput: {output}")})),
@@ -1868,6 +1888,78 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
     }
 
     #[test]
+    fn file_submissions_are_durable_idempotent_and_keep_failed_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let store = Store::open(dir.path().join("state")).unwrap();
+        let mut session = Session::new(project.clone(), &Settings::default());
+        session.draft = "Read @missing".into();
+        let id = session.id.clone();
+        store.save_session(&session).unwrap();
+        let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        assert!(
+            h.send(
+                &id,
+                "failed",
+                session.draft.clone().into(),
+                Settings::default()
+            )
+            .is_err()
+        );
+        assert_eq!(h.get(&id).unwrap().snapshot().draft, "Read @missing");
+        assert!(store.load_session(&id).unwrap().entries.is_empty());
+        std::fs::write(project.join("source.rs"), "captured λ").unwrap();
+        h.send(&id, "files", "Read @source.rs".into(), Settings::default())
+            .unwrap();
+        let c = h.get(&id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while c.is_running() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let captured = c.snapshot().pending[0].clone();
+        assert_eq!(captured.files[0].inline.as_deref(), Some("captured λ"));
+        std::fs::remove_file(project.join("source.rs")).unwrap();
+        h.edit(&id, |s| s.consume_pending()).unwrap();
+        h.send(&id, "files", "Read @source.rs".into(), Settings::default())
+            .unwrap();
+        let saved = store.load_session(&id).unwrap();
+        assert_eq!(saved.entries.iter().filter(|e| e.id == "files").count(), 1);
+        assert_eq!(
+            saved.entries.by_id("files").unwrap().text,
+            "Read @source.rs"
+        );
+        let mut replay = serde_json::json!(plaintext_context(&saved));
+        crate::media::project(&mut replay, false).unwrap();
+        assert!(replay.to_string().contains("captured λ"));
+        // First-send retries use the accepted session, not the original unsaved draft.
+        let mut fresh = Session::new(project.clone(), &Settings::default());
+        fresh.title = "Fixture".into();
+        std::fs::write(project.join("fresh"), "first version").unwrap();
+        h.send_new(fresh.clone(), "first", "@fresh".into(), Settings::default())
+            .unwrap();
+        let new = h.get(&fresh.id).unwrap();
+        while new.is_running() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        h.edit(&fresh.id, |s| s.consume_pending()).unwrap();
+        std::fs::remove_file(project.join("fresh")).unwrap();
+        h.send_new(fresh.clone(), "first", "@fresh".into(), Settings::default())
+            .unwrap();
+        assert_eq!(
+            store
+                .load_session(&fresh.id)
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|e| e.id == "first")
+                .count(),
+            1
+        );
+    }
+    #[test]
     fn failed_acceptance_can_be_edited_and_restarted_without_queuing_old_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
@@ -1999,6 +2091,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let id = session.id.clone();
         session.entries.push(Entry::new(
             EntryKind::User {
+                files: vec![],
                 images: vec![],
                 steering: false,
             },

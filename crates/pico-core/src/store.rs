@@ -158,13 +158,15 @@ pub struct Catalog {
 pub struct UserMessage {
     pub text: String,
     pub images: Vec<crate::media::Media>,
+    #[serde(default)]
+    pub files: Vec<crate::file_tags::Attachment>,
 }
 impl UserMessage {
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.images.is_empty()
     }
     pub fn content(&self) -> Value {
-        if self.images.is_empty() {
+        if self.images.is_empty() && self.files.is_empty() {
             return serde_json::json!(self.text);
         }
         let mut parts = Vec::new();
@@ -189,6 +191,16 @@ impl UserMessage {
                 media: media.clone(),
             });
         }
+        let mut parts: Vec<_> = parts
+            .into_iter()
+            .map(|part| serde_json::to_value(part).expect("content part"))
+            .collect();
+        for file in &self.files {
+            if file.image.is_some() {
+                parts.push(serde_json::json!({"type":"input_text", "text":format!("Attached workspace image {} ({} bytes)", file.name, file.bytes)}));
+            }
+            parts.push(file.content());
+        }
         serde_json::json!(parts)
     }
 }
@@ -197,6 +209,7 @@ impl From<String> for UserMessage {
         Self {
             text,
             images: vec![],
+            files: vec![],
         }
     }
 }
@@ -216,6 +229,8 @@ pub struct NewSessionDraft {
 pub enum EntryKind {
     User {
         images: Vec<crate::media::Media>,
+        #[serde(default)]
+        files: Vec<crate::file_tags::Attachment>,
         /// Submitted during an active turn and not yet consumed at a model boundary.
         #[serde(default)]
         steering: bool,
@@ -414,6 +429,7 @@ impl Session {
             id: submission,
             kind: EntryKind::User {
                 images: message.images.clone(),
+                files: message.files.clone(),
                 steering,
             },
             text: message.text.clone(),
@@ -560,6 +576,13 @@ impl Store {
             match parsed {Ok(summary)=>summaries.push(summary),Err(error)=>warnings.push(format!("Could not load session {id}: {error:#}. Database row preserved; restore it from a backup or repair it before retrying."))}
         }
         Ok((catalog, summaries, warnings))
+    }
+    pub(crate) fn contains_session(&self, id: &str) -> Result<bool> {
+        Ok(self.db.lock().expect("database lock").query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+            [id],
+            |row| row.get(0),
+        )?)
     }
     pub fn load_session(&self, id: &str) -> Result<Session> {
         let db = self.db.lock().expect("database lock");
@@ -776,6 +799,7 @@ mod tests {
             .image(png.get_ref())
             .unwrap();
         let message = UserMessage {
+            files: vec![],
             text: String::new(),
             images: vec![image.clone()],
         };
@@ -788,6 +812,7 @@ mod tests {
         session.accept_submission(
             "steering".into(),
             UserMessage {
+                files: vec![],
                 text: "Compare this image".into(),
                 images: vec![image.clone()],
             },
@@ -802,7 +827,7 @@ mod tests {
         let mut saved = store.load_session(&id).unwrap();
         assert_eq!(saved.pending[0], message);
         assert!(
-            matches!(&saved.entries[0].kind, EntryKind::User { images, steering: false } if images == &vec![image.clone()])
+            matches!(&saved.entries[0].kind, EntryKind::User { images, steering: false , ..} if images == &vec![image.clone()])
         );
         assert!(matches!(
             saved.entries[1].kind,

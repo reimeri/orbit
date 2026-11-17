@@ -24,6 +24,10 @@ tokio-util = "0.7"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+ignore = "0.4"
+notify = "8"
+rustix = { version = "1", features = ["fs", "process"] }
+memchr = "2"
 
 [dev-dependencies]
 tempfile = "3"

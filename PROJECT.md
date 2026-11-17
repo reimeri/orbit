@@ -99,6 +99,9 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
   - Browser tools
   - Use skill
 - UI
+  - [x] Workspace file tags — see [contract, V1 differences and benchmarks](docs/file-tags.md)
+    - Async cached filename completion, ignore-aware discovery and live refresh
+    - Workspace-contained send-time snapshots, durable replay and lossless overflow
   - [x] Native desktop notifications for main-agent questions, completion and terminal errors — see [behavior and verification](docs/notifications.md)
   - Integrated browser
   - Integrated diff viewer

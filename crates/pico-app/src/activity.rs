@@ -506,6 +506,7 @@ mod tests {
             entry(
                 "user",
                 EntryKind::User {
+                    files: vec![],
                     images: vec![],
                     steering: false,
                 },
