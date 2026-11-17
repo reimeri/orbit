@@ -916,8 +916,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
         let mut catalog = Catalog::default();
-        // The catalog supplies capabilities; this test protects validation and refresh,
-        // not today's model names, count, or default reasoning effort.
         for (index, model) in MODELS.iter().enumerate() {
             let preferences = catalog.settings.models.get_mut(model.id).unwrap();
             preferences.effort = model.efforts.last().unwrap().to_string();
@@ -943,21 +941,32 @@ mod tests {
             catalog.settings.models.get_mut(model.id).unwrap().effort =
                 expected[model.id].effort.clone();
         }
-        catalog.settings.models.remove(DEFAULT_MODEL);
-        expected.insert(DEFAULT_MODEL.into(), ModelDefaults::default());
-        catalog.settings.model = "retired-fixture-model".into();
-        catalog.settings.models.insert(
-            "retired-fixture-model".into(),
-            ModelDefaults {
-                effort: "low".into(),
-                fast: true,
-            },
-        );
+        // Reproduce the November 2026 refresh: both older families are retired,
+        // while Luna's customized preferences must survive.
+        for (retired, replacement) in [
+            ("gpt-6-astra", "gpt-6.2-astra"),
+            ("gpt-6.1-sol", "gpt-6.2-sol"),
+        ] {
+            catalog.settings.models.remove(replacement);
+            expected.insert(replacement.into(), ModelDefaults::default());
+            catalog.settings.models.insert(
+                retired.into(),
+                ModelDefaults {
+                    effort: "max".into(),
+                    fast: true,
+                },
+            );
+        }
+        catalog.settings.model = "gpt-6.1-sol".into();
+        catalog.settings.context_limit = 128_000;
+        catalog.settings.images.model = "gpt-image-2.5-sunburst".into();
         // Simulate settings saved by a previous catalog; normal writes reject retired IDs.
         store.write("settings.json", &catalog).unwrap();
         let (loaded, _, _) = store.load().unwrap();
         assert_eq!(loaded.settings.model, DEFAULT_MODEL);
         assert_eq!(loaded.settings.models, expected);
+        assert_eq!(loaded.settings.context_limit, 128_000);
+        assert_eq!(loaded.settings.images.model, "gpt-image-2.5-sunburst");
         loaded.settings.validate().unwrap();
     }
 

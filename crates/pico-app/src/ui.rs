@@ -6778,6 +6778,26 @@ mod tests {
         dispatch(&mut app, Message::ImageModel("discard-me".into())).await;
         dispatch(&mut app, Message::CancelSettings).await;
         assert_eq!(app.settings.images.model, "custom-image-model");
+        // Reset is explicit and staged; it never changes backend or quality.
+        dispatch(&mut app, Message::ToggleSettings).await;
+        dispatch(&mut app, Message::ResetImageModel).await;
+        assert_eq!(
+            app.settings.images.model,
+            pico_core::image_tools::DEFAULT_API_MODEL
+        );
+        let saved = app.harness.as_ref().unwrap().store.load().unwrap().0;
+        assert_eq!(saved.settings.images.model, "custom-image-model");
+        dispatch(&mut app, Message::ApplySettings).await;
+        let saved = app.harness.as_ref().unwrap().store.load().unwrap().0;
+        assert_eq!(
+            saved.settings.images.model,
+            pico_core::image_tools::DEFAULT_API_MODEL
+        );
+        assert_eq!(
+            saved.settings.images.backend,
+            pico_core::image_tools::Backend::Api
+        );
+        assert_eq!(saved.settings.images.quality, "high");
         dispatch(&mut app, Message::ApiKey("private-test-key".into())).await;
         dispatch(&mut app, Message::SaveApiKey).await;
         assert!(app.api_key_configured);
@@ -7763,7 +7783,7 @@ mod tests {
             footer_key(keyboard::key::Named::Escape),
         ] {
             let mut app = app();
-            let model = "gpt-6-astra";
+            let model = "gpt-6.2-astra";
             // Exercise both the original default and a subsequently saved value.
             for saved_fast in [false, true] {
                 dispatch(&mut app, Message::ToggleSettings).await;
@@ -7866,15 +7886,15 @@ mod tests {
         dispatch(&mut app, Message::ModelFast("gpt-6-luna".into(), false)).await;
         dispatch(
             &mut app,
-            Message::ModelEffort("gpt-6-astra".into(), "max".into()),
+            Message::ModelEffort("gpt-6.2-astra".into(), "max".into()),
         )
         .await;
-        dispatch(&mut app, Message::ModelFast("gpt-6-astra".into(), true)).await;
-        dispatch(&mut app, Message::Model("gpt-6-astra".into())).await;
+        dispatch(&mut app, Message::ModelFast("gpt-6.2-astra".into(), true)).await;
+        dispatch(&mut app, Message::Model("gpt-6.2-astra".into())).await;
         dispatch(&mut app, Message::ApplySettings).await;
         let (catalog, _, _) = h.store.load().unwrap();
-        assert_eq!(catalog.settings.model, "gpt-6-astra");
-        assert!(catalog.settings.models["gpt-6-astra"].fast);
+        assert_eq!(catalog.settings.model, "gpt-6.2-astra");
+        assert!(catalog.settings.models["gpt-6.2-astra"].fast);
         dispatch(&mut app, Message::Create(PathBuf::from("/models"))).await;
         assert_eq!(app.current().unwrap().effort, "max");
         assert!(app.current().unwrap().fast);
@@ -7891,7 +7911,7 @@ mod tests {
         assert_eq!(app.current().unwrap().effort, "medium");
         // The persisted session uses a retired model and must recover without losing history.
         let mut session = Session::new(PathBuf::from("/models"), &catalog.settings);
-        session.model = "retired-sol".into();
+        session.model = "gpt-6.1-sol".into();
         session.effort = "low".into();
         session.fast = false;
         session.entries.push(Entry::new(
@@ -7907,12 +7927,12 @@ mod tests {
         h.store.save_session(&session).unwrap();
         dispatch(&mut app, Message::Select(id.clone())).await;
         let saved = h.store.load_session(&id).unwrap();
-        assert_eq!(saved.model, "gpt-6-astra");
+        assert_eq!(saved.model, "gpt-6.2-astra");
         assert_eq!(saved.effort, "max");
         assert!(saved.fast);
         assert_eq!(saved.entries[0].text, "Keep this transcript");
         assert_eq!(app.editor.text(), "Keep this draft");
-        assert!(app.notice.as_ref().unwrap().0.contains("retired-sol"));
+        assert!(app.notice.as_ref().unwrap().0.contains("gpt-6.1-sol"));
         dispatch(&mut app, Message::SessionEffort("high".into())).await;
         dispatch(&mut app, Message::SessionFast(false)).await;
         assert!(!h.store.load_session(&id).unwrap().fast);
@@ -8413,7 +8433,7 @@ mod tests {
         let message = "Investigate λ
 Then implement the fix.";
         type_message(&mut app, message).await;
-        dispatch(&mut app, Message::SessionModel("gpt-6-astra".into())).await;
+        dispatch(&mut app, Message::SessionModel("gpt-6.2-astra".into())).await;
         dispatch(&mut app, Message::SessionEffort("high".into())).await;
         dispatch(&mut app, Message::Create(PathBuf::from("/project-two"))).await;
         assert_eq!(app.editor.text(), message);
@@ -8694,7 +8714,7 @@ Then implement the fix.";
         );
         let original = app.current().unwrap().clone();
         type_message(&mut app, "Forbidden direct child edit").await;
-        dispatch(&mut app, Message::SessionModel("gpt-6-astra".into())).await;
+        dispatch(&mut app, Message::SessionModel("gpt-6.2-astra".into())).await;
         dispatch(&mut app, Message::Send).await;
         assert!(app.editor.text().is_empty());
         assert_eq!(app.current().unwrap().model, original.model);
@@ -9878,9 +9898,10 @@ Then implement the fix.";
             );
             let mut menu_bounds = UiBounds::default();
             ui.operate(&renderer, &mut menu_bounds);
-            let option = menu_bounds.label("GPT-6-Luna");
+            let luna = model("gpt-6-luna").unwrap();
+            let option = menu_bounds.label(luna.name);
             assert!(
-                option.width >= text_width("GPT-6-Luna", FOOTER_MENU_TEXT_SIZE),
+                option.width >= text_width(luna.name, FOOTER_MENU_TEXT_SIZE),
                 "popup options must stay readable even with a narrow chat"
             );
             let reasoning = menu_bounds.label("Reasoning");
@@ -9975,7 +9996,8 @@ Then implement the fix.";
             (&session.model, &session.effort, session.fast),
             (&before.0, &before.1, before.2)
         );
-        for label in ["GPT-6-Luna", "None", "High", "Fast", "Standard"] {
+        let luna = model("gpt-6-luna").unwrap();
+        for label in [luna.name, "None", "High", "Fast", "Standard"] {
             let messages = {
                 let mut renderer = header_renderer();
                 let mut ui = iced_runtime::UserInterface::build(
@@ -9992,7 +10014,7 @@ Then implement the fix.";
             dispatch(&mut app, messages.into_iter().next().unwrap()).await;
             let session = app.current().unwrap();
             match label {
-                "GPT-6-Luna" => assert_eq!(session.model, "gpt-6-luna"),
+                name if name == luna.name => assert_eq!(session.model, luna.id),
                 "None" => assert_eq!(session.effort, "none"),
                 "High" => assert_eq!(session.effort, "high"),
                 "Fast" => assert!(session.fast),
@@ -10165,13 +10187,13 @@ Then implement the fix.";
         app.catalog
             .settings
             .models
-            .get_mut("gpt-6-astra")
+            .get_mut("gpt-6.2-astra")
             .unwrap()
             .effort = "max".into();
         app.catalog
             .settings
             .models
-            .get_mut("gpt-6-astra")
+            .get_mut("gpt-6.2-astra")
             .unwrap()
             .fast = true;
         stored_session(&mut app, PathBuf::from("/footer-persist")).await;
@@ -10184,7 +10206,7 @@ Then implement the fix.";
                 .contains(&"none".into())
         );
         dispatch(&mut app, Message::SessionEffort("max".into())).await;
-        dispatch(&mut app, Message::SessionModel("gpt-6-astra".into())).await;
+        dispatch(&mut app, Message::SessionModel("gpt-6.2-astra".into())).await;
         assert_eq!(app.current().unwrap().effort, "max");
         assert!(app.current().unwrap().fast);
         assert!(
@@ -10203,11 +10225,11 @@ Then implement the fix.";
             .store
             .load_session(app.selected.as_ref().unwrap())
             .unwrap();
-        assert_eq!(saved.model, "gpt-6-astra");
+        assert_eq!(saved.model, "gpt-6.2-astra");
         assert_eq!(saved.effort, "low");
         assert!(!saved.fast);
-        assert_eq!(app.catalog.settings.models["gpt-6-astra"].effort, "max");
-        assert!(app.catalog.settings.models["gpt-6-astra"].fast);
+        assert_eq!(app.catalog.settings.models["gpt-6.2-astra"].effort, "max");
+        assert!(app.catalog.settings.models["gpt-6.2-astra"].fast);
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ Use a disposable project for initial testing. Selecting a project sets the comma
 working directory; it does not restrict filesystem or network access.
 
 Settings has **Account**, **General**, and **Models** tabs. The fixed catalog is
-`gpt-6-astra`, `gpt-6.1-sol` (the default), and `gpt-6-luna`. Choose the app default
+`gpt-6.2-astra`, `gpt-6.2-sol` (the default), and `gpt-6-luna`. Choose the app default
 from the dropdown in General. Models has per-model effort and Fast defaults;
 initially all use Medium with Fast off. Use **Save** to save these
 changes and close Settings. Appearance controls apply immediately.

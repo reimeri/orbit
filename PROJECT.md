@@ -73,7 +73,7 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - Six running children per parent; no nested delegation
     - Final-only repeatable results, durable completion notices and idle-parent wake-up
     - Agents panel, live child transcript inspection, scoped Stop and family deletion
-    - Review (`gpt-6.1-sol`, medium) and Explore (`gpt-6-luna`, high)
+    - Review (`gpt-6.2-sol`, medium) and Explore (`gpt-6-luna`, high)
     - Both profiles are read-only by instruction, not filesystem sandboxing
   - [x] Questionnaires — see [tool contract and acceptance checks](docs/questionnaires.md)
     - Built-in `tools.ask_user` for main conversations, with model continuation paused until answered

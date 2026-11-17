@@ -25,7 +25,7 @@ impl Profile {
     }
     pub fn model(self) -> &'static str {
         match self {
-            Self::Review => "gpt-6.1-sol",
+            Self::Review => "gpt-6.2-sol",
             Self::Explore => "gpt-6-luna",
         }
     }

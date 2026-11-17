@@ -8,23 +8,23 @@ pub struct Model {
     pub audio_input: bool,
 }
 
-pub const DEFAULT_MODEL: &str = "gpt-6.1-sol";
+pub const DEFAULT_MODEL: &str = "gpt-6.2-sol";
 pub const MODELS: &[Model] = &[
     Model {
-        id: "gpt-6-astra",
-        name: "GPT-6-Astra",
+        id: "gpt-6.2-astra",
+        name: "GPT-6.2 Astra",
         audio_input: false,
         efforts: &["low", "medium", "high", "xhigh", "max"],
     },
     Model {
-        id: "gpt-6.1-sol",
-        name: "GPT-6.1-Sol",
+        id: "gpt-6.2-sol",
+        name: "GPT-6.2 Sol",
         audio_input: false,
         efforts: &["low", "medium", "high", "xhigh", "max"],
     },
     Model {
         id: "gpt-6-luna",
-        name: "GPT-6-Luna",
+        name: "GPT-6 Luna",
         audio_input: false,
         efforts: &["none", "low", "medium", "high", "xhigh", "max"],
     },

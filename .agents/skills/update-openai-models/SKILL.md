@@ -27,9 +27,10 @@ runtime model-discovery feature. Read `PROJECT.md` and `docs/development.md` fir
    information is unavailable or conflicting, ask the user rather than guessing
    or changing a known-working catalog. No live API calls without authorization.
 
-Current capability reference links (catalog introduced 2026-11-14):
-- https://developers.openai.com/api/docs/models/gpt-6-astra
-- https://developers.openai.com/api/docs/models/gpt-6.1-sol
+Current capability reference links (refreshed 2026-11-17):
+
+- https://developers.openai.com/api/docs/models/gpt-6.2-astra
+- https://developers.openai.com/api/docs/models/gpt-6.2-sol
 - https://developers.openai.com/api/docs/models/gpt-6-luna
 
 ## Update the app
