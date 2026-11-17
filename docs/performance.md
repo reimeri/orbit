@@ -57,6 +57,11 @@ limits. Execution limits remain per conversation; no global admission cap was ad
 
 ### Durability and recovery
 
+On the first load after a restart, interrupted commands, abandoned tools, and an
+unfinished response are repaired in one transaction before the conversation is
+made available. If the write fails, reopening retries from the on-disk checkpoint;
+it does not replay commands or duplicate recovery notices.
+
 New-session drafts occupy a singleton SQLite row, not a session row. Their message
 is shared across project choices and loaded on restart. The first send commits the
 session and its user message while deleting the shared draft in the same transaction.

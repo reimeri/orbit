@@ -133,6 +133,8 @@ pub struct Harness {
     catalog_revision: AtomicU64,
     loading: Mutex<()>,
     subagents: Mutex<subagents::Coordinator>,
+    /// Recoverable problems opening individual records, for the startup UI.
+    pub startup_warnings: Vec<String>,
     weak: std::sync::Weak<Self>,
 }
 impl Harness {
@@ -147,7 +149,7 @@ impl Harness {
         provider: Provider,
     ) -> Result<Arc<Self>> {
         let auth = provider.auth.clone();
-        let subagents = subagents::Coordinator::load(&store)?;
+        let (subagents, startup_warnings) = subagents::Coordinator::load(&store)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -160,6 +162,7 @@ impl Harness {
             weak: weak.clone(),
             loading: Mutex::new(()),
             subagents: Mutex::new(subagents),
+            startup_warnings,
             changes: tokio::sync::watch::channel(()).0,
             store,
             auth,
@@ -410,76 +413,16 @@ impl Harness {
             return Ok(c);
         }
         let session = self.store.load_session(id)?;
-        let interrupted = session.interrupted;
-        let conversation = self.make_conversation(session, true);
-        let running_commands: Vec<_> = conversation
-            .snapshot()
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| {
-                matches!(
-                    &entry.kind,
-                    EntryKind::Tool {
-                        command_status: Some(crate::shell::CommandStatus::Running),
-                        ..
-                    }
-                )
-                .then_some(i)
-            })
-            .collect();
-        if !running_commands.is_empty() {
-            {
-                let mut state = conversation.state.lock().expect("session lock");
-                for i in running_commands {
-                    if let EntryKind::Tool { command_status, .. } = &mut state.entries[i].kind {
-                        *command_status = Some(crate::shell::CommandStatus::Interrupted);
-                    }
-                }
-                state.entries.push(Entry::new(EntryKind::Notice,
-                    "Command tracking was interrupted by the restart. Inspect the workspace before retrying; commands may have performed side effects."));
-            }
-            conversation.save()?;
-        }
-        // Runtime cells, remote web requests and questionnaire drafts do not survive restart.
-        // This also covers a model turn that finished while its ask cell was pending.
-        let abandoned: Vec<_> = conversation.snapshot().entries.iter().enumerate().filter_map(|(i, entry)| matches!(&entry.kind, EntryKind::Tool { name, complete: false, .. } if matches!(name.as_str(), "ask_user" | "web__run")).then_some(i)).collect();
-        if !abandoned.is_empty() {
-            {
-                let mut state = conversation.state.lock().expect("session lock");
-                for i in abandoned {
-                    if let EntryKind::Tool {
-                        name,
-                        complete,
-                        failed,
-                        output,
-                        ..
-                    } = &mut state.entries[i].kind
-                    {
-                        *complete = true;
-                        *failed = true;
-                        *output = if name == "web__run" {
-                            "Web request interrupted by application restart. Remote work may have completed and consumed usage. It was not automatically replayed."
-                        } else {
-                            "Questionnaire cancelled by application restart. Unsubmitted answers were not saved; ask again if still needed."
-                        }.into();
-                    }
-                }
-                state.needs_attention = true;
-                state.entries.push(Entry::new(EntryKind::Notice, "Unfinished tools were interrupted by the restart. See tool details; no requests were automatically replayed."));
-            }
-            conversation.save()?;
-        }
-        if interrupted || conversation.snapshot().in_progress_response.is_some() {
-            {
-                let mut state = conversation.state.lock().expect("session lock");
-                repair_calls(&mut state);
-                state.needs_attention = true;
-                state.entries.push(Entry::new(EntryKind::Notice,"Previous turn was interrupted. Send a new message to continue; commands already executed are not undone."));
-            }
-            conversation.save()?;
-        }
-        Ok(conversation)
+        let session = if let Some(repaired) = recover_after_restart(&session) {
+            // Publish only after every repair is durable. On failure the next load
+            // starts from the unchanged on-disk checkpoint, not a cached half-repair.
+            self.store.save_changes(Some(&session), &repaired)
+                .context("Could not save session recovery. Check disk space and permissions, then reopen the session to retry")?;
+            repaired
+        } else {
+            session
+        };
+        Ok(self.make_conversation(session, true))
     }
     pub fn catalog_revision(&self) -> u64 {
         self.catalog_revision.load(Ordering::Acquire)
@@ -1078,6 +1021,70 @@ impl Harness {
         }
     }
 }
+/// Only cold loads need restart recovery. An evicted runtime stub is still live.
+fn recover_after_restart(before: &Session) -> Option<Session> {
+    use crate::shell::CommandStatus;
+    let mut repaired = before.clone();
+    let mut commands = false;
+    let mut abandoned = false;
+    for (index, entry) in before.entries.iter().enumerate() {
+        let EntryKind::Tool {
+            name,
+            complete,
+            command_status,
+            ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        let running = *command_status == Some(CommandStatus::Running);
+        let unfinished = !complete && matches!(name.as_str(), "ask_user" | "web__run");
+        if !running && !unfinished {
+            continue;
+        }
+        let EntryKind::Tool {
+            command_status,
+            complete,
+            failed,
+            output,
+            ..
+        } = &mut repaired.entries[index].kind
+        else {
+            unreachable!("same entry as the restart checkpoint")
+        };
+        if running {
+            *command_status = Some(CommandStatus::Interrupted);
+            commands = true;
+        }
+        if unfinished {
+            *complete = true;
+            *failed = true;
+            *output = if name == "web__run" {
+                "Web request interrupted by application restart. Remote work may have completed and consumed usage. It was not automatically replayed."
+            } else {
+                "Questionnaire cancelled by application restart. Unsubmitted answers were not saved; ask again if still needed."
+            }.into();
+            abandoned = true;
+        }
+    }
+    if commands {
+        repaired.entries.push(Entry::new(EntryKind::Notice,
+            "Command tracking was interrupted by the restart. Inspect the workspace before retrying; commands may have performed side effects."));
+    }
+    if abandoned {
+        repaired.needs_attention = true;
+        repaired.entries.push(Entry::new(EntryKind::Notice, "Unfinished tools were interrupted by the restart. See tool details; no requests were automatically replayed."));
+    }
+    let turn = before.interrupted || before.in_progress_response.is_some();
+    if turn {
+        repair_calls(&mut repaired);
+        repaired.interrupted = false;
+        repaired.needs_attention = true;
+        repaired.entries.push(Entry::new(EntryKind::Notice,"Previous turn was interrupted. Send a new message to continue; commands already executed are not undone."));
+    }
+    (commands || abandoned || turn).then_some(repaired)
+}
+
 fn repair_calls(session: &mut Session) {
     // Completed response items survive stream failure/restart even if response.completed
     // never arrived. Preserve successful results before repairing uncertain executions.
@@ -1506,6 +1513,84 @@ mod tests {
             assert!(matches!(&saved.entries.by_id(id).unwrap().kind,
                 EntryKind::Tool { command_status: Some(status), output, .. } if *status == expected && output == "original result"));
         }
+    }
+
+    #[test]
+    fn failed_restart_repair_retries_all_changes_before_publishing() {
+        use crate::{shell::CommandStatus, store::InProgressResponse, test_support::sqlite};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut checkpoint = Session::new(dir.path().into(), &Settings::default());
+        checkpoint.interrupted = true;
+        checkpoint.in_progress_response = Some(InProgressResponse {
+            items: [(
+                0usize,
+                json!({"type":"custom_tool_call","call_id":"outer","name":"exec","input":"work"}),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        });
+        for (name, status) in [
+            ("exec_command", Some(CommandStatus::Running)),
+            ("web__run", None),
+        ] {
+            checkpoint.entries.push(Entry {
+                id: name.into(),
+                text: String::new(),
+                kind: EntryKind::Tool {
+                    name: name.into(),
+                    input: "{}".into(),
+                    output: String::new(),
+                    complete: status.is_some(),
+                    command_status: status,
+                    failed: false,
+                    cell_id: None,
+                    parent: Some("outer".into()),
+                    media: vec![],
+                    web: None,
+                },
+            });
+        }
+        store.save_session(&checkpoint).unwrap();
+        let id = &checkpoint.id;
+        let harness = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+        // Fail first at the original early write, then at the context write
+        // after the entry and metadata changes. Neither may publish partial state.
+        for table in ["sessions", "context"] {
+            sqlite::fail_writes(&db, table, "fixture recovery failure");
+            assert!(harness.load(id).is_err());
+            assert!(harness.get(id).is_none());
+            let unchanged = store.load_session(id).unwrap();
+            assert!(unchanged.interrupted && unchanged.in_progress_response.is_some());
+            assert!(unchanged.entries.iter().eq(checkpoint.entries.iter()));
+            sqlite::allow_writes(&db, table);
+        }
+        let recovered = harness.load(id).unwrap().snapshot();
+        assert!(recovered.needs_attention && !recovered.interrupted);
+        assert!(recovered.in_progress_response.is_none());
+        assert!(matches!(
+            recovered.entries[0].kind,
+            EntryKind::Tool {
+                command_status: Some(CommandStatus::Interrupted),
+                ..
+            }
+        ));
+        assert!(
+            matches!(&recovered.entries[1].kind, EntryKind::Tool { complete: true, failed: true, output, .. } if output.contains("not automatically replayed"))
+        );
+        assert_eq!(recovered.input.len(), 2);
+        assert_eq!(recovered.input[1]["type"], "custom_tool_call_output");
+        assert_eq!(recovered.input[1]["call_id"], "outer");
+        drop(harness);
+        let restarted = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        let reopened = restarted.load(id).unwrap().snapshot();
+        assert!(
+            reopened.entries.iter().eq(recovered.entries.iter()),
+            "no duplicate recovery notices"
+        );
+        assert!(reopened.input.iter().eq(recovered.input.iter()));
     }
 
     #[test]

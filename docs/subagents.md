@@ -127,7 +127,9 @@ completion does not cancel children.
 - **Quit:** cancel all work and save it. Already executed commands are not undone.
 - **Restart:** convert unfinished assignments to interrupted. Do not replay
   commands, resume assignments, or start parents for old notices. Retained
-  notices are delivered on the parent's next user-initiated turn.
+  notices are delivered on the parent's next user-initiated turn. If an individual
+  assignment record is malformed, startup identifies it in a warning and skips
+  it without changing the row. Other assignments and conversations still open.
 
 Session acceptance and assignment insertion share one SQLite transaction.
 Terminal results are stored separately from transcripts. Notification IDs make

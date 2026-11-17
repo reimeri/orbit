@@ -90,6 +90,23 @@ pub struct RunInfo {
     #[serde(default)]
     pub attention_acknowledged: bool,
 }
+impl RunInfo {
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self> {
+        let run: Self = serde_json::from_str(row.get_ref("metadata")?.as_str()?)?;
+        anyhow::ensure!(
+            run.run_id == row.get_ref("id")?.as_str()?
+                && run.parent_id == row.get_ref("parent")?.as_str()?
+                && run.session_id == row.get_ref("session")?.as_str()?
+                && run.request_id == row.get_ref("request")?.as_str()?,
+            "assignment identity mismatch"
+        );
+        anyhow::ensure!(
+            run.status != RunStatus::Completed || row.get("has_result")?,
+            "completed assignment has no stored result"
+        );
+        Ok(run)
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Spawn {
@@ -134,35 +151,26 @@ impl Coordinator {
         });
         runs
     }
-    pub fn load(store: &Store) -> Result<Self> {
+    pub fn load(store: &Store) -> Result<(Self, Vec<String>)> {
         let mut coordinator = Self::default();
+        let mut warnings = Vec::new();
         let db = store.db.lock().expect("database lock");
         let mut query = db.prepare(
-            "SELECT id,parent,session,request,metadata,result IS NOT NULL FROM subagent_runs",
+            "SELECT rowid,id,parent,session,request,metadata,result IS NOT NULL AS has_result FROM subagent_runs",
         )?;
-        let rows = query.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, bool>(5)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, parent, session, request, metadata, has_result) = row?;
-            let mut run: RunInfo = serde_json::from_str(&metadata)?;
-            if run.run_id != id
-                || run.parent_id != parent
-                || run.session_id != session
-                || run.request_id != request
-                || (run.status == RunStatus::Completed && !has_result)
-            {
-                bail!(
-                    "Invalid subagent assignment {id}; database preserved. Restore it from a backup or repair it before retrying."
-                );
-            }
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            let mut run = match RunInfo::from_row(row) {
+                Ok(run) => run,
+                Err(error) => {
+                    let id = match row.get::<_, String>("id") {
+                        Ok(id) => id,
+                        Err(_) => format!("at row {}", row.get::<_, i64>("rowid")?),
+                    };
+                    warnings.push(format!("Skipped subagent assignment {id}: {error}. Other assignments and conversations remain available. The database row was preserved; repair it or restore a backup and restart to recover this assignment."));
+                    continue;
+                }
+            };
             if run.status == RunStatus::Running {
                 run.status = RunStatus::Interrupted;
                 run.finished = Some(now());
@@ -170,7 +178,7 @@ impl Coordinator {
             }
             coordinator.runs.insert(run.run_id.clone(), run);
         }
-        Ok(coordinator)
+        Ok((coordinator, warnings))
     }
 }
 
@@ -329,12 +337,21 @@ impl Harness {
             profile: args.profile,
             title,
             status: RunStatus::Running,
-            assignment: coordinator
-                .runs
-                .values()
-                .filter(|r| r.session_id == session.id)
-                .count()
-                + 1,
+            // Skipped, unreadable assignments still occupy their original positions.
+            assignment: if existing.is_some() {
+                self.store
+                    .db
+                    .lock()
+                    .expect("database lock")
+                    .query_row(
+                        "SELECT COUNT(*) + 1 FROM subagent_runs WHERE session=?1",
+                        [&session.id],
+                        |row| row.get::<_, i64>(0),
+                    )?
+                    .try_into()?
+            } else {
+                1
+            },
             started: now(),
             finished: None,
             notified: false,
@@ -567,6 +584,19 @@ impl Harness {
                 .values()
                 .filter(|r| parents.contains(&r.parent_id))
                 .map(|r| r.session_id.clone()),
+        );
+        // A child's only assignment may have been skipped during startup recovery.
+        ids.extend(
+            self.summaries
+                .lock()
+                .expect("summary lock")
+                .values()
+                .filter(|s| {
+                    s.child
+                        .as_ref()
+                        .is_some_and(|child| parents.contains(&child.parent_id))
+                })
+                .map(|s| s.id.clone()),
         );
         if coordinator
             .runs
@@ -1541,7 +1571,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
         assert!(!f.h.children_need_attention(&f.parent));
         f.h.flush().unwrap();
         assert_eq!(f.wait(vec![first.run_id.clone()], 0).await, original);
-        let reloaded = Coordinator::load(&f.h.store).unwrap();
+        let (reloaded, _) = Coordinator::load(&f.h.store).unwrap();
         for id in [&first.run_id, &second.run_id] {
             assert!(reloaded.runs[id].attention_acknowledged);
             assert_eq!(reloaded.runs[id].status, RunStatus::Failed);
@@ -1639,6 +1669,84 @@ await new Promise(r => setTimeout(r, 60000));"#,
         .unwrap();
         assert!(tools.contains("undefined"));
         assert!(!tools.contains("spawn_subagent"));
+    }
+
+    #[test]
+    fn restart_skips_only_malformed_assignments_and_preserves_their_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let parent = Session::new(dir.path().into(), &Settings::default());
+        let unrelated = Session::new(dir.path().into(), &Settings::default());
+        for session in [&parent, &unrelated] {
+            store.save_session(session).unwrap();
+        }
+        let mut children = vec![];
+        for request in ["bad-json", "identity-mismatch", "missing-result", "valid"] {
+            let mut child = Session::new(dir.path().into(), &Settings::default());
+            child.child = Some(Child {
+                parent_id: parent.id.clone(),
+                profile: Profile::Review,
+            });
+            let run = RunInfo {
+                run_id: id(),
+                parent_id: parent.id.clone(),
+                session_id: child.id.clone(),
+                request_id: request.into(),
+                title: request.into(),
+                profile: Profile::Review,
+                status: if request == "missing-result" {
+                    RunStatus::Completed
+                } else {
+                    RunStatus::Running
+                },
+                assignment: 1,
+                started: now(),
+                finished: None,
+                notified: false,
+                attention_acknowledged: false,
+            };
+            store
+                .save_session_transaction(None, &child, false, Some(&run))
+                .unwrap();
+            children.push((child, run));
+        }
+        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+        db.execute_batch(
+            "UPDATE subagent_runs SET metadata='{' WHERE request='bad-json';
+            UPDATE subagent_runs SET request='other' WHERE request='identity-mismatch';",
+        )
+        .unwrap();
+        let stored_rows = || {
+            db.prepare(
+                "SELECT json_array(id,parent,session,request,metadata,result,error)
+                        FROM subagent_runs WHERE request!='valid' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        let before = stored_rows();
+        let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        assert_eq!(h.load(&unrelated.id).unwrap().id, unrelated.id);
+        assert_eq!(h.load(&parent.id).unwrap().id, parent.id);
+        assert_eq!(h.startup_warnings.len(), 3);
+        for (_, run) in &children[..3] {
+            assert!(h.startup_warnings.iter().any(|w| w.contains(&run.run_id)));
+            assert!(h.subagent_run(&parent.id, &run.run_id).is_none());
+        }
+        let runs = h.subagent_runs(&parent.id);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, children[3].1.run_id);
+        assert_eq!(runs[0].status, RunStatus::Interrupted);
+        assert_eq!(stored_rows(), before);
+        // Even a child with no readable assignments still belongs to the family.
+        h.remove(&parent.id).unwrap();
+        for (child, _) in children {
+            assert!(!store.contains_session(&child.id).unwrap());
+        }
+        assert!(store.contains_session(&unrelated.id).unwrap());
     }
 
     #[tokio::test]

@@ -338,9 +338,10 @@ impl App {
                 Store::from_env()
             }
             .map_err(|e| format!("{e:#}"))?;
-            let (catalog, sessions, warnings) = store.load().map_err(|e| format!("{e:#}"))?;
+            let (catalog, sessions, mut warnings) = store.load().map_err(|e| format!("{e:#}"))?;
             let draft = store.load_new_draft().map_err(|e| format!("{e:#}"))?;
             let harness = Harness::new(store, sessions).map_err(|e| format!("{e:#}"))?;
+            warnings.extend_from_slice(&harness.startup_warnings);
             Ok::<_, String>((harness, catalog, draft, warnings))
         })();
         let (harness, catalog, new_draft, error) = match loaded {
