@@ -26,7 +26,9 @@ use iced::{
 };
 use pico_core::CancellationToken;
 use pico_core::{
-    agent::{ConversationStatus, Harness, subagents::ChildStatus},
+    agent::{
+        ConversationStatus, Harness, SettlementAction, SettlementOutcome, subagents::ChildStatus,
+    },
     auth::Login,
     models::{MODELS, model},
     shell::CommandStatus,
@@ -211,6 +213,7 @@ enum Modal {
     DeleteProject(PathBuf),
     Rename(String),
     Delete(String),
+    StopCommandsAndSettle(String),
     Logout,
     Quit,
     Link(String),
@@ -274,6 +277,7 @@ pub enum Message {
     New,
     Select(String),
     SetSettled(String, bool),
+    RunningCommandsAtSettle(String),
     ToggleSettled,
     SettledScroll(u64, f32, f32),
     Create(PathBuf),
@@ -1637,11 +1641,18 @@ impl App {
                 return bottom();
             }
             Message::SetSettled(id, settled) => {
-                if let Some(h) = &self.harness {
-                    let h = h.clone();
-                    self.tasks.push(self.io.run(move || {
-                        Message::Edited(h.set_settled(&id, settled).map_err(|e| format!("{e:#}")))
-                    }));
+                self.change_settlement(
+                    id,
+                    if settled {
+                        SettlementAction::Settle
+                    } else {
+                        SettlementAction::Undo
+                    },
+                );
+            }
+            Message::RunningCommandsAtSettle(id) => {
+                if self.modal.is_none() && !self.closing && !self.close_requested {
+                    self.modal = Some(Modal::StopCommandsAndSettle(id));
                 }
             }
             Message::ToggleSettled => {
@@ -2418,6 +2429,16 @@ impl App {
         }
         Task::none()
     }
+    fn change_settlement(&mut self, id: String, action: SettlementAction) {
+        if let Some(h) = self.harness.clone() {
+            self.tasks
+                .push(self.io.run(move || match h.set_settled(&id, action) {
+                    Ok(SettlementOutcome::RunningCommands) => Message::RunningCommandsAtSettle(id),
+                    Ok(SettlementOutcome::Applied) => Message::Edited(Ok(())),
+                    Err(error) => Message::Edited(Err(format!("{error:#}"))),
+                }));
+        }
+    }
     fn confirm(&mut self) -> Task<Message> {
         if self.io_busy || self.closing {
             return Task::none();
@@ -2523,6 +2544,10 @@ impl App {
                 }
             }
             Some(Modal::Image(_) | Modal::MarkdownImage(_)) => {}
+            Some(Modal::StopCommandsAndSettle(id)) => {
+                self.modal = None;
+                self.change_settlement(id, SettlementAction::StopCommandsAndSettle);
+            }
             Some(Modal::Quit) => return self.quit(),
             Some(Modal::Link(url)) => {
                 self.modal = None;
@@ -4704,6 +4729,11 @@ impl App {
                 "Remove saved ChatGPT credentials from this Pico V2 installation. Your sessions are kept.",
                 "Sign out",
             ),
+            Modal::StopCommandsAndSettle(_) => (
+                "Stop running commands and settle?",
+                "Commands are still running in this session. Stopping them won’t undo changes they’ve already made. Other sessions won’t be affected.",
+                "Stop commands and settle",
+            ),
             Modal::Quit => (
                 "Stop work and quit?",
                 "Running turns and shell processes will be cancelled. Already completed commands are not undone. Sessions are saved.",
@@ -4740,6 +4770,11 @@ impl App {
                     content = content.push(text(project.name()).size(16));
                 }
                 content = content.push(text(path.display().to_string()).size(13).color(MUTED));
+            }
+            Modal::StopCommandsAndSettle(id) => {
+                if let Some(session) = self.sessions.iter().find(|s| s.id == *id) {
+                    content = content.push(text(session.title.clone()).size(16));
+                }
             }
             Modal::Link(url) => content = content.push(text(url.clone()).size(13)),
             _ => {}
@@ -7077,6 +7112,28 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn settle_confirmation_uses_clicked_row_not_selected_session() {
+        let mut app = app();
+        let path = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, path.clone()).await;
+        let clicked = app.selected.clone().unwrap();
+        stored_session(&mut app, path).await;
+        let selected = app.selected.clone();
+        let h = app.harness.clone().unwrap();
+        dispatch(&mut app, Message::RunningCommandsAtSettle(clicked.clone())).await;
+        assert!(matches!(&app.modal, Some(Modal::StopCommandsAndSettle(id)) if *id == clicked));
+        dispatch(&mut app, Message::Dismiss).await;
+        assert!(h.load(&clicked).unwrap().snapshot().settled_at.is_none());
+        // The command may already be gone by the time the user confirms.
+        dispatch(&mut app, Message::RunningCommandsAtSettle(clicked.clone())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        assert!(app.modal.is_none());
+        assert!(h.load(&clicked).unwrap().snapshot().settled_at.is_some());
+        assert_eq!(app.selected, selected);
+        assert!(app.current().unwrap().settled_at.is_none());
     }
 
     #[tokio::test]

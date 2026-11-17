@@ -333,10 +333,14 @@ impl CodeMode {
         result
     }
 
+    pub(crate) fn shell(&self) -> &Shell {
+        &self.services.shell
+    }
+    pub(crate) fn cells_executing(&self) -> bool {
+        self.active_cells.load(Ordering::Acquire) > 0 || self.workers.load(Ordering::Acquire) > 0
+    }
     pub fn is_executing(&self) -> bool {
-        self.active_cells.load(Ordering::Acquire) > 0
-            || self.workers.load(Ordering::Acquire) > 0
-            || self.services.shell.is_executing()
+        self.cells_executing() || self.shell().is_executing()
     }
     pub fn has_work(&self) -> bool {
         !self.cells.lock().expect("cell lock").is_empty()

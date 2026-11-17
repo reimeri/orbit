@@ -60,6 +60,20 @@ impl std::fmt::Display for ConversationStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementAction {
+    Settle,
+    StopCommandsAndSettle,
+    Undo,
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementOutcome {
+    Applied,
+    RunningCommands,
+}
+
 pub struct Conversation {
     pub id: String,
     notifications: Arc<notifications::Notifications>,
@@ -588,16 +602,21 @@ impl Harness {
         result
     }
     /// Serialize filing with submissions, turn starts, child starts and eviction.
-    pub fn set_settled(&self, id: &str, settled: bool) -> Result<()> {
+    pub fn set_settled(&self, id: &str, action: SettlementAction) -> Result<SettlementOutcome> {
         let mut coordinator = self.subagents.lock().expect("subagent lock");
         let conversation = self.load(id)?;
         let state = conversation.snapshot();
         if state.child.is_some() {
             bail!("Only main sessions can be settled");
         }
-        if settled {
+        if action != SettlementAction::Undo {
             let children = coordinator.latest_runs(id);
-            if conversation.is_executing()
+            if conversation.is_turn_active()
+                || conversation.code.cells_executing()
+                || conversation
+                    .questionnaires
+                    .as_ref()
+                    .is_some_and(|q| q.has_pending())
                 || children.iter().any(|r| {
                     r.status == subagents::RunStatus::Running
                         || self.get(&r.session_id).is_some_and(|c| c.is_executing())
@@ -612,6 +631,18 @@ impl Harness {
                     "This session is no longer idle. Open it and finish or review its work before settling it."
                 );
             }
+            let shell = conversation.code.shell();
+            if shell.has_running_commands() {
+                if action == SettlementAction::Settle {
+                    return Ok(SettlementOutcome::RunningCommands);
+                }
+                // Signal under the start guard, then release it before waiting for
+                // exit/pipe EOF. Recheck all guards before committing settlement.
+                let stopped = shell.stop_running_commands();
+                drop(coordinator);
+                shell.runtime().block_on(stopped)?;
+                return self.set_settled(id, SettlementAction::Settle);
+            }
             // Finish outstanding durable delivery before filing. Stopped turns may
             // retain queued input/notices; settling preserves them without resuming.
             if coordinator.runs(id).any(|r| !r.notified) {
@@ -621,12 +652,13 @@ impl Harness {
             }
         }
         self.edit(id, |s| {
-            if settled {
+            if action != SettlementAction::Undo {
                 s.settled_at.get_or_insert_with(crate::store::now);
             } else {
                 s.settled_at = None;
             }
-        }).context("Could not save the settlement change. It is retained in memory for the next save attempt; check available disk space and permissions, then retry")
+        }).context("Could not save the settlement change. It is retained in memory for the next save attempt; check available disk space and permissions, then retry")?;
+        Ok(SettlementOutcome::Applied)
     }
     pub fn send_new(
         self: &Arc<Self>,
@@ -1260,28 +1292,40 @@ mod tests {
         let c = h.insert(session);
         c.save().unwrap();
         let revision = h.catalog_revision();
-        h.set_settled(&c.id, true).unwrap();
+        assert_eq!(
+            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
+            SettlementOutcome::Applied
+        );
         let settled_at = c.snapshot().settled_at.unwrap();
         assert!(h.catalog_revision() > revision);
         assert_eq!(store.load().unwrap().1[0].settled_at, Some(settled_at));
         assert_eq!(store.load_session(&c.id).unwrap().updated, 77);
         // Repeated clicks/retries must not restart the settlement clock.
         h.edit(&c.id, |s| s.settled_at = Some(123)).unwrap();
-        h.set_settled(&c.id, true).unwrap();
+        assert_eq!(
+            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
+            SettlementOutcome::Applied
+        );
         h.evict_inactive(None).unwrap();
         let c = h.load(&c.id).unwrap();
         assert_eq!(c.snapshot().settled_at, Some(123));
         assert_eq!(c.snapshot().draft, "Unsent draft λ");
 
-        h.set_settled(&c.id, false).unwrap();
+        assert_eq!(
+            h.set_settled(&c.id, SettlementAction::Undo).unwrap(),
+            SettlementOutcome::Applied
+        );
         assert_eq!(store.load().unwrap().1[0].settled_at, None);
         assert_eq!(c.snapshot().updated, 77);
-        h.set_settled(&c.id, true).unwrap();
+        assert_eq!(
+            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
+            SettlementOutcome::Applied
+        );
         assert!(c.snapshot().settled_at.unwrap() >= settled_at);
 
         let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
         db.execute_batch("CREATE TRIGGER fail_settlement BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
-        assert!(h.set_settled(&c.id, false).is_err());
+        assert!(h.set_settled(&c.id, SettlementAction::Undo).is_err());
         assert!(
             c.snapshot().settled_at.is_none(),
             "retain the edit for save retry"
@@ -1290,7 +1334,10 @@ mod tests {
         db.execute_batch("DROP TRIGGER fail_settlement;").unwrap();
         h.flush().unwrap();
         assert!(store.load_session(&c.id).unwrap().settled_at.is_none());
-        h.set_settled(&c.id, true).unwrap();
+        assert_eq!(
+            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
+            SettlementOutcome::Applied
+        );
 
         assert!(
             h.send(&c.id, "empty", "".into(), Settings::default())
@@ -1336,7 +1383,10 @@ mod tests {
             .unwrap();
             c.running.store(flag == 3, Ordering::Release);
             c.finishing.store(flag == 4, Ordering::Release);
-            assert!(h.set_settled(&c.id, true).is_err(), "blocked state {flag}");
+            assert!(
+                h.set_settled(&c.id, SettlementAction::Settle).is_err(),
+                "blocked state {flag}"
+            );
             assert!(c.snapshot().settled_at.is_none());
         }
         c.finishing.store(false, Ordering::Release);
@@ -1358,7 +1408,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        assert!(h.set_settled(&c.id, true).is_err());
+        assert!(h.set_settled(&c.id, SettlementAction::Settle).is_err());
         cancel.cancel();
         assert!(pending.await.unwrap().is_err());
 
@@ -1383,21 +1433,75 @@ mod tests {
             attention_acknowledged: false,
         };
         h.subagents.lock().unwrap().record(run.clone());
-        assert!(h.set_settled(&c.id, true).is_err());
+        assert!(h.set_settled(&c.id, SettlementAction::Settle).is_err());
         run.status = subagents::RunStatus::Failed;
         h.subagents.lock().unwrap().record(run.clone());
-        assert!(h.set_settled(&c.id, true).is_err());
+        assert!(h.set_settled(&c.id, SettlementAction::Settle).is_err());
         run.attention_acknowledged = true;
         h.subagents.lock().unwrap().record(run);
         child.finishing.store(true, Ordering::Release);
         assert!(
-            h.set_settled(&c.id, true).is_err(),
+            h.set_settled(&c.id, SettlementAction::Settle).is_err(),
             "terminal assignment still finalizing"
         );
         child.finishing.store(false, Ordering::Release);
-        h.set_settled(&c.id, true).unwrap();
+        assert_eq!(
+            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
+            SettlementOutcome::Applied
+        );
         assert!(c.snapshot().settled_at.is_some());
-        assert!(h.set_settled(&child.id, true).is_err());
+        assert!(h.set_settled(&child.id, SettlementAction::Settle).is_err());
+    }
+
+    #[test]
+    fn settlement_confirms_only_lingering_commands_in_the_clicked_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let h = Harness::new(store.clone(), vec![]).unwrap();
+        let start_session = || {
+            let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+            let output = c.code.exec(
+                r#"text(await tools.exec_command({cmd:"sleep 60 & wait", login:false, yield_time_ms:0}));"#,
+                "outer", &CancellationToken::new(),
+            ).unwrap();
+            assert!(output.contains("Process running with session ID"));
+            c
+        };
+        let clicked = start_session();
+        let other = start_session();
+        assert_eq!(
+            h.set_settled(&clicked.id, SettlementAction::Settle)
+                .unwrap(),
+            SettlementOutcome::RunningCommands
+        );
+        assert!(clicked.snapshot().settled_at.is_none());
+        assert!(clicked.code.shell().has_running_commands());
+
+        // Confirmation cannot override activity that appeared with the dialog open.
+        h.edit(&clicked.id, |s| s.unchecked_completion = true)
+            .unwrap();
+        assert!(
+            h.set_settled(&clicked.id, SettlementAction::StopCommandsAndSettle)
+                .is_err()
+        );
+        assert!(clicked.code.shell().has_running_commands());
+        h.edit(&clicked.id, |s| s.unchecked_completion = false)
+            .unwrap();
+        assert_eq!(
+            h.set_settled(&clicked.id, SettlementAction::StopCommandsAndSettle)
+                .unwrap(),
+            SettlementOutcome::Applied
+        );
+        assert!(
+            store
+                .load_session(&clicked.id)
+                .unwrap()
+                .settled_at
+                .is_some()
+        );
+        assert!(!clicked.code.shell().has_running_commands());
+        assert!(other.code.shell().has_running_commands());
+        assert!(other.snapshot().settled_at.is_none());
     }
 
     #[test]

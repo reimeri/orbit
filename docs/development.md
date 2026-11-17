@@ -492,7 +492,12 @@ subscription usage and is not exercised by automated tests.
 
 Idle, checked main sessions offer **✓ Settle** in place of their age on row hover.
 Working sessions, pending questionnaires, errors and unread completion dots do not
-offer it. Settling leaves the open conversation and draft unchanged. The bottom
+offer it. If the agent has returned but shell commands are still running, Settle
+asks whether to stop those commands. Cancel leaves them running; confirming
+stops only the clicked session’s commands and files it after they exit. Commands
+in child sessions are not stopped. If no commands are running and the session
+is otherwise eligible, Settle files it immediately without a dialog.
+Settling leaves the open conversation and draft unchanged. The bottom
 Settled section starts collapsed; its compact, independently virtualized list
 shows at most roughly ten rows (fewer in short windows), newest settlement first.
 Row hover swaps the settlement age for Undo. Search includes settled sessions and

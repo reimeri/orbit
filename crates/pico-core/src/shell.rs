@@ -82,6 +82,21 @@ struct Process {
     started: Instant,
 }
 impl Process {
+    fn is_running(&self) -> bool {
+        let state = self.output.0.lock().expect("output lock");
+        state.exit.is_none() || state.readers > 0
+    }
+    async fn wait_for_exit(&self) {
+        loop {
+            let notified = self.output.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_running() {
+                return;
+            }
+            notified.await;
+        }
+    }
     fn stop(&self) {
         let mut state = self.output.0.lock().expect("output lock");
         if state.exit.is_some() && state.readers == 0 {
@@ -98,18 +113,16 @@ impl Process {
         cancel: &CancellationToken,
     ) -> Result<(CommandOutput, bool)> {
         self.runtime.block_on(async {
-            let deadline=tokio::time::Instant::now()+Duration::from_millis(wait.min(300_000));
-            loop {
-                let notified=self.output.1.notified();tokio::pin!(notified);notified.as_mut().enable();
-                {let output=self.output.0.lock().expect("output lock");if output.exit.is_some()&&output.readers==0 {break;}}
-                tokio::select! {
-                    biased;
-                    _=cancel.cancelled()=>{self.stop();bail!("Command cancelled. Side effects already performed are not undone.");}
-                    _=tokio::time::sleep_until(deadline)=>break,
-                    _=notified=>{}
+            tokio::select! {
+                biased;
+                _ = self.wait_for_exit() => {}
+                _ = cancel.cancelled() => {
+                    self.stop();
+                    bail!("Command cancelled. Side effects already performed are not undone.");
                 }
+                _ = tokio::time::sleep(Duration::from_millis(wait.min(300_000))) => {}
             }
-            Ok::<_,anyhow::Error>(())
+            Ok::<_, anyhow::Error>(())
         })?;
         let mut output = self.output.0.lock().expect("process output lock");
         let complete = output.exit.is_some() && output.readers == 0;
@@ -387,11 +400,14 @@ impl Shell {
         if let Some(timeout) = args.timeout_ms {
             let process = process.clone();
             self.runtime.spawn(async move {
-                let deadline=tokio::time::Instant::now()+Duration::from_millis(timeout.min(86_400_000));
-                loop {
-                    let notified=process.output.1.notified();tokio::pin!(notified);notified.as_mut().enable();
-                    {let state=process.output.0.lock().expect("output lock");if state.exit.is_some()&&state.readers==0 {return;}}
-                    tokio::select! {_=tokio::time::sleep_until(deadline)=>{process.stop();return;},_=notified=>{}}
+                if tokio::time::timeout(
+                    Duration::from_millis(timeout.min(86_400_000)),
+                    process.wait_for_exit(),
+                )
+                .await
+                .is_err()
+                {
+                    process.stop();
                 }
             });
         }
@@ -496,16 +512,35 @@ impl Shell {
         result.map(|(text, _)| text)
     }
     pub fn is_executing(&self) -> bool {
-        self.pending_status.load(Ordering::Acquire) > 0
-            || self
-                .processes
-                .lock()
-                .expect("process lock")
-                .values()
-                .any(|process| {
-                    let output = process.output.0.lock().expect("output lock");
-                    output.exit.is_none() || output.readers > 0
-                })
+        self.pending_status.load(Ordering::Acquire) > 0 || self.has_running_commands()
+    }
+    pub(crate) fn has_running_commands(&self) -> bool {
+        self.processes
+            .lock()
+            .expect("process lock")
+            .values()
+            .any(|p| p.is_running())
+    }
+    /// Signal only live groups. Keep the session handles and their unread output.
+    pub(crate) fn stop_running_commands(&self) -> impl Future<Output = Result<()>> + use<> {
+        let running: Vec<_> = self
+            .processes
+            .lock()
+            .expect("process lock")
+            .values()
+            .filter(|p| p.is_running())
+            .cloned()
+            .collect();
+        for process in &running {
+            process.stop();
+        }
+        async move {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                for process in running {
+                    process.wait_for_exit().await;
+                }
+            }).await.context("Commands have not finished stopping. The session was not settled; check its activity and retry Settle.")
+        }
     }
     pub fn has_work(&self) -> bool {
         !self.processes.lock().expect("process lock").is_empty()
