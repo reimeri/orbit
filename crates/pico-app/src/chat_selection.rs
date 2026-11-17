@@ -549,6 +549,8 @@ struct State {
     paragraph: Paragraph,
     spans: Arc<[Span<'static, String>]>,
     index: TextIndex,
+    // Paragraph-local, unpadded bounds; translation and styling stay draw-time inputs.
+    decorations: Vec<(usize, Vec<Rectangle>)>,
     content: String,
     units: Arc<TextUnits>,
     units_key: Option<(usize, Paragraphs)>,
@@ -662,6 +664,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         // hits, links and selection must all use the same bounds and glyphs.
         layout::sized(limits, Length::Shrink, self.height, |limits| {
             let state = tree.state.downcast_mut::<State>();
+            let spans_replaced = !Arc::ptr_eq(&state.spans, &self.spans);
             let spans_changed = state.spans != self.spans;
             if spans_changed {
                 let content: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
@@ -704,16 +707,46 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                 shaping: text::Shaping::Advanced,
                 wrapping: self.wrapping,
             };
-            if spans_changed
+            let geometry_changed = if spans_changed
                 || state.paragraph.compare(text.with_content(())) == text::Difference::Shape
             {
                 state.paragraph = Paragraph::with_spans(text);
                 state.index = TextIndex::new(&state.content, state.paragraph.buffer());
-                state.spans = self.spans.clone();
                 #[cfg(test)]
                 tests::SHAPED.with(|count| count.set(count.get() + 1));
+                true
             } else if state.paragraph.bounds() != text.bounds {
                 state.paragraph.resize(text.bounds);
+                true
+            } else {
+                false
+            };
+            let decorated_spans = || {
+                self.spans.iter().enumerate().filter_map(|(index, span)| {
+                    (span.highlight.is_some() || span.underline || span.strikethrough)
+                        .then_some(index)
+                })
+            };
+            // Iced's Span equality compares shaping attributes, not decoration
+            // flags. Changing which spans are decorated needs geometry even if
+            // the shaped paragraph is unchanged. Paint-only changes to an already
+            // decorated span (padding/colors/underline style) reuse the bounds.
+            if geometry_changed
+                || (spans_replaced
+                    && !decorated_spans().eq(state.decorations.iter().map(|(index, _)| *index)))
+            {
+                // span_bounds scans glyphs from the start for each span. Pay that
+                // cost only when its inputs change, never on scroll-only redraws.
+                state.decorations = decorated_spans()
+                    .map(|index| {
+                        #[cfg(test)]
+                        tests::DECORATION_QUERIES.with(|count| count.set(count.get() + 1));
+                        (index, state.paragraph.span_bounds(index))
+                    })
+                    .collect();
+            }
+            if spans_replaced {
+                state.spans = self.spans.clone();
             }
             state.paragraph.min_bounds()
         })
@@ -838,13 +871,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         // Preserve Rich's span decorations (not just the glyphs). Default/top
         // alignment anchors both the paragraph and these regions at layout.position().
         let translation = layout.position() - Point::ORIGIN;
-        for (index, span) in self.spans.iter().enumerate() {
-            if span.highlight.is_none() && !span.underline && !span.strikethrough {
-                continue;
-            }
-            let regions = paragraph.span_bounds(index);
+        for (index, regions) in &state.decorations {
+            let span = &self.spans[*index];
             if let Some(highlight) = span.highlight {
-                for bounds in &regions {
+                for bounds in regions {
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: bounds.expand(span.padding) + translation,
@@ -864,7 +894,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                 let color = span.color.unwrap_or(style.text_color);
                 let baseline =
                     translation + Vector::new(0., size.0 + (line_height.0 - size.0) / 2.);
-                for bounds in &regions {
+                for bounds in regions {
                     if span.underline {
                         renderer.fill_quad(
                             renderer::Quad {
@@ -964,6 +994,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
 pub(crate) mod tests {
     thread_local! {
         pub(super) static HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static DECORATION_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static UNITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static SHAPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
@@ -1743,18 +1774,47 @@ pub(crate) mod tests {
                 .size(21),
             Span::new("\nHard break e\u{301} 👩‍💻 אבג mixed and a wrapping suffix."),
         ]);
-        for (width, scroll) in [(420., 0.), (160., 0.), (160., 15.)] {
-            let size = Size::new(width, 240.);
-            for scale in [1., 1.25] {
+        let mut paint_only = spans.to_vec();
+        paint_only[1] = paint_only[1]
+            .clone()
+            .padding([5, 9])
+            .background(Color::from_rgb8(30, 60, 90));
+        paint_only[2] = paint_only[2].clone().underline(true);
+        let paint_only: Arc<[_]> = paint_only.into();
+        let mut restyled = paint_only.to_vec();
+        // Decoration-only additions/removals must invalidate even when text/font metrics match.
+        restyled[0] = restyled[0].clone().background(Color::from_rgb8(30, 60, 90));
+        let restyled: Arc<[_]> = restyled.into();
+        let mut edited = restyled.to_vec();
+        edited[0] = Span::new("Changed prefix with more wrapping words. ");
+        let edited: Arc<[_]> = edited.into();
+        let undecorated: Arc<[_]> = Arc::from([Span::new("Plain text replaces all decorations.")]);
+        for scale in [1., 1.25] {
+            let mut cache = user_interface::Cache::new();
+            for (width, scroll, text_size, font, spans, recompute) in [
+                (420., 0., 18., Font::DEFAULT, &spans, true),
+                (420., 15., 18., Font::DEFAULT, &spans, false),
+                (160., 0., 18., Font::DEFAULT, &spans, true),
+                (160., 15., 18., Font::DEFAULT, &spans, false),
+                (160., 15., 22., Font::DEFAULT, &spans, true),
+                (160., 15., 22., Font::MONOSPACE, &spans, true),
+                (160., 15., 22., Font::MONOSPACE, &paint_only, false),
+                (160., 15., 22., Font::MONOSPACE, &restyled, true),
+                (160., 15., 22., Font::MONOSPACE, &spans, true),
+                (160., 15., 22., Font::MONOSPACE, &edited, true),
+                (160., 0., 22., Font::MONOSPACE, &undecorated, false),
+            ] {
+                let size = Size::new(width, 240.);
                 let mut frames = Vec::new();
                 for reference in [true, false] {
+                    let queries = DECORATION_QUERIES.get();
                     let text: Element<'_, Message> = if reference {
-                        rich_text(spans.clone()).size(18).font(Font::DEFAULT).into()
+                        rich_text(spans.clone()).size(text_size).font(font).into()
                     } else {
                         selectable(
                             spans.clone(),
-                            Pixels(18.),
-                            Font::DEFAULT,
+                            Pixels(text_size),
+                            font,
                             Shared::default(),
                             Position {
                                 entry: 0,
@@ -1765,21 +1825,29 @@ pub(crate) mod tests {
                         )
                     };
                     let mut ui = UserInterface::build(
-                        scrollable(container(text).padding(8)).height(100),
+                        scrollable(container(text).padding(8))
+                            .id("decoration-test")
+                            .height(100),
                         size,
-                        user_interface::Cache::new(),
+                        if reference {
+                            user_interface::Cache::new()
+                        } else {
+                            std::mem::take(&mut cache)
+                        },
                         &mut renderer,
                     );
-                    if scroll > 0. {
-                        send(
-                            &mut ui,
-                            &mut renderer,
-                            Event::Mouse(mouse::Event::WheelScrolled {
-                                delta: mouse::ScrollDelta::Pixels { x: 0., y: -scroll },
-                            }),
-                            Point::new(20., 30.),
-                        );
-                    }
+                    // Absolute positioning keeps retained and fresh scrollables
+                    // at the same offset, including after content shrink/reflow.
+                    ui.operate(
+                        &renderer,
+                        &mut iced::advanced::widget::operation::scrollable::scroll_to::<()>(
+                            iced::advanced::widget::Id::new("decoration-test"),
+                            iced::widget::scrollable::AbsoluteOffset {
+                                x: None,
+                                y: Some(scroll),
+                            },
+                        ),
+                    );
                     renderer.reset(Rectangle::with_size(size));
                     ui.draw(
                         &mut renderer,
@@ -1789,6 +1857,21 @@ pub(crate) mod tests {
                         },
                         mouse::Cursor::Unavailable,
                     );
+                    if !reference {
+                        if recompute {
+                            assert!(
+                                DECORATION_QUERIES.get() > queries,
+                                "changed layout must refresh decorated bounds"
+                            );
+                        } else {
+                            assert_eq!(
+                                DECORATION_QUERIES.get(),
+                                queries,
+                                "scroll-only redraws and undecorated text need no geometry queries"
+                            );
+                        }
+                        cache = ui.into_cache();
+                    }
                     frames.push(crate::test_renderer::screenshot(
                         &mut renderer,
                         Size::new((width * scale) as u32, (240. * scale) as u32),

@@ -476,10 +476,10 @@ change to hit-testing cost was expected from this optimization.
 GPU preparation/submission/presentation, whole-app view/update work, and real input
 cadence are excluded. Lavapipe initializes the test renderer, but measured drawing
 only records CPU commands. The synthetic fixtures are not the user's document.
-**Inline-decoration drawing remains a separate bottleneck:** the 170KB formatted
-single-paragraph fixture still takes about 62 ms to record drawing commands, due
-to repeated span-bound scans. Block-level virtualization and decoration caching
-are not part of this change.
+**Remaining limit at this stage:** the 170KB formatted single-paragraph fixture
+still took about 62 ms to record drawing commands, due to repeated span-bound
+scans. The decoration-cache follow-up below addresses that repeated drawing cost;
+block-level virtualization remains separate.
 
 Regressions exercise retained-widget double/triple clicks after same-length edits,
 Unicode offsets, paragraph-mode changes, and style/width changes. A tool-row check
@@ -487,3 +487,71 @@ changes the unseen source suffix while leaving visible text unchanged, requiring
 the new shared logical-line extent. Construction counters protect reuse without
 wall-clock assertions; existing selection/copy/reflow and virtualization checks
 remain in the suite.
+
+## Decoration geometry caching
+
+Decorated selectable spans now retain their `Paragraph::span_bounds` rectangles
+alongside the mounted paragraph. Layout rebuilds the cache after reshaping,
+bounds changes/reflow, or changes in which spans need decorations. Iced span
+equality excludes paint-only properties, so the decorated-span set is checked
+separately; padding/highlight-color changes on already-decorated spans reuse the
+bounds. Unchanged view rebuilds and scrolling reuse them too. Replacing decorated text with undecorated text clears the cached geometry.
+
+The cached rectangles are paragraph-local and unpadded. Painting still applies
+current span styles, padding, colors, and layout translation in the original span
+and decoration order. Clipping behavior is unchanged. The cache contains only
+decorated spans and is dropped with the widget tree; no history-wide cache or new
+retention policy was introduced.
+
+### Measurements
+
+Use the same `selection_scroll_benchmark` command above. It now also asserts no
+geometry queries across unchanged layout/update/draw cycles and reports
+`cold_draw_ms` alongside `cold_layout_ms`. The baseline used the same additional
+cold-draw timer, before the production cache change. This prevents presenting work
+moved into initial layout as though it had disappeared entirely.
+
+Same AMD Ryzen 7 5800X3D, pinned release environment, seven fixtures, and 120 scroll
+cycles per fixture. Three fresh-process samples per version ran serially, without
+concurrent builds. Values are medians of the three per-process medians, in
+milliseconds. The baseline **already includes selection-index reuse**.
+
+| Synthetic message | CPU draw recording before | After |
+| --- | ---: | ---: |
+| 20 paragraphs, 3,440 bytes | 0.0127 ms | 0.0117 ms |
+| 200 paragraphs, 34,400 bytes | 0.0140 ms | 0.0126 ms |
+| 2,000 paragraphs, 344,000 bytes | 0.0208 ms | 0.0193 ms |
+| One heavily formatted paragraph, 34,000 bytes | 2.402 ms | 0.0235 ms |
+| One heavily formatted paragraph, 170,000 bytes | 60.173 ms | 0.0831 ms |
+| One plain paragraph, 64,000 bytes | 0.0142 ms | 0.0107 ms |
+| 2,000 code lines, 120,012 bytes | 0.0201 ms | 0.0197 ms |
+
+The two long formatted-paragraph cases improve by roughly **102x and 724x** in
+CPU draw recording. Retained view construction plus layout remains cheap: for the
+170KB case, the sum of the phase medians was 0.0724 ms before and 0.0622 ms after.
+Short paragraphs and undecorated text were already inexpensive; their small
+absolute timing differences should not be treated as application-level gains.
+
+**Cold layout is still expensive.** This change caches the existing span-bound
+algorithm rather than replacing it with a single-pass algorithm. The 170KB case's
+initial layout increased from 112.3 to 173.7 ms, while its first draw fell from
+64.1 to 0.115 ms. Their combined cost stayed around 175 ms. Geometry is computed
+for all mounted decorated paragraphs, including those outside the visible clip.
+Initial mounting, edits, and reflow can still incur the full computation, and
+cached geometry consumes memory proportional to those mounted span regions.
+
+These are CPU microbenchmarks, not end-to-end frame times or a measurement of the
+user's document. GPU preparation/submission/presentation and whole-app overhead
+remain excluded. Pointer-selection benchmarks were also rerun: endpoints and hit
+counts matched, and event costs remained comparable (the 64KB paragraph's bottom
+case was 0.0622 to 0.0611 ms/event).
+
+### Regression coverage
+
+The native iced Rich pixel comparison now retains the selectable widget across
+scrolling, narrowing, text-size/font changes, decoration-only additions/removals,
+text edits, and replacement with undecorated text. It covers backgrounds, borders,
+padding, underlines, strikethrough, Unicode, wrapping, clipping, and fractional
+scale. Test-only query counters require reuse for scroll-only rebuilds and refresh
+for geometry changes, without hard-coded timing thresholds. Existing selection,
+copy, and virtualization tests remain unchanged.
