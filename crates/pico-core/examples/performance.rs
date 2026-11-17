@@ -2,7 +2,10 @@
 //! cargo run --locked --release -p pico-core --example performance
 use anyhow::Result;
 use pico_core::{
-    agent::Harness,
+    agent::{
+        Harness,
+        subagents::{Child, Profile, RunInfo, RunStatus},
+    },
     store::{Entry, EntryKind, Session, SessionSummary, Settings, Store, atomic_write},
 };
 use serde_json::json;
@@ -109,8 +112,74 @@ fn main() -> Result<()> {
         Ok(())
     })?;
     let (_, summaries, _) = store.load()?;
-    let harness = Harness::new(store.clone(), summaries)?;
+    // Time the actual sidebar status path on a library with repeated assignments.
+    // Fixture construction and cold-start recovery are outside the timed section.
+    let parents: Vec<_> = summaries.into_iter().map(|s| s.id).collect();
+    let tx = db.transaction()?;
+    {
+        let mut insert = tx.prepare("INSERT INTO subagent_runs (id,parent,session,request,metadata,result) VALUES (?1,?2,?3,?4,?5,?6)")?;
+        for (index, parent) in parents.iter().take(500).enumerate() {
+            let mut child = Session::new(dir.path().into(), &Settings::default());
+            child.child = Some(Child {
+                parent_id: parent.clone(),
+                profile: Profile::Review,
+            });
+            tx.execute(
+                "INSERT INTO sessions VALUES (?1,?2,?3,?4)",
+                rusqlite::params![
+                    child.id,
+                    child.updated as i64,
+                    serde_json::to_string(&SessionSummary::from(&child))?,
+                    serde_json::to_string(&child)?
+                ],
+            )?;
+            for assignment in 1..=100 {
+                let failed = (index + assignment) % 2 == 0;
+                let run = RunInfo {
+                    run_id: format!("run-{index}-{assignment}"),
+                    parent_id: parent.clone(),
+                    session_id: child.id.clone(),
+                    request_id: format!("request-{assignment}"),
+                    profile: Profile::Review,
+                    title: "Review".into(),
+                    assignment,
+                    status: if failed {
+                        RunStatus::Failed
+                    } else {
+                        RunStatus::Completed
+                    },
+                    started: 0,
+                    finished: Some(1),
+                    notified: true,
+                    attention_acknowledged: false,
+                };
+                insert.execute(rusqlite::params![
+                    run.run_id,
+                    parent,
+                    child.id,
+                    run.request_id,
+                    serde_json::to_string(&run)?,
+                    (!failed).then_some("done")
+                ])?;
+            }
+        }
+    }
+    tx.commit()?;
+    let harness = Harness::new(store.clone(), store.load()?.1)?;
     assert!(harness.all().is_empty());
+    timed(
+        "Child status snapshot + 10,000 sidebar lookups (50,000 assignments)",
+        200,
+        || {
+            let statuses = harness.child_statuses();
+            let flagged = parents
+                .iter()
+                .filter(|id| statuses.get(*id).is_some_and(|s| s.needs_attention))
+                .count();
+            assert_eq!(black_box(flagged), 250);
+            Ok(())
+        },
+    )?;
     timed("Load selected 20,000-entry session", 5, || {
         black_box(store.load_session(&session.id)?);
         Ok(())

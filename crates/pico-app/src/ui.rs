@@ -26,7 +26,7 @@ use iced::{
 };
 use pico_core::CancellationToken;
 use pico_core::{
-    agent::Harness,
+    agent::{Harness, subagents::ChildStatus},
     auth::Login,
     models::{MODELS, model},
     shell::CommandStatus,
@@ -101,6 +101,7 @@ pub struct App {
     activity: activity::Projection,
     execution: HashSet<String>,
     sidebar_rows: Vec<SidebarRow>,
+    child_statuses: HashMap<String, ChildStatus>,
     sidebar_list: crate::virtual_list::List,
     settled_rows: Vec<usize>,
     settled_list: crate::virtual_list::List,
@@ -373,6 +374,7 @@ impl App {
             activity: activity::Projection::default(),
             execution: HashSet::new(),
             sidebar_rows: vec![],
+            child_statuses: HashMap::new(),
             sidebar_list: crate::virtual_list::List::default(),
             settled_rows: vec![],
             settled_list: crate::virtual_list::List::with_overscan(SETTLED_ROW_HEIGHT),
@@ -558,6 +560,7 @@ impl App {
         };
         let catalog_revision = h.catalog_revision();
         if catalog_revision != self.catalog_revision {
+            self.child_statuses = h.child_statuses();
             self.sessions = h.summaries();
             self.sessions
                 .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
@@ -751,15 +754,14 @@ impl App {
     fn session_status(&self, s: &SessionSummary) -> SessionStatus {
         let h = self.harness.as_ref();
         let c = h.and_then(|h| h.get(&s.id));
+        let children = self.child_statuses.get(&s.id).copied().unwrap_or_default();
         if c.as_ref()
             .is_some_and(|c| c.questionnaires.as_ref().is_some_and(|q| q.has_pending()))
         {
             SessionStatus::Question
-        } else if c.as_ref().is_some_and(|c| c.is_turn_active())
-            || h.is_some_and(|h| h.active_children(&s.id) > 0)
-        {
+        } else if c.as_ref().is_some_and(|c| c.is_turn_active()) || children.running > 0 {
             SessionStatus::Working
-        } else if h.is_some_and(|h| h.children_need_attention(&s.id))
+        } else if children.needs_attention
             || s.interrupted
             || s.needs_attention
             || c.as_ref()
@@ -2953,17 +2955,13 @@ impl App {
                     let badge = project_badge_named(&session.project, &project);
                     // Age restarts on accepted input and successful completion, not streaming.
                     let children = self
-                        .harness
-                        .as_ref()
-                        .map_or(0, |h| h.active_children(&session.id));
-                    let attention = self.harness.as_ref().is_some_and(|h| {
-                        h.children_need_attention(&session.id)
-                            || h.get(&session.id).is_some_and(|c| {
-                                c.questionnaires.as_ref().is_some_and(|q| q.has_pending())
-                            })
-                    });
-                    let age = if children > 0 {
-                        format!("● {children} · {}", age(session.updated))
+                        .child_statuses
+                        .get(&session.id)
+                        .copied()
+                        .unwrap_or_default();
+                    let attention = children.needs_attention || *status == SessionStatus::Question;
+                    let age = if children.running > 0 {
+                        format!("● {} · {}", children.running, age(session.updated))
                     } else if attention {
                         format!("! · {}", age(session.updated))
                     } else {

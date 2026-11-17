@@ -5,6 +5,7 @@ use super::*;
 /// by a storage job queued for an earlier view of the session.
 pub struct Attention {
     conversation: Option<(Arc<Conversation>, u64)>,
+    parent: String,
     runs: Vec<String>,
 }
 
@@ -21,17 +22,28 @@ impl Harness {
             drop(state);
             needs_attention.then_some((c, generation))
         });
+        let parent = self
+            .summaries
+            .lock()
+            .expect("summary lock")
+            .get(session)
+            .and_then(|s| s.child.as_ref())
+            .map(|c| c.parent_id.clone())
+            .unwrap_or_else(|| session.to_owned());
         let runs: Vec<_> = coordinator
-            .runs
-            .values()
+            .runs(&parent)
             .filter(|r| {
-                (r.parent_id == session || r.session_id == session)
+                (parent == session || r.session_id == session)
                     && r.status.needs_attention()
                     && !r.attention_acknowledged
             })
             .map(|r| r.run_id.clone())
             .collect();
-        (conversation.is_some() || !runs.is_empty()).then_some(Attention { conversation, runs })
+        (conversation.is_some() || !runs.is_empty()).then_some(Attention {
+            conversation,
+            parent,
+            runs,
+        })
     }
 
     /// Called on the serialized storage worker, never the UI thread.
@@ -40,11 +52,11 @@ impl Harness {
         if !attention.runs.is_empty() {
             // Persist retained terminal results first: an acknowledgement must never
             // replace unsaved result metadata or be undone by its subsequent retry.
-            self.retry_results(&mut coordinator)?;
+            self.retry_results(&mut coordinator, &attention.parent)?;
             let runs: Vec<_> = attention
                 .runs
                 .iter()
-                .filter_map(|id| coordinator.runs.get(id))
+                .filter_map(|id| coordinator.run(&attention.parent, id))
                 .filter(|r| !r.attention_acknowledged)
                 .map(|r| {
                     let mut r = r.clone();
@@ -64,7 +76,7 @@ impl Harness {
                 transaction.commit()?;
             }
             for run in runs {
-                coordinator.runs.insert(run.run_id.clone(), run);
+                coordinator.record(run);
             }
             self.catalog_revision.fetch_add(1, Ordering::Release);
             self.changes.send_replace(());

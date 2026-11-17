@@ -456,10 +456,7 @@ impl Harness {
             }
             if c.naming.load(Ordering::Acquire)
                 || c.is_executing()
-                || coordinator
-                    .runs
-                    .values()
-                    .any(|r| r.parent_id == c.id && r.status == subagents::RunStatus::Running)
+                || coordinator.status(&c.id).running > 0
                 || !c.loaded.load(Ordering::Acquire)
             {
                 continue;
@@ -490,20 +487,11 @@ impl Harness {
     }
     pub fn flush(&self) -> Result<()> {
         let mut coordinator = self.subagents.lock().expect("subagent lock");
-        self.retry_results(&mut coordinator)?;
-        let parents: Vec<_> = coordinator
-            .runs
-            .values()
-            .filter(|r| !r.notified && r.status != subagents::RunStatus::Running)
-            .map(|r| r.parent_id.clone())
-            .collect();
-        for parent in parents {
-            self.deliver_notices(&mut coordinator, &parent)?;
-        }
+        let results = self.flush_results(&mut coordinator);
         for c in self.all() {
             c.save()?;
         }
-        Ok(())
+        results
     }
     pub fn get(&self, id: &str) -> Option<Arc<Conversation>> {
         self.conversations
@@ -584,12 +572,8 @@ impl Harness {
             }
             // Finish outstanding durable delivery before filing. Stopped turns may
             // retain queued input/notices; settling preserves them without resuming.
-            if coordinator
-                .runs
-                .values()
-                .any(|r| r.parent_id == id && !r.notified)
-            {
-                self.retry_results(&mut coordinator)
+            if coordinator.runs(id).any(|r| !r.notified) {
+                self.retry_results(&mut coordinator, id)
                     .and_then(|()| self.deliver_notices(&mut coordinator, id))
                     .context("Could not finish saving child results before settling. Keep Pico open, check disk space and permissions, then retry")?;
             }
@@ -657,7 +641,7 @@ impl Harness {
             !conversation.deleted.load(Ordering::Acquire),
             "Session deleted before file attachments could be accepted"
         );
-        self.retry_results(&mut coordinator)?;
+        self.retry_results(&mut coordinator, id)?;
         self.deliver_notices(&mut coordinator, id)?;
         let needs_start = {
             let mut saved = conversation.persisted.lock().expect("persistence lock");
@@ -807,7 +791,7 @@ impl Harness {
                             if result.is_err() || save_result.is_err() {
                                 conversation.notifications.publish(&state, notifications::Kind::Failed);
                             } else if !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
-                                && !coordinator.runs.values().any(|r| r.parent_id == conversation.id && r.status == subagents::RunStatus::Running)
+                                && coordinator.status(&conversation.id).running == 0
                             {
                                 // This sidebar hint uses ordinary session saves (eviction,
                                 // edits, shutdown), not a separate completion transaction.
@@ -1343,7 +1327,7 @@ mod tests {
             profile: subagents::Profile::Explore,
         });
         let child = h.insert(child);
-        let run = subagents::RunInfo {
+        let mut run = subagents::RunInfo {
             run_id: "child-run".into(),
             session_id: child.id.clone(),
             parent_id: c.id.clone(),
@@ -1357,27 +1341,13 @@ mod tests {
             notified: true,
             attention_acknowledged: false,
         };
-        h.subagents
-            .lock()
-            .unwrap()
-            .runs
-            .insert(run.run_id.clone(), run);
+        h.subagents.lock().unwrap().record(run.clone());
         assert!(h.set_settled(&c.id, true).is_err());
-        h.subagents
-            .lock()
-            .unwrap()
-            .runs
-            .get_mut("child-run")
-            .unwrap()
-            .status = subagents::RunStatus::Failed;
+        run.status = subagents::RunStatus::Failed;
+        h.subagents.lock().unwrap().record(run.clone());
         assert!(h.set_settled(&c.id, true).is_err());
-        h.subagents
-            .lock()
-            .unwrap()
-            .runs
-            .get_mut("child-run")
-            .unwrap()
-            .attention_acknowledged = true;
+        run.attention_acknowledged = true;
+        h.subagents.lock().unwrap().record(run);
         child.finishing.store(true, Ordering::Release);
         assert!(
             h.set_settled(&c.id, true).is_err(),

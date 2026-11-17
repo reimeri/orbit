@@ -101,6 +101,14 @@ rows and one large body: the summary query does not read any bodies. Baselines
 reproduce the old deep-copy/full-pretty-JSON-write algorithms on the same fixture;
 they are not an end-to-end comparison between separately built application versions.
 
+The example also adds 500 child sessions with 100 assignments each. In a local
+release run, taking the parent-indexed child-status snapshot and looking up all
+10,000 main sessions averaged **0.22 ms** (200 iterations). This measures only
+child-status projection, not rendering, search, or loading SQLite. The coordinator
+updates running and unacknowledged-attention counts from each child's latest
+assignment; the sidebar refreshes its snapshot once per catalog revision. Searching
+or rendering rows does not revisit historical assignments.
+
 One local release run (milliseconds per operation):
 
 | Operation | Time |

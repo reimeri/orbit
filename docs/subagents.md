@@ -135,8 +135,10 @@ Session acceptance and assignment insertion share one SQLite transaction.
 Terminal results are stored separately from transcripts. Notification IDs make
 parent delivery idempotent across a crash between parent persistence and the
 assignment's delivery acknowledgement. A failed terminal-result write retains
-its complete result in memory; sending again or saving on exit retries storage
-without rerunning the assignment. Keep Pico open if storage cannot be saved.
+its complete result in memory. Sending to that parent retries its family's
+results before accepting new input; other parents can send and finish work
+independently. An explicit flush (including shutdown) retries every family and
+reports any that still cannot be saved, without rerunning assignments. Keep Pico open if storage cannot be saved.
 
 ## UI
 
