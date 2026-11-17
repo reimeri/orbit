@@ -67,6 +67,18 @@ enum SidebarRow {
     Session(usize, SessionStatus),
 }
 
+struct PendingSettings {
+    submitted: Settings,
+    close_on_success: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum SettingsSave {
+    Saved,
+    NotSaved(String),
+    PublishedButNotSynced(String),
+}
+
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
 const SETTLE_FONT_SIZE: f32 = 12.;
@@ -146,6 +158,7 @@ pub struct App {
     settings_tab: SettingsTab,
     notice: Option<(String, std::time::Instant)>,
     settings: Settings,
+    pending_settings: Option<PendingSettings>,
     context_text: String,
     threshold_text: String,
     modal: Option<Modal>,
@@ -276,7 +289,8 @@ pub enum Message {
     ToggleAgents,
     StopAgent(String),
     ApplySettings,
-    CatalogSaved(bool, Result<(), String>),
+    CatalogSaved(Result<(), String>),
+    SettingsSaved(SettingsSave),
     SettingsTab(SettingsTab),
     Model(String),
     ModelEffort(String, String),
@@ -362,6 +376,7 @@ impl App {
             None
         };
         let settings = catalog.settings.clone();
+        let io = crate::io_worker::Worker::new(catalog.clone());
         let mut app = Self {
             harness,
             catalog,
@@ -384,7 +399,7 @@ impl App {
             view_epoch: 0,
             sidebar_epoch: 0,
             sidebar_keys: HashMap::new(),
-            io: crate::io_worker::Worker::new(),
+            io,
             tasks: vec![],
             io_busy: false,
             closing: false,
@@ -414,6 +429,7 @@ impl App {
             expanded: HashSet::new(),
             groups: HashSet::new(),
             settings_open: false,
+            pending_settings: None,
             agents_open: false,
             chat_positions: HashMap::new(),
             settings_tab: SettingsTab::Account,
@@ -882,22 +898,24 @@ impl App {
             }));
         }
     }
-    fn save_catalog(&mut self, close_settings: bool) {
+    fn save_catalog(&mut self) {
         self.catalog.selected = self.selected.clone();
         if let Some(h) = &self.harness {
-            let h = h.clone();
+            let store = h.store.clone();
             let catalog = self.catalog.clone();
-            self.tasks.push(self.io.run(move || {
-                Message::CatalogSaved(
-                    close_settings,
-                    h.store.save_catalog(&catalog).map_err(|e| {
-                        format!(
-                            "Could not save settings: {e:#}. Fix storage and retry before quitting."
-                        )
-                    }),
-                )
+            self.tasks.push(self.io.run_catalog(move |writer| {
+                Message::CatalogSaved(writer.save_state(&store, catalog).map_err(|e| {
+                    format!(
+                        "Could not save settings: {e:#}. Fix storage and retry before quitting."
+                    )
+                }))
             }));
         }
+    }
+    fn reset_settings_editor(&mut self, settings: Settings) {
+        self.context_text = settings.context_limit.to_string();
+        self.threshold_text = settings.compact_percent.to_string();
+        self.settings = settings;
     }
     fn take_draft(&mut self) -> Option<(String, UserMessage)> {
         if !self.draft_dirty {
@@ -1132,7 +1150,11 @@ impl App {
         if self.modal.is_some() || self.context_menu.is_some() {
             self.footer_menu_open = false;
         }
-        let close = if self.close_requested && !self.io_busy && !self.closing {
+        let close = if self.close_requested
+            && !self.io_busy
+            && self.pending_settings.is_none()
+            && !self.closing
+        {
             self.close_requested = false;
             self.quit()
         } else {
@@ -1169,6 +1191,28 @@ impl App {
             )
         {
             return Task::none();
+        }
+        if let Some(pending) = &mut self.pending_settings
+            && matches!(
+                message,
+                Message::Model(_)
+                    | Message::ModelEffort(_, _)
+                    | Message::ModelFast(_, _)
+                    | Message::Context(_)
+                    | Message::Threshold(_)
+                    | Message::WebMode(_)
+                    | Message::ImageBackend(_)
+                    | Message::ImageModel(_)
+                    | Message::ImageQuality(_)
+                    | Message::ResetImageModel
+                    | Message::SettingsTab(_)
+                    | Message::ApiKey(_)
+                    | Message::Font(_)
+                    | Message::ChatWidth(_)
+                    | Message::Resume(_)
+            )
+        {
+            pending.close_on_success = false;
         }
         if self.current().is_some_and(|s| s.child.is_some())
             && matches!(
@@ -1316,9 +1360,13 @@ impl App {
                 self.settings.images.model = pico_core::image_tools::DEFAULT_API_MODEL.into()
             }
             Message::CancelSettings => {
-                self.settings = self.catalog.settings.clone();
-                self.context_text = self.settings.context_limit.to_string();
-                self.threshold_text = self.settings.compact_percent.to_string();
+                let draft = if let Some(pending) = &mut self.pending_settings {
+                    pending.close_on_success = false;
+                    crate::io_worker::with_live_controls(&pending.submitted, &self.catalog.settings)
+                } else {
+                    self.catalog.settings.clone()
+                };
+                self.reset_settings_editor(draft);
                 self.settings_open = false;
                 self.api_key_draft.clear();
                 self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -1383,7 +1431,7 @@ impl App {
                         self.restore_draft();
                         let git = self.refresh_git();
                         self.tasks.push(git);
-                        self.save_catalog(false);
+                        self.save_catalog();
                         if let Some((offset, follow)) = self
                             .selected
                             .as_ref()
@@ -1435,7 +1483,7 @@ impl App {
                             self.new_draft = NewSessionDraft::default();
                             self.new_draft_dirty = false;
                             self.selected = Some(id.clone());
-                            self.save_catalog(false);
+                            self.save_catalog();
                         }
                         self.submissions.remove(&id);
                         if self.selected.as_ref() == Some(&id) && self.composer_message() == text {
@@ -1534,7 +1582,7 @@ impl App {
                 self.context_menu = None;
                 if let Some(project) = self.catalog.projects.iter_mut().find(|p| p.path == path) {
                     project.stashed = !project.stashed;
-                    self.save_catalog(false);
+                    self.save_catalog();
                 }
             }
             Message::DeleteProject(path) => {
@@ -1631,7 +1679,7 @@ impl App {
                 if let Some(p) = self.catalog.projects.iter_mut().find(|p| p.path == path) {
                     p.favorite = !p.favorite;
                 }
-                self.save_catalog(false);
+                self.save_catalog();
             }
             Message::Questionnaire(id, message) => {
                 if self.io_busy
@@ -1778,6 +1826,9 @@ impl App {
                 self.agents_open = false;
             }
             Message::ApplySettings => {
+                if self.pending_settings.is_some() {
+                    return Task::none();
+                }
                 let result = (|| {
                     self.settings.context_limit = self
                         .context_text
@@ -1791,19 +1842,50 @@ impl App {
                 })();
                 if let Err(e) = result {
                     self.error = Some(e);
-                } else {
-                    self.catalog.settings = self.settings.clone();
-                    self.save_catalog(true);
+                } else if let Some(h) = &self.harness {
+                    let store = h.store.clone();
+                    let submitted = self.settings.clone();
+                    self.pending_settings = Some(PendingSettings {
+                        submitted: self.settings.clone(),
+                        close_on_success: self.settings_open,
+                    });
+                    self.tasks.push(self.io.run_catalog(move |writer| {
+                        Message::SettingsSaved(match writer.apply(&store, submitted) {
+                            Ok(()) => SettingsSave::Saved,
+                            Err(e) if e.is::<pico_core::store::PublishedButNotSynced>() =>
+                                SettingsSave::PublishedButNotSynced(format!("Settings are active, but crash durability is unconfirmed: {e:#}. Check storage and select Save to retry.")),
+                            Err(e) => SettingsSave::NotSaved(format!("Could not save settings: {e:#}. Check disk space and permissions, then select Save to retry.")),
+                        })
+                    }));
                 }
             }
-            Message::CatalogSaved(close_settings, result) => match result {
-                Ok(()) if close_settings && self.settings_open => {
-                    self.settings_open = false;
-                    self.view_epoch = self.view_epoch.wrapping_add(1);
+            Message::CatalogSaved(result) => self.fail(result),
+            Message::SettingsSaved(result) => {
+                let pending = self
+                    .pending_settings
+                    .take()
+                    .expect("one Settings save in flight");
+                if !matches!(result, SettingsSave::NotSaved(_)) {
+                    self.catalog.settings = crate::io_worker::with_live_controls(
+                        &pending.submitted,
+                        &self.catalog.settings,
+                    );
                 }
-                Ok(()) => {}
-                Err(error) => self.error = Some(error),
-            },
+                match result {
+                    SettingsSave::Saved if pending.close_on_success && self.settings_open => {
+                        self.settings_open = false;
+                        self.view_epoch = self.view_epoch.wrapping_add(1);
+                    }
+                    SettingsSave::Saved => {}
+                    SettingsSave::NotSaved(error) | SettingsSave::PublishedButNotSynced(error) => {
+                        if self.close_requested && matches!(self.modal, Some(Modal::Quit)) {
+                            self.modal = None;
+                        }
+                        self.close_requested = false;
+                        self.error = Some(error);
+                    }
+                }
+            }
             Message::Model(value) => self.settings.model = value,
             Message::SettingsTab(tab) => self.settings_tab = tab,
             Message::ModelEffort(id, effort) => {
@@ -1836,18 +1918,18 @@ impl App {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings.font_size = value;
                 self.catalog.settings.font_size = value;
-                self.save_catalog(false);
+                self.save_catalog();
             }
             Message::ChatWidth(value) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings.chat_width = value;
                 self.catalog.settings.chat_width = value;
-                self.save_catalog(false);
+                self.save_catalog();
             }
             Message::Resume(value) => {
                 self.settings.resume_last = value;
                 self.catalog.settings.resume_last = value;
-                self.save_catalog(false);
+                self.save_catalog();
             }
             Message::SessionSettingsEdited(result) => {
                 self.io_busy = false;
@@ -1881,6 +1963,9 @@ impl App {
             Message::Folder(None) => {}
             Message::ModalInput(value) => self.modal_input = value,
             Message::Dismiss => {
+                if matches!(self.modal, Some(Modal::Quit)) {
+                    self.close_requested = false;
+                }
                 if !self.image_view.request_close(std::time::Instant::now()) {
                     self.modal = None;
                 }
@@ -2221,7 +2306,7 @@ impl App {
                 }
                 iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                     if self.drag.take().is_some() {
-                        self.save_catalog(false);
+                        self.save_catalog();
                     }
                 }
                 iced::Event::Window(window::Event::Resized(size)) => {
@@ -2347,7 +2432,7 @@ impl App {
                             display_name: None,
                             stashed: false,
                         });
-                        self.save_catalog(false);
+                        self.save_catalog();
                     }
                     self.modal = None;
                 }
@@ -2366,7 +2451,7 @@ impl App {
                     self.catalog.projects.iter_mut().find(|p| p.path == path)
                 {
                     project.display_name = Some(name);
-                    self.save_catalog(false);
+                    self.save_catalog();
                     self.modal = None;
                 }
             }
@@ -2380,14 +2465,14 @@ impl App {
                         draft.project = None;
                     }
                     self.io_busy = true;
-                    self.tasks.push(self.io.run(move || {
+                    self.tasks.push(self.io.run_catalog(move |writer| {
                         let result = (|| {
                             h.remove_project(&path)?;
                             h.store.save_new_draft(&draft)?;
                             if catalog.selected.as_ref().is_some_and(|id| h.get(id).is_none()) {
                                 catalog.selected = None;
                             }
-                            h.store.save_catalog(&catalog)
+                            writer.save_state(&h.store, catalog)
                         })().map_err(|e| format!("Could not finish deleting this project: {e:#}. Fix the problem and retry."));
                         Message::ProjectDeleted(path, result)
                     }));
@@ -2454,7 +2539,7 @@ impl App {
         if self.closing {
             return Task::none();
         }
-        if self.io_busy {
+        if self.io_busy || self.pending_settings.is_some() {
             self.close_requested = true;
             return Task::none();
         }
@@ -2468,14 +2553,14 @@ impl App {
         }
         if let Some(h) = &self.harness {
             let h = h.clone();
-            return self.io.run(move || {
+            return self.io.run_catalog(move |writer| {
                 // Ordered after earlier jobs: no queued Send can start behind this barrier.
                 h.stop_all();
                 let result=(|| {
                     while h.all().iter().any(|s|s.is_executing()) {std::thread::sleep(Duration::from_millis(20));}
                     if let Some((id,draft))=draft {h.edit(&id,|s| { s.draft=draft.text; s.draft_images=draft.images; })?;}
                     h.store.save_new_draft(&new_draft)?;
-                    h.store.save_catalog(&catalog)?;
+                    writer.save_state(&h.store, catalog)?;
                     h.flush()?;
                     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(h.auth.flush())
                 })();
@@ -4189,9 +4274,17 @@ impl App {
         if self.settings_tab != SettingsTab::Account {
             panel_content = panel_content.push(
                 row![
-                    theme::button("Save")
-                        .on_press(Message::ApplySettings)
-                        .style(secondary),
+                    theme::button(if self.pending_settings.is_some() {
+                        "Saving…"
+                    } else {
+                        "Save"
+                    })
+                    .on_press_maybe(
+                        self.pending_settings
+                            .is_none()
+                            .then_some(Message::ApplySettings)
+                    )
+                    .style(secondary),
                     theme::button("Cancel")
                         .on_press(Message::CancelSettings)
                         .style(theme::text_button)
@@ -7807,6 +7900,73 @@ mod tests {
                 .context_limit,
             128000
         );
+    }
+
+    #[tokio::test]
+    async fn delayed_settings_reply_respects_new_edits_and_overlapping_autosaves() {
+        // Hold the real worker's reply, not the write itself. No timing sleeps.
+        for (fail, reopen) in [(false, false), (false, true), (true, true)] {
+            let mut app = app();
+            let store = app.harness.as_ref().unwrap().store.clone();
+            let path = store.root().join("settings.json");
+            let original = app.catalog.settings.context_limit;
+            dispatch(&mut app, Message::ToggleSettings).await;
+            dispatch(&mut app, Message::Context("96000".into())).await;
+            if fail {
+                std::fs::create_dir(&path).unwrap(); // Atomic rename must fail.
+            }
+            let apply = app.update(Message::ApplySettings);
+            assert_eq!(app.catalog.settings.context_limit, original);
+            if reopen {
+                dispatch(&mut app, Message::CancelSettings).await;
+                dispatch(&mut app, Message::ToggleSettings).await;
+                assert_eq!(app.context_text, "96000", "reopen the submitted draft");
+            }
+            dispatch(&mut app, Message::Context("144000".into())).await;
+            if fail {
+                let barrier = app.io.run(|| Message::External(Ok(())));
+                drain(&mut app, barrier).await;
+                std::fs::remove_dir(&path).unwrap();
+            }
+            // The autosave runs after Apply on disk, but before its reply in the UI.
+            dispatch(&mut app, Message::Font(21.)).await;
+            let expected = if fail { original } else { 96_000 };
+            let saved = store.load().unwrap().0.settings;
+            assert_eq!((saved.context_limit, saved.font_size), (expected, 21.));
+            drain(&mut app, apply).await;
+            assert!(
+                app.settings_open,
+                "the reply must not close the current edit"
+            );
+            assert_eq!(app.context_text, "144000");
+            assert_eq!(app.catalog.settings.context_limit, expected);
+            assert_eq!(app.catalog.settings.font_size, 21.);
+            if fail {
+                assert!(
+                    app.error
+                        .as_deref()
+                        .unwrap()
+                        .contains("Could not save settings")
+                );
+            }
+            dispatch(&mut app, Message::CancelSettings).await;
+            dispatch(&mut app, Message::ToggleSettings).await;
+            assert_eq!(app.context_text, expected.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_settings_save_does_not_close_an_untouched_reopened_panel() {
+        let mut app = app();
+        dispatch(&mut app, Message::ToggleSettings).await;
+        dispatch(&mut app, Message::Threshold("65".into())).await;
+        let apply = app.update(Message::ApplySettings);
+        dispatch(&mut app, Message::CancelSettings).await;
+        dispatch(&mut app, Message::ToggleSettings).await;
+        drain(&mut app, apply).await;
+        assert!(app.settings_open);
+        assert_eq!(app.threshold_text, "65");
+        assert_eq!(app.catalog.settings.compact_percent, 65);
     }
 
     #[tokio::test]

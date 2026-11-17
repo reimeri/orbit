@@ -32,7 +32,11 @@ Settings has **Account**, **General**, and **Models** tabs. The fixed catalog is
 **Astra**, **Sol** (the default), **Terra**, and **Luna**. Choose the app default
 from the dropdown in General. Models has per-model effort and Fast defaults;
 initially all use Medium with Fast off. Use **Save** to save these
-changes and close Settings. Appearance controls apply immediately.
+changes. They take effect only after the write succeeds. Save closes Settings
+unless you have continued editing or reopened the panel. Reopening during a
+save shows the submitted draft; a failed save leaves your edits available to
+retry. Cancel discards unsaved edits, not a write already in flight. Appearance
+controls apply immediately.
 
 The footer selects a session's model and effort; its effort menu also toggles
 **Fast mode**. Switching models applies the new model's defaults. Saved sessions

@@ -744,6 +744,14 @@ fn write_history<T: Record + Serialize>(
     }
     Ok(())
 }
+/// The new file is visible to readers, but its rename may not survive a crash.
+#[derive(Debug)]
+pub struct PublishedButNotSynced;
+impl std::fmt::Display for PublishedButNotSynced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("File was replaced, but syncing its directory failed")
+    }
+}
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("Missing storage parent")?;
     let temporary = parent.join(format!(".{}.tmp", id()));
@@ -756,7 +764,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        File::open(parent)?.sync_all()?;
+        File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .context(PublishedButNotSynced)?;
         Ok(())
     })();
     if result.is_err() {
