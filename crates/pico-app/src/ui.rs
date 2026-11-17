@@ -1433,6 +1433,14 @@ impl App {
                         self.refresh();
                         self.acknowledge_selected_attention();
                         self.restore_draft();
+                        if self
+                            .current()
+                            .is_some_and(|session| session.child.is_none())
+                            && self.active_questionnaire.is_none()
+                            && self.modal.is_none()
+                        {
+                            self.tasks.push(widget::operation::focus("composer"));
+                        }
                         let git = self.refresh_git();
                         self.tasks.push(git);
                         self.save_catalog();
