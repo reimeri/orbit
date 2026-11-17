@@ -24,8 +24,8 @@ impl Harness {
                 // The request future is scoped to this receiver; it cannot outlive it.
                 items.send((index, item)).expect("live response consumer");
             }
-            Delta::Status(status) => {
-                *conversation.status.lock().expect("status lock") = status;
+            Delta::Retrying(status) => {
+                conversation.set_status(ConversationStatus::Retrying(status));
                 conversation.changed();
             }
             Delta::Text {
@@ -33,12 +33,11 @@ impl Harness {
                 text,
                 reasoning,
             } => {
-                *conversation.status.lock().expect("status lock") = if reasoning {
-                    "Thinking…"
+                conversation.set_status(if reasoning {
+                    ConversationStatus::Thinking
                 } else {
-                    "Writing…"
-                }
-                .into();
+                    ConversationStatus::Writing
+                });
                 let mut session = conversation.state.lock().expect("session lock");
                 if let Some(entry) = session.entries.by_id_mut(&id) {
                     entry.text.push_str(&text);
@@ -207,7 +206,7 @@ async fn execute_call(
         .as_str()
         .expect("validated tool input")
         .to_owned();
-    *conversation.status.lock().expect("status lock") = format!("Running {name}…");
+    conversation.set_status(ConversationStatus::RunningTool(name.clone()));
     {
         let mut session = conversation.state.lock().expect("session lock");
         session.entries.push(Entry {

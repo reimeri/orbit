@@ -23,6 +23,43 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Runtime activity for presentation and attention decisions. Not a persistence
+/// or execution guard: terminal persistence can still be in progress.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ConversationStatus {
+    #[default]
+    Ready,
+    Connecting,
+    Thinking,
+    Writing,
+    RunningTool(String),
+    Retrying(crate::provider::RetryStatus),
+    CompactingContext,
+    RecoveringContext,
+    Stopping,
+    Stopped,
+    Completed,
+    NeedsAttention,
+}
+impl std::fmt::Display for ConversationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ready => "Ready",
+            Self::Connecting => "Connecting…",
+            Self::Thinking => "Thinking…",
+            Self::Writing => "Writing…",
+            Self::RunningTool(name) => return write!(f, "Running {name}…"),
+            Self::Retrying(status) => return status.fmt(f),
+            Self::CompactingContext => "Compacting context…",
+            Self::RecoveringContext => "Recovering context capacity…",
+            Self::Stopping => "Stopping…",
+            Self::Stopped => "Stopped",
+            Self::Completed => "Completed",
+            Self::NeedsAttention => "Needs attention",
+        })
+    }
+}
+
 pub struct Conversation {
     pub id: String,
     notifications: Arc<notifications::Notifications>,
@@ -34,7 +71,7 @@ pub struct Conversation {
     finishing: AtomicBool,
     naming: AtomicBool,
     naming_cancel: CancellationToken,
-    pub status: Mutex<String>,
+    status: Mutex<ConversationStatus>,
     pub turn_usage: Mutex<TurnUsage>,
     cancel: Mutex<CancellationToken>,
     deleted: AtomicBool,
@@ -48,6 +85,12 @@ pub struct Conversation {
     store: Store,
 }
 impl Conversation {
+    pub fn status(&self) -> ConversationStatus {
+        self.status.lock().expect("status lock").clone()
+    }
+    fn set_status(&self, status: ConversationStatus) {
+        *self.status.lock().expect("status lock") = status;
+    }
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
@@ -93,12 +136,11 @@ impl Conversation {
         self.cancel.lock().expect("cancel lock").cancel();
         self.code.stop_all();
         self.notifications.clear(&self.id);
-        *self.status.lock().expect("status lock") = if self.is_running() {
-            "Stopping…"
+        self.set_status(if self.is_running() {
+            ConversationStatus::Stopping
         } else {
-            "Stopped"
-        }
-        .into();
+            ConversationStatus::Stopped
+        });
         self.changed();
     }
     pub fn is_running(&self) -> bool {
@@ -373,7 +415,7 @@ impl Harness {
                 finishing: AtomicBool::new(false),
                 naming: AtomicBool::new(false),
                 naming_cancel: CancellationToken::new(),
-                status: Mutex::new("Ready".into()),
+                status: Mutex::new(ConversationStatus::Ready),
                 turn_usage: Mutex::new(TurnUsage::default()),
                 cancel: Mutex::new(CancellationToken::new()),
                 deleted: AtomicBool::new(false),
@@ -564,7 +606,7 @@ impl Harness {
                 || state.interrupted
                 || state.needs_attention
                 || state.unchecked_completion
-                || *conversation.status.lock().expect("status lock") == "Needs attention"
+                || conversation.status() == ConversationStatus::NeedsAttention
             {
                 bail!(
                     "This session is no longer idle. Open it and finish or review its work before settling it."
@@ -711,7 +753,7 @@ impl Harness {
             let cancel = CancellationToken::new();
             *conversation.cancel.lock().expect("cancel lock") = cancel.clone();
             *conversation.turn_usage.lock().expect("turn usage lock") = TurnUsage::default();
-            *conversation.status.lock().expect("status lock") = "Connecting…".into();
+            conversation.set_status(ConversationStatus::Connecting);
             // cancel() takes the same state lock: it cannot cancel an obsolete
             // token between publishing a running turn and installing its token.
             conversation.turn_generation.fetch_add(1, Ordering::Release);
@@ -761,13 +803,13 @@ impl Harness {
                         format!("Could not save session: {error:#}. Keep Pico open, free disk space or fix permissions, then retry saving."),
                     ));
                 }
-                *conversation.status.lock().expect("status lock") = if cancel.is_cancelled() {
-                    "Stopped"
+                conversation.set_status(if cancel.is_cancelled() {
+                    ConversationStatus::Stopped
                 } else if result.is_ok() && save_result.is_ok() {
-                    "Completed"
+                    ConversationStatus::Completed
                 } else {
-                    "Needs attention"
-                }.into();
+                    ConversationStatus::NeedsAttention
+                });
                 {
                     // Submission/start uses the same state lock. No accepted work can
                     // slip between this final check and the transition to idle.
@@ -811,7 +853,7 @@ impl Harness {
                 let cancelled = cancel.is_cancelled();
                 if let Err(error) = tokio::task::spawn_blocking(move || finish_harness.finish_assignment(&child, result, cancelled)).await.expect("assignment completion worker") {
                     conversation.state.lock().expect("session lock").entries.push(Entry::new(EntryKind::Notice, format!("Could not save/deliver subagent completion: {error:#}. Result retained in memory; fix storage and retry saving before quitting.")));
-                    *conversation.status.lock().expect("status lock") = "Needs attention".into();
+                    conversation.set_status(ConversationStatus::NeedsAttention);
                 }
                 conversation.finishing.store(false, Ordering::Release);
                 }
@@ -880,7 +922,7 @@ impl Harness {
                 > settings.context_limit * u64::from(settings.compact_percent) / 100
                 && compacted_size != Some(snapshot.input.len())
             {
-                *conversation.status.lock().expect("status lock") = "Compacting context…".into();
+                conversation.set_status(ConversationStatus::CompactingContext);
                 conversation.changed();
                 compacted_size = Some(
                     self.compact_context(
@@ -894,7 +936,7 @@ impl Harness {
                 );
                 continue;
             }
-            *conversation.status.lock().expect("status lock") = "Thinking…".into();
+            conversation.set_status(ConversationStatus::Thinking);
             conversation.changed();
             let result = self
                 .respond_and_execute(conversation, &snapshot, &instructions, cancel)
@@ -917,8 +959,7 @@ impl Harness {
                         .lock()
                         .expect("session lock")
                         .in_progress_response = None;
-                    *conversation.status.lock().expect("status lock") =
-                        "Recovering context capacity…".into();
+                    conversation.set_status(ConversationStatus::RecoveringContext);
                     conversation.changed();
                     compacted_size = Some(
                         self.compact_context(
@@ -1745,7 +1786,7 @@ await Promise.all(['first', 'second'].map(async id => {
             .unwrap();
             assert!(!questions.has_pending());
             if stop {
-                assert_eq!(*c.status.lock().unwrap(), "Stopped");
+                assert_eq!(c.status(), ConversationStatus::Stopped);
                 assert!(!c.snapshot().unchecked_completion);
                 if tool == "exec" {
                     assert!(
@@ -1764,7 +1805,7 @@ await Promise.all(['first', 'second'].map(async id => {
                 server.abort();
             } else {
                 server.await.unwrap();
-                assert_eq!(*c.status.lock().unwrap(), "Completed");
+                assert_eq!(c.status(), ConversationStatus::Completed);
                 assert!(
                     c.snapshot()
                         .entries
@@ -2213,7 +2254,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         .await
         .unwrap();
         assert!(conversation.revision() > initial);
-        assert_eq!(*conversation.status.lock().unwrap(), "Needs attention");
+        assert_eq!(conversation.status(), ConversationStatus::NeedsAttention);
         assert!(
             conversation
                 .snapshot()

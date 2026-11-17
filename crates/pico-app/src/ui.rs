@@ -26,7 +26,7 @@ use iced::{
 };
 use pico_core::CancellationToken;
 use pico_core::{
-    agent::{Harness, subagents::ChildStatus},
+    agent::{ConversationStatus, Harness, subagents::ChildStatus},
     auth::Login,
     models::{MODELS, model},
     shell::CommandStatus,
@@ -781,7 +781,7 @@ impl App {
             || s.interrupted
             || s.needs_attention
             || c.as_ref()
-                .is_some_and(|c| *c.status.lock().expect("status lock") == "Needs attention")
+                .is_some_and(|c| c.status() == ConversationStatus::NeedsAttention)
         {
             SessionStatus::Error
         } else if s.unchecked_completion {
@@ -2962,7 +2962,7 @@ impl App {
                 .as_ref()
                 .and_then(|h| h.get(&run.session_id))
                 .filter(|_| run.status == pico_core::agent::subagents::RunStatus::Running)
-                .map(|c| c.status.lock().expect("status lock").clone());
+                .map(|c| c.status().to_string());
             let status_color = if run.status.needs_attention() {
                 DANGER
             } else if activity.is_some() {
@@ -4328,8 +4328,9 @@ impl App {
         let running = conversation.as_ref().is_some_and(|c| c.is_running());
         let status = conversation
             .as_ref()
-            .map(|c| c.status.lock().expect("status lock").clone())
-            .unwrap_or_else(|| "Ready".into());
+            .map(|c| c.status())
+            .unwrap_or_default()
+            .to_string();
         let turn_usage = conversation
             .as_ref()
             .map_or(pico_core::agent::TurnUsage::default(), |c| {
@@ -7650,16 +7651,31 @@ mod tests {
         stored_session(&mut app, path.clone()).await;
         let id = app.selected.clone().unwrap();
         let h = app.harness.as_ref().unwrap().clone();
-        let fail = || {
-            h.edit(&id, |s| {
-                s.needs_attention = true;
-                s.entries
-                    .push(Entry::new(EntryKind::Notice, "Request flagged by provider"));
-            })
-            .unwrap();
-            *h.get(&id).unwrap().status.lock().unwrap() = "Needs attention".into();
+        let fail = async || {
+            // The isolated store has no login: exercise a real terminal transition.
+            let mut changes = h.subscribe();
+            h.start(&id, Settings::default()).unwrap();
+            let c = h.get(&id).unwrap();
+            while c.is_executing() {
+                tokio::time::timeout(Duration::from_secs(3), changes.changed())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            assert_eq!(c.status(), ConversationStatus::NeedsAttention);
         };
-        fail();
+        fail().await;
+        let notice = h
+            .get(&id)
+            .unwrap()
+            .snapshot()
+            .entries
+            .iter()
+            .last()
+            .unwrap()
+            .text
+            .clone();
+        assert!(notice.contains("Sign in"));
         dispatch(&mut app, Message::Changed).await;
         assert!(app.current().unwrap().needs_attention);
         assert!(
@@ -7681,10 +7697,10 @@ mod tests {
         assert!(!h.store.load_session(&id).unwrap().needs_attention);
         assert_eq!(
             app.current().unwrap().entries.iter().last().unwrap().text,
-            "Request flagged by provider"
+            notice
         );
 
-        fail();
+        fail().await;
         dispatch(&mut app, Message::Changed).await;
         dispatch(&mut app, Message::Selected(Err("Selection failed".into()))).await;
         assert!(h.get(&id).unwrap().snapshot().needs_attention);
@@ -8740,14 +8756,9 @@ Then implement the fix.";
         assert!(app.agents_open && !app.settings_open);
         // A terminal run must not display stale runtime activity. The entire
         // card, including its padding outside the labels, opens the child.
-        *app.harness
-            .as_ref()
-            .unwrap()
-            .load(&child_id)
-            .unwrap()
-            .status
-            .lock()
-            .unwrap() = "Thinking…".into();
+        let inactive_child = app.harness.as_ref().unwrap().load(&child_id).unwrap();
+        inactive_child.cancel();
+        assert_eq!(inactive_child.status(), ConversationStatus::Stopped);
         let mut renderer = header_renderer();
         let messages = {
             let mut ui = iced_runtime::UserInterface::build(
@@ -8759,9 +8770,10 @@ Then implement the fix.";
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
             assert!(
-                !bounds.labels.iter().any(|(label, _)| {
-                    matches!(label.as_str(), "Open" | "Stop" | "Thinking…")
-                })
+                !bounds
+                    .labels
+                    .iter()
+                    .any(|(label, _)| { matches!(label.as_str(), "Open" | "Stop" | "Stopped") })
             );
             let profile = bounds.label("Explore");
             let title = bounds.label("Inspect cancellation");
@@ -11025,9 +11037,9 @@ Then implement the fix.";
             text: None,
             repeat: false,
         }));
-        let idle_status = selected.status.lock().unwrap().clone();
+        let idle_status = selected.status();
         dispatch(&mut app, escape.clone()).await;
-        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        assert_eq!(selected.status(), idle_status);
 
         selected.running.store(true, Ordering::Release);
         other.running.store(true, Ordering::Release);
@@ -11040,24 +11052,24 @@ Then implement the fix.";
         assert!(app.context_menu.is_none());
         assert!(app.modal.is_some());
         assert!(app.settings_open);
-        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        assert_eq!(selected.status(), idle_status);
         dispatch(&mut app, escape.clone()).await;
         assert!(app.modal.is_none());
         assert!(app.search_active);
         assert!(app.settings_open);
-        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        assert_eq!(selected.status(), idle_status);
         dispatch(&mut app, escape.clone()).await;
         assert!(!app.search_active);
         assert!(app.search.is_empty());
         assert!(app.settings_open);
-        assert_eq!(*selected.status.lock().unwrap(), idle_status);
+        assert_eq!(selected.status(), idle_status);
         dispatch(&mut app, escape.clone()).await;
         assert!(!app.settings_open);
-        assert_eq!(*selected.status.lock().unwrap(), idle_status);
-        let other_status = other.status.lock().unwrap().clone();
+        assert_eq!(selected.status(), idle_status);
+        let other_status = other.status();
         dispatch(&mut app, escape).await;
-        assert_eq!(*selected.status.lock().unwrap(), "Stopping…");
-        assert_eq!(*other.status.lock().unwrap(), other_status);
+        assert_eq!(selected.status(), ConversationStatus::Stopping);
+        assert_eq!(other.status(), other_status);
         selected.running.store(false, Ordering::Release);
         other.running.store(false, Ordering::Release);
     }

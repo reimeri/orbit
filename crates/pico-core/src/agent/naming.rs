@@ -137,7 +137,7 @@ mod tests {
             }
             until(&h, || !c.is_turn_active()).await;
             assert!(c.naming.load(Ordering::Acquire));
-            assert_eq!(*c.status.lock().unwrap(), "Completed");
+            assert_eq!(c.status(), ConversationStatus::Completed);
             let fallback = c.snapshot().title;
             assert_eq!(fallback, "Diagnose λ cache corruption");
             h.evict_inactive(None).unwrap();

@@ -18,7 +18,7 @@ impl Harness {
             let needs_attention = !c.is_executing()
                 && (state.needs_attention
                     || state.interrupted
-                    || *c.status.lock().expect("status lock") == "Needs attention");
+                    || c.status() == ConversationStatus::NeedsAttention);
             drop(state);
             needs_attention.then_some((c, generation))
         });
@@ -95,7 +95,7 @@ impl Harness {
                 }
                 state.needs_attention = false;
                 state.interrupted = false;
-                *c.status.lock().expect("status lock") = "Ready".into();
+                c.set_status(ConversationStatus::Ready);
                 self.catalog_revision.fetch_add(1, Ordering::Release);
                 c.changed();
             }
@@ -162,6 +162,6 @@ mod tests {
         assert_eq!(state.draft, "Keep this unsent draft λ");
         assert!(state.entries.iter().eq(before.entries.iter()));
         assert!(state.input.iter().eq(before.input.iter()));
-        assert_ne!(*c.status.lock().unwrap(), "Needs attention");
+        assert_ne!(c.status(), ConversationStatus::NeedsAttention);
     }
 }

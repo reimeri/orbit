@@ -14,6 +14,31 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 const SUMMARY_CONTEXT_DIVISOR: u64 = 32;
+const MAX_TRANSIENT_RETRIES: u8 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryStatus {
+    Reconnecting {
+        retry: u8,
+    },
+    ServiceBusy {
+        status: reqwest::StatusCode,
+        delay_secs: u64,
+    },
+}
+impl std::fmt::Display for RetryStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reconnecting { retry } => write!(
+                f,
+                "Connection interrupted; reconnecting ({retry}/{MAX_TRANSIENT_RETRIES})…"
+            ),
+            Self::ServiceBusy { status, delay_secs } => {
+                write!(f, "Service busy ({status}); retrying in {delay_secs}s…")
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Delta {
@@ -22,7 +47,7 @@ pub enum Delta {
         text: String,
         reasoning: bool,
     },
-    Status(String),
+    Retrying(RetryStatus),
     OutputItem {
         index: usize,
         item: Value,
@@ -325,7 +350,10 @@ impl Provider {
         if let Some(tier) = body["service_tier"].as_str() {
             routing_hint.push_str(&format!(";tier={tier}"));
         }
-        for attempt in 0..4 {
+        // A definite 401 gets one credential retry, independent of transport backoff.
+        let mut retried_auth = false;
+        let mut transient_retries = 0;
+        loop {
             let mut request = self
                 .client
                 .post(&self.endpoint)
@@ -341,12 +369,13 @@ impl Provider {
             let response = match tokio::time::timeout(Duration::from_secs(90), request.send()).await
             {
                 Ok(Ok(response)) => response,
-                _ if attempt < 3 => {
-                    emit(Delta::Status(format!(
-                        "Connection interrupted; reconnecting ({}/3)…",
-                        attempt + 1
-                    )));
-                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                _ if transient_retries < MAX_TRANSIENT_RETRIES => {
+                    let delay = Duration::from_secs(1 << transient_retries);
+                    transient_retries += 1;
+                    emit(Delta::Retrying(RetryStatus::Reconnecting {
+                        retry: transient_retries,
+                    }));
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 Ok(Err(error)) => {
@@ -358,21 +387,26 @@ impl Provider {
                 ),
             };
             let status = response.status();
-            if status.as_u16() == 401 && attempt == 0 {
+            if status == reqwest::StatusCode::UNAUTHORIZED && !retried_auth {
+                retried_auth = true;
                 credentials = self.auth.token(Some(&credentials.access_token)).await?;
                 continue;
             }
-            if (status.as_u16() == 429 || status.is_server_error()) && attempt < 3 {
+            if (status.as_u16() == 429 || status.is_server_error())
+                && transient_retries < MAX_TRANSIENT_RETRIES
+            {
                 let delay = response
                     .headers()
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(1 << attempt)
+                    .unwrap_or(1 << transient_retries)
                     .min(30);
-                emit(Delta::Status(format!(
-                    "Service busy ({status}); retrying in {delay}s…"
-                )));
+                transient_retries += 1;
+                emit(Delta::Retrying(RetryStatus::ServiceBusy {
+                    status,
+                    delay_secs: delay,
+                }));
                 tokio::time::sleep(Duration::from_secs(delay)).await;
                 continue;
             }
@@ -386,6 +420,11 @@ impl Provider {
                     Ok(value) => safe_error(&value),
                     Err(_) => crate::output::preserve_bytes(&bytes, 500),
                 };
+                if status == reqwest::StatusCode::UNAUTHORIZED {
+                    bail!(
+                        "ChatGPT still rejected your login ({status}): {error}. Stop running turns, then sign out and sign in again in Settings."
+                    );
+                }
                 bail!(
                     "ChatGPT request failed ({status}): {error}. Check model/access in Settings, then retry."
                 );
@@ -411,9 +450,6 @@ impl Provider {
                 }
             }
         }
-        bail!(
-            "ChatGPT is unavailable after retries. Wait a moment and retry; your session is saved."
-        )
     }
 }
 fn valid_compaction(output: &[Value]) -> bool {
@@ -684,6 +720,75 @@ mod tests {
         let (url, requests, task) = crate::test_support::server(replies).await;
         provider.endpoint = url;
         (dir, provider, requests, task)
+    }
+    #[tokio::test]
+    async fn unauthorized_has_one_refresh_independent_of_transient_retries() {
+        use crate::test_support::{completed, header, server};
+        for final_status in [200, 401] {
+            let (dir, mut provider, mut requests, responses) = fixture([
+                (503, "busy".into()),
+                (401, "expired".into()),
+                (
+                    final_status,
+                    if final_status == 200 {
+                        completed(json!([]))
+                    } else {
+                        "still unauthorized".into()
+                    },
+                ),
+            ])
+            .await;
+            let (issuer, mut refreshes, refresh_server) = server([(200,
+                json!({"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}).to_string()
+            )]).await;
+            provider.auth = Auth::fixture(provider.store.clone(), issuer);
+            let session = Session::new(dir.path().into(), &crate::store::Settings::default());
+            let result = provider
+                .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
+                .await;
+            if final_status == 200 {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.contains("401") && error.contains("sign in again"),
+                    "{error}"
+                );
+            }
+            responses.await.unwrap();
+            refresh_server.await.unwrap();
+            assert!(
+                refreshes
+                    .recv()
+                    .await
+                    .unwrap()
+                    .starts_with("POST /oauth/token ")
+            );
+            let original = requests.recv().await.unwrap();
+            let transient_retry = requests.recv().await.unwrap();
+            let refreshed = requests.recv().await.unwrap();
+            assert_eq!(
+                header(&original, "authorization"),
+                Some("Bearer fixture-access")
+            );
+            assert_eq!(
+                header(&transient_retry, "authorization"),
+                Some("Bearer fixture-access")
+            );
+            assert_eq!(
+                header(&refreshed, "authorization"),
+                Some("Bearer rotated-access")
+            );
+            for retry in [&transient_retry, &refreshed] {
+                assert_eq!(
+                    original.split_once("\r\n\r\n").unwrap().1,
+                    retry.split_once("\r\n\r\n").unwrap().1
+                );
+                for key in ["session-id", "chatgpt-account-id", "x-codex-routing-hint"] {
+                    assert_eq!(header(&original, key), header(retry, key));
+                }
+            }
+        }
     }
     #[tokio::test]
     async fn fast_tier_and_routing_hint_match_across_retries_and_toggle_off() {

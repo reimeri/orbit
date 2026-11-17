@@ -135,8 +135,11 @@ lose details; the original transcript remains the source of truth.
 
 ## Troubleshooting
 
-- **401 / expired login:** stop turns, sign out and sign in again. Refresh is
-  normally automatic; revoked credentials require a fresh login.
+- **401 / expired login:** the Responses provider retries one rejected token per
+  request, independently of its three transient retries. For example, a 503
+  followed by a 401 can still recover automatically. If the new token is also
+  rejected, stop running turns, then sign out and sign in again in Settings.
+  These retries apply before streaming only; an interrupted stream is not replayed.
 - **Model or effort unsupported:** set an available model/effort in Settings or
   the session footer. Model access is account-specific; static suggestions are
   not a service availability guarantee.

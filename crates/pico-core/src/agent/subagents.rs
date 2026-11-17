@@ -954,32 +954,32 @@ mod tests {
             .unwrap();
         let request = f.request().await;
         let child = f.h.get(&run.session_id).unwrap();
-        assert_eq!(child.status.lock().unwrap().clone(), "Thinking…");
+        assert_eq!(child.status(), ConversationStatus::Thinking);
 
         for (event, entry_id, text, expected) in [
             (
                 "response.reasoning_summary_text.delta",
                 "reasoning-1",
                 "Inspecting",
-                "Thinking…",
+                ConversationStatus::Thinking,
             ),
             (
                 "response.output_text.delta",
                 "commentary",
                 "Here is my update",
-                "Writing…",
+                ConversationStatus::Writing,
             ),
             (
                 "response.reasoning_summary_text.delta",
                 "reasoning-2",
                 "Checking again",
-                "Thinking…",
+                ConversationStatus::Thinking,
             ),
             (
                 "response.output_text.delta",
                 "answer",
                 "Finished",
-                "Writing…",
+                ConversationStatus::Writing,
             ),
         ] {
             request
@@ -990,12 +990,12 @@ mod tests {
                 ))
                 .unwrap();
             until(|| child.snapshot().entries.by_id(entry_id).is_some()).await;
-            assert_eq!(child.status.lock().unwrap().clone(), expected);
+            assert_eq!(child.status(), expected);
             assert!(child.is_running());
         }
         request.reply.send(answer("Finished")).unwrap();
         until(|| !child.is_running()).await;
-        assert_eq!(child.status.lock().unwrap().clone(), "Completed");
+        assert_eq!(child.status(), ConversationStatus::Completed);
     }
 
     #[tokio::test]
