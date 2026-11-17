@@ -14,12 +14,15 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 const SUMMARY_CONTEXT_DIVISOR: u64 = 32;
-const MAX_TRANSIENT_RETRIES: u8 = 3;
+const MAX_TRANSIENT_RETRIES: u8 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetryStatus {
     Reconnecting {
         retry: u8,
+    },
+    Overloaded {
+        delay_secs: u64,
     },
     ServiceBusy {
         status: reqwest::StatusCode,
@@ -33,6 +36,9 @@ impl std::fmt::Display for RetryStatus {
                 f,
                 "Connection interrupted; reconnecting ({retry}/{MAX_TRANSIENT_RETRIES})…"
             ),
+            Self::Overloaded { delay_secs } => {
+                write!(f, "ChatGPT is overloaded; retrying in {delay_secs}s…")
+            }
             Self::ServiceBusy { status, delay_secs } => {
                 write!(f, "Service busy ({status}); retrying in {delay_secs}s…")
             }
@@ -73,6 +79,15 @@ impl std::fmt::Display for ContextLimit {
     }
 }
 impl std::error::Error for ContextLimit {}
+#[derive(Debug)]
+struct Overload(String);
+impl std::fmt::Display for Overload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ChatGPT response failed or incomplete: {}", self.0)
+    }
+}
+impl std::error::Error for Overload {}
+
 fn is_context_limit(body: &Value) -> bool {
     matches!(
         body["error"]["code"].as_str(),
@@ -353,7 +368,7 @@ impl Provider {
         // A definite 401 gets one credential retry, independent of transport backoff.
         let mut retried_auth = false;
         let mut transient_retries = 0;
-        loop {
+        'request: loop {
             let mut request = self
                 .client
                 .post(&self.endpoint)
@@ -429,8 +444,6 @@ impl Provider {
                     "ChatGPT request failed ({status}): {error}. Check model/access in Settings, then retry."
                 );
             }
-            // Never replay an interrupted stream: completed calls may already be executing.
-            // Partial arguments never release a call.
             let mut stream = response.bytes_stream();
             let mut decoder = Sse::default();
             let mut response_stream = ResponseStream::default();
@@ -444,8 +457,24 @@ impl Provider {
                 for event in decoder.push(&chunk.context(
                     "ChatGPT connection interrupted during streaming; retry to continue",
                 )?)? {
-                    if let Some(response) = response_stream.event(event, emit, Instant::now())? {
-                        return Ok(response);
+                    match response_stream.event(event, emit, Instant::now()) {
+                        Ok(Some(response)) => return Ok(response),
+                        Ok(None) => {}
+                        // Replay only an explicit overload before generated output.
+                        // Completed items may already have launched tools.
+                        Err(error)
+                            if error.is::<Overload>()
+                                && response_stream.first_token.is_none()
+                                && response_stream.completed_items.is_empty()
+                                && transient_retries < MAX_TRANSIENT_RETRIES =>
+                        {
+                            let delay_secs = 1 << transient_retries;
+                            transient_retries += 1;
+                            emit(Delta::Retrying(RetryStatus::Overloaded { delay_secs }));
+                            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                            continue 'request;
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
             }
@@ -677,14 +706,24 @@ impl ResponseStream {
                     },
                 }));
             }
-            "response.failed" | "response.incomplete" | "error" => bail!(
-                "ChatGPT response failed or incomplete: {}",
-                safe_error(if event["response"].is_object() {
+            "response.failed" | "response.incomplete" | "error" => {
+                let body = if event["response"].is_object() {
                     &event["response"]
                 } else {
                     &event
-                })
-            ),
+                };
+                let message = safe_error(body);
+                let error = body.get("error").unwrap_or(body);
+                if matches!(
+                    error["code"].as_str(),
+                    Some("server_overloaded" | "overloaded")
+                ) || message.trim().eq_ignore_ascii_case(
+                    "Our servers are currently overloaded. Please try again later.",
+                ) {
+                    return Err(Overload(message).into());
+                }
+                bail!("ChatGPT response failed or incomplete: {message}");
+            }
             _ => {}
         }
         Ok(None)
@@ -954,6 +993,38 @@ mod tests {
         assert!(media.thumbnail.unwrap().exists());
         server.await.unwrap();
     }
+    #[tokio::test]
+    async fn overload_retries_before_output_but_not_after_a_completed_call() {
+        let overloaded = json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later."}}});
+        let failure = format!("data: {overloaded}\n\n");
+        let call = json!({"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","call_id":"c","name":"exec","input":"text(1)"}});
+        let (dir, provider, mut requests, server) = fixture([
+            (200, failure.clone()),
+            (200, crate::test_support::completed(json!([]))),
+            (200, format!("data: {call}\n\n{failure}")),
+            (400, "unexpected replay".into()),
+        ])
+        .await;
+        let session = Session::new(dir.path().into(), &crate::store::Settings::default());
+        let cancel = CancellationToken::new();
+        provider
+            .respond(&session, "fixture", &cancel, &|_| {})
+            .await
+            .unwrap();
+        let original = requests.recv().await.unwrap();
+        let retry = requests.recv().await.unwrap();
+        assert_eq!(
+            original.split_once("\r\n\r\n").unwrap().1,
+            retry.split_once("\r\n\r\n").unwrap().1
+        );
+        let error = provider
+            .respond(&session, "fixture", &cancel, &|_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("currently overloaded"));
+        server.abort();
+    }
+
     #[tokio::test]
     async fn truncated_stream_reports_failure_without_retrying() {
         let partial = "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"partial\"}\n\n";

@@ -136,10 +136,12 @@ lose details; the original transcript remains the source of truth.
 ## Troubleshooting
 
 - **401 / expired login:** the Responses provider retries one rejected token per
-  request, independently of its three transient retries. For example, a 503
+  request, independently of its five transient retries. For example, a 503
   followed by a 401 can still recover automatically. If the new token is also
   rejected, stop running turns, then sign out and sign in again in Settings.
-  These retries apply before streaming only; an interrupted stream is not replayed.
+  An explicit stream overload before generated output also uses the transient retry
+  budget, waiting 1, 2, 4, 8, then 16 seconds. Once output begins or a completed item is
+  received, Pico does not replay the request: tools may already have run.
 - **Model or effort unsupported:** set an available model/effort in Settings or
   the session footer. Model access is account-specific; static suggestions are
   not a service availability guarantee.
