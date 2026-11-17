@@ -208,6 +208,13 @@ overlay, with no solid panel. Images retain their natural size unless they must
 shrink to fit the window. Path, resolution and byte size appear in a compact,
 translucent panel at the image’s top left only while hovering over the image.
 Long paths and URLs are ellipsized to keep the panel compact.
+Clicking a loaded chat preview (including Markdown images and attachments) smoothly
+expands it from its visible position into the centered viewer, while the backdrop
+fades in. Closing reverses the transition; it can also interrupt an opening
+animation. The preview remains visible until the original has both decoded and
+finished uploading to the GPU, so large images cannot leave a blank handoff frame.
+If the window was resized or the transcript changed/scrolled, closing fades in
+place instead of returning to stale thumbnail coordinates.
 Click the image or outside it, or press Escape, to close. GIFs animate with an
 icon-only Play/Pause button centered below the image. Closing the modal cancels
 obsolete decoding and stops animation subscriptions. Decoding runs on workers,

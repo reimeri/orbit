@@ -261,6 +261,11 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             viewport,
         );
         shell.merge(child_shell, |message| match message {
+            Message::OpenImageFrom(message, mut source) => {
+                let position = cursor.position().expect("image activation has a cursor");
+                source.translate(Vector::new(position.x, position.y));
+                Message::OpenImageFrom(message, source)
+            }
             Message::Press(press) => {
                 // MouseArea only emits press requests while the pointer is over it.
                 // Read the root cursor: descendants of Scrollable see translated coordinates.

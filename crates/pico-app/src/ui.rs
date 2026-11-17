@@ -17,7 +17,7 @@ use crate::{
 use iced::Theme;
 use iced::futures::SinkExt;
 use iced::{
-    Color, Element, Fill, Subscription, Task, keyboard, mouse,
+    Color, Element, Fill, Size, Subscription, Task, keyboard, mouse,
     widget::{
         self, checkbox, column, container, markdown, mouse_area, opaque, pick_list, row,
         scrollable, slider, space, stack, text, text_editor, text_input, tooltip,
@@ -214,6 +214,7 @@ pub enum Message {
     Notification(crate::notifications::Message),
     Image(crate::image_view::Message),
     OpenImage(pico_core::media::Media),
+    OpenImageFrom(Box<Message>, crate::image_transition::Source),
     MarkdownImage(crate::markdown_images::Message),
     OpenMarkdownImage(String),
     RetryMarkdownImage(String),
@@ -1083,7 +1084,23 @@ impl App {
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let geometry = (
+            self.view_epoch,
+            self.transcript.offset,
+            self.transcript.viewport,
+            self.transcript.total(),
+        );
         let task = self.update_inner(message);
+        if geometry
+            != (
+                self.view_epoch,
+                self.transcript.offset,
+                self.transcript.viewport,
+                self.transcript.total(),
+            )
+        {
+            self.image_view.invalidate_return();
+        }
         if !self.smoke
             && let Some(h) = &self.harness
         {
@@ -1237,6 +1254,9 @@ impl App {
             Message::Image(message) => {
                 let skipped = matches!(message, crate::image_view::Message::Thumbnail(_, None));
                 self.image_view.update(message);
+                if self.image_view.finished_closing() {
+                    self.modal = None;
+                }
                 if skipped {
                     self.prepare_visible();
                 }
@@ -1255,6 +1275,22 @@ impl App {
                     self.modal = Some(Modal::MarkdownImage(image));
                     return task;
                 }
+            }
+            Message::OpenImageFrom(message, source) => {
+                let task = self.update_inner(*message);
+                let (natural, gif) = match &self.modal {
+                    Some(Modal::Image(media)) => (
+                        Size::new(media.width as f32, media.height as f32),
+                        media.mime == "image/gif",
+                    ),
+                    Some(Modal::MarkdownImage(image)) => (
+                        Size::new(image.width as f32, image.height as f32),
+                        image.bytes.starts_with(b"GIF8"),
+                    ),
+                    _ => return task,
+                };
+                self.image_view.animate_from(source, natural, gif);
+                return task;
             }
             Message::OpenImage(media) => {
                 let task = self.image_view.open(&media).map(Message::Image);
@@ -1448,6 +1484,9 @@ impl App {
             Message::Changed => {
                 let before = self.catalog_revision;
                 let changed = self.refresh();
+                if changed {
+                    self.image_view.invalidate_return();
+                }
                 if before != self.catalog_revision
                     && !self.io_busy
                     && !self.closing
@@ -1883,7 +1922,11 @@ impl App {
             Message::Folder(Some(path)) => self.modal_input = path.display().to_string(),
             Message::Folder(None) => {}
             Message::ModalInput(value) => self.modal_input = value,
-            Message::Dismiss => self.modal = None,
+            Message::Dismiss => {
+                if !self.image_view.request_close(std::time::Instant::now()) {
+                    self.modal = None;
+                }
+            }
             Message::Confirm => return self.confirm(),
             Message::Rename(id) => {
                 self.context_menu = None;
@@ -2256,7 +2299,7 @@ impl App {
                         }
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
-                            self.modal = None;
+                            return self.update_inner(Message::Dismiss);
                         } else if self.search_active {
                             return self.update_inner(Message::ToggleSearch);
                         } else if self.settings_open {
@@ -2629,7 +2672,13 @@ impl App {
         if let Some(modal) = &self.modal {
             let shade = mouse_area(container(space().width(Fill).height(Fill)).style(|_| {
                 container::Style {
-                    background: Some(theme::SCRIM.into()),
+                    background: Some(
+                        iced::Color {
+                            a: theme::SCRIM.a * self.image_view.backdrop_opacity(),
+                            ..theme::SCRIM
+                        }
+                        .into(),
+                    ),
                     ..Default::default()
                 }
             }))
@@ -6657,6 +6706,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_zoom_keeps_modal_until_dismiss_or_escape_animation_finishes() {
+        let mut app = app();
+        let root = app.smoke_dir.as_ref().unwrap().clone();
+        let media = pico_core::media::MediaStore::new(root.join("zoom-media"))
+            .image(include_bytes!("fixtures/media.png"))
+            .unwrap();
+        for dismiss in [Message::Dismiss, footer_key(keyboard::key::Named::Escape)] {
+            let handle = widget::image::Handle::from_rgba(120, 40, vec![255; 120 * 40 * 4]);
+            let message = crate::image_transition::tests::activate(
+                crate::image_transition::preview(
+                    theme::button(widget::image(handle.clone()))
+                        .padding(0)
+                        .on_press(Message::OpenImage(media.clone())),
+                    handle,
+                ),
+                iced::Point::new(30., 20.),
+            );
+            dispatch(&mut app, message).await;
+            assert!(matches!(app.modal, Some(Modal::Image(_))));
+            // Advance far beyond the transition, as if the window was suspended.
+            dispatch(
+                &mut app,
+                Message::Image(crate::image_view::Message::Tick(
+                    std::time::Instant::now() + Duration::from_secs(86400),
+                )),
+            )
+            .await;
+            assert_eq!(app.image_view.backdrop_opacity(), 1.);
+            dispatch(&mut app, dismiss.clone()).await;
+            assert!(
+                app.modal.is_some(),
+                "closing must keep the modal and its input barrier alive"
+            );
+            dispatch(&mut app, dismiss).await;
+            dispatch(
+                &mut app,
+                Message::Image(crate::image_view::Message::Tick(
+                    std::time::Instant::now() + Duration::from_secs(86400),
+                )),
+            )
+            .await;
+            assert!(app.modal.is_none());
+            assert!(
+                iced_runtime::futures::subscription::into_recipes(app.image_view.subscription())
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn image_settings_credentials_and_modal_survive_real_ui_updates() {
         let mut app = app();
         dispatch(&mut app, Message::ToggleSettings).await;
@@ -6819,12 +6918,25 @@ mod tests {
     }
     async fn drain(app: &mut App, task: Task<Message>) {
         use iced::futures::StreamExt;
+        let mut image_renderer = None;
         let mut pending = std::collections::VecDeque::from([task]);
         while let Some(task) = pending.pop_front() {
             if let Some(mut stream) = iced_runtime::task::into_stream(task) {
                 while let Some(action) = stream.next().await {
-                    if let iced_runtime::Action::Output(message) = action {
-                        pending.push_back(app.update(message));
+                    match action {
+                        iced_runtime::Action::Output(message) => {
+                            pending.push_back(app.update(message))
+                        }
+                        iced_runtime::Action::Image(iced_runtime::image::Action::Allocate(
+                            handle,
+                            sender,
+                        )) => {
+                            use iced::advanced::image::Renderer as _;
+                            let renderer = image_renderer
+                                .get_or_insert_with(|| crate::test_renderer::new(16.));
+                            sender.send(renderer.load_image(&handle)).unwrap();
+                        }
+                        _ => {}
                     }
                 }
             }

@@ -10,6 +10,8 @@ iced = { version = "0.14.0", default-features = false, features = [
     "wgpu", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs", "svg",
 ] }
 
+iced_runtime = "0.14"
+
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 url = "2"
@@ -27,5 +29,4 @@ workspace = true
 pollster = "0.4"
 tempfile = "3"
 iced_wgpu = { version = "0.14", default-features = false }
-iced_runtime = "0.14"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

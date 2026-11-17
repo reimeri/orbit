@@ -198,16 +198,18 @@ impl Cache {
                 (available.width.min(MAX_PREVIEW_WIDTH) / width).min(MAX_PREVIEW_HEIGHT / height);
             let size = Size::new(width * scale, height * scale);
             let content: Element<'_, crate::ui::Message> = match &result {
-                Some(Ok(loaded)) => theme::button(
-                    image(loaded.preview.clone())
-                        .width(size.width)
-                        .height(size.height)
-                        .content_fit(iced::ContentFit::Contain),
-                )
-                .padding(0)
-                .on_press(crate::ui::Message::OpenMarkdownImage(url.clone()))
-                .style(theme::text_button)
-                .into(),
+                Some(Ok(loaded)) => crate::image_transition::preview(
+                    theme::button(
+                        image(loaded.preview.clone())
+                            .width(size.width)
+                            .height(size.height)
+                            .content_fit(iced::ContentFit::Contain),
+                    )
+                    .padding(0)
+                    .on_press(crate::ui::Message::OpenMarkdownImage(url.clone()))
+                    .style(theme::text_button),
+                    loaded.preview.clone(),
+                ),
                 // The whole rectangle retries, even if the aspect ratio leaves
                 // too little room for a separate padded button. Details live in
                 // an overlay, not in the chat flow.

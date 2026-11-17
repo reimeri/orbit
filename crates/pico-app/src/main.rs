@@ -8,6 +8,7 @@ mod file_completion;
 mod git;
 mod growing_editor;
 mod icons;
+mod image_transition;
 mod image_view;
 mod io_worker;
 mod keyed_column;
