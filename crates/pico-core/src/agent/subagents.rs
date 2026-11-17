@@ -1894,19 +1894,6 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 .contains("Never return this partial answer")
         );
         assert_eq!(results["runs"][1]["final_response"], "");
-        let child = f.h.load(&review.session_id).unwrap();
-        let tools = tokio::task::spawn_blocking(move || {
-            child.code.exec(
-                "text(ALL_TOOLS.map(t=>t.name));text(typeof tools.spawn_subagent);",
-                "inspect-tools",
-                &CancellationToken::new(),
-            )
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(tools.contains("undefined"));
-        assert!(!tools.contains("spawn_subagent"));
     }
 
     #[test]

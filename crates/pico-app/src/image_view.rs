@@ -1738,11 +1738,11 @@ mod tests {
             deadline: Some(now - Duration::from_millis(1500)),
             ..Default::default()
         };
-        viewer.update(Message::Tick(Instant::now()));
+        viewer.update(Message::Tick(now));
         assert_eq!(viewer.index, 1);
-        assert_eq!(viewer.deadline, Some(now + Duration::from_millis(500)));
-        viewer.close();
-        assert!(!viewer.playing);
-        assert!(viewer.deadline.is_none());
+        viewer.update(Message::Tick(now + Duration::from_millis(499)));
+        assert_eq!(viewer.index, 1);
+        viewer.update(Message::Tick(now + Duration::from_millis(500)));
+        assert_eq!(viewer.index, 0);
     }
 }

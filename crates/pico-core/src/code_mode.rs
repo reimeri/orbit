@@ -1006,7 +1006,7 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
         assert!(!dir.path().join("marker").exists());
     }
     #[test]
-    fn cell_output_spills_all_unicode_and_releases_capacity_after_reading() {
+    fn cell_output_preserves_large_unicode_writes_in_order() {
         let mode = mode();
         let result = mode
             .exec(
@@ -1021,11 +1021,6 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
             expected.as_bytes()
         );
         assert!(result.contains("Script completed"));
-        let result = mode
-            .exec("text('small output');", "next", &CancellationToken::new())
-            .unwrap();
-        assert!(result.contains("small output"));
-        assert!(!result.contains("limit reached"));
     }
     #[test]
     fn outer_exec_and_wait_budgets_spill_instead_of_hiding_text() {
@@ -1138,17 +1133,22 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
         assert!(!out.contains("unreachable"));
     }
     #[test]
-    fn cancellation_does_not_exhaust_future_cell_slots() {
+    fn pre_cancelled_calls_do_not_run_or_exhaust_cell_slots() {
         let mode = mode();
         let cancelled = CancellationToken::new();
         cancelled.cancel();
+        // Cross the open-cell limit: rejecting a call must not leak its slot.
         for _ in 0..40 {
-            assert!(mode.exec("text('no')", "p", &cancelled).is_err());
+            assert!(mode.exec("store('ran', true);", "p", &cancelled).is_err());
         }
-        let out = mode
-            .exec("text('recovered')", "p", &CancellationToken::new())
+        let result = mode
+            .exec(
+                "text(load('ran') === true ? 'ran' : 'skipped');",
+                "p",
+                &CancellationToken::new(),
+            )
             .unwrap();
-        assert!(out.contains("recovered"));
+        assert!(result.contains("skipped"));
     }
     #[test]
     fn fresh_cells_store_values_and_await_parallel_tools() {

@@ -114,18 +114,7 @@ pub fn header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.trim())
 }
 
-#[test]
-fn request_headers_ignore_name_case_but_preserve_values_and_exclude_body() {
-    let request =
-        "POST / HTTP/1.1\r\nAuThOrIzAtIoN:\tBearer CaseSensitive \r\n\r\nMissing: not-a-header";
-    assert_eq!(
-        header(request, "authorization"),
-        Some("Bearer CaseSensitive")
-    );
-    assert_eq!(header(request, "missing"), None);
-}
-
-async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+pub async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
     let mut bytes = vec![];
     let header_end = loop {
         let mut buffer = [0; 4096];

@@ -665,12 +665,16 @@ mod tests {
             )
             .unwrap();
         tools.auth = Auth::new(tools.store.clone()).unwrap();
-        let (url, mut requests, task) = server(vec![(
-            503,
-            json!({"error":{"message":"subscription-token unavailable"}}).to_string(),
-        )])
+        let (url, mut requests, task) = server([
+            (
+                503,
+                json!({"error":{"message":"subscription-token unavailable"}}).to_string(),
+            ),
+            (200, response(&png())), // Any retry or billing fallback would publish a file.
+        ])
         .await;
-        tools.codex_endpoint = url;
+        tools.codex_endpoint = format!("{url}/codex");
+        tools.api_endpoint = format!("{url}/api");
         let error = tools
             .call(
                 "image_gen__imagegen",
@@ -692,8 +696,11 @@ mod tests {
             Some("account-id")
         );
         assert!(!request.contains("must-not-use"));
-        task.await.unwrap();
-        assert!(requests.recv().await.is_none());
+        assert!(matches!(
+            requests.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        task.abort();
         assert!(!dir.path().join("icon.png").exists());
     }
     #[tokio::test]
@@ -701,6 +708,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut tools = fixture(dir.path(), true);
         api(&tools);
+        let (url, mut requests, task) = server(vec![(200, response(&png()))]).await;
+        tools.api_endpoint = url.clone();
+        tools.codex_endpoint = url;
         for (args, expected) in [
             (
                 json!({"prompt":"x","output_path":"bad.png","gif":{}}),
@@ -732,8 +742,13 @@ mod tests {
                 .to_string();
             assert!(error.contains(expected), "{error}");
         }
-        let (url, _requests, task) = server(vec![(200, response(&png()))]).await;
-        tools.api_endpoint = url;
+        assert!(
+            matches!(
+                requests.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "invalid requests must not reach the backend"
+        );
         let error = tools
             .call(
                 "image_gen__imagegen",
@@ -851,8 +866,7 @@ mod tests {
             fs::read(dir.path().join("race.png")).unwrap(),
             b"competitor"
         );
-        let recovered = tools.media.image(&png()).unwrap();
-        assert_eq!(fs::read(recovered.path).unwrap(), png());
+        assert_eq!(crate::test_support::saved_output(&error), png());
         server.await.unwrap();
     }
     #[test]

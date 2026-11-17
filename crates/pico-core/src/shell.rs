@@ -742,14 +742,14 @@ mod tests {
                 )
             });
             let deadline = Instant::now() + Duration::from_secs(3);
-            while shell.processes.lock().unwrap().is_empty() {
+            while !shell.has_running_commands() {
                 assert!(Instant::now() < deadline);
                 thread::yield_now();
             }
             cancel.cancel();
             assert!(job.join().unwrap().is_err());
-            assert!(shell.processes.lock().unwrap().is_empty());
         }
+        // More than a full set of cancelled commands must still leave room to run.
         assert!(
             shell
                 .exec(
@@ -772,9 +772,10 @@ mod tests {
     }
     #[test]
     fn blocked_pty_input_can_be_cancelled() {
-        let shell = Arc::new(Shell::new(std::env::temp_dir()));
+        let dir = tempfile::tempdir().unwrap();
+        let shell = Arc::new(Shell::new(dir.path().into()));
         let cancel = CancellationToken::new();
-        let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"stty -echo -icanon; printf ready; sleep 20", "tty":true,"login":false,"yield_time_ms":30})).unwrap(), &cancel).unwrap();
+        let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"stty -echo -icanon; dd bs=1 count=1 of=/dev/null 2>/dev/null && touch received; exec sleep 20", "tty":true,"login":false,"yield_time_ms":30})).unwrap(), &cancel).unwrap();
         let session_id = running_id(&first.text);
         let worker = shell.clone();
         let token = cancel.clone();
@@ -791,10 +792,28 @@ mod tests {
             );
             tx.send(result).unwrap();
         });
-        thread::sleep(Duration::from_millis(30));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.path().join("received").exists() {
+            assert!(Instant::now() < deadline, "PTY received no input");
+            thread::sleep(Duration::from_millis(2));
+        }
         cancel.cancel();
-        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap().is_err());
-        shell.stop_all();
+        let error = rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        let poll = shell.write(
+            StdinArgs {
+                session_id,
+                chars: String::new(),
+                yield_time_ms: 0,
+                max_output_tokens: None,
+            },
+            &CancellationToken::new(),
+        );
+        assert!(poll.err().unwrap().to_string().contains("closed"));
     }
     #[test]
     fn yielded_output_is_consumed_once_and_stderr_is_kept() {

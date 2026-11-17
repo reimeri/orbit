@@ -479,7 +479,7 @@ mod tests {
                             background: Some(color.into()),
                             ..Default::default()
                         });
-                        (id, true, button.into())
+                        (id, true, mouse_area(button).on_right_press(id + 100).into())
                     })
                     .collect(),
             )
@@ -534,6 +534,7 @@ mod tests {
         for event in [
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
         ] {
             content.as_widget_mut().update(
                 &mut tree,
@@ -546,7 +547,11 @@ mod tests {
                 &viewport,
             );
         }
-        assert_eq!(messages, [2], "the visually topmost row owns the hit");
+        assert_eq!(
+            messages,
+            [2, 102],
+            "the visually topmost row owns both hits"
+        );
     }
 
     #[test]
@@ -662,54 +667,5 @@ mod tests {
                 );
             }
         }
-    }
-    #[test]
-    fn crossing_rows_select_and_open_the_menu_of_the_topmost_session() {
-        let renderer = crate::test_renderer::new(16.);
-        let limits = layout::Limits::new(Size::ZERO, Size::new(200., 400.));
-        let viewport = Rectangle::with_size(Size::new(200., 400.));
-        let mut content = buttons(&[(1, 40.), (2, 40.)]);
-        let mut tree = Tree::new(&content);
-        let start = tree.state.downcast_ref::<State<usize>>().now;
-        content
-            .as_widget_mut()
-            .layout(&mut tree, &renderer, &limits);
-        content = buttons(&[(2, 40.), (1, 40.)]);
-        content.as_widget().diff(&mut tree);
-        tree.state.downcast_mut::<State<usize>>().now = start;
-        content
-            .as_widget_mut()
-            .layout(&mut tree, &renderer, &limits);
-        tree.state.downcast_mut::<State<usize>>().now = start + DURATION / 2;
-        let node = content
-            .as_widget_mut()
-            .layout(&mut tree, &renderer, &limits);
-        let overlap = node.children()[0]
-            .bounds()
-            .intersection(&node.children()[1].bounds())
-            .expect("crossing rows overlap");
-        let cursor = mouse::Cursor::Available(overlap.center());
-        let mut messages = Vec::new();
-        for event in [
-            mouse::Event::ButtonPressed(mouse::Button::Left),
-            mouse::Event::ButtonReleased(mouse::Button::Left),
-            mouse::Event::ButtonPressed(mouse::Button::Right),
-        ] {
-            content.as_widget_mut().update(
-                &mut tree,
-                &Event::Mouse(event),
-                Layout::new(&node),
-                cursor,
-                &renderer,
-                &mut clipboard::Null,
-                &mut Shell::new(&mut messages),
-                &viewport,
-            );
-        }
-        assert_eq!(
-            messages,
-            [1, 101],
-            "last drawn session must win overlapping input"
-        );
     }
 }

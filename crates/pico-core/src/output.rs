@@ -203,9 +203,8 @@ mod tests {
         buffer.append(b"\xffafter", 0);
         let error = buffer.read(100).unwrap_err();
         assert!(format!("{error:#}").contains("retained for retry"));
-        assert_eq!(buffer.pending, b"before\xffafter");
         buffer.spill = Some(Spill::new().unwrap());
         assert_eq!(saved_output(&buffer.read(100).unwrap()), b"before\xffafter");
-        assert!(buffer.is_empty());
+        assert_eq!(buffer.read(100).unwrap(), "");
     }
 }

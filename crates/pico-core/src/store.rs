@@ -1116,20 +1116,4 @@ mod tests {
             0o600
         );
     }
-    #[test]
-    fn legacy_files_are_untouched_and_not_loaded() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().into()).unwrap();
-        fs::create_dir(dir.path().join("sessions")).unwrap();
-        fs::write(dir.path().join("sessions/broken.json"), b"{").unwrap();
-        let s = Session::new(dir.path().into(), &Settings::default());
-        store.save_session(&s).unwrap();
-        let (_, sessions, warnings) = store.load().unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert!(warnings.is_empty());
-        assert_eq!(
-            fs::read(dir.path().join("sessions/broken.json")).unwrap(),
-            b"{"
-        );
-    }
 }

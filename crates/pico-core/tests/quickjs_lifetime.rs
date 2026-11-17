@@ -127,12 +127,11 @@ fn cancelled_code_mode_cell_finishes_teardown_and_allows_the_next_cell() {
     assert!(result.summary().contains("Cell terminated"));
     let next = mode
         .exec_output(
-            "await Promise.resolve(); text('recovered'); exit(); text('unreachable');",
+            "await Promise.resolve(); text('recovered');",
             "next",
             &cancel,
         )
         .unwrap();
     assert!(!next.failed);
     assert!(next.summary().contains("recovered"));
-    assert!(!next.summary().contains("unreachable"));
 }

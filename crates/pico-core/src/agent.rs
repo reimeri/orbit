@@ -2389,42 +2389,39 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         assert!(!conversation.is_running());
         assert!(conversation.revision() > settled);
         assert_eq!(
-            conversation.snapshot().pending_tool_outputs[0]["output"],
+            harness
+                .store
+                .load_session(&id)
+                .unwrap()
+                .pending_tool_outputs[0]["output"],
             "after foreground turn"
         );
     }
     #[test]
-    fn background_notifications_are_durable_and_deleted_sessions_stay_deleted() {
+    fn deleting_a_session_stops_its_yielded_tool_without_recreating_the_session() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().into()).unwrap();
-        let session = Session::new(dir.path().into(), &Settings::default());
-        let id = session.id.clone();
-        store.save_session(&session).unwrap();
+        let store = Store::open(dir.path().join("state")).unwrap();
         let harness = Harness::new(store.clone(), vec![]).unwrap();
-        harness.insert(session);
-        let conversation = harness.get(&id).unwrap();
-        conversation
-            .code
-            .exec(
-                "notify('durable progress');",
-                "old-call",
-                &CancellationToken::new(),
-            )
-            .unwrap();
-        let (_, saved, _) = store.load().unwrap();
-        assert_eq!(
-            store
-                .load_session(&saved[0].id)
-                .unwrap()
-                .pending_tool_outputs[0]["output"],
-            "durable progress"
-        );
-        conversation.code.exec("// @exec: {\"yield_time_ms\": 5}\ntext(await tools.exec_command({cmd:'sleep 1; printf done',login:false,yield_time_ms:2000}));", "parent", &CancellationToken::new()).unwrap();
-        harness.remove(&id).unwrap();
-        std::thread::sleep(Duration::from_millis(80));
-        assert!(!store.root().join(format!("sessions/{id}.json")).exists());
+        let c = harness.insert(Session::new(dir.path().into(), &Settings::default()));
+        // The marker is written by the nested command, not by the JS caller:
+        // deletion must race with real work rather than an unstarted cell.
+        c.code.exec(r#"// @exec: {"yield_time_ms": 1}
+            text(await tools.exec_command({cmd:"touch started; exec sleep 60",login:false,yield_time_ms:60000}));"#,
+            "background", &CancellationToken::new()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.path().join("started").exists() {
+            assert!(Instant::now() < deadline, "command did not start");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        harness.remove(&c.id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while c.is_executing() {
+            assert!(Instant::now() < deadline, "deleted session still executing");
+            std::thread::sleep(Duration::from_millis(2));
+        }
         assert!(store.load().unwrap().1.is_empty());
     }
+
     #[test]
     fn image_snapshots_persist_and_cleanup_failure_never_resurrects_deleted_sessions() {
         let dir = tempfile::tempdir().unwrap();

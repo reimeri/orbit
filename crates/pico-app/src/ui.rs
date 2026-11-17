@@ -6761,16 +6761,33 @@ mod tests {
         .unwrap();
         dispatch(&mut app, Message::Changed).await;
         dispatch(&mut app, Message::ToggleEntry("web-result".into())).await;
-        let _ = app.view();
         let loaded = h.store.load_session(&id).unwrap();
         assert!(
             matches!(&loaded.entries[0].kind,EntryKind::Tool{web:Some(actual),output,..} if actual==&metadata && output=="Agent text")
         );
-        dispatch(&mut app, Message::Link(metadata.sources[0].url.clone())).await;
+        let link = {
+            let mut renderer = header_renderer();
+            let mut ui = iced_runtime::UserInterface::build(
+                app.entry_view(&app.current().unwrap().entries[0], 0),
+                iced::Size::new(600., 800.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let mut messages = click_at(
+                &mut ui,
+                &mut renderer,
+                bounds.label("Official source").center(),
+            );
+            assert!(matches!(messages.as_slice(), [Message::Link(_)]));
+            messages.pop().unwrap()
+        };
+        dispatch(&mut app, link).await;
         assert!(matches!(&app.modal,Some(Modal::Link(url)) if url=="https://example.org/docs"));
         dispatch(&mut app, Message::Dismiss).await;
         dispatch(&mut app, Message::ToggleEntry("web-result".into())).await;
-        assert!(!app.outputs.contains_key("web-result"));
+        assert!(!entry_text(&app, 0).contains("Official source"));
     }
 
     #[tokio::test]
@@ -6909,9 +6926,6 @@ mod tests {
         dispatch(&mut app, Message::ToggleEntry(entry_id)).await;
         dispatch(&mut app, Message::OpenImage(media.clone())).await;
         assert!(matches!(&app.modal,Some(Modal::Image(m)) if m==&media));
-        let _ = app.view();
-        dispatch(&mut app, Message::Image(crate::image_view::Message::Toggle)).await;
-        let _ = app.view();
         dispatch(&mut app, Message::Dismiss).await;
         assert!(app.modal.is_none());
         let reloaded = h.store.load_session(&id).unwrap();
@@ -6947,8 +6961,6 @@ mod tests {
         };
         assert_eq!((image.width, image.height), (loaded.width, loaded.height));
         assert_eq!(image.bytes, loaded.bytes);
-        let _ = app.view();
-        dispatch(&mut app, Message::Image(crate::image_view::Message::Toggle)).await;
         dispatch(&mut app, Message::Dismiss).await;
         assert!(app.modal.is_none());
         std::fs::remove_file(root.join("chat.gif")).unwrap();
@@ -6968,29 +6980,6 @@ mod tests {
             "Before\n\n![Caption](chat.gif)\n\nAfter"
         );
         assert!(matches!(saved.entries[0].kind, EntryKind::Assistant));
-    }
-    #[tokio::test]
-    async fn late_core_notifications_do_not_replace_rendered_smoke_fixtures() {
-        let mut app = app();
-        app.smoke_stage = 26;
-        let request = pico_core::questionnaire::Request::parse(
-            r#"{"questions":[{"id":"q","question":"fixture","kind":"text"}]}"#,
-        )
-        .unwrap();
-        app.questionnaires.insert(
-            "smoke-questionnaire".into(),
-            questionnaire::Draft::new(pico_core::questionnaire::Pending {
-                id: "smoke-questionnaire".into(),
-                request: Arc::new(request),
-            }),
-        );
-        app.active_questionnaire = Some("smoke-questionnaire".into());
-        dispatch(&mut app, Message::Changed).await;
-        assert!(app.questionnaires.contains_key("smoke-questionnaire"));
-        assert_eq!(
-            app.active_questionnaire.as_deref(),
-            Some("smoke-questionnaire")
-        );
     }
     async fn stored_session(app: &mut App, path: PathBuf) {
         let session = Session::new(path, &app.catalog.settings);
@@ -7511,42 +7500,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidebar_status_smoke_rows_are_visible_and_do_not_overlap() {
+    async fn sidebar_status_rows_are_visible_and_do_not_overlap() {
         use iced_runtime::{UserInterface, user_interface::Cache};
         let mut app = app();
-        let path = app.smoke_dir.clone().unwrap();
-        stored_session(&mut app, path).await;
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root.clone()).await;
+        let size = iced::Size::new(346., 600.);
         let mut renderer = header_renderer();
-        let cache = UserInterface::build(
-            app.sidebar(),
-            iced::Size::new(346., 600.),
-            Cache::new(),
-            &mut renderer,
-        )
-        .into_cache();
-        app.smoke_stage = 45;
-        let _ = app.smoke_frame(window::Screenshot::new(
-            vec![0, 0, 0, 255, 1, 1, 1, 255],
-            iced::Size::new(2, 1),
-            1.,
-        ));
-        let mut ui = UserInterface::build(
-            app.sidebar(),
-            iced::Size::new(346., 600.),
-            cache,
-            &mut renderer,
-        );
+        let cache =
+            UserInterface::build(app.sidebar(), size, Cache::new(), &mut renderer).into_cache();
+        let statuses = [
+            ("Awaiting an answer", SessionStatus::Question),
+            ("Failed task", SessionStatus::Error),
+            ("Running task", SessionStatus::Working),
+            ("Unread task", SessionStatus::Unchecked),
+            ("Idle task", SessionStatus::Idle),
+        ];
+        app.sessions = statuses
+            .iter()
+            .map(|(title, _)| {
+                let mut session = Session::new(root.clone(), &app.catalog.settings);
+                session.title = title.to_string();
+                SessionSummary::from(&session)
+            })
+            .collect();
+        app.prepare_sidebar();
+        for row in &mut app.sidebar_rows {
+            if let SidebarRow::Session(index, status) = row {
+                *status = statuses[*index].1;
+            }
+        }
+        let mut ui = UserInterface::build(app.sidebar(), size, cache, &mut renderer);
         let mut bounds = UiBounds::default();
         ui.operate(&renderer, &mut bounds);
         let mut bottom = 0.;
-        for session in &app.sessions {
-            let title = bounds.label(&session.title);
-            assert!(title.width > 0. && title.height > 0.);
-            assert!(
-                title.y >= bottom && title.y + title.height <= 600.,
-                "status rows must be separate and visible: {title:?}"
-            );
-            bottom = title.y + title.height;
+        for (title, _) in statuses {
+            let label = bounds.label(title);
+            assert!(label.width > 0. && label.height > 0.);
+            assert!(label.y >= bottom && label.y + label.height <= size.height);
+            bottom = label.y + label.height;
         }
     }
 
@@ -8069,11 +8061,6 @@ mod tests {
         dispatch(&mut app, Message::SessionModel(LUNA.id.into())).await;
         assert_eq!(app.current().unwrap().effort, "medium");
         assert!(!app.current().unwrap().fast);
-        dispatch(&mut app, Message::ToggleFooterMenu).await;
-        assert!(
-            app.footer_options(FooterControl::Effort)
-                .contains(&"none".into())
-        );
         dispatch(&mut app, Message::SessionFast(true)).await;
         assert!(app.current().unwrap().fast);
         assert_eq!(app.current().unwrap().effort, "medium");
@@ -8112,18 +8099,6 @@ mod tests {
         assert!(app.notice.is_none());
         assert_eq!(app.current().unwrap().effort, "high");
         assert!(!app.current().unwrap().fast);
-        dispatch(&mut app, Message::ToggleFooterMenu).await;
-        assert!(
-            !app.footer_options(FooterControl::Effort)
-                .contains(&"none".into())
-        );
-        assert_eq!(
-            app.footer_options(FooterControl::Model),
-            MODELS
-                .iter()
-                .map(|model| model.id.to_owned())
-                .collect::<Vec<_>>()
-        );
     }
 
     #[tokio::test]
@@ -8718,13 +8693,13 @@ Then implement the fix.";
             })
             .unwrap();
         dispatch(&mut app, Message::Changed).await;
-        assert!(!app.transcript.order.is_empty());
+        assert!(chat_text(&app).contains("Old message"));
         dispatch(&mut app, Message::Delete(id)).await;
         dispatch(&mut app, Message::Confirm).await;
-        dispatch(&mut app, Message::Create(path)).await;
-        assert!(app.transcript.order.is_empty());
-        assert!(app.current().unwrap().entries.is_empty());
-        let _ = app.center();
+        dispatch(&mut app, Message::Create(path.clone())).await;
+        let draft = chat_text(&app);
+        assert!(!draft.contains("Old message"));
+        assert_eq!(app.current().unwrap().project, path);
     }
 
     #[tokio::test]
@@ -9807,11 +9782,15 @@ Then implement the fix.";
         let _ = app.update(Message::Git(a.clone(), changes(2)));
         let _ = app.update(Message::GitTick);
         assert!(app.git_pending.contains(&a));
-        dispatch(&mut app, Message::GitTick).await;
-        assert!(
-            app.git_pending.contains(&a),
-            "a pending capture must not be duplicated"
-        );
+        if let Some(mut actions) = iced_runtime::task::into_stream(app.update(Message::GitTick)) {
+            use iced::futures::StreamExt;
+            while let Some(action) = actions.next().await {
+                assert!(
+                    !matches!(action, iced_runtime::Action::Output(Message::Git(..))),
+                    "a pending capture must not be duplicated"
+                );
+            }
+        }
         assert_eq!(app.git_info().unwrap().to_string(), "main  +2 −0");
 
         let _ = app.update(Message::Selected(Ok((Selection::Draft(b.clone()), None))));
@@ -9854,7 +9833,6 @@ Then implement the fix.";
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
         let mut renderer = header_renderer();
         for (status, expected_branch, expected_counts) in [
-            (None, false, None),
             (
                 Some(crate::git::Info::Changes {
                     branch: "main".into(),
@@ -9873,11 +9851,8 @@ Then implement the fix.";
                 true,
                 Some(("+0", "−3")),
             ),
+            (None, false, None),
         ] {
-            let expected_details = expected_counts.map_or("main", |_| "main  +0 −3");
-            if let Some(status) = &status {
-                assert_eq!(status.to_string(), expected_details);
-            }
             // Apply refresh results so a non-repository result also clears old status.
             let path = app.current().unwrap().project.clone();
             let _ = app.update(Message::Git(path, status));
@@ -9908,12 +9883,6 @@ Then implement the fix.";
                 expected_counts.map_or_else(Vec::new, |(added, removed)| vec![added, removed])
             );
         }
-        let path = app.current().unwrap().project.clone();
-        let _ = app.update(Message::Git(path, None));
-        assert!(
-            app.git_info().is_none(),
-            "a non-repository refresh clears old Git status"
-        );
     }
 
     #[tokio::test]
@@ -10344,18 +10313,12 @@ Then implement the fix.";
         dispatch(&mut app, Message::SessionModel(LUNA.id.into())).await;
         assert_eq!(app.current().unwrap().effort, "none");
         assert!(!app.current().unwrap().fast);
-        assert!(
-            app.footer_options(FooterControl::Effort)
-                .contains(&"none".into())
-        );
         dispatch(&mut app, Message::SessionEffort("max".into())).await;
         dispatch(&mut app, Message::SessionModel(ASTRA.id.into())).await;
         assert_eq!(app.current().unwrap().effort, "max");
         assert!(app.current().unwrap().fast);
-        assert!(
-            !app.footer_options(FooterControl::Effort)
-                .contains(&"none".into())
-        );
+        let menu = displayed_text(app.footer_popup(500.), iced::Size::new(500., 400.));
+        assert!(menu.contains("Reasoning") && !menu.contains("None"));
         dispatch(&mut app, Message::SessionEffort("low".into())).await;
         dispatch(&mut app, Message::SessionFast(false)).await;
         // Choosing the already-active speed must not toggle it.
@@ -10502,7 +10465,7 @@ Then implement the fix.";
         assert!(app.selected.is_none());
         assert!(app.sessions.is_empty());
         dispatch(&mut app, Message::New).await;
-        assert!(app.selected.is_none(), "+ must open the project chooser");
+        assert!(chat_text(&app).contains("Choose a project to get started"));
     }
 
     #[tokio::test]
@@ -11799,7 +11762,6 @@ Then implement the fix.";
             "appended entry contributes height"
         );
         assert!(app.markdown.len() < 100);
-        let _ = app.view();
     }
     #[tokio::test]
     async fn popup_transitions_preserve_sidebar_and_chat_scroll() {

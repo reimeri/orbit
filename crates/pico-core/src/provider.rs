@@ -955,18 +955,22 @@ mod tests {
         server.await.unwrap();
     }
     #[tokio::test]
-    async fn truncated_stream_is_not_replayed_or_executed() {
+    async fn truncated_stream_reports_failure_without_retrying() {
         let partial = "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"partial\"}\n\n";
-        let (dir, provider, mut requests, server) = fixture(vec![(200, partial.into())]).await;
+        let (dir, provider, mut requests, server) =
+            fixture([(200, partial.into()), (400, "unexpected retry".into())]).await;
         let session = Session::new(dir.path().into(), &crate::store::Settings::default());
         let error = provider
             .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
             .await
             .unwrap_err();
         assert!(error.to_string().contains("without response.completed"));
-        server.await.unwrap();
         requests.recv().await.unwrap();
-        assert!(requests.recv().await.is_none());
+        assert!(matches!(
+            requests.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        server.abort();
     }
     #[tokio::test]
     async fn oversized_history_is_compacted_in_bounded_chunks() {

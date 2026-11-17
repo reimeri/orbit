@@ -407,9 +407,8 @@ mod tests {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut bytes = [0; 4096];
-            let n = socket.read(&mut bytes).await.unwrap();
-            assert!(String::from_utf8_lossy(&bytes[..n]).contains("/oauth/token"));
+            let request = crate::test_support::read_request(&mut socket).await;
+            assert!(request.starts_with("POST /oauth/token "));
             seen_tx.send(()).unwrap();
             release_rx.await.unwrap();
             let body = r#"{"access_token":"new-access","refresh_token":"rotated-refresh","expires_in":3600}"#;
@@ -419,12 +418,14 @@ mod tests {
         let task = tokio::spawn(async move { requester.token(None).await });
         seen_rx.await.unwrap();
         task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
         release_tx.send(()).unwrap();
         server.await.unwrap();
         let credentials = auth.token(None).await.unwrap();
         assert_eq!(credentials.refresh_token, "rotated-refresh");
         let saved: Credentials = store.read_optional("auth.json").unwrap().unwrap();
         assert_eq!(saved.access_token, "new-access");
+        assert_eq!(saved.refresh_token, "rotated-refresh");
     }
     #[tokio::test]
     async fn oauth_rejects_wrong_state_then_accepts_valid_callback_and_persists_login() {
