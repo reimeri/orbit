@@ -248,16 +248,16 @@ pub fn active(text: &str, cursor: usize) -> Option<Token> {
     }
     None
 }
-pub fn mentions(text: &str) -> Result<Vec<PathBuf>> {
+pub fn mentions(text: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut i = 0;
     while i < text.len() {
         if text.as_bytes()[i] == b'@' && boundary(text, i) {
             let stop = end(text, i);
-            let bytes = decode(&text[i + 1..stop], false)
-                .with_context(|| format!("Invalid file tag at byte {i}"))?;
-            if !bytes.is_empty() {
-                anyhow::ensure!(!bytes.contains(&0), "A file tag cannot contain NUL");
+            if let Ok(bytes) = decode(&text[i + 1..stop], false)
+                && !bytes.is_empty()
+                && !bytes.contains(&0)
+            {
                 paths.push(PathBuf::from(std::ffi::OsString::from_vec(bytes)));
             }
             i = stop;
@@ -265,50 +265,78 @@ pub fn mentions(text: &str) -> Result<Vec<PathBuf>> {
             i += text[i..].chars().next().expect("character").len_utf8();
         }
     }
-    Ok(paths)
+    paths
+}
+/// An unresolvable, inaccessible or out-of-workspace path is just literal text.
+fn resolve_path(
+    result: rustix::io::Result<rustix::fd::OwnedFd>,
+) -> rustix::io::Result<Option<File>> {
+    use rustix::io::Errno;
+    match result {
+        Ok(fd) => Ok(Some(File::from(fd))),
+        Err(
+            Errno::NOENT
+            | Errno::NOTDIR
+            | Errno::NAMETOOLONG
+            | Errno::LOOP
+            | Errno::XDEV
+            | Errno::ACCESS
+            | Errno::PERM
+            | Errno::NXIO
+            | Errno::NODEV,
+        ) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 /// Kernel-enforced containment, including symlink races. Nonblocking prevents FIFO hangs.
-pub(crate) fn open_file(root: &File, relative: &Path) -> Result<File> {
-    anyhow::ensure!(
-        !relative.as_os_str().is_empty()
-            && relative
-                .components()
-                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir)),
-        "File tags must be relative paths inside the workspace"
-    );
-    let fd = rustix::fs::openat2(
+fn open_file(root: &File, relative: &Path) -> Result<Option<File>> {
+    if !relative
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Ok(None);
+    }
+    let Some(file) = resolve_path(rustix::fs::openat2(
         root,
         relative,
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NONBLOCK,
         rustix::fs::Mode::empty(),
         rustix::fs::ResolveFlags::BENEATH | rustix::fs::ResolveFlags::NO_MAGICLINKS,
-    )
-    .context("Open file inside workspace (external symlinks are not allowed)")?;
-    let file = File::from(fd);
-    anyhow::ensure!(
-        file.metadata()?.is_file(),
-        "Only regular workspace files can be tagged"
-    );
-    Ok(file)
+    ))
+    .context("Open file inside workspace")?
+    else {
+        return Ok(None);
+    };
+    Ok(file.metadata()?.is_file().then_some(file))
 }
 
 pub fn capture(root: &Path, storage: &Path, text: &str) -> Result<Vec<Attachment>> {
-    let paths = mentions(text)?;
+    let paths = mentions(text);
     if paths.is_empty() {
         return Ok(vec![]);
     }
-    let root = File::open(root).context("Open workspace for file tags")?;
-    fs::create_dir_all(storage)?;
-    fs::set_permissions(storage, fs::Permissions::from_mode(0o700))?;
+    let Some(root) = resolve_path(rustix::fs::open(
+        root,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ))
+    .context("Open workspace for file tags")?
+    else {
+        return Ok(vec![]);
+    };
     let mut seen = HashSet::new();
     let mut attachments = Vec::new();
     let mut remaining = INLINE_MESSAGE_BYTES;
     for path in paths {
         let name = encode(&path);
         let attachment = (|| -> Result<Option<Attachment>> {
-            let mut source = open_file(&root, &path)?;
+            let Some(mut source) = open_file(&root, &path)? else { return Ok(None); };
             let before = source.metadata()?;
             if !seen.insert((before.dev(), before.ino())) { return Ok(None); }
+            if attachments.is_empty() {
+                fs::create_dir_all(storage)?;
+                fs::set_permissions(storage, fs::Permissions::from_mode(0o700))?;
+            }
             let snapshot = storage.join(crate::store::id());
             let mut output = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&snapshot)?;
             let mut prefix = Vec::new(); let mut buffer = [0u8; 64 * 1024]; let mut bytes = 0;
@@ -337,7 +365,9 @@ pub fn capture(root: &Path, storage: &Path, text: &str) -> Result<Vec<Attachment
             attachments.push(attachment);
         }
     }
-    File::open(storage)?.sync_all()?;
+    if !attachments.is_empty() {
+        File::open(storage)?.sync_all()?;
+    }
     Ok(attachments)
 }
 
@@ -353,10 +383,10 @@ mod tests {
             "docs/λ界.md".as_bytes(),
         ] {
             let path = PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()));
-            assert_eq!(mentions(&encode(&path)).unwrap(), vec![path]);
+            assert_eq!(mentions(&encode(&path)), vec![path]);
         }
-        assert!(mentions(r"mail@host \@literal @").unwrap().is_empty());
-        assert!(mentions("@\"missing").is_err());
+        assert!(mentions(r"mail@host \@literal @").is_empty());
+        assert!(mentions("@\"missing").is_empty());
         let token = active("see @\"some path\" next", 10).unwrap();
         assert_eq!(token.range, 4..16);
         assert_eq!(token.query, b"some");
@@ -371,11 +401,13 @@ mod tests {
         assert_eq!(files.len(), 1);
         fs::write(root.path().join("a"), "new").unwrap();
         assert!(files[0].project().unwrap().contains("original λ"));
-        assert!(capture(root.path(), store.path(), "@../outside").is_err());
         std::os::unix::fs::symlink("/etc/passwd", root.path().join("escape")).unwrap();
-        assert!(capture(root.path(), store.path(), "@escape").is_err());
-        assert!(capture(root.path(), store.path(), "@missing").is_err());
-        assert!(capture(root.path(), store.path(), "@.").is_err());
+        let unavailable = "@../outside @escape @missing @.";
+        assert!(
+            capture(root.path(), store.path(), unavailable)
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn aggregate_budget_and_rehydrated_snapshots_preserve_every_byte() {
@@ -419,11 +451,15 @@ mod tests {
             vec![b'a' + (count - 1) as u8; INLINE_FILE_BYTES]
         );
         nix::unistd::mkfifo(&root.path().join("pipe"), nix::sys::stat::Mode::S_IRUSR).unwrap();
-        assert!(capture(root.path(), storage.path(), "@pipe").is_err());
-        assert!(mentions("@\"part0\"suffix").is_err());
+        assert!(
+            capture(root.path(), storage.path(), "@pipe")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(mentions("@\"part0\"suffix").is_empty());
         let bytes: Vec<_> = (1..=255).collect();
         let path = PathBuf::from(std::ffi::OsString::from_vec(bytes));
-        assert_eq!(mentions(&encode(&path)).unwrap(), vec![path]);
+        assert_eq!(mentions(&encode(&path)), vec![path]);
     }
     #[test]
     fn overflow_and_binary_are_preserved_without_count_cutoffs() {

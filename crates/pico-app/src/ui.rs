@@ -8333,7 +8333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_completion_and_failed_send_preserve_the_authored_draft() {
+    async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
         use iced::futures::{StreamExt, stream};
         use iced_runtime::futures::subscription;
         let mut app = app();
@@ -8426,14 +8426,6 @@ mod tests {
         let draft = app.editor.text();
         std::fs::remove_file(root.join("source notes.md")).unwrap();
         dispatch(&mut app, Message::Send).await;
-        assert_eq!(app.editor.text(), draft);
-        assert!(
-            app.error
-                .as_ref()
-                .is_some_and(|error| error.contains("Could not attach"))
-        );
-        std::fs::write(root.join("source notes.md"), "restored contents").unwrap();
-        dispatch(&mut app, Message::Send).await;
         assert!(app.editor.text().is_empty());
         let saved = app
             .harness
@@ -8446,7 +8438,7 @@ mod tests {
         let EntryKind::User { files, .. } = &saved.entries[0].kind else {
             panic!("user entry")
         };
-        assert_eq!(files[0].inline.as_deref(), Some("restored contents"));
+        assert!(files.is_empty());
     }
 
     #[tokio::test]

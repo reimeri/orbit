@@ -2,7 +2,7 @@
 
 Type `@` at the start of text or after whitespace in the composer to search the current workspace. The
 picker supports Up/Down, Tab/Enter, mouse selection and Escape. Enter selects a
-suggestion while the picker is open; it does not also send the message. Shift+Enter
+suggestion when one is available; if the search finishes with no matches, Enter sends the message. Shift+Enter
 still inserts a newline. An unhandled Escape retains the app's stop/dismiss behavior.
 Long labels are ellipsized only on screen; hover shows the full tag. Up to 24 results
 are retained and at most eight suggestion rows are mounted.
@@ -18,15 +18,17 @@ A literal \@not-a-tag and an email@example.com are not attachments.
 Quoted names support `\"`, `\\`, `\n`, `\r`, `\t`, and `\xHH`. Unicode can be entered
 directly. Byte escapes preserve non-UTF-8 Unix filenames without replacing bytes.
 Autocomplete writes the appropriate representation. A standalone `@` is not an
-attachment. Malformed quoted tags fail submission rather than attaching a prefix
-or interpreting embedded `@` characters as different tags.
+attachment. Malformed quoted tags stay plain text: they do not attach a prefix or
+interpret embedded `@` characters as separate tags.
 
 ## What gets attached
 
 **Tags capture file contents at send time, not when selected and not when replayed.**
 This applies to first messages, ordinary messages and steering. The authored text
 is unchanged in the transcript; a small manifest records each captured file's name
-and exact byte size, with thumbnails for supported images.
+and exact byte size, with thumbnails for supported images. A tag that does not resolve
+to a readable regular file inside the workspace (for example, `@missing` or a Git
+diff’s `@@`) stays plain text without blocking the message or its other attachments.
 
 - Paths are workspace-relative. Absolute paths and `..` components are rejected.
 - Linux `openat2(BENEATH | NO_MAGICLINKS)` enforces containment while opening, not
@@ -44,10 +46,9 @@ and exact byte size, with thumbnails for supported images.
 - PNG/JPEG/WebP/GIF data uses the existing image pipeline and its documented
   decode/size limits. Other binary data remains a file reference, not an unsupported
   audio input. Image-generation billing is not involved.
-- File size/mtime/ctime are checked across capture. A concurrently modified file,
-  disappeared file, bad tag, permission error, or failed preservation blocks
-  acceptance with a recoverable error and keeps the draft. No 32-file cutoff,
-  silent omission, lossy text decoding, or incomplete-success result is used.
+- File size/mtime/ctime are checked across capture. Once a file is opened for
+  attachment, a concurrent modification or failure to read or preserve its bytes
+  still blocks acceptance and keeps the draft.
 
 Capture streams through a bounded buffer outside conversation/subagent locks.
 The normal serialized send worker preserves draft/send ordering; background
@@ -148,7 +149,7 @@ empty-directory watching, root replacement and failure recovery; cache corruptio
 scoped descriptor containment; cancellation and Git subprocess shutdown;
 attachment containment/FIFO rejection/deduplication/aggregate overflow; persistent
 replay/idempotent first-send retries; stale-result/click rejection; composer
-completion/failed-send handling; and real-widget Escape/modal routing. Native
+completion/deleted-file submission; and real-widget Escape/modal routing. Native
 smoke includes the file-tag picker as well as the existing large composer scenes.
 
 Run all tools through `nix develop`. Performance checks are opt-in, not

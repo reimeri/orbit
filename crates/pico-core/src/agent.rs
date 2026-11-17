@@ -2083,7 +2083,12 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         std::fs::create_dir(&project).unwrap();
         let store = Store::open(dir.path().join("state")).unwrap();
         let mut session = Session::new(project.clone(), &Settings::default());
-        session.draft = "Read @missing".into();
+        let text = "@@ -1 +1 @@\nRead @missing @\"bad\\q\" and @source.rs";
+        session.draft = text.into();
+        std::fs::write(project.join("source.rs"), "captured λ").unwrap();
+        // A real attachment still needs durable storage before accepting the draft.
+        let files_dir = store.root().join("files");
+        std::fs::write(&files_dir, "not a directory").unwrap();
         let id = session.id.clone();
         store.save_session(&session).unwrap();
         let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
@@ -2096,10 +2101,10 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             )
             .is_err()
         );
-        assert_eq!(h.get(&id).unwrap().snapshot().draft, "Read @missing");
+        assert_eq!(h.get(&id).unwrap().snapshot().draft, text);
         assert!(store.load_session(&id).unwrap().entries.is_empty());
-        std::fs::write(project.join("source.rs"), "captured λ").unwrap();
-        h.send(&id, "files", "Read @source.rs".into(), Settings::default())
+        std::fs::remove_file(files_dir).unwrap();
+        h.send(&id, "files", text.into(), Settings::default())
             .unwrap();
         let c = h.get(&id).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2108,17 +2113,15 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             std::thread::sleep(Duration::from_millis(2));
         }
         let captured = c.snapshot().pending[0].clone();
+        assert_eq!(captured.files.len(), 1);
         assert_eq!(captured.files[0].inline.as_deref(), Some("captured λ"));
         std::fs::remove_file(project.join("source.rs")).unwrap();
         h.edit(&id, |s| s.consume_pending()).unwrap();
-        h.send(&id, "files", "Read @source.rs".into(), Settings::default())
+        h.send(&id, "files", text.into(), Settings::default())
             .unwrap();
         let saved = store.load_session(&id).unwrap();
         assert_eq!(saved.entries.iter().filter(|e| e.id == "files").count(), 1);
-        assert_eq!(
-            saved.entries.by_id("files").unwrap().text,
-            "Read @source.rs"
-        );
+        assert_eq!(saved.entries.by_id("files").unwrap().text, text);
         let mut replay = serde_json::json!(plaintext_context(&saved));
         crate::media::project(&mut replay, false).unwrap();
         assert!(replay.to_string().contains("captured λ"));

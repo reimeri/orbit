@@ -1101,8 +1101,7 @@ mod tests {
         );
         assert!(index.search(b"x", || true, |_| {}).is_none());
         assert_eq!(
-            crate::file_tags::mentions(&index.search(b"raw", || false, |_| {}).unwrap()[0])
-                .unwrap()[0]
+            crate::file_tags::mentions(&index.search(b"raw", || false, |_| {}).unwrap()[0])[0]
                 .as_os_str()
                 .as_bytes(),
             b"raw\xff"

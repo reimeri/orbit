@@ -231,6 +231,12 @@ impl Completion {
         match event.key {
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::Move(true)),
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::Move(false)),
+            // With no match to accept, Enter belongs to the composer (send).
+            keyboard::Key::Named(keyboard::key::Named::Enter)
+                if !self.response.pending && self.response.paths.is_empty() =>
+            {
+                None
+            }
             keyboard::Key::Named(keyboard::key::Named::Enter | keyboard::key::Named::Tab) => {
                 Some(self.accept_selected())
             }
@@ -366,6 +372,22 @@ mod tests {
             &mut editor,
         );
         assert!(c.response.paths.is_empty());
+        let enter = text_editor::KeyPress {
+            key: keyboard::Key::Named(keyboard::key::Named::Enter),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Enter),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Enter),
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            status: text_editor::Status::Focused { is_hovered: false },
+        };
+        c.update(
+            Message::Results(Response {
+                request: c.request,
+                ..Response::default()
+            }),
+            &mut editor,
+        );
+        assert!(c.binding(&enter).is_none());
         c.update(
             Message::Results(Response {
                 request: c.request,
@@ -374,6 +396,7 @@ mod tests {
             }),
             &mut editor,
         );
+        assert!(matches!(c.binding(&enter), Some(Message::Accept { .. })));
         let stale = c.accept_selected();
         c.update(
             Message::Results(Response {
