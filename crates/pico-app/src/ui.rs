@@ -110,13 +110,13 @@ pub struct App {
     view_epoch: u64,
     sidebar_epoch: u64,
     sidebar_keys: HashMap<String, usize>,
-    io: crate::io_worker::Worker<Message>,
+    io: crate::io_worker::Worker,
     tasks: Vec<Task<Message>>,
     io_busy: bool,
     closing: bool,
     close_requested: bool,
     submissions: HashMap<String, (UserMessage, String)>,
-    revisions: HashMap<String, u64>,
+    current_revision: u64,
     outputs: HashMap<String, tool_output::Output>,
     raw_tool_inputs: HashSet<String>,
     image_view: crate::image_view::Viewer,
@@ -162,7 +162,6 @@ pub struct App {
     git: HashMap<PathBuf, crate::git::Info>,
     git_pending: HashSet<PathBuf>,
     draft_dirty: bool,
-    smoke: bool,
     smoke_stage: usize,
     screenshot_check: Option<crate::screenshot_check::Check>,
     smoke_passed: Arc<AtomicBool>,
@@ -232,7 +231,7 @@ pub enum Message {
     Selected(Result<(Selection, Option<String>), String>),
     NewDraftSaved(Result<(), String>),
     Sent(String, UserMessage, Result<(), String>),
-    DraftSaved(String, UserMessage, Result<(), String>),
+    DraftSaved(String, Result<(), String>),
     Paste,
     ClipboardText(Option<String>),
     AttachmentLoaded(Result<crate::attachments::Input, String>),
@@ -390,7 +389,7 @@ impl App {
             submissions: HashMap::new(),
             attachments: vec![],
             importing: 0,
-            revisions: HashMap::new(),
+            current_revision: 0,
             outputs: HashMap::new(),
             raw_tool_inputs: HashSet::new(),
             image_view: Default::default(),
@@ -434,7 +433,6 @@ impl App {
             git: HashMap::new(),
             git_pending: HashSet::new(),
             draft_dirty: false,
-            smoke,
             smoke_stage: 0,
             screenshot_check: None,
             smoke_passed,
@@ -550,7 +548,7 @@ impl App {
     fn refresh(&mut self) -> bool {
         // Later smoke stages render synthetic UI fixtures, not harness-owned asks.
         // A delayed core notice must not replace them between captured frames.
-        if self.smoke && self.smoke_stage >= 26 {
+        if self.smoke_dir.is_some() && self.smoke_stage >= 26 {
             return false;
         }
         self.sync_questionnaires();
@@ -579,21 +577,16 @@ impl App {
             return false;
         };
         let revision = conversation.revision();
-        if self.revisions.get(&conversation.id) == Some(&revision)
-            && self
-                .current_session
-                .as_ref()
-                .is_some_and(|s| s.id == conversation.id)
-        {
-            return false;
-        }
-        self.revisions.insert(conversation.id.clone(), revision);
-        let snapshot = conversation.snapshot();
-        let same = self
+        let previous = self
             .current_session
             .as_ref()
-            .is_some_and(|s| s.id == snapshot.id);
-        if !same {
+            .filter(|s| s.id == conversation.id);
+        if previous.is_some() && self.current_revision == revision {
+            return false;
+        }
+        self.current_revision = revision;
+        let snapshot = conversation.snapshot();
+        if previous.is_none() {
             self.outputs.clear();
             self.markdown.clear();
             self.chat_selection.borrow_mut().clear();
@@ -603,11 +596,7 @@ impl App {
         }
         // Persistent-tree diffs only visit changed leaves, not the full transcript.
         let empty = pico_core::history::History::default();
-        let old = if same {
-            &self.current_session.as_ref().expect("same session").entries
-        } else {
-            &empty
-        };
+        let old = previous.map_or(&empty, |session| &session.entries);
         for (index, entry) in old.changes(&snapshot.entries) {
             // Markdown can reparse earlier blocks while streaming. Do not keep
             // stale byte/block positions when a selected entry changes.
@@ -875,6 +864,21 @@ impl App {
             },
         ));
     }
+    fn edit_session_settings(&mut self, edit: impl FnOnce(&mut Session) + Send + 'static) {
+        if self.io_busy || self.running() {
+            return;
+        }
+        if let Some(draft) = &mut self.draft_session {
+            edit(draft);
+        } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
+            let h = h.clone();
+            let id = id.clone();
+            self.io_busy = true;
+            self.tasks.push(self.io.run(move || {
+                Message::SessionSettingsEdited(h.edit(&id, edit).map_err(|e| format!("{e:#}")))
+            }));
+        }
+    }
     fn save_catalog(&mut self, close_settings: bool) {
         self.catalog.selected = self.selected.clone();
         if let Some(h) = &self.harness {
@@ -900,9 +904,9 @@ impl App {
         self.draft_dirty = false;
         Some((id, self.composer_message()))
     }
-    fn save_draft(&mut self) -> bool {
-        if self.io_busy || self.closing {
-            return true;
+    fn save_draft(&mut self) {
+        if self.io_busy {
+            return;
         }
         if self.new_draft_dirty
             && let Some(h) = &self.harness
@@ -919,22 +923,23 @@ impl App {
         {
             let h = h.clone();
             self.tasks.push(self.io.run(move || {
-                let result=h.edit(&id,|s| { s.draft=draft.text.clone(); s.draft_images=draft.images.clone(); }).map_err(|e|format!("Could not save draft: {e:#}. Keep Pico open and retry after fixing storage."));
-                Message::DraftSaved(id,draft,result)
+                let result = h.edit(&id, |s| {
+                    s.draft = draft.text;
+                    s.draft_images = draft.images;
+                }).map_err(|e| {
+                    format!("Could not save draft: {e:#}. Keep Pico open and retry after fixing storage.")
+                });
+                Message::DraftSaved(id, result)
             }));
         }
-        true
     }
     fn restore_draft(&mut self) {
         let workspace = self
             .current()
             .filter(|s| s.child.is_none())
             .map(|s| (s.id.clone(), s.project.clone()));
-        let cache = if self.smoke {
-            self.smoke_dir
-                .as_ref()
-                .expect("smoke directory")
-                .join("file-cache")
+        let cache = if let Some(dir) = &self.smoke_dir {
+            dir.join("file-cache")
         } else {
             pico_core::file_index::cache_dir()
         };
@@ -1081,9 +1086,9 @@ impl App {
             }));
         }
     }
-    fn fail(&mut self, result: Result<(), impl std::fmt::Display>) {
-        if let Err(e) = result {
-            self.error = Some(e.to_string());
+    fn fail(&mut self, result: Result<(), String>) {
+        if let Err(error) = result {
+            self.error = Some(error);
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1104,7 +1109,7 @@ impl App {
         {
             self.image_view.invalidate_return();
         }
-        if !self.smoke
+        if self.smoke_dir.is_none()
             && let Some(h) = &self.harness
         {
             self.notifications
@@ -1409,7 +1414,7 @@ impl App {
                     self.new_draft_dirty = true;
                 }
             }
-            Message::DraftSaved(id, _draft, result) => {
+            Message::DraftSaved(id, result) => {
                 if let Err(error) = result {
                     self.error = Some(error);
                     if self.selected.as_ref() == Some(&id) {
@@ -1481,9 +1486,7 @@ impl App {
             },
             Message::Tick => self.tick += 1,
             Message::AgeTick => {}
-            Message::SaveDraft => {
-                self.save_draft();
-            }
+            Message::SaveDraft => self.save_draft(),
             Message::Changed => {
                 let before = self.catalog_revision;
                 let changed = self.refresh();
@@ -1683,8 +1686,6 @@ impl App {
             Message::Editor(_) | Message::EditorScroll(_) | Message::DeletePreviousWord => {
                 if self.active_questionnaire.is_some()
                     || self.io_busy
-                    || self.closing
-                    || self.close_requested
                     || self.modal.is_some()
                     || self.context_menu.is_some()
                 {
@@ -1851,60 +1852,11 @@ impl App {
                 self.refresh();
             }
             Message::SessionModel(value) => {
-                if self.io_busy || self.running() {
-                    return Task::none();
-                }
                 let settings = self.catalog.settings.clone();
-                if let Some(draft) = &mut self.draft_session {
-                    draft.select_model(&value, &settings);
-                } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
-                    let h = h.clone();
-                    let id = id.clone();
-                    self.io_busy = true;
-                    self.tasks.push(self.io.run(move || {
-                        Message::SessionSettingsEdited(
-                            h.edit(&id, |s| s.select_model(&value, &settings))
-                                .map_err(|e| format!("{e:#}")),
-                        )
-                    }));
-                }
+                self.edit_session_settings(move |s| s.select_model(&value, &settings));
             }
-            Message::SessionEffort(value) => {
-                if self.io_busy || self.running() {
-                    return Task::none();
-                }
-                if let Some(draft) = &mut self.draft_session {
-                    draft.effort = value;
-                } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
-                    let h = h.clone();
-                    let id = id.clone();
-                    self.io_busy = true;
-                    self.tasks.push(self.io.run(move || {
-                        Message::SessionSettingsEdited(
-                            h.edit(&id, |s| s.effort = value)
-                                .map_err(|e| format!("{e:#}")),
-                        )
-                    }));
-                }
-            }
-            Message::SessionFast(value) => {
-                if self.io_busy || self.running() {
-                    return Task::none();
-                }
-                if let Some(draft) = &mut self.draft_session {
-                    draft.fast = value;
-                } else if let (Some(h), Some(id)) = (&self.harness, &self.selected) {
-                    let h = h.clone();
-                    let id = id.clone();
-                    self.io_busy = true;
-                    self.tasks.push(self.io.run(move || {
-                        Message::SessionSettingsEdited(
-                            h.edit(&id, |s| s.fast = value)
-                                .map_err(|e| format!("{e:#}")),
-                        )
-                    }));
-                }
-            }
+            Message::SessionEffort(value) => self.edit_session_settings(move |s| s.effort = value),
+            Message::SessionFast(value) => self.edit_session_settings(move |s| s.fast = value),
             Message::AddProject => {
                 self.modal_input = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 self.modal = Some(Modal::AddProject);
@@ -2331,7 +2283,7 @@ impl App {
             },
             Message::WindowOpened(id) => {
                 self.window_id = Some(id);
-                if self.smoke {
+                if self.smoke_dir.is_some() {
                     // Change the view and request capture in the same update;
                     // no timer can hide an ordering bug in the screenshot API.
                     self.screenshot_check = Some(Default::default());
@@ -2559,7 +2511,7 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveDraft));
         }
-        if !self.smoke {
+        if self.smoke_dir.is_none() {
             subscriptions.push(self.notifications.subscription().map(Message::Notification));
         }
         subscriptions.push(

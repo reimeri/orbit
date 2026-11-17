@@ -372,7 +372,7 @@ async fn code_mode_returns_text_only_persists_metadata_and_respects_disabled_cha
             Ok(())
         }),
     )
-    .with_web(Some(web.clone()));
+    .with_web(web.clone());
     let code = Arc::new(code);
     let exec = code.clone();
     let result = tokio::task::spawn_blocking(move || exec.exec(r#"const r = await tools.web__run({time:[{utc_offset:'+00:00'}]}); text(typeof r); text(r);"#,"outer",&CancellationToken::new())).await.unwrap().unwrap();

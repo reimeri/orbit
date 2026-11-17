@@ -110,11 +110,7 @@ struct Stored {
     bytes: usize,
 }
 pub struct CodeMode {
-    images: Option<Arc<ImageTools>>,
-    web: Option<Arc<crate::web_search::WebSearch>>,
-    questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
-    delegation: Option<Delegation>,
-    shell: Arc<Shell>,
+    services: Services,
     cells: Mutex<HashMap<String, Arc<Cell>>>,
     stored: Arc<Mutex<Stored>>,
     observer: Observer,
@@ -132,11 +128,13 @@ impl CodeMode {
         questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
     ) -> Self {
         Self {
-            images: None,
-            web: None,
-            questionnaires,
-            delegation,
-            shell,
+            services: Services {
+                shell,
+                delegation,
+                questionnaires,
+                images: None,
+                web: None,
+            },
             cells: Mutex::new(HashMap::new()),
             stored: Arc::new(Mutex::new(Stored::default())),
             observer,
@@ -145,18 +143,18 @@ impl CodeMode {
         }
     }
     pub fn with_images(mut self, images: Arc<ImageTools>) -> Self {
-        self.images = Some(images);
+        self.services.images = Some(images);
         self
     }
-    pub(crate) fn with_web(mut self, web: Option<Arc<crate::web_search::WebSearch>>) -> Self {
-        self.web = web;
+    pub(crate) fn with_web(mut self, web: Arc<crate::web_search::WebSearch>) -> Self {
+        self.services.web = Some(web);
         self
     }
     pub(crate) fn media_lifecycle(&self) -> Option<std::sync::MutexGuard<'_, bool>> {
-        self.images.as_ref().map(|i| i.media.lifecycle())
+        self.services.images.as_ref().map(|i| i.media.lifecycle())
     }
     pub fn remove_media(&self) -> Result<()> {
-        if let Some(images) = &self.images {
+        if let Some(images) = &self.services.images {
             images.media.remove()?;
         }
         Ok(())
@@ -190,13 +188,7 @@ impl CodeMode {
         });
         cells.insert(cell_id.clone(), cell.clone());
         drop(cells);
-        let services = Services {
-            shell: self.shell.clone(),
-            delegation: self.delegation.clone(),
-            questionnaires: self.questionnaires.clone(),
-            images: self.images.clone(),
-            web: self.web.clone(),
-        };
+        let services = self.services.clone();
         let stored = self.stored.clone();
         let observer = self.observer.clone();
         let parent = parent.to_owned();
@@ -255,7 +247,7 @@ impl CodeMode {
         tokens: usize,
         cancel: &CancellationToken,
     ) -> Result<Output> {
-        let interrupted = self.shell.runtime().block_on(async {
+        let interrupted = self.services.shell.runtime().block_on(async {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(ms.min(300_000));
             let mut interrupted = false;
             loop {
@@ -344,18 +336,18 @@ impl CodeMode {
     pub fn is_executing(&self) -> bool {
         self.active_cells.load(Ordering::Acquire) > 0
             || self.workers.load(Ordering::Acquire) > 0
-            || self.shell.is_executing()
+            || self.services.shell.is_executing()
     }
     pub fn has_work(&self) -> bool {
         !self.cells.lock().expect("cell lock").is_empty()
-            || self.shell.has_work()
+            || self.services.shell.has_work()
             || !self.stored.lock().expect("store lock").values.is_empty()
     }
     pub fn stop_all(&self) {
         for (_, cell) in self.cells.lock().expect("cell lock").drain() {
             cell.cancel.cancel();
         }
-        self.shell.stop_all();
+        self.services.shell.stop_all();
     }
 }
 impl Drop for CodeMode {
@@ -377,6 +369,7 @@ fn parse(source: &str) -> Result<(Pragma, String)> {
         Ok((Pragma::default(), source.into()))
     }
 }
+#[derive(Clone)]
 struct Services {
     shell: Arc<Shell>,
     delegation: Option<Delegation>,

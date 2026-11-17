@@ -3,13 +3,6 @@ use super::*;
 use crate::provider::{Delta, Response};
 use crate::store::InProgressResponse;
 
-pub(super) fn is_tool_call(item: &Value) -> bool {
-    matches!(
-        item["type"].as_str(),
-        Some("function_call" | "custom_tool_call")
-    )
-}
-
 impl Harness {
     pub(super) async fn respond_and_execute(
         &self,

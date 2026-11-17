@@ -6,7 +6,7 @@ pub mod subagents;
 use crate::{
     auth::Auth,
     code_mode::{CodeMode, Event as CodeEvent},
-    provider::Provider,
+    provider::{Provider, is_tool_call},
     shell::Shell,
     store::{Entry, EntryKind, Session, SessionSummary, Settings, Store},
 };
@@ -27,9 +27,9 @@ pub struct Conversation {
     pub id: String,
     notifications: Arc<notifications::Notifications>,
     pub questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
-    revision: Arc<AtomicU64>,
+    revision: AtomicU64,
     changes: tokio::sync::watch::Sender<()>,
-    pub state: Arc<Mutex<Session>>,
+    pub state: Mutex<Session>,
     pub running: AtomicBool,
     finishing: AtomicBool,
     naming: AtomicBool,
@@ -37,7 +37,7 @@ pub struct Conversation {
     pub status: Mutex<String>,
     pub turn_usage: Mutex<TurnUsage>,
     cancel: Mutex<CancellationToken>,
-    deleted: Arc<AtomicBool>,
+    deleted: AtomicBool,
     code: CodeMode,
     last_settings: Mutex<Settings>,
     persisted: Mutex<Option<Session>>,
@@ -124,7 +124,7 @@ pub struct Harness {
     changes: tokio::sync::watch::Sender<()>,
     pub store: Store,
     pub auth: Arc<Auth>,
-    provider: Arc<Provider>,
+    provider: Provider,
     image_client: reqwest::Client,
     web_client: reqwest::Client,
     runtime: Option<tokio::runtime::Runtime>,
@@ -147,14 +147,13 @@ impl Harness {
         provider: Provider,
     ) -> Result<Arc<Self>> {
         let auth = provider.auth.clone();
-        let provider = Arc::new(provider);
         let subagents = subagents::Coordinator::load(&store)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
         let image_client = crate::image_tools::ImageTools::client()?;
         let web_client = crate::web_search::WebSearch::client()?;
-        let harness = Arc::new_cyclic(|weak| Self {
+        Ok(Arc::new_cyclic(|weak| Self {
             notifications: Arc::new(notifications::Notifications::default()),
             image_client,
             web_client,
@@ -169,8 +168,7 @@ impl Harness {
             conversations: Mutex::new(HashMap::new()),
             catalog_revision: AtomicU64::new(0),
             summaries: Mutex::new(sessions.into_iter().map(|s| (s.id.clone(), s)).collect()),
-        });
-        Ok(harness)
+        }))
     }
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
         self.changes.subscribe()
@@ -334,7 +332,7 @@ impl Harness {
             Conversation {
                 id: id.clone(),
                 notifications: self.notifications.clone(),
-                revision: Arc::new(AtomicU64::new(0)),
+                revision: AtomicU64::new(0),
                 changes: self.changes.clone(),
                 last_settings: Mutex::new(Settings::default()),
                 code: CodeMode::with_tools(
@@ -365,9 +363,9 @@ impl Harness {
                     questionnaires.clone(),
                 )
                 .with_images(images)
-                .with_web(Some(web)),
+                .with_web(web),
                 questionnaires,
-                state: Arc::new(Mutex::new(session)),
+                state: Mutex::new(session),
                 running: AtomicBool::new(false),
                 finishing: AtomicBool::new(false),
                 naming: AtomicBool::new(false),
@@ -375,7 +373,7 @@ impl Harness {
                 status: Mutex::new("Ready".into()),
                 turn_usage: Mutex::new(TurnUsage::default()),
                 cancel: Mutex::new(CancellationToken::new()),
-                deleted: Arc::new(AtomicBool::new(false)),
+                deleted: AtomicBool::new(false),
                 persisted: Mutex::new(saved),
                 submissions: AtomicU64::new(0),
                 turn_generation: AtomicU64::new(0),
@@ -806,7 +804,7 @@ impl Harness {
         self.runtime.as_ref().expect("live runtime").spawn(async move {
             loop {
                 let submission = conversation.submissions.load(Ordering::Acquire);
-                let result = harness.run(&conversation, settings.clone(), &cancel).await;
+                let result = harness.run(&conversation, &settings, &cancel).await;
                 {
                     let mut state = conversation.state.lock().expect("session lock");
                     if result.is_ok()
@@ -900,7 +898,7 @@ impl Harness {
     async fn run(
         &self,
         conversation: &Arc<Conversation>,
-        settings: Settings,
+        settings: &Settings,
         cancel: &CancellationToken,
     ) -> Result<String> {
         {
@@ -925,13 +923,18 @@ impl Harness {
             conversation.changed();
         }
         conversation.save_async().await?;
-        let cwd = conversation.snapshot().project;
+        let (cwd, profile) = {
+            let session = conversation.state.lock().expect("session lock");
+            (
+                session.project.clone(),
+                session.child.as_ref().map(|child| child.profile),
+            )
+        };
         let mut instructions = instructions(&cwd)?;
-        if let Some(child) = &conversation.snapshot().child {
-            instructions.push_str(child.profile.instructions());
-        } else {
-            instructions.push_str(crate::questionnaire::INSTRUCTIONS);
-        }
+        instructions.push_str(profile.map_or(
+            crate::questionnaire::INSTRUCTIONS,
+            subagents::Profile::instructions,
+        ));
         let mut compacted_size = None;
         loop {
             if cancel.is_cancelled() {
@@ -1005,7 +1008,7 @@ impl Harness {
                 Err(error) => return Err(error),
             };
             let final_text = subagents::final_response(&response.output);
-            let has_calls = response.output.iter().any(execution::is_tool_call);
+            let has_calls = response.output.iter().any(is_tool_call);
             {
                 let mut s = conversation.state.lock().expect("session lock");
                 s.input.extend(response.output);
