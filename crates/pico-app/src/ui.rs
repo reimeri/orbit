@@ -4371,7 +4371,12 @@ impl App {
         } else {
             shorten(&display_path, (path_width / 7.).max(1.) as usize)
         };
-        let path_view = container(ellipsized_text(&path_label, 11., Some(MUTED))).width(path_width);
+        let path_view = container(crate::ellipsized_text::shrinking_ellipsized_text(
+            &path_label,
+            11.,
+            Some(MUTED),
+        ))
+        .max_width(path_width);
         info = info.push(
             if path_label != path || text_width(&path_label, 11.) > path_width {
                 footer_tip(path_view, path)
