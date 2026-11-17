@@ -128,6 +128,7 @@ pub struct App {
     io: crate::io_worker::Worker,
     tasks: Vec<Task<Message>>,
     io_busy: bool,
+    switching_session: bool,
     closing: bool,
     close_requested: bool,
     submissions: HashMap<String, (UserMessage, String)>,
@@ -406,6 +407,7 @@ impl App {
             io,
             tasks: vec![],
             io_busy: false,
+            switching_session: false,
             closing: false,
             close_requested: false,
             submissions: HashMap::new(),
@@ -586,6 +588,11 @@ impl App {
                 .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
             self.catalog_revision = catalog_revision;
             self.prepare_sidebar();
+        }
+        // The worker may already have evicted the outgoing conversation.
+        // Keep its view mounted until Selected commits the incoming snapshot.
+        if self.switching_session {
+            return false;
         }
         let h = self.harness.as_ref().expect("harness");
         let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
@@ -1052,6 +1059,7 @@ impl App {
         if let Some(h) = &self.harness {
             let h = h.clone();
             self.io_busy = true;
+            self.switching_session = true;
             self.tasks.push(self.io.run(move || {
                 Message::Selected(
                     (|| {
@@ -1409,6 +1417,7 @@ impl App {
             },
             Message::Press(_) => unreachable!("press requests are resolved by the root widget"),
             Message::Selected(result) => {
+                self.switching_session = false;
                 self.io_busy = false;
                 match result {
                     Ok((selection, notice)) => {
@@ -1644,10 +1653,7 @@ impl App {
                 }
             }
             Message::New => self.select(Selection::Picker),
-            Message::Select(id) => {
-                self.select(Selection::Session(id));
-                return bottom();
-            }
+            Message::Select(id) => self.select(Selection::Session(id)),
             Message::SetSettled(id, settled) => {
                 self.change_settlement(
                     id,
@@ -3549,9 +3555,7 @@ impl App {
         let editor = text_editor(&self.editor)
             .id("composer")
             .style(theme::editor)
-            .placeholder(if self.io_busy || self.closing {
-                "Saving…"
-            } else if running {
+            .placeholder(if running {
                 "Steer the agent after its current tool batch…"
             } else {
                 "Message Pico…"
@@ -8147,6 +8151,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_row_press_and_pending_load_keep_the_composer_focused() {
+        use iced::advanced::widget::{Id, operation::focusable};
+        use iced::futures::StreamExt;
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        let mut app = app();
+        let project = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, project.clone()).await;
+        let target = app.selected.clone().unwrap();
+        app.harness
+            .as_ref()
+            .unwrap()
+            .edit(&target, |s| {
+                s.title = "Destination".into();
+                s.draft = "incoming draft".into();
+            })
+            .unwrap();
+        stored_session(&mut app, project).await;
+        let outgoing = app.selected.clone().unwrap();
+        type_message(&mut app, "outgoing draft").await;
+
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(app.window_width, app.window_height);
+        let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+        ui.operate(&renderer, &mut focusable::focus("composer".into()));
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let cursor = mouse::Cursor::Available(bounds.label("Destination").center());
+        let mut messages = vec![];
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            ui.update(
+                &[iced::Event::Mouse(event)],
+                cursor,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            assert_eq!(bounds.focused, Some(Id::new("composer")));
+        }
+        let cache = ui.into_cache();
+        let [select @ Message::Select(id)] = messages.as_slice() else {
+            panic!("expected a row selection: {messages:?}");
+        };
+        assert_eq!(id, &target);
+        let pending = app.update(select.clone());
+        // A core change can arrive after eviction but before the UI receives
+        // the selection result. It must not unmount the outgoing editor.
+        let mut actions = iced_runtime::task::into_stream(pending).unwrap();
+        let selected = loop {
+            if let iced_runtime::Action::Output(message @ Message::Selected(_)) =
+                actions.next().await.unwrap()
+            {
+                break message;
+            }
+        };
+        dispatch(&mut app, Message::Changed).await;
+        assert_eq!(app.current().unwrap().id, outgoing);
+        assert_eq!(app.editor.text(), "outgoing draft");
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        assert_eq!(bounds.focused, Some(Id::new("composer")));
+        let cache = ui.into_cache();
+        dispatch(&mut app, selected).await;
+        assert_eq!(app.editor.text(), "incoming draft");
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        assert_eq!(bounds.focused, Some(Id::new("composer")));
+    }
+
+    #[tokio::test]
     async fn image_paste_preserves_composer_focus_across_attachment_changes() {
         use iced::advanced::widget::{Operation, operation::Focusable};
         use iced_runtime::{UserInterface, user_interface::Cache};
@@ -9350,6 +9431,7 @@ Then implement the fix.";
 
     #[derive(Default)]
     struct UiBounds {
+        focused: Option<iced::advanced::widget::Id>,
         labels: Vec<(String, iced::Rectangle)>,
         containers: Vec<iced::Rectangle>,
         scrolls: Vec<(iced::advanced::widget::Id, iced::Rectangle)>,
@@ -9363,6 +9445,16 @@ Then implement the fix.";
         }
         fn container(&mut self, _: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
             self.containers.push(bounds);
+        }
+        fn focusable(
+            &mut self,
+            id: Option<&iced::advanced::widget::Id>,
+            _: iced::Rectangle,
+            state: &mut dyn iced::advanced::widget::operation::Focusable,
+        ) {
+            if state.is_focused() {
+                self.focused = id.cloned();
+            }
         }
         fn scrollable(
             &mut self,
