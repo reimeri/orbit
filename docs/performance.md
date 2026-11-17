@@ -411,3 +411,79 @@ exercise retained widget state across width reflow/content edits, and verify
 closer/tied candidates and bounded hit work when noncompetitive blocks are added.
 Existing selection tests cover bidi, multi-click word/paragraph extension, links,
 hard lines, CRLF tool copying, and scrolling with a stationary pointer.
+
+## Selection-index reuse during scrolling
+
+Selectable text now keeps its flattened text and word/paragraph selection index in
+retained widget state, alongside the shaped paragraph. Rebuilding a view no longer
+segments unchanged text. Text edits, logical byte-offset changes, and changes
+between Markdown-block and plain-text paragraph semantics invalidate the index;
+width, font/style, and scroll changes do not. Tool rows continue to use their
+shared whole-output index, including boundaries beyond the mounted visual row.
+The cache lives only as long as the mounted widget: there is no new history-wide
+cache or change to eviction/overscan policy. The Markdown viewer's separate
+copy-reconstruction block strings are still constructed during view building.
+
+### Reproduce
+
+```sh
+nix develop --command ./scripts/test-renderer.sh \
+  cargo test --locked --release -p pico-evo selection_scroll_benchmark \
+  -- --ignored --nocapture --test-threads=1
+
+# Existing pointer-selection benchmark, also rerun for this change:
+nix develop --command ./scripts/test-renderer.sh \
+  cargo test --locked --release -p pico-evo selection_motion_benchmark \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The scrolling benchmark in `chat_selection_benchmark.rs` uses the production
+Markdown viewer, selection root, scroll helper, and viewport observer. It retains
+widget state while rebuilding the view and alternates 120px wheel moves in a
+760x600 viewport with an explicit 16px font. Each fixture reports medians and p95
+for 120 cycles after initial layout. Assertions require scroll observations and
+no newly constructed paragraphs or selection indexes during unchanged rebuilds.
+The separately reported `word_indexes_separate` stage deliberately rebuilds the
+old indexes as a diagnostic; it is **not** included in frame-stage totals.
+
+### Paired release measurements
+
+AMD Ryzen 7 5800X3D, pinned Nix environment and unchanged release profile. Three
+fresh-process samples per version ran serially, with no concurrent builds. Each
+phase below is the median of the three per-process medians. The table adds view
+construction and retained layout to ensure work was eliminated rather than just
+moved between those phases; these sums are **not full frame times**.
+
+| Synthetic message | View + layout before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| 20 paragraphs, 3,440 bytes | 0.0483 ms | 0.00554 ms | 88.5% |
+| 200 paragraphs, 34,400 bytes | 0.494 ms | 0.0562 ms | 88.6% |
+| 2,000 paragraphs, 344,000 bytes | 5.126 ms | 0.616 ms | 88.0% |
+| One plain paragraph, 64,000 bytes | 0.765 ms | 0.0223 ms | 97.1% |
+| 2,000 code lines, 120,012 bytes | 2.299 ms | 0.346 ms | 85.0% |
+| One heavily formatted paragraph, 34,000 bytes | 0.382 ms | 0.0130 ms | 96.6% |
+| One heavily formatted paragraph, 170,000 bytes | 1.963 ms | 0.116 ms | 94.1% |
+
+For the 2,000-paragraph case, view construction fell from 4.927 to 0.447 ms and
+retained layout from 0.198 to 0.170 ms. Index construction still occurs on initial
+mounting and actual text/semantic changes; this does not remove cold shaping.
+
+The existing pointer-motion benchmark retained identical selection endpoints and
+hit counts. Representative bottom-of-document times were 0.0571 to 0.0581 ms/event
+for the 64KB paragraph and 0.0346 to 0.0340 ms/event for 200 blocks: no material
+change to hit-testing cost was expected from this optimization.
+
+GPU preparation/submission/presentation, whole-app view/update work, and real input
+cadence are excluded. Lavapipe initializes the test renderer, but measured drawing
+only records CPU commands. The synthetic fixtures are not the user's document.
+**Inline-decoration drawing remains a separate bottleneck:** the 170KB formatted
+single-paragraph fixture still takes about 62 ms to record drawing commands, due
+to repeated span-bound scans. Block-level virtualization and decoration caching
+are not part of this change.
+
+Regressions exercise retained-widget double/triple clicks after same-length edits,
+Unicode offsets, paragraph-mode changes, and style/width changes. A tool-row check
+changes the unseen source suffix while leaving visible text unchanged, requiring
+the new shared logical-line extent. Construction counters protect reuse without
+wall-clock assertions; existing selection/copy/reflow and virtualization checks
+remain in the suite.

@@ -59,12 +59,13 @@ enum Granularity {
 
 /// Logical boundaries, independent of visual wrapping. Tool rows share one index
 /// for the complete document, so even unmounted portions of a unit are selected.
+#[derive(Default)]
 pub struct TextUnits {
     words: Vec<Range<usize>>,
     paragraphs: Vec<Range<usize>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Paragraphs {
     Block,
     BlankLines,
@@ -73,6 +74,8 @@ enum Paragraphs {
 
 impl TextUnits {
     fn new(text: &str, offset: usize, paragraphs: Paragraphs) -> Self {
+        #[cfg(test)]
+        tests::UNITS.with(|count| count.set(count.get() + 1));
         let words = text
             .split_word_bound_indices()
             .map(|(start, word)| offset + start..offset + start + word.len())
@@ -505,17 +508,9 @@ fn selectable(
     at: Position,
     kind: SelectableText,
 ) -> Element<'static, Message> {
-    let content: String = spans.iter().map(|s| s.text.as_ref()).collect();
-    let (row_height, units) = match kind {
-        SelectableText::Row { height, units } => (Some(height), units),
-        SelectableText::Block => (
-            None,
-            Arc::new(TextUnits::new(&content, at.byte, Paragraphs::Block)),
-        ),
-        SelectableText::Plain => (
-            None,
-            Arc::new(TextUnits::new(&content, at.byte, Paragraphs::BlankLines)),
-        ),
+    let row_height = match &kind {
+        SelectableText::Row { height, .. } => Some(*height),
+        SelectableText::Block | SelectableText::Plain => None,
     };
     let line_height = row_height
         .map(|h| text::LineHeight::Absolute(h.into()))
@@ -528,8 +523,7 @@ fn selectable(
     Element::new(Selectable {
         height: row_height.map_or(Length::Shrink, Length::Fixed),
         spans,
-        content,
-        units,
+        kind,
         size,
         font,
         line_height,
@@ -542,8 +536,7 @@ fn selectable(
 struct Selectable {
     height: Length,
     spans: Arc<[Span<'static, String>]>,
-    content: String,
-    units: Arc<TextUnits>,
+    kind: SelectableText,
     size: Pixels,
     font: Font,
     line_height: text::LineHeight,
@@ -556,6 +549,9 @@ struct State {
     paragraph: Paragraph,
     spans: Arc<[Span<'static, String>]>,
     index: TextIndex,
+    content: String,
+    units: Arc<TextUnits>,
+    units_key: Option<(usize, Paragraphs)>,
     pressed_link: Option<String>,
 }
 /// Byte indexes belong to the shaped paragraph, not to a transient widget/view.
@@ -642,12 +638,16 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
     }
     fn operate(
         &mut self,
-        _tree: &mut Tree,
+        tree: &mut Tree,
         layout: Layout<'_>,
         _renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.text(None, layout.bounds(), &self.content);
+        operation.text(
+            None,
+            layout.bounds(),
+            &tree.state.downcast_ref::<State>().content,
+        );
     }
     fn size(&self) -> Size<Length> {
         Size::new(Length::Shrink, self.height)
@@ -662,6 +662,37 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         // hits, links and selection must all use the same bounds and glyphs.
         layout::sized(limits, Length::Shrink, self.height, |limits| {
             let state = tree.state.downcast_mut::<State>();
+            let spans_changed = state.spans != self.spans;
+            if spans_changed {
+                let content: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
+                if content != state.content {
+                    state.content = content;
+                    state.units_key = None;
+                }
+            }
+            // Selection boundaries follow logical text, not styling, wrapping or
+            // viewport position. Retain them with the mounted paragraph instead
+            // of segmenting unchanged text during every view reconstruction.
+            match &self.kind {
+                SelectableText::Block | SelectableText::Plain => {
+                    let paragraphs = match self.kind {
+                        SelectableText::Block => Paragraphs::Block,
+                        _ => Paragraphs::BlankLines,
+                    };
+                    let key = (self.at.byte, paragraphs);
+                    if state.units_key != Some(key) {
+                        state.units =
+                            Arc::new(TextUnits::new(&state.content, self.at.byte, paragraphs));
+                        state.units_key = Some(key);
+                    }
+                }
+                SelectableText::Row { units, .. } => {
+                    // Tool rows share boundaries for the entire output; a word or
+                    // logical line may extend beyond this mounted visual row.
+                    state.units = units.clone();
+                    state.units_key = None;
+                }
+            }
             let text = iced::advanced::Text {
                 content: self.spans.as_ref(),
                 bounds: limits.max(),
@@ -673,11 +704,11 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                 shaping: text::Shaping::Advanced,
                 wrapping: self.wrapping,
             };
-            if state.spans != self.spans
+            if spans_changed
                 || state.paragraph.compare(text.with_content(())) == text::Difference::Shape
             {
                 state.paragraph = Paragraph::with_spans(text);
-                state.index = TextIndex::new(&self.content, state.paragraph.buffer());
+                state.index = TextIndex::new(&state.content, state.paragraph.buffer());
                 state.spans = self.spans.clone();
                 #[cfg(test)]
                 tests::SHAPED.with(|count| count.set(count.get() + 1));
@@ -728,7 +759,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                     byte: self.at.byte + hit.byte,
                     ..self.at
                 };
-                let range = self
+                let range = state
                     .units
                     .range(self.at.byte + hit.unit_byte, selection.granularity);
                 selection.candidate = Some(MotionCandidate {
@@ -761,7 +792,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                         },
                         self.at.byte + hit.unit_byte,
                         cursor.position().expect("hit has a cursor"),
-                        &self.units,
+                        &state.units,
                     );
                     state.pressed_link = self.link(state, Point::new(point.x, point.y));
                     shell.capture_event();
@@ -872,7 +903,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         let range = self.selection.borrow().local_range(
             self.at.entry,
             self.at.block,
-            self.at.byte..self.at.byte + self.content.len(),
+            self.at.byte..self.at.byte + state.content.len(),
         );
         if range.is_empty() {
             return;
@@ -933,6 +964,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
 pub(crate) mod tests {
     thread_local! {
         pub(super) static HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static UNITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static SHAPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
@@ -1126,6 +1158,145 @@ pub(crate) mod tests {
             runs[1] > runs[0],
             "narrowing must actually exercise visual reflow"
         );
+    }
+
+    #[test]
+    fn selection_units_reuse_unchanged_text_and_refresh_text_offset_and_mode() {
+        let mut renderer = renderer();
+        let selection = Shared::default();
+        let mut cache = user_interface::Cache::new();
+        // Same-length edits change word boundaries. Width/style changes must not
+        // segment text again, while offsets and paragraph semantics must refresh.
+        let original = "café cat\n\nlast";
+        let edited = "ab cd cat\n\nlast";
+        let block = Paragraphs::Block;
+        let plain = Paragraphs::BlankLines;
+        let white = Some(Color::WHITE);
+        for (value, paragraphs, offset, width, color, reuse, word_end, paragraph_end) in [
+            (original, block, 0, 500., None, false, 5, 15),
+            (original, block, 0, 45., None, true, 5, 15),
+            (original, block, 0, 45., white, true, 5, 15),
+            (edited, block, 0, 500., None, false, 2, 15),
+            (edited, block, 37, 500., None, false, 2, 15),
+            (edited, plain, 37, 500., None, false, 2, 9),
+            (edited, plain, 37, 90., None, true, 2, 9),
+        ] {
+            let before = UNITS.get();
+            let mut span = Span::new(value.to_owned());
+            span.color = color;
+            let view = selectable(
+                Arc::from([span]),
+                16.into(),
+                Font::DEFAULT,
+                selection.clone(),
+                Position {
+                    entry: 3,
+                    block: 2,
+                    byte: offset,
+                },
+                match paragraphs {
+                    Paragraphs::Block => SelectableText::Block,
+                    _ => SelectableText::Plain,
+                },
+            );
+            let mut ui = UserInterface::build(
+                pointer_input(view, false, selection.clone()),
+                Size::new(width, 1000.),
+                cache,
+                &mut renderer,
+            );
+            if reuse {
+                assert_eq!(
+                    UNITS.get(),
+                    before,
+                    "unchanged logical text must reuse its index"
+                );
+            } else {
+                assert!(
+                    UNITS.get() > before,
+                    "changed selection semantics need a new index"
+                );
+            }
+            let mut bounds = TextBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            assert_eq!(
+                bounds.0[0].0, value,
+                "text operations must see the current retained text"
+            );
+            let point = bounds.0[0].1.position() + Vector::new(1., 8.);
+            for (count, end) in [(2, word_end), (3, paragraph_end)] {
+                selection.borrow_mut().clear();
+                clicks(&mut ui, &mut renderer, point, count, false);
+                let (start, finish) = selection
+                    .borrow()
+                    .range()
+                    .expect("multi-click selects text");
+                assert_eq!(
+                    start,
+                    Position {
+                        entry: 3,
+                        block: 2,
+                        byte: offset
+                    }
+                );
+                assert_eq!(
+                    finish,
+                    Position {
+                        byte: offset + end,
+                        ..start
+                    }
+                );
+            }
+            cache = ui.into_cache();
+        }
+    }
+
+    #[test]
+    fn retained_tool_rows_replace_shared_units_even_when_visible_text_is_unchanged() {
+        let mut renderer = renderer();
+        let selection = Shared::default();
+        let mut cache = user_interface::Cache::new();
+        // Identical visible text, different unseen suffix and logical line extent.
+        // Row-local indexes or reuse based only on the visible spans are incorrect.
+        for (source, end) in [
+            ("prefix café tail", 17),
+            ("prefix café much longer tail", 29),
+        ] {
+            let units = Arc::new(TextUnits::lines(source));
+            let before = UNITS.get();
+            let mut ui = UserInterface::build(
+                pointer_input(
+                    tool_row(
+                        "café",
+                        selection.clone(),
+                        Position {
+                            entry: 0,
+                            block: 0,
+                            byte: 7,
+                        },
+                        20.,
+                        false,
+                        units,
+                    ),
+                    false,
+                    selection.clone(),
+                ),
+                Size::new(300., 100.),
+                cache,
+                &mut renderer,
+            );
+            assert_eq!(
+                UNITS.get(),
+                before,
+                "tool rows must use their shared document index"
+            );
+            selection.borrow_mut().clear();
+            clicks(&mut ui, &mut renderer, Point::new(1., 8.), 3, false);
+            let (start, finish) = selection.borrow().range().unwrap();
+            assert_eq!(start.byte, 0);
+            assert_eq!(finish.byte, end);
+            cache = ui.into_cache();
+        }
     }
 
     #[test]

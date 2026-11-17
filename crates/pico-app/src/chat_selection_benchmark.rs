@@ -1,4 +1,5 @@
-//! Opt-in CPU-side selection benchmark; parsing, layout and GPU rendering are untimed.
+//! Opt-in CPU selection benchmarks: pointer motion and scroll-triggered view rebuilds.
+//! GPU preparation, submission and presentation are excluded.
 //! PICO_SELECTION_BENCH_TEXT optionally supplies a long local Markdown file (never logged).
 use super::*;
 use iced::advanced::clipboard;
@@ -123,6 +124,165 @@ fn selection_motion_benchmark() {
                 samples[1],
                 tests::HITS.get() as f64 / (4 * events) as f64,
                 selection.borrow().focus.unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual scrolling CPU benchmark; run alone in release"]
+fn selection_scroll_benchmark() {
+    use iced::advanced::Renderer as _;
+    let prose = "Scrolling **formatted text** with `inline code`, a [link](https://example.com), and Unicode café λ界. This paragraph describes an ordinary document with several words.\n\n";
+    let cases = vec![
+        ("20-blocks", prose.repeat(20)),
+        ("200-blocks", prose.repeat(200)),
+        ("2000-blocks", prose.repeat(2000)),
+        ("formatted-single-paragraph-200", prose.trim().repeat(200)),
+        ("formatted-single-paragraph-1000", prose.trim().repeat(1000)),
+        (
+            "64k-paragraph",
+            "The quick brown fox moves left and right. café e\u{301} 👩‍💻\n".repeat(1000),
+        ),
+        (
+            "2000-code-lines",
+            format!(
+                "```rust\n{}\n```",
+                "let result = compute_value(input); // an ordinary code line\n".repeat(2000)
+            ),
+        ),
+    ];
+    let mut renderer = crate::test_renderer::new(16.);
+    let size = Size::new(760., 600.);
+    for (name, source) in cases {
+        let start = Instant::now();
+        let content = markdown::Content::parse(&source);
+        let parse_ms = start.elapsed().as_secs_f64() * 1000.;
+        let selection = Shared::default();
+        let mut cache = user_interface::Cache::new();
+        let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let mut blocks = 0;
+        let mut messages = Vec::new();
+        let mut cold_layout_ms = 0.;
+        for iteration in 0..121 {
+            let units = tests::UNITS.get();
+            let start = Instant::now();
+            let viewer = Viewer::new(selection.clone(), 0);
+            let element = markdown::view_with(
+                content.items(),
+                markdown::Settings::with_text_size(16., crate::theme::markdown_style()),
+                &viewer,
+            );
+            blocks = viewer.blocks.borrow().len();
+            let view = crate::pointer_input::pointer_input(
+                crate::scrollbar::scroll(crate::transcript_viewport::observe(
+                    container(element).width(Length::Fill),
+                    0,
+                    |offset, height, _| Message::Scroll(0, offset, height, false),
+                ))
+                .width(Length::Fill)
+                .id("scroll-probe")
+                .into(),
+                false,
+                selection.clone(),
+            );
+            let view_ms = start.elapsed().as_secs_f64() * 1000.;
+            let shaped = tests::shaped_paragraphs();
+            let start = Instant::now();
+            let mut ui = UserInterface::build(view, size, cache, &mut renderer);
+            let layout_ms = start.elapsed().as_secs_f64() * 1000.;
+            if iteration == 0 {
+                cold_layout_ms = layout_ms;
+                ui.operate(
+                    &renderer,
+                    &mut iced::advanced::widget::operation::scrollable::scroll_to::<()>(
+                        iced::advanced::widget::Id::new("scroll-probe"),
+                        iced::widget::scrollable::AbsoluteOffset {
+                            x: None,
+                            y: Some(2000.),
+                        },
+                    ),
+                );
+            } else {
+                assert_eq!(
+                    tests::shaped_paragraphs(),
+                    shaped,
+                    "unchanged content must reuse paragraphs"
+                );
+                assert_eq!(
+                    tests::UNITS.get(),
+                    units,
+                    "unchanged content must reuse selection indexes"
+                );
+            }
+            messages.clear();
+            let start = Instant::now();
+            black_box(ui.update(
+                &[
+                    Event::Mouse(mouse::Event::WheelScrolled {
+                        delta: mouse::ScrollDelta::Pixels {
+                            x: 0.,
+                            y: if iteration % 2 == 0 { -120. } else { 120. },
+                        },
+                    }),
+                    Event::Window(iced::window::Event::RedrawRequested(
+                        iced::time::Instant::now(),
+                    )),
+                ],
+                mouse::Cursor::Available(Point::new(400., 300.)),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            ));
+            let update_ms = start.elapsed().as_secs_f64() * 1000.;
+            assert!(messages.iter().any(|m| matches!(m, Message::Scroll(..))));
+            let start = Instant::now();
+            renderer.reset(Rectangle::with_size(size));
+            ui.draw(
+                &mut renderer,
+                &crate::theme::app(),
+                &renderer::Style {
+                    text_color: crate::theme::TEXT,
+                },
+                mouse::Cursor::Unavailable,
+            );
+            let draw_ms = start.elapsed().as_secs_f64() * 1000.;
+            cache = ui.into_cache();
+            // Independent cost of rebuilding the same word indexes (the old path).
+            // This diagnostic is not added to the measured frame stages.
+            let start = Instant::now();
+            for block in viewer.blocks.borrow().iter() {
+                black_box(TextUnits::new(&block.text, 0, Paragraphs::Block));
+            }
+            let units_ms = start.elapsed().as_secs_f64() * 1000.;
+            if iteration > 0 {
+                for (values, value) in samples
+                    .iter_mut()
+                    .zip([view_ms, layout_ms, update_ms, draw_ms, units_ms])
+                {
+                    values.push(value);
+                }
+            }
+        }
+        println!(
+            "SCROLL case={name} bytes={} blocks={blocks} parse_ms={parse_ms:.3} cold_layout_ms={cold_layout_ms:.3}",
+            source.len()
+        );
+        for (stage, mut values) in [
+            "view",
+            "layout",
+            "wheel_redraw",
+            "draw_recording",
+            "word_indexes_separate",
+        ]
+        .into_iter()
+        .zip(samples)
+        {
+            values.sort_by(f64::total_cmp);
+            println!(
+                "SCROLL stage={stage} median_ms={:.6} p95_ms={:.6}",
+                values[values.len() / 2],
+                values[values.len() * 95 / 100]
             );
         }
     }
