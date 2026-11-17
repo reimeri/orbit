@@ -343,12 +343,11 @@ impl Provider {
             let response = match tokio::time::timeout(Duration::from_secs(90), request.send()).await
             {
                 Ok(Ok(response)) => response,
-                result if attempt < 3 => {
+                _ if attempt < 3 => {
                     emit(Delta::Status(format!(
                         "Connection interrupted; reconnecting ({}/3)…",
                         attempt + 1
                     )));
-                    let _ = result;
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                     continue;
                 }

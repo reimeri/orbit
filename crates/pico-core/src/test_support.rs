@@ -1,11 +1,40 @@
 //! Local-only protocol fixture; no test reads user credentials or calls OpenAI.
 pub mod sqlite;
 
+use crate::store::Store;
+use std::{path::PathBuf, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::mpsc,
 };
+
+pub fn authenticated_store(root: PathBuf) -> Store {
+    let store = Store::open(root).unwrap();
+    store
+        .write(
+            "auth.json",
+            &crate::auth::Credentials {
+                access_token: "fixture".into(),
+                refresh_token: "fixture".into(),
+                expires_at: crate::store::now() + 3600,
+                account_id: Some("fixture".into()),
+                email: None,
+            },
+        )
+        .unwrap();
+    store
+}
+
+pub async fn until(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
 
 pub async fn server(
     replies: impl IntoIterator<Item = (u16, String), IntoIter: Send + 'static>,

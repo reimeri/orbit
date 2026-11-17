@@ -2755,25 +2755,24 @@ impl App {
             let dismiss = dismiss_layer(Message::CloseFooterMenu);
             let right = 50.
                 + if self.settings_open || self.agents_open {
-                    self.catalog
-                        .settings
-                        .settings_width
-                        .min(self.window_width * 0.4)
-                        + 5.
+                    self.panel_width() + 5.
                 } else {
                     0.
                 };
             // Anchor at the chat's right edge, but let a popup extend over the
             // left sidebar when the center is too narrow to read its choices.
             let positioned = row![
-                container(column![space().height(Fill), self.footer_popup()])
-                    .align_right(Fill)
-                    .padding(iced::Padding {
-                        top: 0.,
-                        right: 14.,
-                        bottom: 42.,
-                        left: 14.
-                    }),
+                container(column![
+                    space().height(Fill),
+                    self.footer_popup(self.window_width - right - 28.)
+                ])
+                .align_right(Fill)
+                .padding(iced::Padding {
+                    top: 0.,
+                    right: 14.,
+                    bottom: 42.,
+                    left: 14.
+                }),
                 space().width(right),
             ]
             .height(Fill);
@@ -2883,6 +2882,22 @@ impl App {
             .and_then(|id| self.harness.as_ref().map(|h| h.active_children(id)))
             .unwrap_or(0)
     }
+    fn panel_width(&self) -> f32 {
+        self.catalog
+            .settings
+            .settings_width
+            .min(self.window_width * 0.4)
+    }
+
+    fn panel_container<'a>(&self, content: widget::Column<'a, Message>) -> Element<'a, Message> {
+        container(content)
+            .padding(iced::Padding::new(RIGHT_PANEL_PADDING).right(theme::SCROLLBAR_EDGE_INSET))
+            .width(self.panel_width())
+            .height(Fill)
+            .style(right_panel)
+            .into()
+    }
+
     fn agents_panel(&self) -> Element<'_, Message> {
         let mut content = column![
             container(right_panel_header("Agents", Message::ToggleAgents))
@@ -2952,17 +2967,7 @@ impl App {
             );
         }
         content = content.push(scroll(cards).height(Fill));
-        container(content)
-            .padding(iced::Padding::new(RIGHT_PANEL_PADDING).right(theme::SCROLLBAR_EDGE_INSET))
-            .width(
-                self.catalog
-                    .settings
-                    .settings_width
-                    .min(self.window_width * 0.4),
-            )
-            .height(Fill)
-            .style(right_panel)
-            .into()
+        self.panel_container(content)
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
@@ -4243,17 +4248,7 @@ impl App {
                 .spacing(8),
             );
         }
-        container(panel_content)
-            .padding(iced::Padding::new(RIGHT_PANEL_PADDING).right(theme::SCROLLBAR_EDGE_INSET))
-            .width(
-                self.catalog
-                    .settings
-                    .settings_width
-                    .min(self.window_width * 0.4),
-            )
-            .height(Fill)
-            .style(right_panel)
-            .into()
+        self.panel_container(panel_content)
     }
     fn footer(&self) -> Element<'_, Message> {
         widget::responsive(|size| self.footer_content(size.width))
@@ -4525,7 +4520,7 @@ impl App {
         }
     }
 
-    fn footer_popup(&self) -> Element<'_, Message> {
+    fn footer_popup(&self, available_width: f32) -> Element<'_, Message> {
         let session = self.current().expect("footer menu has a session");
         let enabled = !self.io_busy && !self.running();
         let list_height = (self.window_height - 170.).clamp(60., 240.);
@@ -4588,17 +4583,6 @@ impl App {
                     .style(move |theme, status| theme::menu_button(theme, status, chosen)),
             );
         }
-        // The popup may extend over the left sidebar, but never beyond the window.
-        let right = 50.
-            + if self.settings_open || self.agents_open {
-                self.catalog
-                    .settings
-                    .settings_width
-                    .min(self.window_width * 0.4)
-                    + 5.
-            } else {
-                0.
-            };
         opaque(
             container(
                 column![
@@ -4618,7 +4602,7 @@ impl App {
                 .spacing(8),
             )
             .padding(6)
-            .width((self.window_width - right - 28.).min(480.))
+            .width(available_width.min(480.))
             .style(card),
         )
     }

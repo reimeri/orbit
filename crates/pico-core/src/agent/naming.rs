@@ -95,19 +95,7 @@ mod tests {
             "invalid title",
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(dir.path().join("state")).unwrap();
-            store
-                .write(
-                    "auth.json",
-                    &crate::auth::Credentials {
-                        access_token: "fixture".into(),
-                        refresh_token: "fixture".into(),
-                        expires_at: crate::store::now() + 3600,
-                        account_id: Some("fixture".into()),
-                        email: None,
-                    },
-                )
-                .unwrap();
+            let store = crate::test_support::authenticated_store(dir.path().join("state"));
             let (url, mut requests, server) = gated_server().await;
             let h = Harness::with_provider(
                 store.clone(),

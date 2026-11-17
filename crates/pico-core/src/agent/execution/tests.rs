@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::{StreamingRequest, completed, sqlite, streaming_server};
+use crate::test_support::{StreamingRequest, completed, sqlite, streaming_server, until};
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -12,19 +12,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("state")).unwrap();
-        store
-            .write(
-                "auth.json",
-                &crate::auth::Credentials {
-                    access_token: "fixture".into(),
-                    refresh_token: "fixture".into(),
-                    expires_at: crate::store::now() + 3600,
-                    account_id: Some("fixture".into()),
-                    email: None,
-                },
-            )
-            .unwrap();
+        let store = crate::test_support::authenticated_store(dir.path().join("state"));
         let (endpoint, requests, server) = streaming_server().await;
         let h = Harness::with_provider(
             store.clone(),
@@ -87,15 +75,6 @@ impl Drop for Fixture {
         self.h.stop_all();
         self.server.abort();
     }
-}
-async fn until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !condition() {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap();
 }
 fn call(id: &str, source: &str) -> Value {
     json!({"type":"custom_tool_call", "id":format!("item-{id}"), "call_id":id,

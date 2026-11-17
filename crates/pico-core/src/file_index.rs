@@ -471,8 +471,8 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
 }
 // Resolve exclusions once per background operation, never once per filename or
 // on the UI thread. Do not exclude arbitrary projects merely named pico-evo.
-fn discovery_exclusions(cache: Option<&Path>) -> Vec<PathBuf> {
-    let mut paths: Vec<_> = cache.map(Path::to_path_buf).into_iter().collect();
+fn discovery_exclusions(cache: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![cache.to_path_buf()];
     let xdg = std::env::var_os("XDG_CONFIG_HOME");
     let home = std::env::var_os("HOME");
     if let Some(config) = crate::config_dir(
@@ -490,22 +490,24 @@ fn discovery_exclusions(cache: Option<&Path>) -> Vec<PathBuf> {
     }
     paths
 }
-fn walk(root: &Path, cache: &Path, cancelled: &impl Fn() -> bool) -> Result<Snapshot> {
-    let mut builder = ignore::WalkBuilder::new(root);
-    builder
+fn discovery_walk(root: &Path, cache: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
         .hidden(false)
         .follow_links(false)
         .require_git(false)
         .add_custom_ignore_filename(".rgignore")
         .filter_entry({
-            let excluded = discovery_exclusions(Some(cache));
+            let excluded = discovery_exclusions(cache);
             move |entry| {
                 !excluded.iter().any(|path| entry.path().starts_with(path))
                     && !internal(entry.path())
             }
-        });
+        })
+        .build()
+}
+fn walk(root: &Path, cache: &Path, cancelled: &impl Fn() -> bool) -> Result<Snapshot> {
     let mut snapshot = Snapshot::new();
-    for entry in builder.build() {
+    for entry in discovery_walk(root, cache) {
         anyhow::ensure!(!cancelled(), "File discovery cancelled");
         let entry = entry?;
         if entry.file_type().is_some_and(|kind| kind.is_file()) {
@@ -619,7 +621,7 @@ fn enumerate_git(
     cache: &Path,
 ) -> Result<Option<Snapshot>> {
     let output = child.stdout.take().expect("piped git output");
-    let excluded = discovery_exclusions(Some(cache));
+    let excluded = discovery_exclusions(cache);
     // A separate guard kills/reaps Git even if its pipe stalls during shutdown.
     let process_group = nix::unistd::Pid::from_raw(child.id() as i32);
     let stop = AtomicBool::new(false);
@@ -808,20 +810,7 @@ fn watch_paths(
     }
     // Directory discovery includes empty directories, without watching ignored build trees.
     // Filenames are already indexed; visiting entries here also bounds cancellation latency.
-    let mut builder = ignore::WalkBuilder::new(root);
-    builder
-        .hidden(false)
-        .follow_links(false)
-        .require_git(false)
-        .add_custom_ignore_filename(".rgignore")
-        .filter_entry({
-            let excluded = discovery_exclusions(Some(cache));
-            move |entry| {
-                !excluded.iter().any(|path| entry.path().starts_with(path))
-                    && !internal(entry.path())
-            }
-        });
-    for entry in builder.build() {
+    for entry in discovery_walk(root, cache) {
         if stopped(shared) {
             return (paths, false);
         }
@@ -1259,18 +1248,19 @@ mod tests {
         .await
         .unwrap();
     }
+    async fn until(
+        rx: &mut tokio::sync::watch::Receiver<Response>,
+        check: impl Fn(&Response) -> bool,
+    ) -> Response {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            rx.wait_for(check).await.unwrap().clone()
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn ignored_scope_changes_keep_main_index_and_refresh_live() {
-        async fn until(
-            rx: &mut tokio::sync::watch::Receiver<Response>,
-            check: impl Fn(&Response) -> bool,
-        ) -> Response {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                rx.wait_for(check).await.unwrap().clone()
-            })
-            .await
-            .unwrap()
-        }
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         fs::write(
@@ -1394,16 +1384,6 @@ mod tests {
     }
     #[tokio::test]
     async fn failed_refresh_keeps_results_and_root_replacement_recovers_watching() {
-        async fn until(
-            rx: &mut tokio::sync::watch::Receiver<Response>,
-            check: impl Fn(&Response) -> bool,
-        ) -> Response {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                rx.wait_for(check).await.unwrap().clone()
-            })
-            .await
-            .unwrap()
-        }
         let parent = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let root = parent.path().join("workspace");

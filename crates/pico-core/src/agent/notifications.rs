@@ -105,19 +105,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_notifications_are_live_once_and_survive_eviction_not_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().into()).unwrap();
-        store
-            .write(
-                "auth.json",
-                &crate::auth::Credentials {
-                    access_token: "fixture".into(),
-                    refresh_token: "fixture".into(),
-                    expires_at: crate::store::now() + 3600,
-                    account_id: Some("fixture".into()),
-                    email: None,
-                },
-            )
-            .unwrap();
+        let store = crate::test_support::authenticated_store(dir.path().into());
         let (url, mut requests, server) = crate::test_support::gated_server().await;
         let h =
             Harness::with_provider(store.clone(), vec![], Provider::fixture(store.clone(), url))

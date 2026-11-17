@@ -291,10 +291,7 @@ mod tests {
 
     #[test]
     fn rendered_wave_moves_freezes_and_resumes_without_requesting_frames() {
-        exercise_wave(crate::test_renderer::new(16.));
-    }
-
-    fn exercise_wave(mut renderer: iced::Renderer) {
+        let mut renderer = crate::test_renderer::new(16.);
         let size = Size::new(320., 80.);
         let viewport = Rectangle::with_size(size);
         let start = Instant::now();

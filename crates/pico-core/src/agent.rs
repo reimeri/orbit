@@ -1579,19 +1579,7 @@ mod tests {
             ("wait", true),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(dir.path().into()).unwrap();
-            store
-                .write(
-                    "auth.json",
-                    &crate::auth::Credentials {
-                        access_token: "fixture".into(),
-                        refresh_token: "fixture".into(),
-                        expires_at: crate::store::now() + 3600,
-                        account_id: Some("fixture".into()),
-                        email: None,
-                    },
-                )
-                .unwrap();
+            let store = crate::test_support::authenticated_store(dir.path().into());
             let source = r#"// @exec: {"yield_time_ms": 100}
 text('Output before questionnaire');
 await Promise.all(['first', 'second'].map(async id => {

@@ -660,7 +660,7 @@ pub(super) fn final_response(output: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::StreamingRequest as Request;
+    use crate::test_support::{StreamingRequest as Request, until};
     use tokio::sync::mpsc;
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -683,19 +683,7 @@ mod tests {
                 "Project rule: preserve the sapphire invariant.",
             )
             .unwrap();
-            let store = Store::open(dir.path().join("state")).unwrap();
-            store
-                .write(
-                    "auth.json",
-                    &crate::auth::Credentials {
-                        access_token: "fixture".into(),
-                        refresh_token: "fixture".into(),
-                        expires_at: now() + 3600,
-                        account_id: Some("fixture".into()),
-                        email: None,
-                    },
-                )
-                .unwrap();
+            let store = crate::test_support::authenticated_store(dir.path().join("state"));
             let (endpoint, requests, server) = crate::test_support::streaming_server().await;
             let provider = Provider::fixture(store.clone(), endpoint);
             let h = Harness::with_provider(store.clone(), vec![], provider).unwrap();
@@ -842,15 +830,6 @@ mod tests {
         crate::test_support::completed(
             json!([{"type":"message","id":id(),"phase":"final_answer","content":[{"type":"output_text","text":text}]}]),
         )
-    }
-    async fn until(mut condition: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .unwrap();
     }
 
     #[tokio::test]

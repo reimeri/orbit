@@ -15,11 +15,6 @@ unsafe_code = "forbid"
 [profile.dev]
 # Keep useful backtraces without full variable debug info for the entire GUI stack.
 debug = "line-tables-only"
-incremental = true
-
-[profile.test]
-debug = "line-tables-only"
-incremental = true
 
 [patch.crates-io]
 # Prepared by nix develop and the package build; see patches/*/README.md.
