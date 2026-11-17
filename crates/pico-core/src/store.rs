@@ -385,14 +385,13 @@ impl Session {
         self.effort = defaults.effort.clone();
         self.fast = defaults.fast;
     }
-    /// Returns the retired model ID, for a user-facing informational notice.
-    pub fn reconcile_model(&mut self, settings: &Settings) -> Option<String> {
+    /// Returns whether the session was switched to the configured default.
+    pub fn reconcile_model(&mut self, settings: &Settings) -> bool {
         if model(&self.model).is_some() {
-            return None;
+            return false;
         }
-        let retired = self.model.clone();
         self.select_model(&settings.model, settings);
-        Some(retired)
+        true
     }
     pub fn rename(&mut self, title: String) {
         self.title = title;
@@ -944,8 +943,8 @@ mod tests {
         // Reproduce the November 2026 refresh: both older families are retired,
         // while Luna's customized preferences must survive.
         for (retired, replacement) in [
-            ("gpt-6-astra", "gpt-6.2-astra"),
-            ("gpt-6.1-sol", "gpt-6.2-sol"),
+            ("gpt-6-astra", crate::models::ASTRA.id),
+            ("gpt-6.1-sol", crate::models::SOL.id),
         ] {
             catalog.settings.models.remove(replacement);
             expected.insert(replacement.into(), ModelDefaults::default());
@@ -957,6 +956,9 @@ mod tests {
                 },
             );
         }
+        // Terra is new to the catalog and has no saved preferences yet.
+        catalog.settings.models.remove(crate::models::TERRA.id);
+        expected.insert(crate::models::TERRA.id.into(), ModelDefaults::default());
         catalog.settings.model = "gpt-6.1-sol".into();
         catalog.settings.context_limit = 128_000;
         catalog.settings.images.model = "gpt-image-2.5-sunburst".into();

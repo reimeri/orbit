@@ -1,12 +1,12 @@
 ---
 name: update-openai-models
-description: Check official OpenAI documentation for newer Astra, Sol, Luna, and API image models, then update Pico V2's catalog, reasoning efforts and default image model.
+description: Check official OpenAI documentation for newer Astra, Sol, Terra, Luna, and API image models, then update Pico V2's catalog, reasoning efforts and default image model.
 ---
 
 # Update the OpenAI model catalog
 
 Use this skill when asked to refresh Pico's OpenAI models or check for newer
-Astra, Sol, Luna, or API image-model versions. This is a repository maintenance workflow, not a
+Astra, Sol, Terra, Luna, or API image-model versions. This is a repository maintenance workflow, not a
 runtime model-discovery feature. Read `PROJECT.md` and `docs/development.md` first.
 
 ## Research before editing
@@ -16,7 +16,7 @@ runtime model-discovery feature. Read `PROJECT.md` and `docs/development.md` fir
    - https://developers.openai.com/api/docs/models
    - https://developers.openai.com/api/docs/guides/reasoning
    - https://developers.openai.com/api/docs/changelog
-2. Find the newest generally available **Astra**, **Sol**, and **Luna** family
+2. Find the newest generally available **Astra**, **Sol**, **Terra**, and **Luna** family
    versions. Do not infer API identifiers or capabilities from marketing names,
    unrelated families, dates, or search snippets. Do not substitute a preview or
    specialist variant without user approval. API availability alone does not
@@ -37,10 +37,10 @@ Current capability reference links (refreshed 2026-11-17):
 
 - `crates/pico-core/src/models.rs` is the single fixed catalog. Keep **one current
   entry per family**; replace older family versions rather than accumulating
-  old versions or compatibility aliases. Preserve the default family (currently
-  Sol), updating `DEFAULT_MODEL` to its replacement ID when needed.
+  old versions or compatibility aliases. Update the family constant’s provider
+  ID, not its UI name. Keep Sol as the default.
 - Keep effort lists model-specific. The current catalog has low, medium, high,
-  xhigh, max for Astra/Sol; Luna additionally has none. Do not carry these lists
+  xhigh, max for Astra/Sol/Terra; Luna additionally has none. Do not carry these lists
   forward without checking the replacement models' documentation.
 - `crates/pico-core/src/store.rs` owns per-model preferences (Medium, Fast off
   initially). Preferences for unchanged IDs must survive catalog refresh.

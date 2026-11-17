@@ -579,15 +579,13 @@ impl Harness {
             .cloned()
             .collect()
     }
-    /// Publish automatic model recovery only after it is durable, so a failed
-    /// selection can retry and still report which model was replaced.
-    pub fn reconcile_model(&self, id: &str, settings: &Settings) -> Result<Option<String>> {
+    pub fn reconcile_model(&self, id: &str, settings: &Settings) -> Result<bool> {
         let conversation = self.load(id)?;
         let mut saved = conversation.persisted.lock().expect("persistence lock");
         let mut session = conversation.snapshot();
-        let Some(retired) = session.reconcile_model(settings) else {
-            return Ok(None);
-        };
+        if !session.reconcile_model(settings) {
+            return Ok(false);
+        }
         self.store.save_changes(saved.as_ref(), &session)?;
         conversation
             .state
@@ -596,7 +594,7 @@ impl Harness {
             .select_model(&session.model, settings);
         *saved = Some(session);
         conversation.changed();
-        Ok(Some(retired))
+        Ok(true)
     }
     pub fn edit(&self, id: &str, edit: impl FnOnce(&mut Session)) -> Result<()> {
         let conversation = self.load(id)?;

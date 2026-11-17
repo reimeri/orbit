@@ -138,7 +138,7 @@ mod tests {
                 let body: Value =
                     serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
                 if body["tools"] == json!([]) {
-                    assert_eq!(body["model"], "gpt-6-luna");
+                    assert_eq!(body["model"], crate::models::LUNA.id);
                     assert_eq!(body["tool_choice"], "none");
                     assert_eq!(body["input"], json!([{"role":"user", "content":first}]));
                     assert!(body.get("service_tier").is_none());

@@ -144,7 +144,7 @@ async fn transport_preserves_metadata_and_snapshots_mode_model_without_conversat
     assert!(first["max_output_tokens"].as_u64().unwrap() > 0);
     assert!(first.get("input").is_none());
     mode(&web, Mode::Cached);
-    *model.lock().unwrap() = "gpt-6-luna".into();
+    *model.lock().unwrap() = crate::models::LUNA.id.into();
     let second = web
         .call(
             r#"{"open":[{"ref_id":"turn0search0"}]}"#,
@@ -157,7 +157,7 @@ async fn transport_preserves_metadata_and_snapshots_mode_model_without_conversat
     let request = requests.recv().await.unwrap();
     let request: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(request["id"], first["id"]);
-    assert_eq!(request["model"], "gpt-6-luna");
+    assert_eq!(request["model"], crate::models::LUNA.id);
     assert_eq!(request["settings"]["external_web_access"], false);
     assert_eq!(request["commands"]["open"][0]["ref_id"], "turn0search0");
     assert!(request.get("input").is_none());

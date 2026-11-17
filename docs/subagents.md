@@ -7,8 +7,8 @@ compatibility layer.
 
 | Type | Model | Reasoning | Instructions |
 | --- | --- | --- | --- |
-| `review` | `gpt-6.2-sol` | `medium` | Review changes for actionable issues, with evidence and file/line references |
-| `explore` | `gpt-6-luna` | `high` | Fast project inspection and precise answers with source references |
+| `review` | Sol | `medium` | Review changes for actionable issues, with evidence and file/line references |
+| `explore` | Luna | `high` | Fast project inspection and precise answers with source references |
 
 Both profiles use Fast off. Their fixed model/effort choices do not follow the
 main session's model preferences. Both are **read-only by instruction, not by

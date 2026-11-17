@@ -1040,8 +1040,11 @@ impl App {
                         h.evict_inactive(id)?;
                         // Recovery is the last fallible step: once saved, its notice
                         // must reach the UI even if other selection work failed earlier.
-                        let retired = id.map(|id| h.reconcile_model(id, &settings)).transpose()?.flatten();
-                        let notice = retired.map(|retired| format!("{retired} is no longer in the model catalog. This session now uses {} with its default effort and Fast setting.", settings.model));
+                        let replaced = match id {
+                            Some(id) => h.reconcile_model(id, &settings)?,
+                            None => false,
+                        };
+                        let notice = replaced.then(|| format!("The previous model is no longer available. This session now uses {} with its default effort and Fast setting.", model(&settings.model).expect("catalog model")));
                         Ok::<_, pico_core::Error>((selection, notice))
                     })()
                     .map_err(|e| {
@@ -4138,9 +4141,9 @@ impl App {
                     .push(text("Default model").size(12))
                     .push(
                         pick_list(
-                            model_options(),
-                            Some(self.settings.model.clone()),
-                            Message::Model,
+                            MODELS,
+                            model(&self.settings.model),
+                            |selected| Message::Model(selected.id.into()),
                         ).style(theme::pick_list).menu_style(theme::pick_list_menu)
                         .width(Fill),
                     )
@@ -4197,7 +4200,6 @@ impl App {
                         container(
                             column![
                                 text(model.name).size(16),
-                                text(model.id).size(11).color(MUTED),
                                 text("Default effort").size(12),
                                 pick_list(
                                     model.efforts,
@@ -4513,7 +4515,7 @@ impl App {
 
     fn footer_options(&self, control: FooterControl) -> Vec<String> {
         match control {
-            FooterControl::Model => model_options(),
+            FooterControl::Model => MODELS.iter().map(|m| m.id.to_owned()).collect(),
             FooterControl::Effort => model(&self.current().expect("footer session").model)
                 .expect("catalog model")
                 .efforts
@@ -5031,7 +5033,7 @@ impl App {
                     profile: pico_core::agent::subagents::Profile::Explore,
                 });
                 child.title = "Trace completion notifications and cancellation".into();
-                child.model = "gpt-6-luna".into();
+                child.model = pico_core::models::LUNA.id.into();
                 child.effort = "high".into();
                 child.entries.push(Entry::new(
                     EntryKind::User {
@@ -5814,9 +5816,6 @@ fn effort_name(effort: &str) -> &'static str {
     }
 }
 
-fn model_options() -> Vec<String> {
-    MODELS.iter().map(|m| m.id.to_owned()).collect()
-}
 fn shorten(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.into();
@@ -5910,6 +5909,7 @@ fn window_events() -> Subscription<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pico_core::models::{ASTRA, LUNA};
     mod sqlite {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -7783,7 +7783,7 @@ mod tests {
             footer_key(keyboard::key::Named::Escape),
         ] {
             let mut app = app();
-            let model = "gpt-6.2-astra";
+            let model = ASTRA.id;
             // Exercise both the original default and a subsequently saved value.
             for saved_fast in [false, true] {
                 dispatch(&mut app, Message::ToggleSettings).await;
@@ -7880,25 +7880,25 @@ mod tests {
         let h = app.harness.as_ref().unwrap().clone();
         dispatch(
             &mut app,
-            Message::ModelEffort("gpt-6-luna".into(), "medium".into()),
+            Message::ModelEffort(LUNA.id.into(), "medium".into()),
         )
         .await;
-        dispatch(&mut app, Message::ModelFast("gpt-6-luna".into(), false)).await;
+        dispatch(&mut app, Message::ModelFast(LUNA.id.into(), false)).await;
         dispatch(
             &mut app,
-            Message::ModelEffort("gpt-6.2-astra".into(), "max".into()),
+            Message::ModelEffort(ASTRA.id.into(), "max".into()),
         )
         .await;
-        dispatch(&mut app, Message::ModelFast("gpt-6.2-astra".into(), true)).await;
-        dispatch(&mut app, Message::Model("gpt-6.2-astra".into())).await;
+        dispatch(&mut app, Message::ModelFast(ASTRA.id.into(), true)).await;
+        dispatch(&mut app, Message::Model(ASTRA.id.into())).await;
         dispatch(&mut app, Message::ApplySettings).await;
         let (catalog, _, _) = h.store.load().unwrap();
-        assert_eq!(catalog.settings.model, "gpt-6.2-astra");
-        assert!(catalog.settings.models["gpt-6.2-astra"].fast);
+        assert_eq!(catalog.settings.model, ASTRA.id);
+        assert!(catalog.settings.models[ASTRA.id].fast);
         dispatch(&mut app, Message::Create(PathBuf::from("/models"))).await;
         assert_eq!(app.current().unwrap().effort, "max");
         assert!(app.current().unwrap().fast);
-        dispatch(&mut app, Message::SessionModel("gpt-6-luna".into())).await;
+        dispatch(&mut app, Message::SessionModel(LUNA.id.into())).await;
         assert_eq!(app.current().unwrap().effort, "medium");
         assert!(!app.current().unwrap().fast);
         dispatch(&mut app, Message::ToggleFooterMenu).await;
@@ -7927,12 +7927,14 @@ mod tests {
         h.store.save_session(&session).unwrap();
         dispatch(&mut app, Message::Select(id.clone())).await;
         let saved = h.store.load_session(&id).unwrap();
-        assert_eq!(saved.model, "gpt-6.2-astra");
+        assert_eq!(saved.model, ASTRA.id);
         assert_eq!(saved.effort, "max");
         assert!(saved.fast);
         assert_eq!(saved.entries[0].text, "Keep this transcript");
         assert_eq!(app.editor.text(), "Keep this draft");
-        assert!(app.notice.as_ref().unwrap().0.contains("gpt-6.1-sol"));
+        let notice = &app.notice.as_ref().unwrap().0;
+        assert!(notice.contains(ASTRA.name));
+        assert!(!notice.contains("gpt-"));
         dispatch(&mut app, Message::SessionEffort("high".into())).await;
         dispatch(&mut app, Message::SessionFast(false)).await;
         assert!(!h.store.load_session(&id).unwrap().fast);
@@ -7982,7 +7984,7 @@ mod tests {
         dispatch(&mut app, Message::Select(id.clone())).await;
         assert_eq!(app.selected.as_ref(), Some(&id));
         assert!(app.error.is_none());
-        assert!(app.notice.as_ref().unwrap().0.contains("retired-model"));
+        assert!(app.notice.as_ref().unwrap().0.contains("previous model"));
         let saved = h.store.load_session(&id).unwrap();
         assert_eq!(saved.model, app.catalog.settings.model);
         assert_eq!(saved.effort, defaults.effort);
@@ -8433,7 +8435,7 @@ mod tests {
         let message = "Investigate λ
 Then implement the fix.";
         type_message(&mut app, message).await;
-        dispatch(&mut app, Message::SessionModel("gpt-6.2-astra".into())).await;
+        dispatch(&mut app, Message::SessionModel(ASTRA.id.into())).await;
         dispatch(&mut app, Message::SessionEffort("high".into())).await;
         dispatch(&mut app, Message::Create(PathBuf::from("/project-two"))).await;
         assert_eq!(app.editor.text(), message);
@@ -8594,7 +8596,7 @@ Then implement the fix.";
             profile: Profile::Explore,
         });
         child.title = "Inspect cancellation".into();
-        child.model = "gpt-6-luna".into();
+        child.model = LUNA.id.into();
         child.effort = "high".into();
         child.entries.push(Entry::new(
             EntryKind::User {
@@ -8714,7 +8716,7 @@ Then implement the fix.";
         );
         let original = app.current().unwrap().clone();
         type_message(&mut app, "Forbidden direct child edit").await;
-        dispatch(&mut app, Message::SessionModel("gpt-6.2-astra".into())).await;
+        dispatch(&mut app, Message::SessionModel(ASTRA.id.into())).await;
         dispatch(&mut app, Message::Send).await;
         assert!(app.editor.text().is_empty());
         assert_eq!(app.current().unwrap().model, original.model);
@@ -8734,7 +8736,7 @@ Then implement the fix.";
             let profile = bounds.label("Explore");
             let status = bounds.label("Completed");
             let title = bounds.label("Inspect cancellation");
-            let metadata = bounds.label("gpt-6-luna · high · 17s");
+            let metadata = bounds.label("Luna · high · 17s");
             assert!((profile.center_y() - status.center_y()).abs() <= 1.);
             assert!((title.center_y() - metadata.center_y()).abs() <= 1.);
             assert!(title.y > profile.y);
@@ -9898,7 +9900,7 @@ Then implement the fix.";
             );
             let mut menu_bounds = UiBounds::default();
             ui.operate(&renderer, &mut menu_bounds);
-            let luna = model("gpt-6-luna").unwrap();
+            let luna = LUNA;
             let option = menu_bounds.label(luna.name);
             assert!(
                 option.width >= text_width(luna.name, FOOTER_MENU_TEXT_SIZE),
@@ -9996,7 +9998,7 @@ Then implement the fix.";
             (&session.model, &session.effort, session.fast),
             (&before.0, &before.1, before.2)
         );
-        let luna = model("gpt-6-luna").unwrap();
+        let luna = LUNA;
         for label in [luna.name, "None", "High", "Fast", "Standard"] {
             let messages = {
                 let mut renderer = header_renderer();
@@ -10172,33 +10174,18 @@ Then implement the fix.";
     #[tokio::test]
     async fn footer_selector_persists_changes_and_refreshes_model_defaults() {
         let mut app = app();
+        app.catalog.settings.models.get_mut(LUNA.id).unwrap().effort = "none".into();
+        app.catalog.settings.models.get_mut(LUNA.id).unwrap().fast = false;
         app.catalog
             .settings
             .models
-            .get_mut("gpt-6-luna")
-            .unwrap()
-            .effort = "none".into();
-        app.catalog
-            .settings
-            .models
-            .get_mut("gpt-6-luna")
-            .unwrap()
-            .fast = false;
-        app.catalog
-            .settings
-            .models
-            .get_mut("gpt-6.2-astra")
+            .get_mut(ASTRA.id)
             .unwrap()
             .effort = "max".into();
-        app.catalog
-            .settings
-            .models
-            .get_mut("gpt-6.2-astra")
-            .unwrap()
-            .fast = true;
+        app.catalog.settings.models.get_mut(ASTRA.id).unwrap().fast = true;
         stored_session(&mut app, PathBuf::from("/footer-persist")).await;
         dispatch(&mut app, Message::ToggleFooterMenu).await;
-        dispatch(&mut app, Message::SessionModel("gpt-6-luna".into())).await;
+        dispatch(&mut app, Message::SessionModel(LUNA.id.into())).await;
         assert_eq!(app.current().unwrap().effort, "none");
         assert!(!app.current().unwrap().fast);
         assert!(
@@ -10206,7 +10193,7 @@ Then implement the fix.";
                 .contains(&"none".into())
         );
         dispatch(&mut app, Message::SessionEffort("max".into())).await;
-        dispatch(&mut app, Message::SessionModel("gpt-6.2-astra".into())).await;
+        dispatch(&mut app, Message::SessionModel(ASTRA.id.into())).await;
         assert_eq!(app.current().unwrap().effort, "max");
         assert!(app.current().unwrap().fast);
         assert!(
@@ -10225,11 +10212,11 @@ Then implement the fix.";
             .store
             .load_session(app.selected.as_ref().unwrap())
             .unwrap();
-        assert_eq!(saved.model, "gpt-6.2-astra");
+        assert_eq!(saved.model, ASTRA.id);
         assert_eq!(saved.effort, "low");
         assert!(!saved.fast);
-        assert_eq!(app.catalog.settings.models["gpt-6.2-astra"].effort, "max");
-        assert!(app.catalog.settings.models["gpt-6.2-astra"].fast);
+        assert_eq!(app.catalog.settings.models[ASTRA.id].effort, "max");
+        assert!(app.catalog.settings.models[ASTRA.id].fast);
     }
 
     #[tokio::test]
@@ -10242,7 +10229,7 @@ Then implement the fix.";
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
         dispatch(&mut app, Message::ToggleFooterMenu).await;
         sqlite::fail_writes(&db, "sessions", "fixture footer write failure");
-        dispatch(&mut app, Message::SessionModel("gpt-6-luna".into())).await;
+        dispatch(&mut app, Message::SessionModel(LUNA.id.into())).await;
         assert!(!app.io_busy);
         assert!(app.footer_menu_open);
         assert!(
@@ -10252,7 +10239,7 @@ Then implement the fix.";
                 .contains("fixture footer write failure")
         );
         // Unsaved choices remain in memory; another selection retries persistence.
-        assert_eq!(app.current().unwrap().model, "gpt-6-luna");
+        assert_eq!(app.current().unwrap().model, LUNA.id);
         sqlite::allow_writes(&db, "sessions");
         dispatch(&mut app, Message::ErrorDismiss).await;
         let save = app.update(Message::SessionEffort("none".into()));
@@ -10268,7 +10255,7 @@ Then implement the fix.";
             "finishing a save must not reopen a dismissed popup"
         );
         let saved = h.store.load_session(&id).unwrap();
-        assert_eq!(saved.model, "gpt-6-luna");
+        assert_eq!(saved.model, LUNA.id);
         assert_eq!(saved.effort, "none");
         assert!(app.error.is_none());
     }

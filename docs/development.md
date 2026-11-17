@@ -465,7 +465,7 @@ image edges on the CPU Vulkan driver. Run `just smoke-gpu` for host-GPU acceptan
 ## Automatic session titles
 
 On the first accepted user message, main sessions request a short title from
-`gpt-6-luna` in the background through the existing ChatGPT subscription provider.
+Luna in the background through the existing ChatGPT subscription provider.
 The tools-disabled request contains only that message (including attached images),
 not project instructions or later conversation history. It does not change the
 conversation's selected model, transcript, context, usage display or running status.

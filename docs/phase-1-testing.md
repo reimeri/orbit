@@ -154,7 +154,7 @@ lose details; the original transcript remains the source of truth.
 ## UI regression checks
 
 - Open the footer model picker and leave it open: ordering must stay fixed across
-  redraws and status updates; only the three models in the Models tab appear, once each.
+  redraws and status updates; Astra, Sol, Terra, and Luna appear once each, without version IDs.
 - There is no chat header, bottom-sidebar New session/shortcut label, composer
   hint, Send, Continue, Latest or Stop buttons. Enter still sends; Shift+Enter adds
   a line. Esc dismisses an open menu, dialog or Settings first; with those closed,
@@ -176,13 +176,13 @@ lose details; the original transcript remains the source of truth.
 
 - Verify Account, General, and Models tabs remain visible while scrolling their
   content. Account owns sign-in/out; General owns the default-model dropdown,
-  context/compaction settings and appearance; Models owns all three model defaults.
+  context/compaction settings and appearance; Models owns the per-family defaults.
 - Set Astra to Max/Fast on and Luna to None/Fast off, then Save. Choose
   Astra as the default in General and apply. A new session starts with Astra,
   Max and Fast. Switch to Luna in the footer: effort becomes None, Fast turns off.
 - Click anywhere on the combined model/reasoning footer button. The popup has
   models on the left, supported reasoning levels on the right, and Standard/Fast
-  along the bottom. Astra/Sol have Low, Medium, High, Extra High, Max; Luna also
+  along the bottom. Astra/Sol/Terra have Low, Medium, High, Extra High, Max; Luna also
   has None. Changing model refreshes these choices and applies its saved defaults.
 - Changes leave the popup open. Selections are mouse-only: Tab, arrows, Enter and
   Space do not navigate, select, or type/send in the composer behind the popup.

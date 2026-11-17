@@ -23,10 +23,10 @@ impl Profile {
             Self::Explore => "Explore",
         }
     }
-    pub fn model(self) -> &'static str {
+    pub fn model(self) -> crate::models::Model {
         match self {
-            Self::Review => "gpt-6.2-sol",
-            Self::Explore => "gpt-6-luna",
+            Self::Review => crate::models::SOL,
+            Self::Explore => crate::models::LUNA,
         }
     }
     pub fn effort(self) -> &'static str {
@@ -301,7 +301,7 @@ impl Harness {
                 parent_id: parent.into(),
                 profile: args.profile,
             });
-            session.model = args.profile.model().into();
+            session.model = args.profile.model().id.into();
             session.effort = args.profile.effort().into();
             session.fast = false;
             session
@@ -957,7 +957,7 @@ mod tests {
             // Keep provider streams open while inspecting the children's catalogs.
             let mut pending = vec![];
             for profile in [Profile::Explore, Profile::Review] {
-                let child = f.spawn(profile, None, profile.model()).unwrap();
+                let child = f.spawn(profile, None, profile.model().id).unwrap();
                 let request = f.request().await;
                 let mut expected = vec!["exec_command", "write_stdin", "view_image"];
                 if mode != Mode::Disabled {
@@ -1006,7 +1006,7 @@ mod tests {
             &["exec_command", "write_stdin", "web__run", "view_image"],
         )
         .await;
-        assert_eq!(explore_request.body["model"], Profile::Explore.model());
+        assert_eq!(explore_request.body["model"], Profile::Explore.model().id);
         assert_eq!(
             explore_request.body["reasoning"]["effort"],
             Profile::Explore.effort()
@@ -1037,7 +1037,7 @@ mod tests {
         );
         let review = f.spawn(Profile::Review, None, "review").unwrap();
         let review_request = f.request().await;
-        assert_eq!(review_request.body["model"], Profile::Review.model());
+        assert_eq!(review_request.body["model"], Profile::Review.model().id);
         assert_eq!(
             review_request.body["reasoning"]["effort"],
             Profile::Review.effort()
