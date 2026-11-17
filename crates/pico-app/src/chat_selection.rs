@@ -232,29 +232,6 @@ impl Selection {
             false
         }
     }
-    fn offer(&mut self, at: Position, unit_byte: usize, units: &TextUnits, distance: f32) {
-        if self
-            .candidate
-            .as_ref()
-            .is_none_or(|best| distance < best.distance)
-        {
-            let range = units.range(unit_byte, self.granularity);
-            self.candidate = Some(MotionCandidate {
-                at,
-                unit: (
-                    Position {
-                        byte: range.start,
-                        ..at
-                    },
-                    Position {
-                        byte: range.end,
-                        ..at
-                    },
-                ),
-                distance,
-            });
-        }
-    }
     fn extend(&mut self, at: Position) {
         self.focus = Some(at);
         self.moved |= self.pressed_at != Some(at);
@@ -578,7 +555,52 @@ struct Selectable {
 struct State {
     paragraph: Paragraph,
     spans: Arc<[Span<'static, String>]>,
+    index: TextIndex,
     pressed_link: Option<String>,
+}
+/// Byte indexes belong to the shaped paragraph, not to a transient widget/view.
+/// Build from the renderer's logical lines; visual wrapping does not change them.
+#[derive(Default)]
+struct TextIndex {
+    graphemes: Vec<usize>,
+    lines: Vec<Range<usize>>,
+}
+impl TextIndex {
+    fn new(content: &str, buffer: &cosmic_text::Buffer) -> Self {
+        let graphemes = content
+            .grapheme_indices(true)
+            .map(|(byte, _)| byte)
+            .chain([content.len()])
+            .collect();
+        let lines = buffer
+            .lines
+            .iter()
+            .scan(0, |offset, line| {
+                let start = *offset;
+                let end = start + line.text().len();
+                *offset = end + line.ending().as_str().len();
+                Some(start..end)
+            })
+            .collect();
+        Self { graphemes, lines }
+    }
+    fn nearest(&self, byte: usize) -> usize {
+        let mut index = self
+            .graphemes
+            .partition_point(|&boundary| boundary < byte)
+            .min(self.graphemes.len() - 1);
+        // Match the original scan: the earlier boundary wins an equal-distance tie.
+        if index > 0
+            && byte.abs_diff(self.graphemes[index - 1]) <= byte.abs_diff(self.graphemes[index])
+        {
+            index -= 1;
+        }
+        index
+    }
+    fn cursor(&self, byte: usize) -> cosmic_text::Cursor {
+        let line = self.lines.partition_point(|range| range.end < byte);
+        cosmic_text::Cursor::new(line, byte - self.lines[line].start)
+    }
 }
 struct Hit {
     byte: usize,
@@ -588,28 +610,17 @@ impl Selectable {
     fn hit(&self, state: &State, point: Point) -> Option<Hit> {
         // Iced's generic hit_test drops the hard-line index. Use the renderer's
         // shaped buffer so hard breaks, wrapping, bidi and Unicode agree with paint.
+        #[cfg(test)]
+        tests::HITS.set(tests::HITS.get() + 1);
         let buffer = state.paragraph.buffer();
         let hit = buffer.hit(point.x, point.y)?;
-        let offset: usize = buffer.lines[..hit.line]
-            .iter()
-            .map(|l| l.text().len() + l.ending().as_str().len())
-            .sum();
-        let byte = offset + hit.index;
-        let byte = self
-            .content
-            .grapheme_indices(true)
-            .map(|(i, _)| i)
-            .chain([self.content.len()])
-            .min_by_key(|i| i.abs_diff(byte))
-            .expect("end boundary");
+        let offset = state.index.lines[hit.line].start;
+        let boundary = state.index.nearest(offset + hit.index);
+        let byte = state.index.graphemes[boundary];
         // The trailing half of a glyph hits the caret *after* it. Unit selection
         // must still select that glyph's word (also for RTL text and ligatures).
         let unit_byte = if hit.affinity == cosmic_text::Affinity::Before && byte > offset {
-            self.content[..byte]
-                .grapheme_indices(true)
-                .next_back()
-                .expect("preceding grapheme")
-                .0
+            state.index.graphemes[boundary - 1]
         } else {
             byte
         };
@@ -666,6 +677,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                 || state.paragraph.compare(text.with_content(())) == text::Difference::Shape
             {
                 state.paragraph = Paragraph::with_spans(text);
+                state.index = TextIndex::new(&self.content, state.paragraph.buffer());
                 state.spans = self.spans.clone();
                 #[cfg(test)]
                 tests::SHAPED.with(|count| count.set(count.get() + 1));
@@ -703,18 +715,39 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             let x = p.x.clamp(bounds.x, bounds.x + bounds.width);
             let y = p.y.clamp(bounds.y, bounds.y + bounds.height);
             let distance = (p.x - x).powi(2) + (p.y - y).powi(2);
-            if let Some(hit) = self.hit(state, Point::new(x - bounds.x, y - bounds.y)) {
-                self.selection.borrow_mut().offer(
-                    Position {
-                        byte: self.at.byte + hit.byte,
-                        ..self.at
-                    },
-                    self.at.byte + hit.unit_byte,
-                    &self.units,
+            let mut selection = self.selection.borrow_mut();
+            // Equal-distance candidates cannot replace the first winner either.
+            // Reject before consulting the shaped text, including offscreen blocks.
+            if selection
+                .candidate
+                .as_ref()
+                .is_none_or(|best| distance < best.distance)
+                && let Some(hit) = self.hit(state, Point::new(x - bounds.x, y - bounds.y))
+            {
+                let at = Position {
+                    byte: self.at.byte + hit.byte,
+                    ..self.at
+                };
+                let range = self
+                    .units
+                    .range(self.at.byte + hit.unit_byte, selection.granularity);
+                selection.candidate = Some(MotionCandidate {
+                    at,
+                    unit: (
+                        Position {
+                            byte: range.start,
+                            ..at
+                        },
+                        Position {
+                            byte: range.end,
+                            ..at
+                        },
+                    ),
                     distance,
-                );
+                });
             }
         }
+
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 state.pressed_link = None;
@@ -769,7 +802,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         let Some(clip) = layout.bounds().intersection(viewport) else {
             return;
         };
-        let paragraph = &tree.state.downcast_ref::<State>().paragraph;
+        let state = tree.state.downcast_ref::<State>();
+        let paragraph = &state.paragraph;
         // Preserve Rich's span decorations (not just the glyphs). Default/top
         // alignment anchors both the paragraph and these regions at layout.position().
         let translation = layout.position() - Point::ORIGIN;
@@ -844,17 +878,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             return;
         }
         let buffer = paragraph.buffer();
-        let to_cursor = |byte: usize| {
-            let mut offset = 0;
-            for (line, text) in buffer.lines.iter().enumerate() {
-                if byte <= offset + text.text().len() {
-                    return cosmic_text::Cursor::new(line, byte - offset);
-                }
-                offset += text.text().len() + text.ending().as_str().len();
-            }
-            unreachable!("selection lies within paragraph")
-        };
-        let (start, end) = (to_cursor(range.start), to_cursor(range.end));
+        let (start, end) = (
+            state.index.cursor(range.start),
+            state.index.cursor(range.end),
+        );
         renderer.with_layer(clip, |renderer| {
             for run in buffer.layout_runs() {
                 if let Some((x, width)) = run.highlight(start, end) {
@@ -905,6 +932,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
 #[cfg(test)]
 pub(crate) mod tests {
     thread_local! {
+        pub(super) static HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static SHAPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
@@ -1011,6 +1039,152 @@ pub(crate) mod tests {
                     .collect(),
             )],
         )
+    }
+
+    #[test]
+    fn indexed_boundaries_follow_unicode_and_hard_lines_after_reflow_and_edits() {
+        let mut renderer = renderer();
+        let selection = Shared::default();
+        let mut tree = Tree::empty();
+        let original = "a\u{301}👩‍💻z\nsecond line with enough words to wrap\nlast";
+        let mut runs = Vec::new();
+        for (value, width) in [
+            (original, 500.),
+            (original, 90.),
+            ("אבג\ncafé\nend", 300.),
+            ("", 90.),
+        ] {
+            let mut view = plain(
+                value,
+                16.,
+                None,
+                selection.clone(),
+                Position {
+                    entry: 0,
+                    block: 0,
+                    byte: 0,
+                },
+            );
+            tree.diff(view.as_widget());
+            view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(width, 1000.)),
+            );
+            let state = tree.state.downcast_ref::<State>();
+            runs.push(state.paragraph.buffer().layout_runs().count());
+            // Independent linear reference, including bytes inside UTF-8/emoji clusters
+            // and equal-distance ties. It also catches stale indexes after an edit.
+            for byte in 0..=value.len() {
+                let expected = value
+                    .grapheme_indices(true)
+                    .map(|(i, _)| i)
+                    .chain([value.len()])
+                    .min_by_key(|i| i.abs_diff(byte))
+                    .unwrap();
+                assert_eq!(state.index.graphemes[state.index.nearest(byte)], expected);
+            }
+            // Explicit LF fixtures: visual wraps must never become logical line offsets.
+            let mut offset = 0;
+            for (line, text) in value.split('\n').enumerate() {
+                for byte in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+                    let cursor = state.index.cursor(offset + byte);
+                    assert_eq!((cursor.line, cursor.index), (line, byte));
+                }
+                offset += text.len() + 1;
+            }
+            // Exercise the cached endpoint mapping in drawing as well as in lookup.
+            selection.borrow_mut().start(Position {
+                entry: 0,
+                block: 0,
+                byte: 0,
+            });
+            selection.borrow_mut().extend(Position {
+                entry: 0,
+                block: 0,
+                byte: value.len(),
+            });
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(width, 1000.)),
+            );
+            renderer.reset(Rectangle::with_size(Size::new(width, 1000.)));
+            view.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &renderer::Style {
+                    text_color: Color::WHITE,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(Size::new(width, 1000.)),
+            );
+        }
+        assert!(
+            runs[1] > runs[0],
+            "narrowing must actually exercise visual reflow"
+        );
+    }
+
+    #[test]
+    fn candidate_rejection_bounds_hits_and_preserves_closer_and_tied_targets() {
+        let mut renderer = renderer();
+        let mut hit_counts = Vec::new();
+        for count in [2, 80] {
+            let selection = Shared::default();
+            let rows = (0..count).map(|entry| {
+                tool_row(
+                    "alpha omega",
+                    selection.clone(),
+                    Position {
+                        entry,
+                        block: 0,
+                        byte: 0,
+                    },
+                    20.,
+                    false,
+                    Arc::new(TextUnits::lines("alpha omega")),
+                )
+            });
+            let mut ui = UserInterface::build(
+                pointer_input(column(rows).spacing(12).into(), false, selection.clone()),
+                Size::new(300., 2000.),
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = TextBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let first = bounds.0[0].1;
+            let second = bounds.0[1].1;
+            let first_point = Point::new(first.x + 1., first.center_y());
+            send(&mut ui, &mut renderer, press(), first_point);
+            HITS.set(0);
+            send(&mut ui, &mut renderer, motion(first_point), first_point);
+            hit_counts.push(HITS.get());
+            // A nearer block encountered later must replace the first candidate;
+            // changing direction must not retain the previous event's winner.
+            for (point, entry) in [
+                (Point::new(second.x + 1., second.center_y()), 1),
+                (first_point, 0),
+                (
+                    Point::new(first.x + 1., (first.y + first.height + second.y) / 2.),
+                    0,
+                ),
+            ] {
+                send(&mut ui, &mut renderer, motion(point), point);
+                assert_eq!(selection.borrow().focus.unwrap().entry, entry);
+            }
+        }
+        assert!(
+            hit_counts[0] > 0,
+            "the fixture must exercise text hit testing"
+        );
+        assert_eq!(
+            hit_counts[0], hit_counts[1],
+            "adding noncompetitive blocks must not add text hits"
+        );
     }
 
     #[test]
@@ -1991,3 +2165,7 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "chat_selection_benchmark.rs"]
+mod benchmark;

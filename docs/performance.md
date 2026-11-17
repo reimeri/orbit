@@ -346,3 +346,68 @@ the report's `tick-driven` approach, not the larger widget-local-clock redesign.
 
 See [editor performance](editor-performance.md) for the opt-in paste/layout/
 scrollbar benchmark, debug and release baselines, and proposed follow-up work.
+
+## Transcript selection hit-testing
+
+Selection candidates now compare their distance with the current winner **before**
+calling the text renderer's hit test. Equal-distance candidates keep the first
+winner, as before. Each shaped selectable paragraph also retains grapheme byte
+boundaries and logical-line ranges. Hits use binary search for the nearest
+boundary (earlier boundary wins a tie), direct line-start/predecessor lookup, and
+binary search for highlight endpoint cursors instead of rescanning the text.
+Indexes rebuild with paragraph shaping and survive width-only reflow. They add
+O(graphemes + logical lines) memory to mounted paragraphs; construction is linear
+and outside pointer-event handling. Existing renderer newline mapping is unchanged.
+
+### Reproducing the benchmark
+
+`crates/pico-app/src/chat_selection_benchmark.rs` is an ignored benchmark using
+the real Markdown viewer, selection root, scrollable and iced UI update path:
+
+```sh
+nix develop --command ./scripts/test-renderer.sh \
+  cargo test --locked --release -p pico-evo selection_motion_benchmark \
+  -- --ignored --nocapture --test-threads=1
+```
+
+Omit `--release` for the debug comparison. To include a long local assistant
+message, set `PICO_SELECTION_BENCH_TEXT=/absolute/path/to/message.md`; its contents
+are never printed. The synthetic cases need no session data. Run benchmarks alone.
+
+Each case uses a 760x600 viewport and explicit 16px text, alternates the pointer
+left/right, and measures near both the top and bottom. Results are medians of
+three 200-event batches after a warm-up batch. Assertions check that both pointer
+positions move the selection, scrolling reaches later text, and no paragraphs
+are reshaped or application messages emitted during the measured work.
+Parsing, initial layout/index construction, drawing and GPU submission are **not**
+timed. Lavapipe initializes the headless renderer; these are CPU event timings,
+not full-window CPU usage or frame times. Hit counts are test-only instrumentation.
+
+### Local before/after results
+
+Both versions used the same benchmark and toolchain. Milliseconds per event:
+
+| Fixture / pointer location | Release before | Release after | Debug before | Debug after |
+| --- | ---: | ---: | ---: | ---: |
+| Local 14,609-byte message, top | 0.207988 | 0.017750 | 2.217222 | 0.117481 |
+| Local 14,609-byte message, bottom | 0.199838 | 0.032373 | 2.178716 | 0.204105 |
+| 64,000-byte source paragraph, top | 0.786564 | 0.000618 | 9.190375 | 0.006033 |
+| 64,000-byte source paragraph, bottom | 0.845305 | 0.055584 | 9.549609 | 0.422080 |
+| 200 short paragraphs, top | 0.218093 | 0.006970 | 2.255400 | 0.035868 |
+| 200 short paragraphs, bottom | 0.201761 | 0.033194 | 2.185024 | 0.214335 |
+
+The local message has 178 selectable blocks. Its text hits/event fell from 134
+to 1.5 near the top and 121 near the bottom (averages over alternating positions).
+Before/after selection endpoints matched in every fixture/location/profile.
+
+The bottom cases expose the remaining limits rather than hiding them: traversal
+is still in document order, so earlier blocks can be successively closer winners.
+The renderer's native hit test also still walks visual runs within a large
+paragraph. This change does **not** add block-level virtualization or remove
+large-paragraph shaping/highlight costs.
+
+Regression tests compare indexed Unicode snapping with a linear reference,
+exercise retained widget state across width reflow/content edits, and verify
+closer/tied candidates and bounded hit work when noncompetitive blocks are added.
+Existing selection tests cover bidi, multi-click word/paragraph extension, links,
+hard lines, CRLF tool copying, and scrolling with a stationary pointer.
