@@ -1,9 +1,12 @@
 //! Composer-local completion state; the shared index never runs on the UI worker.
-use crate::theme;
+use crate::{
+    icons::{self, Icon},
+    theme,
+};
 use iced::futures::SinkExt;
 use iced::{
     Element, Fill, Subscription, keyboard,
-    widget::{column, container, row, text, text_editor, tooltip},
+    widget::{column, container, row, text, text_editor},
 };
 use pico_core::{
     file_index::{Response, Service},
@@ -251,55 +254,54 @@ impl Completion {
             })
     }
     pub fn view(&self) -> Element<'_, Message> {
-        let mut rows = column![].spacing(2);
-        let start = self.selected.saturating_sub(6);
-        for (index, path) in self.response.paths.iter().enumerate().skip(start).take(8) {
-            let label = crate::ellipsized_text::ellipsized_text(
-                path,
-                12.,
-                Some(if index == self.selected {
-                    theme::ACCENT
-                } else {
-                    theme::MUTED
-                }),
-            );
+        const VISIBLE: usize = 8;
+        const INSET: f32 = 6.;
+        let mut rows = column![].width(Fill);
+        // Keep one result below the selection when possible, but never scroll
+        // past the last full window of results.
+        let start = self
+            .selected
+            .saturating_sub(VISIBLE - 2)
+            .min(self.response.paths.len().saturating_sub(VISIBLE));
+        for (index, path) in self
+            .response
+            .paths
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(VISIBLE)
+        {
+            let selected = index == self.selected;
+            let label = crate::ellipsized_text::ellipsized_text(path, 12., None);
             rows = rows.push(
-                tooltip(
-                    theme::button(container(label).width(Fill).padding([3, 6]))
-                        .style(theme::text_button)
-                        .on_press(Message::Accept {
-                            request: self.request,
-                            generation: self.response.generation,
-                            path: Some(path.clone()),
-                        }),
-                    text(path).size(12),
-                    tooltip::Position::Top,
-                )
-                .style(theme::card),
+                theme::button(label)
+                    .padding([3., crate::growing_editor::PADDING - INSET])
+                    .style(move |theme, status| theme::completion_item(theme, status, selected))
+                    .on_press(Message::Accept {
+                        request: self.request,
+                        generation: self.response.generation,
+                        path: Some(path.clone()),
+                    }),
             );
         }
         let status = if self.response.pending {
-            "Searching workspace files…"
+            Some("Searching workspace files…")
         } else if !self.response.status.is_empty() {
-            &self.response.status
+            Some(self.response.status.as_str())
         } else if self.response.paths.is_empty() {
-            "No matching files"
+            Some("No matching files")
         } else {
-            "↑↓ select · Tab/Enter attach · Esc dismiss"
+            None
         };
-        let mut actions = row![
-            text(status).size(11).color(theme::MUTED),
-            theme::button(text("Refresh").size(11))
-                .on_press(Message::Refresh)
-                .style(theme::text_button)
-        ]
-        .spacing(8);
+        if let Some(status) = status {
+            rows = rows.push(text(status).size(11).color(theme::MUTED));
+        }
         if self
             .token
             .as_ref()
             .is_some_and(|(_, token)| token.query.contains(&b'/'))
         {
-            actions = actions.push(
+            rows = rows.push(
                 theme::button(
                     text(if self.ignored {
                         "Hide ignored"
@@ -312,8 +314,15 @@ impl Completion {
                 .style(theme::text_button),
             );
         }
-        container(rows.push(actions))
-            .padding(8)
+        let refresh = icons::tip(
+            theme::button(Icon::RefreshCw.view(12.))
+                .padding(4)
+                .style(theme::sidebar_control)
+                .on_press(Message::Refresh),
+            "Refresh workspace files",
+        );
+        container(row![rows, refresh].spacing(4))
+            .padding(INSET)
             .width(Fill)
             .style(theme::card)
             .into()

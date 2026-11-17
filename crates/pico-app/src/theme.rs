@@ -117,6 +117,25 @@ pub fn text_button(theme: &Theme, status: button_widget::Status) -> button_widge
     style
 }
 
+pub fn completion_item(
+    theme: &Theme,
+    status: button_widget::Status,
+    selected: bool,
+) -> button_widget::Style {
+    let mut style = text_button(theme, status);
+    style.text_color = if selected {
+        ACCENT
+    } else if matches!(
+        status,
+        button_widget::Status::Hovered | button_widget::Status::Pressed
+    ) {
+        ACCENT.scale_alpha(0.85)
+    } else {
+        MUTED
+    };
+    style
+}
+
 /// Destructive menu action without a filled button background.
 pub fn danger_text(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let mut style = text_button(theme, status);

@@ -4,7 +4,7 @@ Type `@` at the start of text or after whitespace in the composer to search the 
 picker supports Up/Down, Tab/Enter, mouse selection and Escape. Enter selects a
 suggestion when one is available; if the search finishes with no matches, Enter sends the message. Shift+Enter
 still inserts a newline. An unhandled Escape retains the app's stop/dismiss behavior.
-Long labels are ellipsized only on screen; hover shows the full tag. Up to 24 results
+Long labels are ellipsized only on screen; selecting a suggestion inserts the full tag. Up to 24 results
 are retained and at most eight suggestion rows are mounted.
 
 Tags are ordinary editable text, not rich-text chips. They persist with drafts,

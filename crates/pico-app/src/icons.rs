@@ -41,6 +41,7 @@ pub enum Icon {
     LogIn,
     LogOut,
     RotateCcw,
+    RefreshCw,
     Info,
     CircleAlert,
 }
@@ -76,6 +77,7 @@ impl Icon {
             Self::LogIn => include_bytes!("icons/log-in.svg"),
             Self::LogOut => include_bytes!("icons/log-out.svg"),
             Self::RotateCcw => include_bytes!("icons/rotate-ccw.svg"),
+            Self::RefreshCw => include_bytes!("icons/refresh-cw.svg"),
             Self::Info => include_bytes!("icons/info.svg"),
             Self::CircleAlert => include_bytes!("icons/circle-alert.svg"),
         };
