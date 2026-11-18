@@ -568,3 +568,26 @@ padding, underlines, strikethrough, Unicode, wrapping, clipping, and fractional
 scale. Test-only query counters require reuse for scroll-only rebuilds and refresh
 for geometry changes, without hard-coded timing thresholds. Existing selection,
 copy, and virtualization tests remain unchanged.
+
+## Single-pass decoration bounds on mount and reflow
+
+Layout now collects the rectangles for **all** decorated spans in one pass over
+the shaped glyphs, instead of restarting the glyph iterator for each span. A
+temporary table maps glyph metadata to the decorated span's output slot. This
+makes geometry collection linear in glyphs plus spans. Undecorated paragraphs
+skip the pass; unchanged layouts keep the existing cache. The collector matches
+iced Rich's first contiguous glyph group per span, including for bidirectional
+text, and preserves paint order.
+
+The `selection_scroll_benchmark` command above now also narrows the mounted
+760 px viewport to 570 px after the last scroll cycle and times that relayout.
+Medians of three fresh processes per version in the pinned release environment
+(Ryzen 7 5800X3D); times are CPU layout only, not whole frames:
+
+| Single formatted paragraph | Cold layout, before → after | Width change, before → after |
+| --- | ---: | ---: |
+| 34,000 bytes | 24.7 → 21.6 ms | 3.0 → 1.2 ms |
+| 170,000 bytes | 172.7 → 114.1 ms | 72.9 → 6.0 ms |
+
+The large fixture's reflow now fits a 16.7 ms layout budget. Its first mount
+still does not: the full paragraph must still be shaped, wrapped and indexed.

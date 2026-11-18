@@ -165,9 +165,10 @@ fn selection_scroll_benchmark() {
         let mut messages = Vec::new();
         let mut cold_layout_ms = 0.;
         let mut cold_draw_ms = 0.;
+        let mut reflow_ms = 0.;
         for iteration in 0..121 {
             let units = tests::UNITS.get();
-            let decoration_queries = tests::DECORATION_QUERIES.get();
+            let decoration_passes = tests::DECORATION_PASSES.get();
             let start = Instant::now();
             let viewer = Viewer::new(selection.clone(), 0);
             let element = markdown::view_with(
@@ -253,10 +254,15 @@ fn selection_scroll_benchmark() {
                 cold_draw_ms = draw_ms;
             } else {
                 assert_eq!(
-                    tests::DECORATION_QUERIES.get(),
-                    decoration_queries,
+                    tests::DECORATION_PASSES.get(),
+                    decoration_passes,
                     "unchanged scroll frames must reuse decoration geometry"
                 );
+            }
+            if iteration == 120 {
+                let start = Instant::now();
+                ui = ui.relayout(Size::new(size.width * 0.75, size.height), &mut renderer);
+                reflow_ms = start.elapsed().as_secs_f64() * 1000.;
             }
             cache = ui.into_cache();
             // Independent cost of rebuilding the same word indexes (the old path).
@@ -276,7 +282,7 @@ fn selection_scroll_benchmark() {
             }
         }
         println!(
-            "SCROLL case={name} bytes={} blocks={blocks} parse_ms={parse_ms:.3} cold_layout_ms={cold_layout_ms:.3} cold_draw_ms={cold_draw_ms:.3}",
+            "SCROLL case={name} bytes={} blocks={blocks} parse_ms={parse_ms:.3} cold_layout_ms={cold_layout_ms:.3} cold_draw_ms={cold_draw_ms:.3} reflow_ms={reflow_ms:.3}",
             source.len()
         );
         for (stage, mut values) in [

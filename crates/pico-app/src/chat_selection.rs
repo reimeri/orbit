@@ -575,6 +575,61 @@ struct State {
     units_key: Option<(usize, Paragraphs)>,
     pressed_link: Option<String>,
 }
+
+/// Batch equivalent of iced's Paragraph::span_bounds for the decorated spans.
+/// Glyph metadata is the source span index; layout runs are in visual order.
+fn decoration_bounds(
+    paragraph: &Paragraph,
+    span_count: usize,
+    decorated: impl Iterator<Item = usize>,
+) -> Vec<(usize, Vec<Rectangle>)> {
+    let mut result: Vec<_> = decorated.map(|i| (i, Vec::<Rectangle>::new())).collect();
+    let mut remaining = result.len();
+    if remaining == 0 {
+        return result;
+    }
+    #[cfg(test)]
+    tests::DECORATION_PASSES.with(|count| count.set(count.get() + 1));
+
+    // Keep results in paint order, including empty spans. Taking a slot on
+    // entry matches iced's first contiguous group if bidi reorders a span.
+    let mut slots: Vec<_> = (0..span_count).map(|_| None).collect();
+    for (index, regions) in &mut result {
+        slots[*index] = Some(regions);
+    }
+    let mut previous = None;
+    let mut active = None;
+    'runs: for run in paragraph.buffer().layout_runs() {
+        for glyph in run.glyphs {
+            if previous != Some(glyph.metadata) {
+                if remaining == 0 {
+                    break 'runs;
+                }
+                previous = Some(glyph.metadata);
+                active = slots[glyph.metadata].take();
+                if active.is_some() {
+                    remaining -= 1;
+                }
+            }
+            let Some(regions) = active.as_deref_mut() else {
+                continue;
+            };
+            let y = run.line_top + glyph.y;
+            if let Some(last) = regions.last_mut()
+                && last.y == y
+            {
+                last.width += glyph.w;
+            } else {
+                regions.push(Rectangle::new(
+                    Point::new(glyph.x, y),
+                    Size::new(glyph.w, glyph.line_height_opt.unwrap_or(run.line_height)),
+                ));
+            }
+        }
+    }
+    result
+}
+
 /// Byte indexes belong to the shaped paragraph, not to a transient widget/view.
 /// Build from the renderer's logical lines; visual wrapping does not change them.
 #[derive(Default)]
@@ -754,15 +809,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                 || (spans_replaced
                     && !decorated_spans().eq(state.decorations.iter().map(|(index, _)| *index)))
             {
-                // span_bounds scans glyphs from the start for each span. Pay that
-                // cost only when its inputs change, never on scroll-only redraws.
-                state.decorations = decorated_spans()
-                    .map(|index| {
-                        #[cfg(test)]
-                        tests::DECORATION_QUERIES.with(|count| count.set(count.get() + 1));
-                        (index, state.paragraph.span_bounds(index))
-                    })
-                    .collect();
+                state.decorations =
+                    decoration_bounds(&state.paragraph, self.spans.len(), decorated_spans());
             }
             if spans_replaced {
                 state.spans = self.spans.clone();
@@ -1013,7 +1061,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
 pub(crate) mod tests {
     thread_local! {
         pub(super) static HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-        pub(super) static DECORATION_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static DECORATION_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static UNITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static SHAPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
@@ -1767,6 +1815,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn batched_bounds_match_iced_for_bidi_wrapping_and_empty_spans() {
+        let spans: [Span<'_, String>; 5] = [
+            Span::new("LTR prefix אב"),
+            Span::new("גד suffix "),
+            Span::new(""),
+            Span::new("wrapped words at a different size\nand after a hard break").size(23),
+            Span::new(" plain tail"),
+        ];
+        for width in [96., 900.] {
+            let paragraph = Paragraph::with_spans(iced::advanced::Text {
+                content: &spans,
+                bounds: Size::new(width, 1000.),
+                size: 16.into(),
+                font: Font::DEFAULT,
+                line_height: text::LineHeight::default(),
+                align_x: text::Alignment::Default,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: text::Shaping::Advanced,
+                wrapping: text::Wrapping::WordOrGlyph,
+            });
+            let decorated = [0, 1, 2, 3];
+            let expected: Vec<_> = decorated
+                .iter()
+                .map(|&i| (i, paragraph.span_bounds(i)))
+                .collect();
+            assert!(expected[2].1.is_empty());
+            assert!(expected[3].1.len() >= 2);
+            assert_eq!(
+                decoration_bounds(&paragraph, spans.len(), decorated.into_iter()),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn shared_paragraph_matches_rich_text_pixels() {
         use iced::widget::rich_text;
         let mut renderer = crate::test_renderer::new(16.);
@@ -1826,7 +1909,7 @@ pub(crate) mod tests {
                 let size = Size::new(width, 240.);
                 let mut frames = Vec::new();
                 for reference in [true, false] {
-                    let queries = DECORATION_QUERIES.get();
+                    let passes = DECORATION_PASSES.get();
                     let text: Element<'_, Message> = if reference {
                         rich_text(spans.clone()).size(text_size).font(font).into()
                     } else {
@@ -1879,13 +1962,13 @@ pub(crate) mod tests {
                     if !reference {
                         if recompute {
                             assert!(
-                                DECORATION_QUERIES.get() > queries,
+                                DECORATION_PASSES.get() > passes,
                                 "changed layout must refresh decorated bounds"
                             );
                         } else {
                             assert_eq!(
-                                DECORATION_QUERIES.get(),
-                                queries,
+                                DECORATION_PASSES.get(),
+                                passes,
                                 "scroll-only redraws and undecorated text need no geometry queries"
                             );
                         }
