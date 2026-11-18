@@ -42,6 +42,7 @@
       desktopItem = pkgs.makeDesktopItem {
         name = "pico-evo";
         desktopName = "Pico V2";
+        icon = "pico-evo";
         comment = "Native Wayland AI coding harness";
         exec = "pico-evo";
         terminal = false;
@@ -79,6 +80,8 @@
         postInstall = ''
           mkdir -p "$out/share/applications"
           cp ${desktopItem}/share/applications/* "$out/share/applications/"
+          install -Dm644 ${./assets/icon/pico-evo.svg} "$out/share/icons/hicolor/scalable/apps/pico-evo.svg"
+          install -Dm644 ${./assets/icon/pico-evo-48.png} "$out/share/icons/hicolor/48x48/apps/pico-evo.png"
         '';
         postFixup = ''
           wrapProgram "$out/bin/pico-evo" \
