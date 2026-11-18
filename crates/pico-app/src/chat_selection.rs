@@ -307,6 +307,7 @@ pub struct Viewer<'a> {
     selection: Shared,
     entry: usize,
     next: Cell<usize>,
+    in_table: Cell<bool>,
     pub blocks: RefCell<Vec<Block>>,
 }
 impl<'a> Viewer<'a> {
@@ -316,6 +317,7 @@ impl<'a> Viewer<'a> {
             selection,
             entry,
             next: Cell::new(0),
+            in_table: Cell::new(false),
             blocks: RefCell::new(Vec::new()),
         }
     }
@@ -346,13 +348,28 @@ impl<'a> Viewer<'a> {
                 block,
                 byte: 0,
             },
-            SelectableText::Block,
+            if self.in_table.get() {
+                SelectableText::TableCell
+            } else {
+                SelectableText::Block
+            },
         )
     }
 }
 impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
     fn on_link_click(url: String) -> Message {
         Message::Link(url)
+    }
+    fn table(
+        &self,
+        settings: markdown::Settings,
+        columns: &'a [markdown::Column],
+        rows: &'a [markdown::Row],
+    ) -> Element<'a, Message> {
+        let previous = self.in_table.replace(true);
+        let table = markdown::table(self, settings, columns, rows);
+        self.in_table.set(previous);
+        table
     }
     fn paragraph(
         &self,
@@ -496,6 +513,7 @@ pub fn tool_row(
 
 enum SelectableText {
     Block,
+    TableCell,
     Plain,
     Row { height: f32, units: Arc<TextUnits> },
 }
@@ -510,15 +528,16 @@ fn selectable(
 ) -> Element<'static, Message> {
     let row_height = match &kind {
         SelectableText::Row { height, .. } => Some(*height),
-        SelectableText::Block | SelectableText::Plain => None,
+        SelectableText::Block | SelectableText::TableCell | SelectableText::Plain => None,
     };
     let line_height = row_height
         .map(|h| text::LineHeight::Absolute(h.into()))
         .unwrap_or_default();
-    let wrapping = if row_height.is_some() {
-        text::Wrapping::None
-    } else {
-        text::Wrapping::default()
+    let wrapping = match &kind {
+        SelectableText::Row { .. } => text::Wrapping::None,
+        // Paths and other unbroken Markdown text must also fit a bounded cell.
+        SelectableText::TableCell => text::Wrapping::WordOrGlyph,
+        SelectableText::Block | SelectableText::Plain => text::Wrapping::default(),
     };
     Element::new(Selectable {
         height: row_height.map_or(Length::Shrink, Length::Fixed),
@@ -677,9 +696,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             // viewport position. Retain them with the mounted paragraph instead
             // of segmenting unchanged text during every view reconstruction.
             match &self.kind {
-                SelectableText::Block | SelectableText::Plain => {
+                SelectableText::Block | SelectableText::TableCell | SelectableText::Plain => {
                     let paragraphs = match self.kind {
-                        SelectableText::Block => Paragraphs::Block,
+                        SelectableText::Block | SelectableText::TableCell => Paragraphs::Block,
                         _ => Paragraphs::BlankLines,
                     };
                     let key = (self.at.byte, paragraphs);
@@ -1965,6 +1984,49 @@ pub(crate) mod tests {
             );
         }
     }
+    #[test]
+    fn markdown_table_reflows_before_resorting_to_horizontal_scroll() {
+        let markdown = format!(
+            "| Finding | Evidence |\n| --- | --- |\n| **{}** | `{}` |\n| Next | Row |",
+            "Long formatted finding. ".repeat(10),
+            "unbroken_identifier".repeat(8),
+        );
+        let content = markdown::Content::parse(&markdown);
+        let viewer = Viewer::new(Shared::default(), 0);
+        let view = markdown::view_with(
+            content.items(),
+            markdown::Settings::from(iced::Theme::Dark),
+            &viewer,
+        );
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            view,
+            Size::new(840., 1000.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+
+        let mut wide = TextBounds::default();
+        ui.operate(&renderer, &mut wide);
+        ui = ui.relayout(Size::new(440., 1000.), &mut renderer);
+        let mut narrow = TextBounds::default();
+        ui.operate(&renderer, &mut narrow);
+        for i in [2, 3] {
+            let cell = narrow.0[i].1;
+            assert!(cell.height > wide.0[i].1.height, "cell must rewrap");
+            assert!(cell.x + cell.width <= 440.);
+            assert!(cell.y + cell.height <= narrow.0[4].1.y);
+        }
+
+        // At phone-like widths the table may extend beyond the pane rather
+        // than squeezing the text into a column only a few glyphs wide.
+        ui = ui.relayout(Size::new(160., 1000.), &mut renderer);
+        let mut squeezed = TextBounds::default();
+        ui.operate(&renderer, &mut squeezed);
+        let last = squeezed.0[3].1;
+        assert!(last.x + last.width > 160.);
+    }
+
     #[test]
     fn drag_across_markdown_and_messages_copies_visible_text_in_both_directions() {
         let selection = Shared::default();

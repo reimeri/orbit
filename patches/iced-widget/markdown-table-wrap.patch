@@ -1,0 +1,84 @@
+--- a/src/markdown.rs
++++ b/src/markdown.rs
+@@ -1511,6 +1511,7 @@
+                     }
+                 },
+             )
++            .width(Length::Fill)
+             .align_x(match column.alignment {
+                 pulldown_cmark::Alignment::None
+                 | pulldown_cmark::Alignment::Left => {
+@@ -1526,6 +1527,7 @@
+         }),
+         rows,
+     )
++    .width(Length::Shrink)
+     .padding_x(settings.spacing.0)
+     .padding_y(settings.spacing.0 / 2.0)
+     .separator_x(0);
+@@ -1534,6 +1536,11 @@
+         .direction(scrollable::Direction::Horizontal(
+             scrollable::Scrollbar::default(),
+         ))
++        // Keep roughly eight ems for text per column before allowing overflow.
++        .wrap_at_viewport(
++            columns.len() as f32
++                * (8.0 * settings.text_size.0 + 2.0 * settings.spacing.0),
++        )
+         .spacing(settings.spacing.0 / 2.0)
+         .into()
+ }
+--- a/src/scrollable.rs
++++ b/src/scrollable.rs
+@@ -78,6 +78,7 @@
+     height: Length,
+     direction: Direction,
+     auto_scroll: bool,
++    min_wrap_width: Option<f32>,
+     content: Element<'a, Message, Theme, Renderer>,
+     on_scroll: Option<Box<dyn Fn(Viewport) -> Message + 'a>>,
+     class: Theme::Class<'a>,
+@@ -107,6 +108,7 @@
+             height: Length::Shrink,
+             direction: direction.into(),
+             auto_scroll: false,
++            min_wrap_width: None,
+             content: content.into(),
+             on_scroll: None,
+             class: Theme::default(),
+@@ -129,6 +131,13 @@
+         self
+     }
+ 
++    /// Constrains horizontal content to the viewport, unless it is narrower
++    /// than the minimum usable wrapping width (e.g. a many-column table).
++    pub(crate) fn wrap_at_viewport(mut self, min_width: f32) -> Self {
++        self.min_wrap_width = Some(min_width);
++        self
++    }
++
+     /// Makes the [`Scrollable`] scroll horizontally, with default [`Scrollbar`] settings.
+     pub fn horizontal(self) -> Self {
+         self.direction(Direction::Horizontal(Scrollbar::default()))
+@@ -450,7 +459,9 @@
+                         limits.min(),
+                         Size::new(
+                             if is_horizontal {
+-                                f32::INFINITY
++                                self.min_wrap_width.map_or(f32::INFINITY, |min| {
++                                    limits.max().width.max(min)
++                                })
+                             } else {
+                                 limits.max().width
+                             },
+--- a/src/table.rs
++++ b/src/table.rs
+@@ -332,7 +332,7 @@
+         let width_unit = (left.width
+             - spacing_x * self.columns.len().saturating_sub(1) as f32
+             - self.padding_x * 2.0)
+-            / column_factors.iter().sum::<u16>() as f32;
++            / column_factors.iter().map(|&n| f32::from(n)).sum::<f32>();
+ 
+         let height_unit = (left.height
+             - spacing_y * rows.saturating_sub(1) as f32
