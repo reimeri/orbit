@@ -1,6 +1,6 @@
 //! Images decode off the UI thread. Chat uses static thumbnails; only the modal animates.
 use crate::icons::{Icon, tip as icon_tip};
-use crate::theme;
+use crate::{recent_previews::RecentPreviews, theme};
 #[cfg(test)]
 use iced::Color;
 use iced::{
@@ -128,13 +128,24 @@ const THUMBNAIL_MAX_WIDTH: f32 = 320.;
 const THUMBNAIL_MAX_HEIGHT: f32 = 220.;
 
 impl Viewer {
-    pub fn prepare(&mut self, media: &[Media]) -> Task<Message> {
+    pub fn prepare(&mut self, recent: &mut RecentPreviews, media: &[Media]) -> Task<Message> {
         let wanted: HashSet<_> = media.iter().filter_map(|m| m.thumbnail.clone()).collect();
-        self.thumbnails.retain(|p, _| wanted.contains(p));
+        for (path, result) in self.thumbnails.extract_if(|path, _| !wanted.contains(path)) {
+            if let Ok(handle) = result {
+                recent.store_saved(path, handle);
+            }
+        }
         *self.wanted.lock().expect("wanted previews") = wanted.clone();
         let mut jobs = Vec::new();
         for path in wanted {
-            if self.thumbnails.contains_key(&path) || !self.pending.insert(path.clone()) {
+            if self.thumbnails.contains_key(&path) {
+                continue;
+            }
+            if let Some(handle) = recent.take_saved(&path) {
+                self.thumbnails.insert(path, Ok(handle));
+                continue;
+            }
+            if !self.pending.insert(path.clone()) {
                 continue;
             }
             let wanted = self.wanted.clone();
@@ -169,7 +180,11 @@ impl Viewer {
                 |(p, r)| Message::Thumbnail(p, r),
             ));
         }
-        Task::batch(jobs)
+        if jobs.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(jobs)
+        }
     }
     pub fn thumbnail(&self, media: &Media) -> Element<'_, crate::ui::Message> {
         match media
@@ -1624,6 +1639,7 @@ mod tests {
         let frames = handles(pico_core::media::frames(&media.path).unwrap());
         assert_eq!(frames.len(), 2);
         let mut viewer = Viewer::default();
+        let mut recent = RecentPreviews::default();
         let _task = viewer.open(&media);
         let generation = viewer.generation;
         viewer.close();
@@ -1649,8 +1665,8 @@ mod tests {
         assert!(viewer.playing);
         viewer.update(Message::Toggle);
         assert!(!viewer.playing);
-        let _task = viewer.prepare(std::slice::from_ref(&media));
-        let _task = viewer.prepare(&[]);
+        let _task = viewer.prepare(&mut recent, std::slice::from_ref(&media));
+        let _task = viewer.prepare(&mut recent, &[]);
         viewer.update(Message::Thumbnail(
             media.thumbnail.unwrap(),
             Some(Ok(frames[0].handle.clone())),
@@ -1661,15 +1677,27 @@ mod tests {
         let media = pico_core::media::MediaStore::new(dir.path().into())
             .image(include_bytes!("fixtures/media.png"))
             .unwrap();
-        let _task = viewer.prepare(std::slice::from_ref(&media));
-        let _task = viewer.prepare(&[]);
-        let _task = viewer.prepare(std::slice::from_ref(&media));
+        let _task = viewer.prepare(&mut recent, std::slice::from_ref(&media));
+        let _task = viewer.prepare(&mut recent, &[]);
+        let _task = viewer.prepare(&mut recent, std::slice::from_ref(&media));
         let thumbnail = media.thumbnail.clone().unwrap();
         viewer.update(Message::Thumbnail(thumbnail.clone(), None));
         assert!(!viewer.thumbnails.contains_key(&thumbnail));
         assert!(!viewer.pending.contains(&thumbnail));
-        let _retry = viewer.prepare(&[media]);
+        let _retry = viewer.prepare(&mut recent, std::slice::from_ref(&media));
         assert!(viewer.pending.contains(&thumbnail));
+        let handle = frames[0].handle.clone();
+        viewer.update(Message::Thumbnail(
+            thumbnail.clone(),
+            Some(Ok(handle.clone())),
+        ));
+        let _ = viewer.prepare(&mut recent, &[]);
+        let hit = viewer.prepare(&mut recent, &[media]);
+        assert!(iced_runtime::task::into_stream(hit).is_none());
+        assert_eq!(
+            viewer.thumbnails[&thumbnail].as_ref().unwrap().id(),
+            handle.id()
+        );
     }
     #[tokio::test]
     async fn ephemeral_gif_bytes_use_the_existing_modal_playback_and_error_states() {

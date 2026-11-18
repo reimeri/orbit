@@ -1,5 +1,5 @@
-//! Visible-only, ephemeral Markdown previews. Never writes to session media storage.
-use crate::theme;
+//! Viewport-loaded, ephemeral Markdown previews. Never writes to session media storage.
+use crate::{recent_previews::RecentPreviews, theme};
 use iced::{
     Element, Length, Size, Task,
     widget::{container, image, responsive, space, text, tooltip},
@@ -25,6 +25,11 @@ pub struct Loaded {
     preview: image::Handle,
     preview_bytes: usize,
 }
+impl Loaded {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.bytes.capacity() + self.preview_bytes
+    }
+}
 #[derive(Clone, Debug)]
 pub enum Message {
     Dimensions {
@@ -43,28 +48,34 @@ struct Slot {
     source: Option<pico_core::markdown_image::Source>,
     dimensions: Option<(u32, u32)>,
     result: Option<Result<Arc<Loaded>, String>>,
-    _task: iced::task::Handle,
+    _task: Option<iced::task::Handle>,
 }
 #[derive(Default)]
 pub struct Cache {
     session: Option<String>,
     generation: u64,
     slots: HashMap<String, Slot>,
-    // Only small geometry records survive viewport/session eviction, never pixels.
+    // Only small geometry records survive session switches.
     dimensions: VecDeque<(pico_core::markdown_image::Source, (u32, u32))>,
 }
 impl Cache {
     pub fn prepare(
         &mut self,
+        recent: &mut RecentPreviews,
         session: Option<(&str, &Path)>,
         urls: HashSet<String>,
     ) -> Task<Message> {
         let id = session.map(|(id, _)| id);
         if self.session.as_deref() != id {
+            recent.clear_markdown();
             self.slots.clear();
             self.session = id.map(str::to_owned);
         }
-        self.slots.retain(|url, _| urls.contains(url));
+        for (_, slot) in self.slots.extract_if(|url, _| !urls.contains(url)) {
+            if let Some(Ok(image)) = slot.result {
+                recent.store_markdown(image);
+            }
+        }
         let Some((_, workspace)) = session else {
             return Task::none();
         };
@@ -75,6 +86,21 @@ impl Cache {
             }
             self.generation = self.generation.wrapping_add(1);
             let generation = self.generation;
+            if let Some(image) = recent.take_markdown(&url) {
+                let dimensions = Some((image.width, image.height));
+                let result = self.admit(Ok(image));
+                self.slots.insert(
+                    url,
+                    Slot {
+                        generation,
+                        source: None,
+                        dimensions,
+                        result: Some(result),
+                        _task: None,
+                    },
+                );
+                continue;
+            }
             let source = pico_core::markdown_image::Source::resolve(workspace, &url)
                 .map_err(|e| format!("{e:#}"));
             let dimensions = source.as_ref().ok().and_then(|key| {
@@ -119,12 +145,16 @@ impl Cache {
                     source: key,
                     dimensions,
                     result: None,
-                    _task: handle.abort_on_drop(),
+                    _task: Some(handle.abort_on_drop()),
                 },
             );
             tasks.push(task);
         }
-        Task::batch(tasks)
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
     }
     pub fn update(&mut self, message: Message) {
         let (url, generation) = match &message {
@@ -160,23 +190,23 @@ impl Cache {
                 }
             }
         }
-        if let Message::Loaded {
-            url, mut result, ..
-        } = message
-        {
-            let retained: usize = self
-                .slots
-                .values()
-                .filter_map(|slot| slot.result.as_ref()?.as_ref().ok())
-                .map(|loaded| loaded.bytes.len() + loaded.preview_bytes)
-                .sum();
-            if let Ok(loaded) = &result
-                && retained + loaded.bytes.len() + loaded.preview_bytes
-                    > pico_core::media::MAX_ANIMATION_BYTES
-            {
-                result = Err("Visible Markdown images exceed the 256 MiB cache limit. Use fewer/smaller images, or scroll other image messages out of view and retry.".into());
-            }
+        if let Message::Loaded { url, result, .. } = message {
+            let result = self.admit(result);
             self.slots.get_mut(&url).expect("current slot").result = Some(result);
+        }
+    }
+    fn admit(&self, result: Result<Arc<Loaded>, String>) -> Result<Arc<Loaded>, String> {
+        let image = result?;
+        let retained: usize = self
+            .slots
+            .values()
+            .filter_map(|slot| slot.result.as_ref()?.as_ref().ok())
+            .map(|loaded| loaded.retained_bytes())
+            .sum();
+        if retained + image.retained_bytes() > pico_core::media::MAX_ANIMATION_BYTES {
+            Err("Visible Markdown images exceed the 256 MiB cache limit. Use fewer/smaller images, or scroll other image messages out of view and retry.".into())
+        } else {
+            Ok(image)
         }
     }
     pub fn loaded(&self, url: &str) -> Option<Arc<Loaded>> {
@@ -340,7 +370,8 @@ mod tests {
         let path = dir.path().join("image.gif");
         std::fs::write(&path, include_bytes!("fixtures/media.gif")).unwrap();
         let mut cache = Cache::default();
-        let task = cache.prepare(Some(("first", dir.path())), one_url());
+        let mut recent = RecentPreviews::default();
+        let task = cache.prepare(&mut recent, Some(("first", dir.path())), one_url());
         let stale_generation = cache.slots["image.gif"].generation;
         finish(&mut cache, task).await;
         let loaded = cache.slots["image.gif"]
@@ -353,16 +384,22 @@ mod tests {
         assert_eq!(&*loaded.bytes, include_bytes!("fixtures/media.gif"));
         // GIF logical-screen header: width 0x0060, height 0x0040.
         assert_eq!((loaded.width, loaded.height), (96, 64));
-        let task = cache.prepare(Some(("first", dir.path())), one_url());
+        let task = cache.prepare(&mut recent, Some(("first", dir.path())), one_url());
         if let Some(mut stream) = iced_runtime::task::into_stream(task) {
             assert!(
                 stream.next().await.is_none(),
                 "visible images must not refetch on every layout"
             );
         }
-        // A second session with the same relative URL must not inherit the image.
+        // A same-session scroll back must keep the actual decoded preview, even
+        // if the source disappears. Switching sessions must instead reload it.
+        let _ = cache.prepare(&mut recent, Some(("first", dir.path())), HashSet::new());
         std::fs::remove_file(&path).unwrap();
-        let task = cache.prepare(Some(("second", dir.path())), one_url());
+        let hit = cache.prepare(&mut recent, Some(("first", dir.path())), one_url());
+        assert!(iced_runtime::task::into_stream(hit).is_none());
+        assert!(Arc::ptr_eq(&cache.loaded("image.gif").unwrap(), &loaded));
+        let _ = cache.prepare(&mut recent, Some(("first", dir.path())), HashSet::new());
+        let task = cache.prepare(&mut recent, Some(("second", dir.path())), one_url());
         cache.update(Message::Loaded {
             url: "image.gif".into(),
             generation: stale_generation,
@@ -373,14 +410,14 @@ mod tests {
         assert!(cache.slots["image.gif"].result.as_ref().unwrap().is_err());
         std::fs::write(&path, include_bytes!("fixtures/media.gif")).unwrap();
         cache.retry("image.gif");
-        let task = cache.prepare(Some(("second", dir.path())), one_url());
+        let task = cache.prepare(&mut recent, Some(("second", dir.path())), one_url());
         finish(&mut cache, task).await;
         assert!(cache.slots["image.gif"].result.as_ref().unwrap().is_ok());
-        let _ = cache.prepare(None, HashSet::new());
+        let _ = cache.prepare(&mut recent, None, HashSet::new());
         assert!(cache.slots.is_empty());
         // Evict an in-flight request as well; it must never restore its slot.
-        let task = cache.prepare(Some(("second", dir.path())), one_url());
-        let _ = cache.prepare(None, HashSet::new());
+        let task = cache.prepare(&mut recent, Some(("second", dir.path())), one_url());
+        let _ = cache.prepare(&mut recent, None, HashSet::new());
         finish(&mut cache, task).await;
         assert!(cache.slots.is_empty());
     }
@@ -419,7 +456,12 @@ mod tests {
             });
             let dir = tempfile::tempdir().unwrap();
             let mut cache = Cache::default();
-            let task = cache.prepare(Some(("session", dir.path())), HashSet::from([url.clone()]));
+            let mut recent = RecentPreviews::default();
+            let task = cache.prepare(
+                &mut recent,
+                Some(("session", dir.path())),
+                HashSet::from([url.clone()]),
+            );
             let mut stream = iced_runtime::task::into_stream(task).unwrap();
             let first = stream.next().await.unwrap();
             let iced_runtime::Action::Output(message) = first else {
@@ -472,7 +514,12 @@ mod tests {
     fn metadata_placeholder_loaded_error_and_retry_have_identical_layout_at_each_width() {
         for dimensions in [(1200, 600), (300, 1200), (6000, 100)] {
             let mut cache = Cache::default();
-            let _task = cache.prepare(Some(("session", Path::new("/workspace"))), one_url());
+            let mut recent = RecentPreviews::default();
+            let _task = cache.prepare(
+                &mut recent,
+                Some(("session", Path::new("/workspace"))),
+                one_url(),
+            );
             let generation = cache.slots["image.gif"].generation;
             cache.update(Message::Dimensions {
                 url: "image.gif".into(),
@@ -557,7 +604,11 @@ mod tests {
                 matches!(messages.as_slice(), [crate::ui::Message::RetryMarkdownImage(url)] if url == "image.gif")
             );
             cache.retry("image.gif");
-            let _task = cache.prepare(Some(("session", Path::new("/workspace"))), one_url());
+            let _task = cache.prepare(
+                &mut recent,
+                Some(("session", Path::new("/workspace"))),
+                one_url(),
+            );
             assert_eq!(
                 [layout(&cache, 700.), layout(&cache, narrow_width)],
                 loading
@@ -568,7 +619,12 @@ mod tests {
     #[test]
     fn geometry_survives_session_eviction_without_reusing_pixels_or_other_workspaces() {
         let mut cache = Cache::default();
-        let _task = cache.prepare(Some(("first", Path::new("/workspace/a"))), one_url());
+        let mut recent = RecentPreviews::default();
+        let _task = cache.prepare(
+            &mut recent,
+            Some(("first", Path::new("/workspace/a"))),
+            one_url(),
+        );
         let old = cache.slots["image.gif"].generation;
         cache.update(Message::Dimensions {
             url: "image.gif".into(),
@@ -576,14 +632,22 @@ mod tests {
             dimensions: (900, 300),
         });
         let expected = layout(&cache, 500.);
-        let _task = cache.prepare(None, HashSet::new());
-        let _task = cache.prepare(Some(("second", Path::new("/workspace/a"))), one_url());
+        let _task = cache.prepare(&mut recent, None, HashSet::new());
+        let _task = cache.prepare(
+            &mut recent,
+            Some(("second", Path::new("/workspace/a"))),
+            one_url(),
+        );
         assert_eq!(layout(&cache, 500.), expected);
         assert!(
             cache.loaded("image.gif").is_none(),
             "source must still be reloaded"
         );
-        let _task = cache.prepare(Some(("third", Path::new("/workspace/b"))), one_url());
+        let _task = cache.prepare(
+            &mut recent,
+            Some(("third", Path::new("/workspace/b"))),
+            one_url(),
+        );
         assert!(cache.slots["image.gif"].dimensions.is_none());
         cache.update(Message::Dimensions {
             url: "image.gif".into(),
@@ -600,16 +664,25 @@ mod tests {
             generation,
             dimensions: (50, 150),
         });
-        let _task = cache.prepare(None, HashSet::new());
-        let _task = cache.prepare(Some(("first", Path::new("/workspace/a"))), one_url());
+        let _task = cache.prepare(&mut recent, None, HashSet::new());
+        let _task = cache.prepare(
+            &mut recent,
+            Some(("first", Path::new("/workspace/a"))),
+            one_url(),
+        );
         assert_eq!(layout(&cache, 500.), expected);
     }
 
     #[test]
     fn retained_originals_are_bounded_across_images_and_eviction_allows_retry() {
         let mut cache = Cache::default();
+        let mut recent = RecentPreviews::default();
         let urls: HashSet<_> = ["a", "b", "c", "d"].map(str::to_owned).into();
-        let _task = cache.prepare(Some(("session", Path::new("/workspace"))), urls.clone());
+        let _task = cache.prepare(
+            &mut recent,
+            Some(("session", Path::new("/workspace"))),
+            urls.clone(),
+        );
         // Each input is below the per-image limit. Three fit the total budget,
         // but four do not; sharing the fixture allocation keeps the test cheap.
         let mut bytes = include_bytes!("fixtures/media.png").to_vec();
@@ -646,11 +719,17 @@ mod tests {
                 .contains("256 MiB")
         );
         let _task = cache.prepare(
+            &mut recent,
             Some(("session", Path::new("/workspace"))),
             urls.into_iter().filter(|url| url != "a").collect(),
         );
+        assert!(
+            recent.take_markdown("a").is_none(),
+            "oversized offscreen image"
+        );
         cache.retry("d");
         let _task = cache.prepare(
+            &mut recent,
             Some(("session", Path::new("/workspace"))),
             ["b", "c", "d"].map(str::to_owned).into(),
         );
@@ -660,6 +739,34 @@ mod tests {
             result: Ok(loaded("d")),
         });
         assert!(cache.loaded("d").is_some());
+    }
+
+    #[test]
+    fn offscreen_budget_counts_both_markdown_originals_and_saved_pixels() {
+        let mut recent = RecentPreviews::default();
+        let handle = image::Handle::from_rgba(1, 1, vec![1; 4]);
+        // One original plus its preview fills the specified 64 MiB budget.
+        let large = Arc::new(Loaded {
+            url: "large".into(),
+            bytes: Arc::new(vec![0; 64 * 1024 * 1024 - 4]),
+            width: 1,
+            height: 1,
+            preview: handle.clone(),
+            preview_bytes: 4,
+        });
+        recent.store_saved("old".into(), handle.clone());
+        recent.store_markdown(large);
+        assert!(recent.take_saved(Path::new("old")).is_none());
+        let hit = recent.take_markdown("large").unwrap();
+        recent.store_saved("new".into(), handle.clone());
+        // Taking the oldest offscreen entry out for display releases its budget.
+        assert_eq!(
+            recent.take_saved(Path::new("new")).unwrap().id(),
+            handle.id()
+        );
+        recent.store_markdown(hit);
+        recent.store_saved("new".into(), handle);
+        assert!(recent.take_markdown("large").is_none());
     }
 
     #[test]

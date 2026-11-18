@@ -135,6 +135,7 @@ pub struct App {
     current_revision: u64,
     outputs: HashMap<String, tool_output::Output>,
     raw_tool_inputs: HashSet<String>,
+    recent_previews: crate::recent_previews::RecentPreviews,
     image_view: crate::image_view::Viewer,
     markdown_images: crate::markdown_images::Cache,
     api_key_draft: String,
@@ -416,6 +417,7 @@ impl App {
             current_revision: 0,
             outputs: HashMap::new(),
             raw_tool_inputs: HashSet::new(),
+            recent_previews: Default::default(),
             image_view: Default::default(),
             markdown_images: Default::default(),
             api_key_draft: String::new(),
@@ -768,6 +770,7 @@ impl App {
         self.tasks.push(
             self.markdown_images
                 .prepare(
+                    &mut self.recent_previews,
                     self.current_session
                         .as_ref()
                         .map(|s| (s.id.as_str(), s.project.as_path())),
@@ -775,8 +778,11 @@ impl App {
                 )
                 .map(Message::MarkdownImage),
         );
-        self.tasks
-            .push(self.image_view.prepare(&visible_media).map(Message::Image));
+        self.tasks.push(
+            self.image_view
+                .prepare(&mut self.recent_previews, &visible_media)
+                .map(Message::Image),
+        );
     }
     fn session_status(&self, s: &SessionSummary) -> SessionStatus {
         let h = self.harness.as_ref();

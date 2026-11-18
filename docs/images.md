@@ -218,7 +218,8 @@ place instead of returning to stale thumbnail coordinates.
 Click the image or outside it, or press Escape, to close. GIFs animate with an
 icon-only Play/Pause button centered below the image. Closing the modal cancels
 obsolete decoding and stops animation subscriptions. Decoding runs on workers,
-with at most two UI decoders and visible-only thumbnail retention.
+with at most two UI decoders. Recently viewed decoded thumbnails can be reused
+when scrolling back, without rereading the saved thumbnail file.
 
 Resource policy: 79 MiB per media input, 10,240,000 decoded image pixels,
 512 GIF frames / 256 MiB cumulative decoded animation data, 256 MiB JS heap,
@@ -258,7 +259,7 @@ before pixel decoding starts. The rectangle, loaded preview and error/retry stat
 share the same aspect-ratio layout, so decoding completion does not move the chat.
 Metadata is probed during source loading where the format permits it. A bounded
 in-memory cache remembers the last 256 resolved sources' dimensions across scrolling
-and session switches; source bytes and pixels are still reloaded. On the first load
+and session switches. On the first load
 (or after that cache is evicted/restarted), a neutral rectangle can resize once the
 previously unknown dimensions arrive. Changed source dimensions can also resize it.
 Loading and error states preserve the alt text. Click a failed image rectangle to
@@ -266,11 +267,15 @@ retry; hover it for the full error details (even for very thin images).
 Ordinary links to image files remain links, not embedded previews.
 
 Markdown images are **not saved with the conversation** and are not added to model
-context as media. Only their Markdown source text is persisted. A visible-message
-memory cache retains source bytes and thumbnails; leaving the message/session evicts
-it and cancels pending work. Reopening reloads the original source, so a moved/deleted
-file or unavailable URL produces an explicit error. An already open modal can finish
-using its loaded bytes. Two source loads and two shared decoders may run concurrently;
+context as media. Only their Markdown source text is persisted. When a message leaves the mounted transcript, pending loads are
+cancelled. Successfully loaded previews can be reused immediately on scroll-back,
+including their original bytes for the viewer. This offscreen cache is shared with
+decoded tool/attachment thumbnails, retains up to 64 MiB and 256 entries, and
+evicts the least recently viewed entries first. Failures are not cached offscreen.
+Switching sessions clears offscreen Markdown previews, not saved-media thumbnails.
+Until eviction a preview can show the previously loaded image even if its source
+changes or disappears; after eviction it reloads the original. An already open
+modal can finish using its loaded bytes. Two source loads and two shared decoders may run concurrently;
 the retained Markdown cache is capped at 256 MiB across visible messages. If that
 limit is reached, use fewer/smaller images or scroll other image messages out of view
 and retry. Images never create files in session media storage.
