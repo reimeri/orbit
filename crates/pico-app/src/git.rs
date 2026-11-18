@@ -2,9 +2,11 @@ use std::{
     ffi::OsStr,
     fmt,
     io::{BufRead, Read},
-    os::unix::ffi::OsStrExt,
+    num::NonZeroUsize,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     process::{Output, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -36,9 +38,43 @@ impl fmt::Display for Info {
     }
 }
 
-pub async fn info(path: PathBuf) -> Option<Info> {
+// Counts are properties of a file version, not of a branch or a path. Device
+// and inode distinguish replacements; ctime also catches rewrites with a
+// restored mtime. No paths or file contents are retained.
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct FileVersion {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl From<&std::fs::Metadata> for FileVersion {
+    fn from(m: &std::fs::Metadata) -> Self {
+        Self {
+            dev: m.dev(),
+            ino: m.ino(),
+            len: m.len(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        }
+    }
+}
+
+pub struct LineCounts(Mutex<lru::LruCache<FileVersion, u64>>);
+
+impl Default for LineCounts {
+    fn default() -> Self {
+        Self(Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(8192).unwrap(),
+        )))
+    }
+}
+
+pub async fn info(path: PathBuf, counts: Arc<LineCounts>) -> Option<Info> {
     let deadline = Instant::now() + Duration::from_secs(15);
-    match tokio::time::timeout_at(deadline.into(), read_info(&path, deadline)).await {
+    match tokio::time::timeout_at(deadline.into(), read_info(&path, deadline, counts)).await {
         Ok(Ok(info)) => info,
         Ok(Err(error)) => Some(Info::Unavailable(error)),
         Err(_) => Some(Info::Unavailable(
@@ -73,7 +109,11 @@ fn successful(output: Output) -> Result<Vec<u8>, String> {
         ))
     }
 }
-async fn read_info(path: &Path, deadline: Instant) -> Result<Option<Info>, String> {
+async fn read_info(
+    path: &Path,
+    deadline: Instant,
+    counts: Arc<LineCounts>,
+) -> Result<Option<Info>, String> {
     let root = git(path, &["rev-parse", "--show-toplevel"]).await?;
     // Not being a repository is normal for a workspace. Keep other failures
     // (permissions, unsafe ownership, missing Git, etc.) visible and retryable.
@@ -124,9 +164,12 @@ async fn read_info(path: &Path, deadline: Instant) -> Result<Option<Info>, Strin
     let untracked =
         successful(git(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?)?;
     let root = root.to_owned();
-    added += tokio::task::spawn_blocking(move || untracked_lines(&root, &untracked, deadline))
-        .await
-        .map_err(|e| format!("Could not count untracked lines: {e}; will retry automatically"))??;
+    added +=
+        tokio::task::spawn_blocking(move || untracked_lines(&root, &untracked, deadline, &counts))
+            .await
+            .map_err(|e| {
+                format!("Could not count untracked lines: {e}; will retry automatically")
+            })??;
     Ok(Some(Info::Changes {
         branch,
         added,
@@ -155,7 +198,12 @@ fn numstat(bytes: &[u8]) -> Result<(u64, u64), String> {
     Ok((added, removed))
 }
 
-fn untracked_lines(root: &Path, paths: &[u8], deadline: Instant) -> Result<u64, String> {
+fn untracked_lines(
+    root: &Path,
+    paths: &[u8],
+    deadline: Instant,
+    counts: &LineCounts,
+) -> Result<u64, String> {
     let mut total = 0;
     for name in paths.split(|b| *b == 0).filter(|name| !name.is_empty()) {
         if Instant::now() >= deadline {
@@ -170,27 +218,18 @@ fn untracked_lines(root: &Path, paths: &[u8], deadline: Instant) -> Result<u64, 
             if !metadata.is_file() {
                 return Ok(0);
             }
-            let mut reader = std::io::BufReader::new(std::fs::File::open(&path)?);
-            // Match Git's binary-content heuristic (NUL in the first 8000 bytes).
-            let first = reader.fill_buf()?;
-            if first[..first.len().min(8000)].contains(&0) {
-                return Ok(0);
+            let version = FileVersion::from(&metadata);
+            if let Some(lines) = counts.0.lock().expect("line counts").get(&version).copied() {
+                return Ok(lines);
             }
-            let mut lines = 0;
-            let mut last = None;
-            let mut buffer = [0; 8192];
-            loop {
-                if Instant::now() >= deadline {
-                    return Err(std::io::ErrorKind::TimedOut.into());
-                }
-                let n = reader.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                lines += buffer[..n].iter().filter(|b| **b == b'\n').count() as u64;
-                last = Some(buffer[n - 1]);
+            let file = std::fs::File::open(&path)?;
+            let lines = count_lines(&file, deadline)?;
+            // Never memoize a partial scan or a file replaced/edited while we
+            // read it. Check the open descriptor, not a new lookup by pathname.
+            if FileVersion::from(&file.metadata()?) == version {
+                counts.0.lock().expect("line counts").put(version, lines);
             }
-            Ok(lines + u64::from(last.is_some_and(|b| b != b'\n')))
+            Ok(lines)
         };
         match count() {
             Ok(lines) => total += lines,
@@ -204,6 +243,30 @@ fn untracked_lines(root: &Path, paths: &[u8], deadline: Instant) -> Result<u64, 
         }
     }
     Ok(total)
+}
+
+fn count_lines(file: &std::fs::File, deadline: Instant) -> std::io::Result<u64> {
+    let mut reader = std::io::BufReader::new(file);
+    // Match Git's binary-content heuristic (NUL in the first 8000 bytes).
+    let first = reader.fill_buf()?;
+    if first[..first.len().min(8000)].contains(&0) {
+        return Ok(0);
+    }
+    let mut lines = 0;
+    let mut last = None;
+    let mut buffer = [0; 8192];
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        lines += buffer[..n].iter().filter(|b| **b == b'\n').count() as u64;
+        last = Some(buffer[n - 1]);
+    }
+    Ok(lines + u64::from(last.is_some_and(|b| b != b'\n')))
 }
 
 #[cfg(test)]
@@ -254,7 +317,7 @@ mod tests {
         std::fs::write(root.join("binary"), b"\0a\nb\n").unwrap();
         std::fs::write(root.join("empty"), b"").unwrap();
         std::fs::write(root.join("ignored"), "not\ncounted\n").unwrap();
-        let result = info(root.join("subdir")).await;
+        let result = info(root.join("subdir"), Arc::default()).await;
         match result {
             Some(Info::Changes {
                 branch,
@@ -269,21 +332,95 @@ mod tests {
         }
         command(root, &["checkout", "--detach", "-f", "HEAD"]);
         assert!(
-            matches!(info(root.to_owned()).await, Some(Info::Changes { branch, .. }) if branch.ends_with(" (detached)"))
+            matches!(info(root.to_owned(), Arc::default()).await, Some(Info::Changes { branch, .. }) if branch.ends_with(" (detached)"))
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_untracked_files_are_not_read_and_edits_update_the_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        command(root, &["init", "--template=", "--initial-branch=main"]);
+        let text = root.join("untracked.txt");
+        let binary = root.join("blob");
+        std::fs::write(&text, "a\nb\nc").unwrap();
+        std::fs::write(&binary, b"abc\0").unwrap();
+        let modified = text.metadata().unwrap().modified().unwrap();
+
+        // Observe real reads, including the binary sniff, rather than cache internals.
+        let mut watcher = inotify::Inotify::init().unwrap();
+        let text_watch = watcher
+            .watches()
+            .add(&text, inotify::WatchMask::ACCESS)
+            .unwrap();
+        let binary_watch = watcher
+            .watches()
+            .add(&binary, inotify::WatchMask::ACCESS)
+            .unwrap();
+        let mut read_files = || {
+            let mut buffer = [0; 4096];
+            match watcher.read_events(&mut buffer) {
+                Ok(events) => events
+                    .map(|e| e.wd)
+                    .collect::<std::collections::HashSet<_>>(),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Default::default(),
+                Err(e) => panic!("Could not observe fixture reads: {e}"),
+            }
+        };
+        let counts = Arc::default();
+        let refresh = || info(root.to_owned(), Arc::clone(&counts));
+        assert!(matches!(
+            refresh().await,
+            Some(Info::Changes { added: 3, .. })
+        ));
+        assert_eq!(
+            read_files(),
+            [text_watch.clone(), binary_watch.clone()].into()
+        );
+        assert!(matches!(
+            refresh().await,
+            Some(Info::Changes { added: 3, .. })
+        ));
+        assert!(
+            read_files().is_empty(),
+            "a warm refresh should read neither file"
+        );
+
+        // Same inode, size and mtime, different number of lines.
+        std::fs::write(&text, "abcde").unwrap();
+        std::fs::File::open(&text)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert!(matches!(
+            refresh().await,
+            Some(Info::Changes { added: 1, .. })
+        ));
+        assert_eq!(read_files(), [text_watch].into());
+
+        // An atomic same-size replacement changes binary classification; removing
+        // the other untracked file must remove its contribution, even if cached.
+        let replacement = root.join("replacement");
+        std::fs::write(&replacement, "x\ny\n").unwrap();
+        std::fs::rename(&replacement, &binary).unwrap();
+        std::fs::remove_file(text).unwrap();
+        assert!(matches!(
+            refresh().await,
+            Some(Info::Changes { added: 2, .. })
+        ));
     }
 
     #[tokio::test]
     async fn non_repository_is_absent_but_real_errors_remain_visible() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(info(dir.path().to_owned()).await.is_none());
+        assert!(info(dir.path().to_owned(), Arc::default()).await.is_none());
 
         command(
             dir.path(),
             &["init", "--template=", "--initial-branch=main"],
         );
         command(dir.path(), &["commit", "--allow-empty", "-m", "initial"]);
-        let status = info(dir.path().to_owned()).await.unwrap();
+        let status = info(dir.path().to_owned(), Arc::default()).await.unwrap();
         assert!(matches!(
             &status,
             Info::Changes { branch, added: 0, removed: 0 } if branch == "main"
@@ -291,7 +428,7 @@ mod tests {
         assert_eq!(status.to_string(), "main");
 
         assert!(matches!(
-            info(dir.path().join("missing")).await,
+            info(dir.path().join("missing"), Arc::default()).await,
             Some(Info::Unavailable(_))
         ));
     }
@@ -303,7 +440,7 @@ mod tests {
         std::fs::write(dir.path().join("staged"), "a\nb\n").unwrap();
         command(dir.path(), &["add", "staged"]);
         std::fs::write(dir.path().join("untracked"), "c").unwrap();
-        match info(dir.path().to_owned()).await {
+        match info(dir.path().to_owned(), Arc::default()).await {
             Some(Info::Changes {
                 branch,
                 added,

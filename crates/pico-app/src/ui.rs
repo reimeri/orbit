@@ -179,6 +179,7 @@ pub struct App {
     sidebar_follow_top: bool,
     git: HashMap<PathBuf, crate::git::Info>,
     git_pending: HashSet<PathBuf>,
+    git_counts: Arc<crate::git::LineCounts>,
     draft_dirty: bool,
     smoke_stage: usize,
     screenshot_check: Option<crate::screenshot_check::Check>,
@@ -459,6 +460,7 @@ impl App {
             sidebar_follow_top: true,
             git: HashMap::new(),
             git_pending: HashSet::new(),
+            git_counts: Arc::default(),
             draft_dirty: false,
             smoke_stage: 0,
             screenshot_check: None,
@@ -516,9 +518,10 @@ impl App {
         if !self.git_pending.insert(path.clone()) {
             return Task::none();
         }
+        let counts = self.git_counts.clone();
         Task::perform(
             async move {
-                let info = crate::git::info(path.clone()).await;
+                let info = crate::git::info(path.clone(), counts).await;
                 (path, info)
             },
             |(path, info)| Message::Git(path, info),

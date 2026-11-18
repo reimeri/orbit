@@ -591,3 +591,19 @@ Medians of three fresh processes per version in the pinned release environment
 
 The large fixture's reflow now fits a 16.7 ms layout budget. Its first mount
 still does not: the full paragraph must still be shaped, wrapped and indexed.
+
+## Git status: untracked line counts
+
+Git status still polls every five seconds and gets fresh tracked diffs and
+untracked membership from Git. The worker stats each untracked regular file
+and reuses its line count (including zero for binary files) if its device,
+inode, size, mtime and ctime match. A miss reads the file; the count is cached
+only if the open descriptor still matches after the scan. The in-memory LRU
+holds up to 8,192 versions across projects. Eviction costs a reread, not an
+approximation of the displayed total.
+
+In an optimized local probe with a single unchanged 64 MiB untracked text log
+(4,194,304 lines), median time for a complete warm status refresh fell from
+35.18 ms to 7.98 ms over 21 refreshes per version. This measures background
+refresh latency, not UI frame time. The Git regression test also monitors real
+file accesses, so it detects repeated reads even with a warm OS page cache.

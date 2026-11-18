@@ -2865,6 +2865,8 @@ dependencies = [
  "iced",
  "iced_runtime",
  "iced_wgpu",
+ "inotify",
+ "lru",
  "pico-core",
  "pollster",
  "rfd",
