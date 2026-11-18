@@ -6,6 +6,7 @@ use std::{
     cmp::Ordering as Cmp,
     collections::HashSet,
     fs::{self, File},
+    hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader, Read},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
@@ -18,7 +19,7 @@ use std::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 pub const RESULTS: usize = 24;
@@ -287,6 +288,9 @@ pub struct Service {
 }
 impl Service {
     pub fn open(root: PathBuf, cache: PathBuf) -> Result<Arc<Self>> {
+        Self::start(root, cache, RECONCILE)
+    }
+    fn start(root: PathBuf, cache: PathBuf, reconcile: Duration) -> Result<Arc<Self>> {
         let (responses, _) = tokio::sync::watch::channel(Response::default());
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -317,7 +321,7 @@ impl Service {
             .spawn(move || search_worker(worker, search_root))?;
         std::thread::Builder::new()
             .name("pico-file-discovery".into())
-            .spawn(move || discovery_worker(shared, root, cache))?;
+            .spawn(move || discovery_worker(shared, root, cache, reconcile))?;
         Ok(service)
     }
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Response> {
@@ -615,18 +619,59 @@ fn discover(root: &Path, shared: &Shared, cache: &Path) -> Result<(Snapshot, Str
 }
 // Pipe reads and child reaping share a cancellable process-group supervisor.
 fn enumerate_git(
-    mut child: std::process::Child,
+    child: std::process::Child,
     root: &Path,
     shared: &Shared,
     cache: &Path,
 ) -> Result<Option<Snapshot>> {
-    let output = child.stdout.take().expect("piped git output");
     let excluded = discovery_exclusions(cache);
+    let (status, snapshot) = read_git(child, shared, |output| {
+        let mut snapshot = Snapshot::new();
+        let mut reader = BufReader::new(output);
+        let mut path = Vec::new();
+        loop {
+            path.clear();
+            let n = (&mut reader)
+                .take((SNAPSHOT_BYTES + 1) as u64)
+                .read_until(0, &mut path)?;
+            if n == 0 {
+                break;
+            }
+            anyhow::ensure!(!stopped(shared), "File discovery cancelled");
+            anyhow::ensure!(path.pop() == Some(0), "Invalid git filename stream");
+            let relative = Path::new(std::ffi::OsStr::from_bytes(&path));
+            if excluded
+                .iter()
+                .any(|path| root.join(relative).starts_with(path))
+            {
+                continue;
+            }
+            // Deleted tracked paths and submodule directories are not files.
+            match fs::symlink_metadata(root.join(relative)) {
+                Ok(metadata) if metadata.is_file() => snapshot.append(&path)?,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        snapshot.finish(&|| stopped(shared))
+    })?;
+    Ok(status.success().then_some(snapshot))
+}
+
+// Keep metadata-only Git probes subject to the same shutdown and timeout rules
+// as filename discovery, including when a descendant holds the pipe open.
+fn read_git<T>(
+    mut child: std::process::Child,
+    shared: &Shared,
+    read: impl FnOnce(std::process::ChildStdout) -> Result<T>,
+) -> Result<(std::process::ExitStatus, T)> {
+    let output = child.stdout.take().expect("piped git output");
     // A separate guard kills/reaps Git even if its pipe stalls during shutdown.
     let process_group = nix::unistd::Pid::from_raw(child.id() as i32);
     let stop = AtomicBool::new(false);
-    std::thread::scope(|scope| -> Result<Option<Snapshot>> {
-        scope.spawn(|| {
+    std::thread::scope(|scope| {
+        let guard = scope.spawn(|| {
             let deadline = Instant::now() + Duration::from_secs(120);
             while !stop.load(Ordering::Relaxed) {
                 if stopped(shared) || Instant::now() >= deadline {
@@ -634,40 +679,10 @@ fn enumerate_git(
                         nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGKILL);
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::park_timeout(Duration::from_millis(50));
             }
         });
-        let result = (|| -> Result<Snapshot> {
-            let mut snapshot = Snapshot::new();
-            let mut reader = BufReader::new(output);
-            let mut path = Vec::new();
-            loop {
-                path.clear();
-                let n = (&mut reader)
-                    .take((SNAPSHOT_BYTES + 1) as u64)
-                    .read_until(0, &mut path)?;
-                if n == 0 {
-                    break;
-                }
-                anyhow::ensure!(!stopped(shared), "File discovery cancelled");
-                anyhow::ensure!(path.pop() == Some(0), "Invalid git filename stream");
-                let relative = Path::new(std::ffi::OsStr::from_bytes(&path));
-                if excluded
-                    .iter()
-                    .any(|path| root.join(relative).starts_with(path))
-                {
-                    continue;
-                }
-                // Deleted tracked paths and submodule directories are not files.
-                match fs::symlink_metadata(root.join(relative)) {
-                    Ok(metadata) if metadata.is_file() => snapshot.append(&path)?,
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            snapshot.finish(&|| stopped(shared))
-        })();
+        let result = read(output);
         if result.is_err() {
             let _ = nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGKILL);
         }
@@ -680,11 +695,8 @@ fn enumerate_git(
             }
         };
         stop.store(true, Ordering::Relaxed);
-        match (result, status) {
-            (Ok(snapshot), Ok(status)) if status.success() => Ok(Some(snapshot)),
-            (Err(error), _) => Err(error),
-            _ => Ok(None),
-        }
+        guard.thread().unpark();
+        Ok((status?, result?))
     })
 }
 fn cache_path(root: &Path, cache: &Path) -> PathBuf {
@@ -872,7 +884,146 @@ fn scope_watch_paths(
 
     (paths, true)
 }
-fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf) {
+// Unlike workspace directory entries, absent external ignore files can't be
+// covered by our directory watches. Sample their metadata before discovery,
+// including missing paths so creation/deletion and inode replacement invalidate.
+fn policy_stamp(root: &Path, shared: &Shared) -> Result<u64> {
+    let mut hash = DefaultHasher::new();
+    let mut stat = |path: &Path| -> std::io::Result<()> {
+        let stamp = match fs::metadata(path) {
+            Ok(m) => Some((m.dev(), m.ino(), m.ctime(), m.ctime_nsec())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        (path, stamp).hash(&mut hash);
+        Ok(())
+    };
+    stat(root)?;
+    // These can appear/change outside the directory watches, including when
+    // the selected workspace is a subdirectory of a repository.
+    let mut repository = std::env::var_os("GIT_DIR").is_some();
+    for ancestor in root.ancestors() {
+        for name in [".ignore", ".rgignore", ".gitignore"] {
+            stat(&ancestor.join(name))?;
+        }
+        repository |= ancestor.join(".git").try_exists()?;
+    }
+    if let Some(path) = ignore::gitignore::gitconfig_excludes_path() {
+        stat(&path)?;
+    }
+    if repository {
+        // Let Git resolve linked worktrees, subdirectory workspaces and config
+        // includes. These queries inspect policy only; neither lists filenames.
+        let probe = |args: &[&str]| -> Result<_> {
+            let child = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()?;
+            read_git(child, shared, |output| {
+                let mut bytes = Vec::new();
+                output.take(32 * 1024 + 1).read_to_end(&mut bytes)?;
+                anyhow::ensure!(
+                    bytes.len() <= 32 * 1024,
+                    "Git policy paths exceeded probe budget"
+                );
+                Ok(bytes)
+            })
+        };
+        let locations = probe(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-path",
+            "index",
+            "--git-path",
+            "config",
+            "--git-path",
+            "config.worktree",
+            "--git-path",
+            "info/exclude",
+        ]);
+        let (status, bytes) = match locations {
+            Ok(output) => output,
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                // Discovery also uses the ignore-aware walker without Git.
+                return Ok(hash.finish());
+            }
+            Err(e) => return Err(e),
+        };
+        anyhow::ensure!(status.success(), "Could not locate Git policy files");
+        let paths: Vec<_> = bytes
+            .strip_suffix(b"\n")
+            .unwrap_or(&bytes)
+            .split(|&b| b == b'\n')
+            .map(|b| Path::new(std::ffi::OsStr::from_bytes(b)))
+            .collect();
+        // rev-parse has no NUL delimiter: ambiguous paths take the full fallback.
+        let [worktree, index, config, worktree_config, exclude] = paths[..] else {
+            anyhow::bail!("Ambiguous Git policy paths");
+        };
+        for path in [index, config, worktree_config, exclude] {
+            stat(path)?;
+        }
+        let (status, bytes) = probe(&[
+            "config",
+            "--includes",
+            "--null",
+            "--path",
+            "--get",
+            "core.excludesFile",
+        ])?;
+        if status.success() {
+            let path = bytes
+                .strip_suffix(&[0])
+                .ok_or_else(|| anyhow::anyhow!("Invalid Git exclude path"))?;
+            stat(&worktree.join(std::ffi::OsStr::from_bytes(path)))?;
+        } else {
+            anyhow::ensure!(
+                status.code() == Some(1),
+                "Could not read Git ignore configuration"
+            );
+        }
+    }
+    Ok(hash.finish())
+}
+
+/// Directory ctime covers entry creation/removal/rename, not ordinary file
+/// writes. Check ignore files too: in-place policy edits can change membership.
+/// Compare to the *start* of discovery to cover the gap before watch setup.
+fn watches_unchanged(watched: &HashSet<PathBuf>, started: SystemTime, shared: &Shared) -> bool {
+    let Ok(since) = started.duration_since(SystemTime::UNIX_EPOCH) else {
+        return false;
+    };
+    let before_scan = |m: &fs::Metadata| {
+        (m.ctime(), m.ctime_nsec()) < (since.as_secs() as i64, i64::from(since.subsec_nanos()))
+    };
+    watched.iter().all(|path| {
+        if stopped(shared) {
+            return false;
+        }
+        let Ok(meta) = fs::metadata(path) else {
+            return false;
+        };
+        before_scan(&meta)
+            && (!meta.is_dir()
+                || [".gitignore", ".ignore", ".rgignore"].iter().all(|name| {
+                    match fs::metadata(path.join(name)) {
+                        Ok(m) => before_scan(&m),
+                        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                    }
+                }))
+    })
+}
+
+fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf, reconcile: Duration) {
     let weak = Arc::downgrade(&shared);
     let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let relevant = match event {
@@ -927,6 +1078,7 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf) {
     let mut status = String::new();
     let mut rebuild = true;
     let mut next = Instant::now();
+    let mut baseline = None;
     loop {
         if stopped(&shared) {
             return;
@@ -939,6 +1091,9 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf) {
                 state.force = false;
                 state.dirty = None;
             }
+            let started = SystemTime::now();
+            let policy = policy_stamp(&root, &shared).ok();
+            baseline = None;
             match discover(&root, &shared, &cache) {
                 Ok((index, mut discovered_status)) => {
                     if stopped(&shared) {
@@ -951,6 +1106,8 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf) {
                         discovered_status.push_str(&format!(
                             " Cache unavailable: {error:#}; live search remains available."
                         ));
+                    } else {
+                        baseline = policy.map(|stamp| (started, stamp));
                     }
                     status = discovered_status;
                     replacement = Some(index);
@@ -961,7 +1118,7 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf) {
                     );
                 }
             }
-            next = Instant::now() + RECONCILE;
+            next = Instant::now() + reconcile;
         }
         let scope = shared
             .state
@@ -998,10 +1155,24 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf) {
             }
             let now = Instant::now();
             rebuild = state.force
-                || now >= next
                 || state
                     .dirty
-                    .is_some_and(|last| now.duration_since(last) >= DEBOUNCE);
+                    .is_some_and(|last| now.duration_since(last) >= DEBOUNCE || now >= next);
+            if !rebuild && now >= next {
+                drop(state);
+                // Failed discovery, missing watches, or an inconclusive probe
+                // take the full recovery path. Never do filesystem I/O under the lock.
+                rebuild = watch_error.is_some()
+                    || !baseline.is_some_and(|(started, original)| {
+                        watches_unchanged(&watched, started, &shared)
+                            && policy_stamp(&root, &shared).is_ok_and(|current| current == original)
+                    });
+                state = shared.state.lock().expect("file index");
+                next = Instant::now() + reconcile;
+                if !rebuild {
+                    continue; // Recheck events/force/scope that arrived during the probe.
+                }
+            }
             if rebuild || state.explicit_scope != scope {
                 break;
             }
@@ -1259,6 +1430,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clean_reconciliation_reuses_index_but_unwatched_ignore_change_rebuilds() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(root.path())
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        let excludes = external.path().join("excludes");
+        fs::write(&excludes, "other-name\n").unwrap();
+        git(&["config", "core.excludesFile", excludes.to_str().unwrap()]);
+        fs::write(root.path().join("visible"), "before").unwrap();
+        let interval = Duration::from_millis(100);
+        let service = Service::start(root.path().into(), cache.path().into(), interval).unwrap();
+        let mut rx = service.subscribe();
+        service.query(1, b"visible".to_vec(), false);
+        let first = until(&mut rx, |r| !r.pending && r.paths == ["@visible"]).await;
+        let cached = || {
+            fs::metadata(cache_path(root.path(), cache.path()))
+                .unwrap()
+                .ino()
+        };
+        let inode = cached();
+        fs::write(root.path().join("visible"), "ordinary content edit").unwrap();
+        tokio::time::sleep(interval * 4).await;
+        service.query(2, b"visible".to_vec(), false);
+        let idle = until(&mut rx, |r| r.request == 2 && !r.pending).await;
+        assert_eq!(idle.generation, first.generation);
+        assert_eq!(
+            cached(),
+            inode,
+            "idle checks must not replace the cache file"
+        );
+
+        // No event in any watched directory: the periodic safety check must
+        // still notice an external policy edit and rerun the active query.
+        fs::write(excludes, "visible\n").unwrap();
+        until(&mut rx, |r| {
+            r.generation > idle.generation && !r.pending && r.paths.is_empty()
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn ignored_scope_changes_keep_main_index_and_refresh_live() {
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
@@ -1388,7 +1612,12 @@ mod tests {
         let root = parent.path().join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("original"), "x").unwrap();
-        let service = Service::open(root.clone(), cache.path().into()).unwrap();
+        let service = Service::start(
+            root.clone(),
+            cache.path().into(),
+            Duration::from_millis(200),
+        )
+        .unwrap();
         let mut rx = service.subscribe();
         service.query(1, vec![], false);
         until(&mut rx, |r| r.paths == vec!["@original"] && !r.pending).await;
@@ -1401,7 +1630,7 @@ mod tests {
         assert_eq!(failed.paths, vec!["@original"]);
         fs::create_dir(&root).unwrap();
         fs::write(root.join("replacement"), "x").unwrap();
-        service.refresh();
+        // Failed discovery must retry without a watch on the new inode.
         until(&mut rx, |r| r.paths == vec!["@replacement"] && !r.pending).await;
         // No manual refresh: this must be a watch on the replacement inode.
         fs::write(root.join("added"), "x").unwrap();

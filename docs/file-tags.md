@@ -104,10 +104,17 @@ and strips internal `pico_file` records from wire input.
   conventional ignore-policy locations. Changing or dismissing the scope updates
   only its watch extension, without rebuilding the main filename index or rewriting
   its cache. Watches shared with normal discovery remain installed. Content writes
-  do not reindex filenames. Event bursts debounce for 250 ms; 30-second
-  reconciliation also bounds continuous-event
-  deferral and recovers missed events/global configuration changes.
-- Watches are reinstalled during reconciliation, including paths replaced by a
+  do not reindex filenames. Event bursts debounce for 250 ms, with a 30-second limit
+  on deferral during continuous changes. Manual Refresh still forces discovery.
+- The 30-second safety check no longer unconditionally rebuilds the index. With
+  healthy watches it checks metadata for watched directories and ignore-policy
+  files. In repositories it also asks Git for the locations of its index, config
+  and excludes files (including linked worktrees and external excludes). A clean
+  check does not enumerate filenames, sort, replace the snapshot, reinstall
+  watches, rewrite the disk cache, or rerun the current search. Idle check cost
+  scales with the bounded watch set rather than the number of indexed files.
+- Changed metadata, an inconclusive check, or a previous discovery/cache failure
+  takes the full refresh path. Full refreshes reinstall watches, including paths replaced by a
   different inode. Failed registrations are retried. Watch unavailability/budget
   exhaustion degrades visibly to periodic reconciliation. Failed discovery keeps
   the previous good snapshot and offers automatic retry plus Refresh.
