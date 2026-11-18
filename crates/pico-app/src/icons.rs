@@ -100,8 +100,12 @@ impl Icon {
         })
     }
 
-    pub fn label<'a, Message: 'a>(self, label: &'a str, size: f32) -> Element<'a, Message> {
-        row![self.view(16.), text(label).size(size)]
+    pub fn label<'a, Message: 'a>(
+        self,
+        label: impl Into<iced::widget::Text<'a>>,
+        size: f32,
+    ) -> Element<'a, Message> {
+        row![self.view(16.), label.into().size(size)]
             .spacing(8)
             .align_y(iced::Center)
             .into()

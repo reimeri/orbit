@@ -19,8 +19,8 @@ use iced::futures::SinkExt;
 use iced::{
     Color, Element, Fill, Size, Subscription, Task, keyboard, mouse,
     widget::{
-        self, checkbox, column, container, markdown, mouse_area, opaque, pick_list, row,
-        scrollable, slider, space, stack, text, text_editor, text_input, tooltip,
+        self, column, container, markdown, mouse_area, opaque, row, scrollable, slider, space,
+        stack, text, text_editor, text_input, tooltip,
     },
     window,
 };
@@ -2693,7 +2693,8 @@ impl App {
                     row![
                         Icon::CircleAlert.colored(16., DANGER),
                         text(error).size(13).width(Fill),
-                        theme::button("Dismiss").on_press(Message::ErrorDismiss)
+                        theme::button(theme::primary_label("Dismiss"))
+                            .on_press(Message::ErrorDismiss)
                     ]
                     .spacing(12),
                 )
@@ -4128,6 +4129,59 @@ impl App {
         .width(Fill)
         .into()
     }
+    fn model_settings_table<'a>(&'a self) -> widget::Column<'a, Message> {
+        // The model column absorbs resizing; header and data share the other two tracks.
+        let effort_width = (self.panel_width() * 0.30).clamp(84., 140.);
+        let table_row = |name: Element<'a, Message>, effort, fast| {
+            row![
+                container(name).width(Fill),
+                container(effort).width(effort_width),
+                container(fast).center_x(44),
+            ]
+            .padding([8, 6])
+            .spacing(6)
+            .align_y(iced::Center)
+        };
+        let heading = |label| text(label).size(10).color(MUTED).into();
+        let mut table = column![table_row(
+            heading("MODEL"),
+            heading("DEFAULT EFFORT"),
+            heading("FAST"),
+        )];
+        for model in MODELS {
+            let defaults = &self.settings.models[model.id];
+            let (mark, color) = match *model {
+                pico_core::models::ASTRA => ("✦", ACCENT),
+                pico_core::models::SOL => ("☼", WARNING),
+                pico_core::models::TERRA => ("◎", SUCCESS),
+                pico_core::models::LUNA => ("☾", ACCENT),
+                _ => ("·", MUTED),
+            };
+            let name = column![
+                row![text(mark).size(16).color(color), text(model.name).size(16)]
+                    .spacing(6)
+                    .align_y(iced::Center),
+                ellipsized_text(model.id, 11., Some(MUTED))
+            ]
+            .spacing(2);
+            table = table
+                .push(table_row(
+                    name.into(),
+                    theme::dropdown(
+                        model.efforts,
+                        Some(defaults.effort.as_str()),
+                        move |effort| Message::ModelEffort(model.id.into(), effort.into()),
+                    )
+                    .into(),
+                    theme::switch(defaults.fast)
+                        .on_toggle(move |on| Message::ModelFast(model.id.into(), on))
+                        .into(),
+                ))
+                .push(widget::rule::horizontal(1));
+        }
+        table
+    }
+
     fn settings_panel(&self) -> Element<'_, Message> {
         let mut tabs = row![].spacing(4);
         for (tab, label) in [
@@ -4136,22 +4190,25 @@ impl App {
             (SettingsTab::Models, "Models"),
             (SettingsTab::Images, "Images"),
         ] {
-            tabs = tabs.push(
-                theme::button(text(label).size(13).width(Fill).align_x(iced::Center))
-                    .width(Fill)
-                    .padding([8, 4])
-                    .on_press(Message::SettingsTab(tab))
-                    .style(if self.settings_tab == tab {
-                        theme::primary
-                    } else {
-                        theme::text_button
-                    }),
-            );
+            let selected = self.settings_tab == tab;
+            let button = theme::button(text(label).size(13).width(Fill).align_x(iced::Center))
+                .width(Fill)
+                .padding([8, 2])
+                .on_press(Message::SettingsTab(tab))
+                .style(move |theme, status| {
+                    let mut style = theme::text_button(theme, status);
+                    if selected {
+                        style.text_color = ACCENT;
+                    }
+                    style
+                });
+            let underline = container(space().width(Fill).height(2))
+                .style(move |_| container::background(if selected { ACCENT } else { BORDER }));
+            tabs = tabs.push(column![button, underline].width(Fill));
         }
         let header = column![
             right_panel_header("Settings", Message::ToggleSettings),
-            tabs,
-            widget::rule::horizontal(1)
+            tabs
         ]
         .spacing(12);
         let header = container(header).padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER));
@@ -4173,25 +4230,25 @@ impl App {
                                 .style(theme::text_button),
                         );
                     }
-                    settings = settings.push(
-                        theme::button("Cancel login")
-                            .on_press(Message::CancelLogin)
-                            .style(secondary),
-                    );
+                    settings =
+                        settings.push(theme::cancel("Cancel login").on_press(Message::CancelLogin));
                 } else {
                     settings = settings
                         .push(text("Use your ChatGPT subscription.").size(13).color(MUTED))
                         .push(
-                            theme::button(Icon::LogIn.label("Sign in with ChatGPT", 16.))
-                                .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
-                                .padding(10),
+                            theme::button(
+                                Icon::LogIn
+                                    .label(theme::primary_label("Sign in with ChatGPT"), 16.),
+                            )
+                            .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
+                            .padding(10),
                         );
                 }
                 settings=settings.push(widget::rule::horizontal(1))
                     .push(text("OpenAI API key · images only").size(14))
                     .push(text(if self.api_key_configured {"A private API key is saved."}else{"No API key saved."}).size(12).color(MUTED))
                     .push(text_input(if self.api_key_configured {"Enter a replacement key"}else{"Enter API key"},&self.api_key_draft).style(theme::input).secure(true).on_input(Message::ApiKey).padding(8))
-                    .push(row![theme::button("Save key").on_press_maybe((!self.api_key_draft.trim().is_empty()).then_some(Message::SaveApiKey)),theme::button("Remove key").on_press_maybe(self.api_key_configured.then_some(Message::RemoveApiKey))].spacing(8))
+                    .push(row![theme::primary_action("Save key").on_press_maybe((!self.api_key_draft.trim().is_empty()).then_some(Message::SaveApiKey)),theme::action("Remove key").style(theme::danger_text).on_press_maybe(self.api_key_configured.then_some(Message::RemoveApiKey))].spacing(8))
                     .push(text("Stored privately, separately from settings. No environment override. Signing out of ChatGPT does not remove this key.").size(12).color(MUTED));
             }
             SettingsTab::Images => {
@@ -4199,13 +4256,13 @@ impl App {
                 settings=settings
                     .push(text("Image generation").size(18))
                     .push(text("Billing backend").size(12))
-                    .push(pick_list([Backend::Codex,Backend::Api],Some(self.settings.images.backend),Message::ImageBackend).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
+                    .push(theme::dropdown([Backend::Codex,Backend::Api],Some(self.settings.images.backend),Message::ImageBackend))
                     .push(text("Codex uses your ChatGPT subscription. API generations are billed separately. Pico never switches billing automatically.").size(12).color(MUTED))
                     .push(text("API model · generation and editing").size(12))
                     .push(text_input(DEFAULT_API_MODEL,&self.settings.images.model).style(theme::input).on_input(Message::ImageModel).padding(8))
                     .push(theme::button(Icon::RotateCcw.label("Reset API model to current default", 16.)).on_press(Message::ResetImageModel).style(theme::text_button))
                     .push(text("Quality · both backends").size(12))
-                    .push(pick_list(QUALITIES,Some(self.settings.images.quality.as_str()),|q|Message::ImageQuality(q.into())).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
+                    .push(theme::dropdown(QUALITIES,Some(self.settings.images.quality.as_str()),|q|Message::ImageQuality(q.into())))
                     .push(text("Size is automatic. GIF and quality availability depend on your model and account. Unsupported choices return an error, never a silent downgrade.").size(12).color(MUTED));
                 if self.settings.images.backend == Backend::Api && !self.api_key_configured {
                     settings = settings.push(
@@ -4219,17 +4276,16 @@ impl App {
                 use pico_core::web_search::Mode;
                 settings = settings
                     .push(text("Web access").size(12))
-                    .push(pick_list([Mode::Live, Mode::Cached, Mode::Disabled], Some(self.settings.web_search), Message::WebMode).style(theme::pick_list).menu_style(theme::pick_list_menu).width(Fill))
+                    .push(theme::dropdown([Mode::Live, Mode::Cached, Mode::Disabled], Some(self.settings.web_search), Message::WebMode))
                     .push(text("Uses your ChatGPT subscription. Live permits external access; Cached requests cache-only access and may limit operations. Disabled prevents new web calls. No API billing or automatic fallback.").size(12).color(MUTED))
                     .push(widget::rule::horizontal(1))
                     .push(text("Default model").size(12))
                     .push(
-                        pick_list(
+                        theme::dropdown(
                             MODELS,
                             model(&self.settings.model),
                             |selected| Message::Model(selected.id.into()),
-                        ).style(theme::pick_list).menu_style(theme::pick_list_menu)
-                        .width(Fill),
+                        ),
                     )
                     .push(text("Context token limit").size(12))
                     .push(
@@ -4272,67 +4328,34 @@ impl App {
                         .step(20_f32),
                     )
                     .push(
-                        checkbox(self.catalog.settings.resume_last).style(theme::checkbox)
+                        theme::switch(self.catalog.settings.resume_last)
                             .label("Restore last session")
                             .on_toggle(Message::Resume),
                     );
             }
-            SettingsTab::Models => {
-                for model in MODELS {
-                    let defaults = &self.settings.models[model.id];
-                    settings = settings.push(
-                        container(
-                            column![
-                                text(model.name).size(16),
-                                text("Default effort").size(12),
-                                pick_list(
-                                    model.efforts,
-                                    Some(defaults.effort.as_str()),
-                                    move |effort| Message::ModelEffort(
-                                        model.id.into(),
-                                        effort.into()
-                                    )
-                                )
-                                .style(theme::pick_list)
-                                .menu_style(theme::pick_list_menu)
-                                .width(Fill),
-                                checkbox(defaults.fast)
-                                    .style(theme::checkbox)
-                                    .label("Fast by default")
-                                    .on_toggle(move |fast| Message::ModelFast(
-                                        model.id.into(),
-                                        fast
-                                    )),
-                            ]
-                            .spacing(10),
-                        )
-                        .padding(12)
-                        .width(Fill)
-                        .style(card),
-                    );
-                }
-            }
+            SettingsTab::Models => settings = self.model_settings_table(),
         }
         let mut panel_content = column![header, scroll(settings).height(Fill)].spacing(14);
         if self.settings_tab != SettingsTab::Account {
+            let save = theme::primary_action(if self.pending_settings.is_some() {
+                "Saving…"
+            } else {
+                "Save"
+            })
+            .on_press_maybe(
+                self.pending_settings
+                    .is_none()
+                    .then_some(Message::ApplySettings),
+            );
+            let actions = row![
+                space().width(Fill),
+                theme::cancel("Cancel").on_press(Message::CancelSettings),
+                save
+            ]
+            .spacing(8);
             panel_content = panel_content.push(
-                row![
-                    theme::button(if self.pending_settings.is_some() {
-                        "Saving…"
-                    } else {
-                        "Save"
-                    })
-                    .on_press_maybe(
-                        self.pending_settings
-                            .is_none()
-                            .then_some(Message::ApplySettings)
-                    )
-                    .style(secondary),
-                    theme::button("Cancel")
-                        .on_press(Message::CancelSettings)
-                        .style(theme::text_button)
-                ]
-                .spacing(8),
+                container(column![widget::rule::horizontal(1), actions].spacing(10))
+                    .padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER)),
             );
         }
         self.panel_container(panel_content)
@@ -4800,13 +4823,16 @@ impl App {
         if let Some(error) = &self.error {
             content = content.push(text(error).size(12).color(DANGER));
         }
+        let confirm = if matches!(modal, Modal::Delete(_) | Modal::DeleteProject(_)) {
+            theme::action(confirm).style(theme::danger)
+        } else {
+            theme::primary_action(confirm)
+        };
         content = content.push(
             row![
                 space().width(Fill),
-                theme::button("Cancel")
-                    .on_press(Message::Dismiss)
-                    .style(secondary),
-                theme::button(confirm).on_press(Message::Confirm)
+                theme::cancel("Cancel").on_press(Message::Dismiss),
+                confirm.on_press(Message::Confirm)
             ]
             .spacing(12),
         );
@@ -9642,6 +9668,38 @@ Then implement the fix.";
         }
     }
 
+    #[tokio::test]
+    async fn model_switches_align_with_header_and_edit_their_own_row() {
+        let mut app = app();
+        app.settings_tab = SettingsTab::Models;
+        let mut renderer = header_renderer();
+        for width in [260., 440.] {
+            app.catalog.settings.settings_width = width;
+            let mut ui = iced_runtime::UserInterface::build(
+                app.settings_panel(),
+                iced::Size::new(width, 560.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let fast_x = bounds.label("FAST").center_x();
+            assert!(fast_x < width);
+            for model in MODELS {
+                let name = bounds.label(model.name);
+                let id = bounds.label(model.id);
+                let row_y = (name.y + id.y + id.height) / 2.;
+                let messages = click_at(&mut ui, &mut renderer, iced::Point::new(fast_x, row_y));
+                assert!(
+                    matches!(messages.as_slice(), [Message::ModelFast(id, on)]
+                    if id == model.id && *on != app.settings.models[model.id].fast),
+                    "wrong switch at {width} for {}: {messages:?}",
+                    model.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn settings_dropdown_outside_click_activates_controls() {
         use iced_runtime::{UserInterface, user_interface::Cache};
@@ -9651,13 +9709,12 @@ Then implement the fix.";
         for target in ["Before", "After"] {
             let view = row![
                 theme::button(text("Before")).on_press(Message::ToggleSettings),
-                pick_list(["Selected", "Other"], Some("Selected"), |value| {
+                theme::dropdown(["Selected", "Other"], Some("Selected"), |value| {
                     Message::ImageQuality(value.into())
                 })
                 .on_open(Message::ToggleFooterMenu)
                 .on_close(Message::CloseMenu)
-                .style(theme::pick_list)
-                .menu_style(theme::pick_list_menu),
+                .width(iced::Shrink),
                 theme::button(text("After")).on_press(Message::ToggleSettings),
             ]
             .spacing(20);

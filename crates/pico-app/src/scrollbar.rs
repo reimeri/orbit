@@ -216,10 +216,7 @@ mod tests {
         for count in [2, 40] {
             let mut ui = UserInterface::build(
                 container(
-                    iced::widget::pick_list((0..count).collect::<Vec<_>>(), Some(0), |_| ())
-                        .width(180)
-                        .style(theme::pick_list)
-                        .menu_style(theme::pick_list_menu),
+                    theme::dropdown((0..count).collect::<Vec<_>>(), Some(0), |_| ()).width(180),
                 )
                 .id("content"),
                 Size::new(240., 200.),

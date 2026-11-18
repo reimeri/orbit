@@ -6,8 +6,8 @@
 use iced::{
     Color, Element, Theme,
     widget::{
-        self, button as button_widget, checkbox as checkbox_widget, container, markdown,
-        overlay::menu, pick_list as pick_list_widget, text_editor, text_input,
+        self, button as button_widget, container, markdown, overlay::menu,
+        pick_list as pick_list_widget, text_editor, text_input, toggler,
     },
 };
 
@@ -66,20 +66,38 @@ pub fn button<'a, Message: 'a>(
     widget::button(content).style(primary)
 }
 
+/// Shared sizing for labeled form and dialog actions (not icon buttons or menu rows).
+pub fn action<'a, Message: 'a>(label: impl Into<widget::Text<'a>>) -> widget::Button<'a, Message> {
+    button(label.into().size(14)).padding([8, 16])
+}
+
+pub fn primary_label(label: &str) -> widget::Text<'_> {
+    widget::text(label).font(iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::DEFAULT
+    })
+}
+
+pub fn primary_action<'a, Message: 'a>(label: &'a str) -> widget::Button<'a, Message> {
+    action(primary_label(label))
+}
+
+pub fn cancel<'a, Message: 'a>(label: &'a str) -> widget::Button<'a, Message> {
+    action(label).style(text_button)
+}
+
 pub fn primary(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let mut style = button_widget::primary(theme, status);
-    // Iced's strong accent is darker: use it at rest, not on hover.
-    let palette = theme.extended_palette().primary;
-    match status {
-        button_widget::Status::Active | button_widget::Status::Pressed => {
-            style.background = Some(palette.strong.color.into());
-            style.text_color = palette.strong.text;
-        }
-        button_widget::Status::Hovered => {
-            style.background = Some(palette.base.color.into());
-            style.text_color = palette.base.text;
-        }
-        button_widget::Status::Disabled => {}
+    if !matches!(status, button_widget::Status::Disabled) {
+        style.background = Some(
+            match status {
+                button_widget::Status::Hovered => Color::from_rgb8(183, 211, 235),
+                button_widget::Status::Pressed => ACCENT,
+                _ => Color::from_rgb8(167, 201, 232),
+            }
+            .into(),
+        );
+        style.text_color = BACKGROUND;
     }
     style.border.radius = RADIUS_CONTROL.into();
     style
@@ -187,32 +205,76 @@ pub fn editor(theme: &Theme, status: text_editor::Status) -> text_editor::Style 
     style
 }
 
-pub fn pick_list(theme: &Theme, status: pick_list_widget::Status) -> pick_list_widget::Style {
-    let mut style = pick_list_widget::default(theme, status);
-    style.border.radius = RADIUS_CONTROL.into();
-    style
+pub fn dropdown<'a, T, L, V, Message>(
+    options: L,
+    selected: Option<V>,
+    on_selected: impl Fn(T) -> Message + 'a,
+) -> widget::PickList<'a, T, L, V, Message>
+where
+    T: ToString + PartialEq + Clone + 'a,
+    L: std::borrow::Borrow<[T]> + 'a,
+    V: std::borrow::Borrow<T> + 'a,
+    Message: Clone,
+{
+    widget::pick_list(options, selected, on_selected)
+        .text_size(13)
+        .padding([7, 9])
+        .handle(pick_list_widget::Handle::Arrow {
+            size: Some(9.into()),
+        })
+        .style(pick_list)
+        .menu_style(pick_list_menu)
+        .width(iced::Fill)
+}
+
+fn pick_list(_: &Theme, status: pick_list_widget::Status) -> pick_list_widget::Style {
+    pick_list_widget::Style {
+        text_color: TEXT,
+        placeholder_color: MUTED,
+        handle_color: MUTED,
+        background: SECONDARY.into(),
+        border: iced::border::rounded(RADIUS_CONTROL)
+            .width(BORDER_WIDTH)
+            .color(if matches!(status, pick_list_widget::Status::Active) {
+                SECONDARY_HOVER
+            } else {
+                ACCENT
+            }),
+    }
 }
 
 pub fn pick_list_menu(theme: &Theme) -> menu::Style {
     let mut style = menu::default(theme);
-    style.border.radius = RADIUS_CONTROL.into();
+    style.background = POPOVER.into();
+    style.selected_background = Color::from_rgb8(52, 73, 91).into();
+    style.selected_text_color = TEXT;
+    style.border = iced::border::rounded(RADIUS_CONTROL)
+        .color(SECONDARY_HOVER)
+        .width(BORDER_WIDTH);
     style
 }
 
-pub fn checkbox(theme: &Theme, status: checkbox_widget::Status) -> checkbox_widget::Style {
-    // Reverse only the checked accent; unchecked boxes already brighten on hover.
-    let status = match status {
-        checkbox_widget::Status::Active { is_checked: true } => {
-            checkbox_widget::Status::Hovered { is_checked: true }
-        }
-        checkbox_widget::Status::Hovered { is_checked: true } => {
-            checkbox_widget::Status::Active { is_checked: true }
-        }
-        status => status,
-    };
-    let mut style = checkbox_widget::primary(theme, status);
-    style.border.radius = RADIUS_SMALL.into();
-    style
+pub fn switch<'a, Message>(on: bool) -> widget::Toggler<'a, Message> {
+    widget::toggler(on)
+        .size(18)
+        .text_size(14)
+        .style(|theme, status| {
+            let mut style = toggler::default(theme, status);
+            match status {
+                toggler::Status::Active { is_toggled }
+                | toggler::Status::Hovered { is_toggled } => {
+                    style.background = if is_toggled { ACCENT } else { SECONDARY_HOVER }.into();
+                    style.foreground = if is_toggled { BACKGROUND } else { TEXT }.into();
+                    if matches!(status, toggler::Status::Hovered { .. }) {
+                        style.background_border_width = BORDER_WIDTH;
+                        style.background_border_color = MUTED;
+                    }
+                }
+                toggler::Status::Disabled { .. } => {}
+            }
+            style.padding_ratio = 0.14;
+            style
+        })
 }
 
 pub fn markdown_style() -> markdown::Style {
