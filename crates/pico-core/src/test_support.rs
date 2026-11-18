@@ -43,17 +43,6 @@ pub async fn server(
     mpsc::UnboundedReceiver<String>,
     tokio::task::JoinHandle<()>,
 ) {
-    server_with(replies.into_iter().map(|reply| move |_: &str| reply)).await
-}
-
-/// Scripted responses that can inspect the request (for generated tool/cell IDs).
-pub async fn server_with<F: FnOnce(&str) -> (u16, String) + Send + 'static>(
-    replies: impl IntoIterator<Item = F, IntoIter: Send + 'static>,
-) -> (
-    String,
-    mpsc::UnboundedReceiver<String>,
-    tokio::task::JoinHandle<()>,
-) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (tx, rx) = mpsc::unbounded_channel();
@@ -66,10 +55,10 @@ pub async fn server_with<F: FnOnce(&str) -> (u16, String) + Send + 'static>(
                     .unwrap()
                     .unwrap();
             let request = read_request(&mut socket).await;
-            let (status, body) = reply(&request);
+            let (status, body) = reply;
             tx.send(request).unwrap();
             let response = format!(
-                "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
@@ -79,7 +68,7 @@ pub async fn server_with<F: FnOnce(&str) -> (u16, String) + Send + 'static>(
 }
 pub fn completed(output: serde_json::Value) -> String {
     format!(
-        "data: {}\n\n",
+        "{}\n\n",
         serde_json::json!({"type":"response.completed","response":{"status":"completed","output":output,"usage":{"input_tokens":37,"output_tokens":11}}})
     )
 }
@@ -145,84 +134,5 @@ pub async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
-/// Concurrent requests whose replies are independently released by the test.
-pub async fn gated_server() -> (
-    String,
-    mpsc::UnboundedReceiver<(String, tokio::sync::oneshot::Sender<(u16, String)>)>,
-    tokio::task::JoinHandle<()>,
-) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let (tx, rx) = mpsc::unbounded_channel();
-    let task = tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let request = read_request(&mut socket).await;
-                let (reply, response) = tokio::sync::oneshot::channel::<(u16, String)>();
-                if tx.send((request, reply)).is_err() {
-                    return;
-                }
-                let Ok((status, body)) = response.await else {
-                    return;
-                };
-                let response = format!(
-                    "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                // Cancellation/deletion can close the client before the gated reply.
-                let _ = socket.write_all(response.as_bytes()).await;
-            });
-        }
-    });
-    (url, rx, task)
-}
-
-/// A response stream whose individual SSE chunks are released by the test.
-pub struct StreamingRequest {
-    pub body: serde_json::Value,
-    pub reply: mpsc::UnboundedSender<String>,
-}
-
-pub async fn streaming_server() -> (
-    String,
-    mpsc::UnboundedReceiver<StreamingRequest>,
-    tokio::task::JoinHandle<()>,
-) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let (tx, requests) = mpsc::unbounded_channel();
-    let server = tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let request = read_request(&mut socket).await;
-                let (reply, mut rx) = mpsc::unbounded_channel::<String>();
-                if tx
-                    .send(StreamingRequest {
-                        body: serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1)
-                            .unwrap(),
-                        reply,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-                if socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.is_err() {
-                    return;
-                }
-                while let Some(body) = rx.recv().await {
-                    let chunk = format!("{:x}\r\n{body}\r\n", body.len());
-                    if socket.write_all(chunk.as_bytes()).await.is_err() {
-                        return;
-                    }
-                }
-                // Stop/deletion may have closed the client already.
-                let _ = socket.write_all(b"0\r\n\r\n").await;
-            });
-        }
-    });
-    (endpoint, requests, server)
-}
+mod websocket;
+pub use websocket::{StreamingRequest, gated_server, server_with, streaming_server, ws_server};

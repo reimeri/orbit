@@ -82,7 +82,7 @@ fn call(id: &str, source: &str) -> Value {
 }
 fn done(index: usize, item: &Value) -> String {
     format!(
-        "data: {}\n\n",
+        "{}\n\n",
         json!({"type":"response.output_item.done", "output_index":index, "item":item})
     )
 }
@@ -296,7 +296,7 @@ async fn stream_failure_stop_and_invalid_completion_preserve_results_without_rep
             "c",
             "text(await tools.exec_command({cmd:'touch forbidden',login:false}));",
         );
-        stream.reply.send(format!("{}data: {}\n\n", done(2, &c), json!({"type":"response.custom_tool_call_input.delta","item_id":"partial","delta":"text('never execute partial input')"}))).unwrap();
+        stream.reply.send(format!("{}{}\n\n", done(2, &c), json!({"type":"response.custom_tool_call_input.delta","item_id":"partial","delta":"text('never execute partial input')"}))).unwrap();
         until(|| {
             f.saved()
                 .in_progress_response
@@ -308,11 +308,31 @@ async fn stream_failure_stop_and_invalid_completion_preserve_results_without_rep
         .await;
         let crash_checkpoint = f.saved();
         match failure {
-            "disconnect" => drop(stream),
+            "disconnect" => {
+                drop(stream);
+                until(|| {
+                    f.c.snapshot()
+                        .entries
+                        .iter()
+                        .any(|e| e.text.contains("Waiting for the running tool"))
+                })
+                .await;
+                assert!(f.requests.try_recv().is_err());
+                f.release_cell().await;
+                let retry = f.request().await;
+                assert!(retry.body.get("previous_response_id").is_none());
+                let input = retry.body["input"].as_array().unwrap();
+                assert!(input.iter().any(|i| i["call_id"] == "b"
+                    && i["output"].to_string().contains("must not finish normally")));
+                assert!(input.iter().any(
+                    |i| i["call_id"] == "c" && i["output"].to_string().contains("Not executed")
+                ));
+                retry.reply.send(completed(json!([]))).unwrap();
+            }
             "context-limit" => stream
                 .reply
                 .send(format!(
-                    "data: {}\n\n",
+                    "{}\n\n",
                     json!({"type":"error","error":{"code":"context_length_exceeded"}})
                 ))
                 .unwrap(),
@@ -381,11 +401,11 @@ async fn stream_failure_stop_and_invalid_completion_preserve_results_without_rep
                 .contains("partial recovery information")
         );
         assert!(matches!(&f.saved().entries.by_id("b").unwrap().kind,
-            EntryKind::Tool { media, failed: true, .. } if media.len() == 1));
+            EntryKind::Tool { media, failed, .. } if media.len() == 1 && *failed == (failure != "disconnect")));
         assert!(f.saved().in_progress_response.is_none());
         assert_eq!(
             f.saved().needs_attention,
-            !matches!(failure, "stop" | "stop-after-completion")
+            !matches!(failure, "stop" | "stop-after-completion" | "disconnect")
         );
         if failure == "stop-after-completion" {
             assert_eq!(
@@ -488,5 +508,52 @@ async fn storage_failures_prevent_dispatch_and_retain_completed_results_for_save
                     output.contains("result retained despite storage failure")
                 })));
         }
+    }
+}
+
+#[tokio::test]
+async fn dropped_partial_output_retries_from_history_until_stopped_or_exhausted() {
+    for stop in [true, false] {
+        let mut f = Fixture::new().await;
+        let first = f.request().await;
+        let original = first.body["input"].clone();
+        first.reply.send(json!({"type":"response.output_text.delta","item_id":"partial","delta":"unfinished sentence"}).to_string()).unwrap();
+        drop(first);
+        until(|| {
+            f.saved()
+                .entries
+                .iter()
+                .any(|e| e.text.contains("Reconnecting from saved progress"))
+        })
+        .await;
+        if stop {
+            f.h.stop(&f.c.id);
+        } else {
+            for _ in 0..MAX_RECOVERIES {
+                let retry = f.request().await;
+                assert_eq!(retry.body["input"], original);
+                assert!(retry.body.get("previous_response_id").is_none());
+                drop(retry);
+            }
+        }
+        until(|| !f.c.is_turn_active()).await;
+        assert!(f.requests.try_recv().is_err());
+        let saved = f.saved();
+        assert_eq!(saved.needs_attention, !stop);
+        assert!(
+            saved
+                .entries
+                .iter()
+                .any(|e| matches!(e.kind, EntryKind::Notice)
+                    && e.text.contains("unfinished sentence"))
+        );
+        assert_eq!(
+            saved
+                .entries
+                .iter()
+                .filter(|e| e.text.contains("exhausted"))
+                .count(),
+            usize::from(!stop)
+        );
     }
 }

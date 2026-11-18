@@ -803,9 +803,14 @@ impl Harness {
         let generation = conversation.turn_generation.load(Ordering::Acquire);
         let harness = self.clone();
         self.runtime.as_ref().expect("live runtime").spawn(async move {
+            let mut recovery = execution::Recovery::default();
             loop {
                 let submission = conversation.submissions.load(Ordering::Acquire);
-                let result = harness.run(&conversation, &settings, &cancel).await;
+                let result = harness.run(&conversation, &settings, &cancel, &mut recovery).await;
+                if result.is_err() || cancel.is_cancelled() {
+                    harness.provider.discard_continuation(&conversation.id);
+                    recovery.stopped(&conversation, cancel.is_cancelled());
+                }
                 {
                     let mut state = conversation.state.lock().expect("session lock");
                     if result.is_ok()
@@ -901,6 +906,7 @@ impl Harness {
         conversation: &Arc<Conversation>,
         settings: &Settings,
         cancel: &CancellationToken,
+        recovery: &mut execution::Recovery,
     ) -> Result<String> {
         {
             let mut s = conversation.state.lock().expect("session lock");
@@ -971,10 +977,25 @@ impl Harness {
             conversation.set_status(ConversationStatus::Thinking);
             conversation.changed();
             let result = self
-                .respond_and_execute(conversation, &snapshot, &instructions, cancel)
+                .respond_and_execute(conversation, &snapshot, &instructions, cancel, recovery)
                 .await;
             let response = match result {
-                Ok(response) => response,
+                Ok(response) => {
+                    recovery.resumed(conversation);
+                    response
+                }
+                Err(error)
+                    if error.is::<crate::provider::StreamInterrupted>()
+                        && !cancel.is_cancelled() =>
+                {
+                    {
+                        let mut session = conversation.state.lock().expect("session lock");
+                        commit_progress(&mut session);
+                        conversation.changed();
+                    }
+                    recovery.retry(conversation, cancel).await?;
+                    continue;
+                }
                 Err(error)
                     if error.is::<crate::provider::ContextLimit>()
                         && conversation
@@ -1142,7 +1163,7 @@ fn recover_after_restart(before: &Session) -> Option<Session> {
     (commands || abandoned || turn).then_some(repaired)
 }
 
-fn repair_calls(session: &mut Session) {
+fn commit_progress(session: &mut Session) {
     // Completed response items survive stream failure/restart even if response.completed
     // never arrived. Preserve successful results before repairing uncertain executions.
     if let Some(progress) = session.in_progress_response.take() {
@@ -1153,6 +1174,10 @@ fn repair_calls(session: &mut Session) {
             .input
             .extend(progress.results.into_iter().map(|(_, value)| value));
     }
+}
+
+fn repair_calls(session: &mut Session) {
+    commit_progress(session);
     let completed: HashSet<_> = session
         .input
         .iter()

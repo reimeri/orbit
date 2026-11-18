@@ -985,7 +985,7 @@ mod tests {
             request
                 .reply
                 .send(format!(
-                    "data: {}\n\n",
+                    "{}\n\n",
                     json!({"type": event, "item_id": entry_id, "summary_index": 0, "delta": text})
                 ))
                 .unwrap();
@@ -1760,7 +1760,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
         crate::test_support::sqlite::fail_writes(&db, "subagent_runs", "disk fixture");
         let failure = |message| {
             format!(
-                "data: {}\n\n",
+                "{}\n\n",
                 json!({"type":"response.failed","response":{"status":"failed","error":{"message":message}}})
             )
         };
@@ -1833,7 +1833,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
         )
         .unwrap();
         let parent = f.request().await;
-        first.reply.send(format!("data: {}\n\ndata: {}\n\n",
+        first.reply.send(format!("{}\n\n{}\n\n",
             json!({"type":"response.output_text.delta","item_id":"partial","delta":"Never return this partial answer"}),
             json!({"type":"response.failed","response":{"status":"failed","error":{"message":"Fixture failure"}}})
         )).unwrap();
@@ -1994,7 +1994,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 params![run.run_id, serde_json::to_string(&run).unwrap()],
             )
             .unwrap();
-        let (endpoint, mut requests, server) = crate::test_support::server(vec![(
+        let (endpoint, mut requests, server) = crate::test_support::ws_server(vec![(
             200,
             answer("Recovered parent acknowledges interruption"),
         )])

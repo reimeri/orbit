@@ -100,17 +100,14 @@ next invocation. Final response reconciliation does not rerun early calls. Image
 emitted by an earlier invocation are available to subsequent image-edit requests
 even before the model response finishes.
 
-On stream failure or Stop, no more calls are admitted. Active response work is
-cancelled and its invocation settled before interrupted-call repair. Text and media
-already buffered by the active cell are drained into its interrupted result, not
-discarded. Completed results survive, and calls with uncertain side effects receive an explicit
-interrupted result rather than being replayed. Restart repairs the same journal.
-If storage fails, execution stops and unsaved results remain in memory for a save
-retry; keep Pico open and fix disk space/permissions before continuing.
-
-This does not change SSE transport, steering boundaries, or add automatic replay
-of interrupted model responses. The next model request still waits for the current
-response and its invocations to finish, including questionnaire barriers.
+On a dropped WebSocket, no more calls from that response start. A running
+invocation can finish or yield; its result is saved before reconnecting. Calls
+that never started get explicit not-executed results. Pico opens a new socket
+and requests a new response from repaired local history (at most three times
+per turn). It does not resume partial text, redispatch old calls or bypass a
+pending questionnaire. Stop still cancels the invocation and reconnection.
+Provider protocol errors, unaccounted-for side effects, and storage failures
+are not transport retries. Restart repair never automatically starts work.
 
 ## Reference provenance
 

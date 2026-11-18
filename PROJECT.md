@@ -15,6 +15,7 @@ Do not try to directly translate the C code to Rust. Use idiomatic rust instead 
 
 See [Pico V2 and Codex differences](docs/codex-comparison.md) for the current
 agent-loop behavior, tool discovery, prewarming and incremental-request comparison.
+See the [Responses WebSocket migration plan](docs/responses-websocket-plan.md) for the implementation and live acceptance checks.
 
 - Agent loop. It is working but we should consider overhauling it. Many harnesses have moved to using code-mode which I think should be also our target
 - Subagents. Make them closer to how they work in codex

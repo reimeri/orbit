@@ -4,14 +4,14 @@ use crate::{
     store::{Session, Usage},
 };
 use anyhow::{Context, Result, bail};
-use futures_util::StreamExt;
-use reqwest::Client;
+mod websocket;
 use serde_json::{Value, json};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
+pub(crate) use websocket::StreamInterrupted;
 
 const SUMMARY_CONTEXT_DIVISOR: u64 = 32;
 const MAX_TRANSIENT_RETRIES: u8 = 5;
@@ -95,7 +95,8 @@ fn is_context_limit(body: &Value) -> bool {
     )
 }
 pub struct Provider {
-    client: Client,
+    sockets: websocket::Sockets,
+    upgrade_client: reqwest::Client,
     pub auth: Arc<Auth>,
     endpoint: String,
     store: crate::store::Store,
@@ -112,10 +113,13 @@ impl Provider {
         Ok(Self {
             auth,
             store,
-            client: Client::builder()
+            sockets: Default::default(),
+            upgrade_client: reqwest::Client::builder()
+                .http1_only()
+                .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(20))
                 .build()?,
-            endpoint: "https://chatgpt.com/backend-api/codex/responses".into(),
+            endpoint: "wss://chatgpt.com/backend-api/codex/responses".into(),
         })
     }
     fn turn_request(&self, session: &Session, instructions: &str) -> Result<Value> {
@@ -123,7 +127,6 @@ impl Provider {
         let mut body = request_base(session, instructions);
         body["tools"] = code_mode::tools(session.child.is_some(), web);
         body["parallel_tool_calls"] = json!(true);
-        body["input"] = json!(session.input);
         Ok(body)
     }
     pub async fn respond(
@@ -133,13 +136,8 @@ impl Provider {
         cancel: &CancellationToken,
         emit: &(dyn Fn(Delta) + Send + Sync),
     ) -> Result<Response> {
-        self.request(
-            &session.id,
-            self.turn_request(session, instructions)?,
-            cancel,
-            emit,
-        )
-        .await
+        let body = self.turn_request(session, instructions)?;
+        tokio::select! { biased; _ = cancel.cancelled() => bail!("Turn cancelled"), r = self.websocket_request(&session.id, body, Some(&session.input), emit) => r }
     }
     /// A separate, tools-disabled request: never add naming context to the conversation.
     pub(crate) async fn session_title(
@@ -185,6 +183,7 @@ impl Provider {
         account: &(dyn Fn(&Response) + Send + Sync),
     ) -> Result<Compaction> {
         let mut body = self.turn_request(session, instructions)?;
+        body["input"] = json!(session.input);
         body["input"]
             .as_array_mut()
             .expect("request input")
@@ -341,144 +340,7 @@ impl Provider {
         cancel: &CancellationToken,
         emit: &(dyn Fn(Delta) + Send + Sync),
     ) -> Result<Response> {
-        tokio::select! { _ = cancel.cancelled() => bail!("Turn cancelled"), result = self.request_inner(session_id, body, emit) => result }
-    }
-    async fn request_inner(
-        &self,
-        session_id: &str,
-        body: Value,
-        emit: &(dyn Fn(Delta) + Send + Sync),
-    ) -> Result<Response> {
-        let mut body = body;
-        let audio_supported =
-            crate::models::model(body["model"].as_str().context("Missing model")?)
-                .is_some_and(|m| m.audio_input);
-        body = tokio::task::spawn_blocking(move || {
-            crate::media::project(&mut body, audio_supported)?;
-            Ok::<_, anyhow::Error>(body)
-        })
-        .await??;
-        let mut credentials = self.auth.token(None).await?;
-        // V1's advisory Codex routing hint must match the pinned request body,
-        // including retries and compaction. Normal mode has no tier hint.
-        let mut routing_hint = format!("model={}", body["model"].as_str().expect("request model"));
-        if let Some(tier) = body["service_tier"].as_str() {
-            routing_hint.push_str(&format!(";tier={tier}"));
-        }
-        // A definite 401 gets one credential retry, independent of transport backoff.
-        let mut retried_auth = false;
-        let mut transient_retries = 0;
-        'request: loop {
-            let mut request = self
-                .client
-                .post(&self.endpoint)
-                .bearer_auth(&credentials.access_token)
-                .header("originator", "pico-evo")
-                .header("OpenAI-Beta", "responses=experimental")
-                .header("session-id", session_id)
-                .header("x-codex-routing-hint", &routing_hint)
-                .json(&body);
-            if let Some(account) = &credentials.account_id {
-                request = request.header("chatgpt-account-id", account);
-            }
-            let response = match tokio::time::timeout(Duration::from_secs(90), request.send()).await
-            {
-                Ok(Ok(response)) => response,
-                _ if transient_retries < MAX_TRANSIENT_RETRIES => {
-                    let delay = Duration::from_secs(1 << transient_retries);
-                    transient_retries += 1;
-                    emit(Delta::Retrying(RetryStatus::Reconnecting {
-                        retry: transient_retries,
-                    }));
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                Ok(Err(error)) => {
-                    return Err(error)
-                        .context("Could not reach ChatGPT. Check your connection and retry");
-                }
-                Err(_) => bail!(
-                    "ChatGPT did not respond within 90 seconds. Check your connection and retry."
-                ),
-            };
-            let status = response.status();
-            if status == reqwest::StatusCode::UNAUTHORIZED && !retried_auth {
-                retried_auth = true;
-                credentials = self.auth.token(Some(&credentials.access_token)).await?;
-                continue;
-            }
-            if (status.as_u16() == 429 || status.is_server_error())
-                && transient_retries < MAX_TRANSIENT_RETRIES
-            {
-                let delay = response
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(1 << transient_retries)
-                    .min(30);
-                transient_retries += 1;
-                emit(Delta::Retrying(RetryStatus::ServiceBusy {
-                    status,
-                    delay_secs: delay,
-                }));
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-                continue;
-            }
-            if !status.is_success() {
-                let bytes = response.bytes().await?;
-                let parsed = serde_json::from_slice::<Value>(&bytes);
-                if parsed.as_ref().is_ok_and(is_context_limit) {
-                    return Err(ContextLimit.into());
-                }
-                let error = match parsed {
-                    Ok(value) => safe_error(&value),
-                    Err(_) => crate::output::preserve_bytes(&bytes, 500),
-                };
-                if status == reqwest::StatusCode::UNAUTHORIZED {
-                    bail!(
-                        "ChatGPT still rejected your login ({status}): {error}. Stop running turns, then sign out and sign in again in Settings."
-                    );
-                }
-                bail!(
-                    "ChatGPT request failed ({status}): {error}. Check model/access in Settings, then retry."
-                );
-            }
-            let mut stream = response.bytes_stream();
-            let mut decoder = Sse::default();
-            let mut response_stream = ResponseStream::default();
-            loop {
-                let next = tokio::time::timeout(Duration::from_secs(120), stream.next()).await.context("ChatGPT stream stalled. Retry to continue; completed shell commands are not repeated automatically")?;
-                let Some(chunk) = next else {
-                    bail!(
-                        "ChatGPT stream ended without response.completed. No incomplete tool calls were executed. Retry to continue."
-                    );
-                };
-                for event in decoder.push(&chunk.context(
-                    "ChatGPT connection interrupted during streaming; retry to continue",
-                )?)? {
-                    match response_stream.event(event, emit, Instant::now()) {
-                        Ok(Some(response)) => return Ok(response),
-                        Ok(None) => {}
-                        // Replay only an explicit overload before generated output.
-                        // Completed items may already have launched tools.
-                        Err(error)
-                            if error.is::<Overload>()
-                                && response_stream.first_token.is_none()
-                                && response_stream.completed_items.is_empty()
-                                && transient_retries < MAX_TRANSIENT_RETRIES =>
-                        {
-                            let delay_secs = 1 << transient_retries;
-                            transient_retries += 1;
-                            emit(Delta::Retrying(RetryStatus::Overloaded { delay_secs }));
-                            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                            continue 'request;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
-        }
+        tokio::select! { _ = cancel.cancelled() => bail!("Turn cancelled"), result = self.websocket_request(session_id, body, None, emit) => result }
     }
 }
 fn valid_compaction(output: &[Value]) -> bool {
@@ -497,47 +359,8 @@ fn request_base(session: &Session, instructions: &str) -> Value {
     body
 }
 #[derive(Default)]
-struct Sse {
-    line: Vec<u8>,
-    data: String,
-}
-impl Sse {
-    fn push(&mut self, bytes: &[u8]) -> Result<Vec<Value>> {
-        const LIMIT: usize = 16 * 1024 * 1024;
-        let mut events = vec![];
-        // Only search new bytes; retain at most an unfinished line, never shift a prefix.
-        for part in bytes.split_inclusive(|b| *b == b'\n') {
-            if self.line.len() + self.data.len() + part.len() > LIMIT {
-                bail!("Provider event exceeded 16 MiB");
-            }
-            self.line.extend_from_slice(part);
-            if part.last() != Some(&b'\n') {
-                continue;
-            }
-            let line = std::str::from_utf8(&self.line)?.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                if !self.data.is_empty() {
-                    if self.data != "[DONE]" {
-                        events.push(
-                            serde_json::from_str(&self.data)
-                                .context("Invalid JSON in provider event")?,
-                        );
-                    }
-                    self.data.clear();
-                }
-            } else if let Some(value) = line.strip_prefix("data:") {
-                if !self.data.is_empty() {
-                    self.data.push('\n');
-                }
-                self.data.push_str(value.strip_prefix(' ').unwrap_or(value));
-            }
-            self.line.clear();
-        }
-        Ok(events)
-    }
-}
-#[derive(Default)]
-struct ResponseStream {
+struct ResponseStream<'a> {
+    previous_calls: std::collections::HashSet<&'a str>,
     first_token: Option<Instant>,
     summary_indices: std::collections::HashMap<String, u64>,
     completed_items: std::collections::BTreeMap<usize, Value>,
@@ -577,7 +400,7 @@ fn validate_output_item(item: &Value) -> Result<()> {
     Ok(())
 }
 
-impl ResponseStream {
+impl ResponseStream<'_> {
     fn complete_item(
         &mut self,
         index: usize,
@@ -585,6 +408,13 @@ impl ResponseStream {
         emit: &(dyn Fn(Delta) + Send + Sync),
     ) -> Result<()> {
         validate_output_item(&item)?;
+        if is_tool_call(&item)
+            && self
+                .previous_calls
+                .contains(item["call_id"].as_str().expect("validated call"))
+        {
+            bail!("ChatGPT reused a tool call ID from history. The call was not executed again.");
+        }
         if let Some(previous) = self.completed_items.get(&index) {
             if previous != &item {
                 bail!("Provider changed an already completed output item");
@@ -675,7 +505,12 @@ impl ResponseStream {
                 let mut call_ids = std::collections::HashSet::new();
                 for item in &output {
                     validate_output_item(item)?;
-                    if is_tool_call(item) && !call_ids.insert(item["call_id"].as_str()) {
+                    if is_tool_call(item)
+                        && (self
+                            .previous_calls
+                            .contains(item["call_id"].as_str().expect("validated call"))
+                            || !call_ids.insert(item["call_id"].as_str()))
+                    {
                         bail!("Provider returned duplicate tool call IDs");
                     }
                 }
@@ -756,7 +591,7 @@ mod tests {
             )
             .unwrap();
         let mut provider = Provider::new(Auth::new(store.clone()).unwrap(), store).unwrap();
-        let (url, requests, task) = crate::test_support::server(replies).await;
+        let (url, requests, task) = crate::test_support::ws_server(replies).await;
         provider.endpoint = url;
         (dir, provider, requests, task)
     }
@@ -819,10 +654,7 @@ mod tests {
                 Some("Bearer rotated-access")
             );
             for retry in [&transient_retry, &refreshed] {
-                assert_eq!(
-                    original.split_once("\r\n\r\n").unwrap().1,
-                    retry.split_once("\r\n\r\n").unwrap().1
-                );
+                assert!(retry.starts_with("GET "));
                 for key in ["session-id", "chatgpt-account-id", "x-codex-routing-hint"] {
                     assert_eq!(header(&original, key), header(retry, key));
                 }
@@ -858,7 +690,13 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
-        for fast in [true, true, false] {
+        let rejected = requests.recv().await.unwrap();
+        assert!(rejected.starts_with("GET "));
+        assert_eq!(
+            crate::test_support::header(&rejected, "x-codex-routing-hint"),
+            Some(format!("model={};tier=priority", session.model).as_str())
+        );
+        for fast in [true, false] {
             let request = requests.recv().await.unwrap();
             let (_, body) = request.split_once("\r\n\r\n").unwrap();
             let body: Value = serde_json::from_str(body).unwrap();
@@ -996,12 +834,12 @@ mod tests {
     #[tokio::test]
     async fn overload_retries_before_output_but_not_after_a_completed_call() {
         let overloaded = json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later."}}});
-        let failure = format!("data: {overloaded}\n\n");
+        let failure = format!("{overloaded}\n\n");
         let call = json!({"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","call_id":"c","name":"exec","input":"text(1)"}});
         let (dir, provider, mut requests, server) = fixture([
             (200, failure.clone()),
             (200, crate::test_support::completed(json!([]))),
-            (200, format!("data: {call}\n\n{failure}")),
+            (200, format!("{call}\n\n{failure}")),
             (400, "unexpected replay".into()),
         ])
         .await;
@@ -1027,7 +865,8 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_stream_reports_failure_without_retrying() {
-        let partial = "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"partial\"}\n\n";
+        let partial =
+            "{\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"partial\"}\n\n";
         let (dir, provider, mut requests, server) =
             fixture([(200, partial.into()), (400, "unexpected retry".into())]).await;
         let session = Session::new(dir.path().into(), &crate::store::Settings::default());
@@ -1336,7 +1175,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_json_service_error_preserves_full_response_body() {
-        let diagnostic = format!("proxy error {} diagnostic tail", "λ".repeat(1000));
+        let diagnostic = format!("proxy error {} diagnostic tail", "λ".repeat(20000));
         let (dir, provider, _requests, server) = fixture(vec![(400, diagnostic.clone())]).await;
         let session = Session::new(dir.path().into(), &crate::store::Settings::default());
         let error = provider
@@ -1496,25 +1335,6 @@ mod tests {
         assert_eq!(response.streaming_time, Duration::ZERO);
     }
 
-    #[test]
-    fn sse_survives_split_unicode_crlf_and_multiple_events() {
-        let source = "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"héλ\"}\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":42,\"output_tokens\":7}}}\n\n";
-        let mut sse = Sse::default();
-        let mut events = vec![];
-        for byte in source.bytes() {
-            events.extend(sse.push(&[byte]).unwrap());
-        }
-        assert_eq!(events[0]["delta"], "héλ");
-        assert_eq!(
-            ResponseStream::default()
-                .event(events.pop().unwrap(), &|_| {}, Instant::now())
-                .unwrap()
-                .unwrap()
-                .usage
-                .input,
-            42
-        );
-    }
     #[test]
     fn only_completed_items_release_calls_and_conflicting_items_are_rejected() {
         let events = std::sync::Mutex::new(Vec::new());

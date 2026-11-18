@@ -29,8 +29,8 @@ Responses tools, with built-ins available through JavaScript's `tools` object.
 | --- | --- | --- |
 | Tool dispatch | Starts completed top-level calls while the response is still streaming, in response order. `exec` and `wait` invocations are exclusive; yielded cells can continue running. | Can dispatch completed tool calls while the response is still streaming; tools may run concurrently or exclusively according to their capabilities. Its code-mode `exec` and `wait` are exclusive. |
 | Steering | Saves messages accepted during a turn and consumes them at the next loop boundary, after the current response and its returned calls. Does not preempt the active model request. | Has sampling interruption/draining and follow-up machinery for incoming messages; behavior depends on the execution path. |
-| Recovery | Retries connection/setup failures, selected HTTP errors, and explicit overloads before generated output or completed items. A stream interruption ends the turn with a recoverable error rather than automatically retrying generation. Incomplete tool calls are not executed. | Has stream-level retry and transport fallback, while treating some provider outcomes as terminal rather than retryable. |
-| Transport | Uses HTTP/SSE and sends the current accumulated input context on each request. | Also supports persistent WebSockets, preconnection, request prewarming and incremental continuation. |
+| Recovery | Retries connection/setup failures, selected HTTP errors, and explicit overloads before generated output or completed items. A dropped agent stream can start a new generation from recovered history, up to three times. Incomplete tool calls are not executed. | Has stream-level retry and transport fallback, while treating some provider outcomes as terminal rather than retryable. |
+| Transport | Uses WebSockets only for Responses; compatible follow-ups send the new input with a previous response ID. | Also supports persistent WebSockets, preconnection, request prewarming and incremental continuation. |
 | Compaction | Pauses the loop at a reported-usage threshold, or after a context-limit error. Tries native encrypted compaction, with bounded chunked summarization as fallback. | Includes an asynchronous/background compaction path in addition to foreground compaction machinery. |
 
 **Sequential dispatch does not mean Pico has no concurrency.** A JavaScript cell
@@ -49,10 +49,9 @@ saved as invocations finish or yield. Final reconciliation does not dispatch a c
 twice, and model context retains response-item order followed by tool-result order.
 
 Recovery pairs unfinished calls with an explicit interrupted result rather than
-blindly repeating potentially completed side effects. Stream failure stops new
-dispatch, cancels that response's active work and settles its invocation before
-repairing history. Completed results survive failure/restart; interrupted streams
-are not automatically replayed. Context-limit recovery cannot compact and retry a
+blindly repeating potentially completed side effects. A dropped socket stops new dispatch but lets an already-running invocation
+finish before saving its result and reconnecting. An interrupted stream is not
+replayed: a new request starts from recovered history. Context-limit recovery cannot compact and retry a
 stale snapshot after completed response items have arrived. Stop cancels ongoing
 work; it does not undo completed commands.
 Fallback compaction preserves historical context and oversized output references
@@ -143,8 +142,7 @@ This does not generate a speculative answer or execute tools. It moves setup wor
 earlier and can reduce time to useful output when preparation overlaps other work.
 An extra warmup round trip is not automatically faster if nothing can overlap it.
 Pico currently has neither a WebSocket preconnect nor this no-generation warmup
-path. This does not imply that its HTTP client opens a fresh TCP connection for
-every request; HTTP connection reuse is separate.
+path; it opens the socket on demand and reuses it across compatible requests.
 
 See also the [OpenAI WebSocket guide][api-websocket].
 
@@ -153,7 +151,7 @@ See also the [OpenAI WebSocket guide][api-websocket].
 Let `H` be existing conversation input. The model returns response `R1`, containing
 tool call `C1`, and the harness executes it to obtain result `O1`.
 
-Pico sends accumulated context again:
+Without continuation, a client sends accumulated context again:
 
 ```text
 Request 1: input = H
@@ -161,7 +159,7 @@ Response R1: tool call C1
 Request 2: input = H + C1 + O1
 ```
 
-Codex's incremental path can instead send:
+Pico and Codex can instead send:
 
 ```text
 Request 1: input = H
@@ -174,9 +172,9 @@ the new tool result. **The logical conversation is the same; less history travel
 over the wire.** These examples omit other request fields: required settings and
 instructions still need to be supplied appropriately.
 
-Codex verifies that the current input extends the previous known input and output,
+Both clients verify that the current input extends the previous known input and output,
 and that relevant request properties remain compatible. If history was replaced,
-shortened or otherwise changed, or relevant settings differ, it uses full input
+shortened or otherwise changed, or relevant settings differ, each uses full input
 instead of an invalid delta. Auth ownership changes invalidate cached transport
 and continuation state.
 
@@ -209,8 +207,7 @@ machinery. Pico's subagents are read-only **by instruction**, not filesystem
 isolation. They use fixed profiles, isolated context, no nested delegation and
 idle-child continuation; see [subagent contracts](subagents.md).
 
-The remaining direct loop-behavior gaps include preemptive steering and automatic
-stream recovery. Early exclusive dispatch now matches the code-mode-only top-level
+The remaining direct loop-behavior gaps include preemptive steering. Early exclusive dispatch now matches the code-mode-only top-level
 scheduling needed by Pico; it does not implement Codex's general capability-based
 scheduler for other top-level tool catalogs. Prewarming and incremental
 requests are primarily performance work. Deferred discovery primarily matters if

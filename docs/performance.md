@@ -43,8 +43,8 @@ limits. Execution limits remain per conversation; no global admission cap was ad
 - Fallback compaction persists its plaintext summary and transcript checkpoint;
   later fallbacks summarize only subsequent records. It builds bounded chunks and
   does not copy the original provider input into each summary request. Native
-  compaction remains the preferred path. SSE decoding scans incoming bytes once
-  and bounds the combined pending line/event storage.
+  compaction remains the preferred path. WebSocket continuations select the new input before
+  materializing saved media, and inbound event sizes are bounded.
 - Shell output uses a bounded ring/deque instead of shifting its 1 MiB tail.
   Non-PTY pipes/waiters and PTY readiness use the shared Tokio executor; a PTY
   child still has a blocking wait thread. QuickJS cells and nested host calls

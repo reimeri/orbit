@@ -1,7 +1,83 @@
-//! Early, exclusive top-level tool execution over the existing SSE transport.
+//! Early, exclusive top-level tool execution with recoverable Responses streams.
 use super::*;
 use crate::provider::{Delta, Response};
 use crate::store::InProgressResponse;
+
+const MAX_RECOVERIES: u8 = 3;
+
+#[derive(Default)]
+pub(super) struct Recovery {
+    attempts: u8,
+    notice: Option<String>,
+}
+impl Recovery {
+    fn notice(&mut self, conversation: &Conversation, message: String) {
+        let mut session = conversation.state.lock().expect("session lock");
+        if let Some(id) = &self.notice {
+            session.entries.by_id_mut(id).expect("recovery notice").text = message;
+        } else {
+            let entry = Entry::new(EntryKind::Notice, message);
+            self.notice = Some(entry.id.clone());
+            session.entries.push(entry);
+        }
+        conversation.changed();
+    }
+
+    pub(super) async fn retry(
+        &mut self,
+        conversation: &Arc<Conversation>,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if self.attempts == MAX_RECOVERIES {
+            self.notice(
+                conversation,
+                "Reconnection attempts exhausted. Saved progress is retained.".into(),
+            );
+            bail!(
+                "Could not keep a connection to ChatGPT. Check your network, then send a message to continue from saved progress."
+            );
+        }
+        self.attempts += 1;
+        self.notice(conversation, format!("Connection lost. Reconnecting from saved progress (attempt {} of {MAX_RECOVERIES})…", self.attempts));
+        conversation.set_status(ConversationStatus::Connecting);
+        conversation.save_async().await?;
+        let mut changes = conversation.changes.subscribe();
+        while conversation
+            .questionnaires
+            .as_ref()
+            .is_some_and(|q| q.has_pending())
+        {
+            tokio::select! { _ = cancel.cancelled() => bail!("Turn cancelled"), result = changes.changed() => result? }
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => bail!("Turn cancelled"),
+            _ = tokio::time::sleep(Duration::from_secs(1 << (self.attempts - 1))) => Ok(())
+        }
+    }
+    pub(super) fn stopped(&mut self, conversation: &Conversation, cancelled: bool) {
+        if self.notice.is_some() && (cancelled || self.attempts < MAX_RECOVERIES) {
+            self.notice(
+                conversation,
+                if cancelled {
+                    "Reconnection stopped."
+                } else {
+                    "Could not continue automatically."
+                }
+                .into(),
+            );
+        }
+        self.notice = None;
+    }
+    pub(super) fn resumed(&mut self, conversation: &Conversation) {
+        if self.notice.is_some() {
+            self.notice(
+                conversation,
+                "Reconnected. Continued from saved progress.".into(),
+            );
+            self.notice = None;
+        }
+    }
+}
 
 impl Harness {
     pub(super) async fn respond_and_execute(
@@ -10,6 +86,7 @@ impl Harness {
         snapshot: &Session,
         instructions: &str,
         cancel: &CancellationToken,
+        recovery: &mut Recovery,
     ) -> Result<Response> {
         conversation
             .state
@@ -152,7 +229,13 @@ impl Harness {
         }
         .await;
         if result.is_err() {
-            work_cancel.cancel();
+            let dropped = result
+                .as_ref()
+                .is_err_and(|error| error.is::<crate::provider::StreamInterrupted>())
+                && !cancel.is_cancelled();
+            if !dropped {
+                work_cancel.cancel();
+            }
             // Include already-delivered completed items even when the stream failed in
             // the same poll. They are recovery context, never permission to run more tools.
             while let Ok((index, item)) = received.try_recv() {
@@ -160,12 +243,81 @@ impl Harness {
             }
             // Never drop a live spawn_blocking invocation: persist its outcome before
             // the caller repairs interrupted calls or marks the turn idle.
-            if let Some(work) = active
-                && let Err(error) = work.await
-            {
-                return result.map_err(|primary| primary.context(format!(
-                    "Could not settle interrupted tool work: {error:#}. Keep Pico open and fix storage before retrying."
-                )));
+            if let Some(work) = active {
+                let started = {
+                    let session = conversation.state.lock().expect("session lock");
+                    let call = &session
+                        .in_progress_response
+                        .as_ref()
+                        .expect("active response")
+                        .items[&(next_index - 1)];
+                    session
+                        .entries
+                        .by_id(call["call_id"].as_str().expect("validated call"))
+                        .is_some()
+                };
+                if dropped && started {
+                    recovery.notice(
+                        conversation,
+                        "Connection lost. Waiting for the running tool before reconnecting…".into(),
+                    );
+                }
+                if !dropped || started {
+                    // User Stop still reaches this child token. Do not cancel a working
+                    // invocation just because the model connection disappeared.
+                    work.await.context("Could not settle interrupted tool work. Inspect tool results and fix storage before continuing")?;
+                }
+            }
+            if dropped && !cancel.is_cancelled() {
+                let mut session = conversation.state.lock().expect("session lock");
+                let progress = session
+                    .in_progress_response
+                    .as_ref()
+                    .expect("active response");
+                let completed_ids: HashSet<_> = progress
+                    .items
+                    .values()
+                    .filter_map(|item| item["id"].as_str())
+                    .collect();
+                let partial: Vec<_> = session
+                    .entries
+                    .range(snapshot.entries.len())
+                    .filter(|e| {
+                        matches!(e.kind, EntryKind::Assistant | EntryKind::Reasoning)
+                            && !completed_ids.contains(e.id.as_str())
+                    })
+                    .map(|e| e.id.clone())
+                    .collect();
+                let pending: Vec<_> = progress
+                    .items
+                    .iter()
+                    .filter(|(index, item)| {
+                        is_tool_call(item) && !progress.results.contains_key(index)
+                    })
+                    .map(|(i, item)| (*i, item.clone()))
+                    .collect();
+                for id in partial {
+                    let entry = session.entries.by_id_mut(&id).expect("partial entry");
+                    entry.kind = EntryKind::Notice;
+                    entry
+                        .text
+                        .insert_str(0, "Interrupted partial output (not sent on retry):\n");
+                }
+                for (index, item) in pending {
+                    let id = item["call_id"].as_str().expect("validated call");
+                    if session.entries.by_id(id).is_some() {
+                        bail!(
+                            "Connection lost during tool {id}. Its outcome is unknown. Inspect its effects before continuing."
+                        );
+                    }
+                    let kind = if item["type"] == "custom_tool_call" {
+                        "custom_tool_call_output"
+                    } else {
+                        "function_call_output"
+                    };
+                    session.in_progress_response.as_mut().expect("active response").results.insert(index,
+                        json!({"type":kind, "call_id":id, "output":"Not executed: the connection was lost before this call was dispatched."}));
+                }
             }
         }
         result
