@@ -12,7 +12,7 @@ use pico_core::{
 };
 use theme::{ACCENT, MUTED, SUCCESS, WARNING};
 
-fn caption(label: &'static str) -> iced::widget::Text<'static> {
+pub(super) fn caption(label: &'static str) -> iced::widget::Text<'static> {
     text(label)
         .size(10)
         .color(MUTED)
@@ -20,9 +20,15 @@ fn caption(label: &'static str) -> iced::widget::Text<'static> {
 }
 
 fn section(label: &'static str) -> Element<'static, Message> {
-    container(caption(label))
+    section_bar(caption(label))
+}
+
+pub(super) const SECTION_INSET: u16 = 10;
+
+pub(super) fn section_bar<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
         .width(Fill)
-        .padding([6, 10])
+        .padding([6, SECTION_INSET])
         .style(|_| {
             container::background(theme::PANEL).border(iced::border::rounded(theme::RADIUS_SMALL))
         })

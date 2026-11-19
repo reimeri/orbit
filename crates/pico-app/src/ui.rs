@@ -4172,23 +4172,25 @@ impl App {
     fn model_settings_table<'a>(&'a self) -> widget::Column<'a, Message> {
         // The model column absorbs resizing; header and data share the other two tracks.
         let effort_width = (self.panel_width() * 0.30).clamp(84., 140.);
-        let table_row = |name: Element<'a, Message>, effort, fast| {
+        let tracks = |name: Element<'a, Message>, effort, fast| {
             row![
                 container(name).width(Fill),
                 container(effort).width(effort_width),
                 container(fast).center_x(44),
             ]
-            .padding([8, 6])
             .spacing(6)
             .align_y(iced::Center)
         };
+        let table_row =
+            |name, effort, fast| tracks(name, effort, fast).padding([8, settings::SECTION_INSET]);
+        let header = |name, effort, fast| settings::section_bar(tracks(name, effort, fast));
         let name_cell = |icon: Element<'a, Message>, label: &'static str| {
             row![container(icon).center_x(16), text(label).size(16)]
                 .spacing(6)
                 .align_y(iced::Center)
         };
-        let heading = |label| text(label).size(10).color(MUTED).into();
-        let mut table = column![table_row(
+        let heading = |label| settings::caption(label).into();
+        let mut table = column![header(
             heading("MODEL"),
             heading("DEFAULT EFFORT"),
             heading("FAST"),
@@ -4236,7 +4238,7 @@ impl App {
         };
         table = table.push(space().height(12));
         if !compact {
-            table = table.push(table_row(
+            table = table.push(header(
                 role_and_model(heading("SUBAGENT"), heading("MODEL")),
                 heading("EFFORT"),
                 heading("FAST"),
@@ -4273,7 +4275,7 @@ impl App {
                         row![model, effort].spacing(6),
                     ]
                     .spacing(7)
-                    .padding([8, 6]),
+                    .padding([8, settings::SECTION_INSET]),
                 )
             } else {
                 table.push(table_row(
