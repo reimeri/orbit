@@ -5880,23 +5880,22 @@ fn external(destination: impl Into<OsString>) -> Task<Message> {
     let destination = destination.into();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || {
-                let recovery = format!(
-                    "Open {} manually, or check its default application with xdg-open.",
-                    destination.to_string_lossy()
-                );
-                let status = std::process::Command::new("xdg-open")
-                    .arg(&destination)
-                    .status()
-                    .map_err(|error| format!("Could not launch xdg-open: {error}. {recovery}"))?;
-                if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("xdg-open failed ({status}). {recovery}"))
-                }
-            })
-            .await
-            .map_err(|error| format!("Could not finish opening the link: {error}. Try again."))?
+            let recovery = format!(
+                "Open {} manually, or check its default application with xdg-open.",
+                destination.to_string_lossy()
+            );
+            // Some desktop openers stay alive until the document is closed. Wait
+            // asynchronously so exiting Pico drops the wait, not the external app.
+            let status = tokio::process::Command::new("xdg-open")
+                .arg(destination)
+                .status()
+                .await
+                .map_err(|error| format!("Could not launch xdg-open: {error}. {recovery}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("xdg-open failed ({status}). {recovery}"))
+            }
         },
         Message::External,
     )

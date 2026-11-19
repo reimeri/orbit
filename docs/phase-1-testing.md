@@ -39,6 +39,10 @@ Check:
   Cancel leaves the file unopened. Web links still open in the browser; unsupported
   schemes are rejected. If launching fails, the error identifies the destination
   and suggests opening it manually or checking its default application.
+- To check shutdown with a long-running opener, put a test `xdg-open` script
+  earlier on Pico's `PATH` that runs `exec sleep 60`. Confirm a document link,
+  then quit Pico while the sleep process is alive. Pico should exit immediately
+  and the opener should still be running; terminate the test opener afterward.
 - Drag to select part of a message, then across paragraphs and messages in either
   direction. Ctrl+C copies the displayed text, not Markdown markup. Check code
   blocks (including blank lines), Unicode, notices and expanded thinking/tool
