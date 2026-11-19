@@ -2808,7 +2808,7 @@ impl App {
             }))
             .on_press(Message::Dismiss);
             layers
-                .push(shade)
+                .push(opaque(shade))
                 .push(
                     container(opaque(self.modal_view(modal)))
                         .center_x(Fill)
@@ -9912,6 +9912,52 @@ Then implement the fix.";
                 [Message::CloseMenu]
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn modal_backdrop_masks_controls_but_keeps_dialog_interactive() {
+        use iced_runtime::{
+            UserInterface,
+            user_interface::{Cache, State},
+        };
+        let mut app = app();
+        app.settings_open = true;
+        app.modal = Some(Modal::Quit);
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(app.window_width, app.window_height);
+        let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let covered = bounds
+            .rightmost_control_at(bounds.label("Settings").center_y())
+            .center();
+        let confirm = bounds.label("Stop and quit").center();
+        for (point, interaction) in [
+            (covered, mouse::Interaction::Idle),
+            (confirm, mouse::Interaction::Pointer),
+        ] {
+            let (state, _) = ui.update(
+                &[iced::Event::Mouse(mouse::Event::CursorMoved {
+                    position: point,
+                })],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Vec::new(),
+            );
+            assert!(
+                matches!(state, State::Updated { mouse_interaction, .. } if mouse_interaction == interaction),
+                "{state:?}"
+            );
+        }
+        assert!(matches!(
+            click_at(&mut ui, &mut renderer, covered).as_slice(),
+            [Message::Dismiss]
+        ));
+        assert!(matches!(
+            click_at(&mut ui, &mut renderer, confirm).as_slice(),
+            [Message::Confirm]
+        ));
     }
 
     #[tokio::test]
