@@ -136,6 +136,7 @@ fn main() -> Result<()> {
             for assignment in 1..=100 {
                 let failed = (index + assignment) % 2 == 0;
                 let run = RunInfo {
+                    configuration: None,
                     run_id: format!("run-{index}-{assignment}"),
                     parent_id: parent.clone(),
                     session_id: child.id.clone(),

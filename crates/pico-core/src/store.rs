@@ -1,5 +1,6 @@
 //! Durable V2 state. Provider context and the complete visible transcript are separate.
 use crate::{
+    agent::subagents::Profile,
     history::{History, Record},
     models::{DEFAULT_MODEL, MODELS, model},
 };
@@ -70,6 +71,20 @@ fn model_defaults() -> BTreeMap<String, ModelDefaults> {
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentSettings {
+    pub model: String,
+    pub effort: String,
+    pub fast: bool,
+}
+
+fn subagent_defaults() -> BTreeMap<Profile, SubagentSettings> {
+    Profile::ALL
+        .into_iter()
+        .map(|p| (p, p.defaults()))
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -79,6 +94,8 @@ pub struct Settings {
     pub model: String,
     #[serde(default = "model_defaults")]
     pub models: BTreeMap<String, ModelDefaults>,
+    #[serde(default = "subagent_defaults")]
+    pub subagents: BTreeMap<Profile, SubagentSettings>,
     pub context_limit: u64,
     pub compact_percent: u8,
     pub sidebar_width: f32,
@@ -94,6 +111,7 @@ impl Default for Settings {
             web_search: crate::web_search::Mode::Live,
             model: DEFAULT_MODEL.into(),
             models: model_defaults(),
+            subagents: subagent_defaults(),
             context_limit: 272_000,
             compact_percent: 80,
             sidebar_width: 240.,
@@ -110,6 +128,15 @@ impl Settings {
         self.models.retain(|id, _| model(id).is_some());
         for m in MODELS {
             self.models.entry(m.id.into()).or_default();
+        }
+        for profile in Profile::ALL {
+            let config = self
+                .subagents
+                .entry(profile)
+                .or_insert_with(|| profile.defaults());
+            if model(&config.model).is_none() {
+                *config = profile.defaults();
+            }
         }
         if model(&self.model).is_none() {
             self.model = DEFAULT_MODEL.into();
@@ -130,6 +157,20 @@ impl Settings {
                 .with_context(|| format!("Missing defaults for {}", m.name))?;
             if !m.efforts.contains(&defaults.effort.as_str()) {
                 bail!("Choose a supported reasoning effort for {}.", m.name);
+            }
+        }
+        for profile in Profile::ALL {
+            let config = self
+                .subagents
+                .get(&profile)
+                .with_context(|| format!("Missing configuration for {}.", profile.label()))?;
+            let selected = model(&config.model)
+                .with_context(|| format!("Choose a supported model for {}.", profile.label()))?;
+            if !selected.efforts.contains(&config.effort.as_str()) {
+                bail!(
+                    "Choose a supported reasoning effort for {}.",
+                    profile.label()
+                );
             }
         }
         if !(8_000..=2_000_000).contains(&self.context_limit)
@@ -553,10 +594,14 @@ impl Store {
     pub fn root(&self) -> &Path {
         &self.root
     }
-    pub fn load(&self) -> Result<(Catalog, Vec<SessionSummary>, Vec<String>)> {
+    pub(crate) fn load_catalog(&self) -> Result<Catalog> {
         let mut catalog: Catalog = self.read_optional("settings.json")?.unwrap_or_default();
         catalog.settings.refresh_models();
         catalog.settings.validate()?;
+        Ok(catalog)
+    }
+    pub fn load(&self) -> Result<(Catalog, Vec<SessionSummary>, Vec<String>)> {
+        let catalog = self.load_catalog()?;
         let db = self.db.lock().expect("database lock");
         let mut query = db.prepare("SELECT id,summary FROM sessions ORDER BY updated DESC,id")?;
         let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;

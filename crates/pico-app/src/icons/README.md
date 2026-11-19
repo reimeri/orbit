@@ -7,7 +7,8 @@ notice from Lucide commit `86d323875837015ddf74d044df1f4c09e99c6885`.
 
 Only the icons used by Pico are bundled and embedded at compile time; there are
 no runtime downloads. `star-filled.svg` is the upstream `star.svg` with
-`fill="currentColor"` for the selected favorite state. All other SVGs are unmodified.
+`fill="currentColor"` for the selected favorite state. `book-open.svg` and `map.svg`
+use a lighter stroke to match the model glyphs. All other SVGs are unmodified.
 
 Use the shared `crate::icons::Icon` component so SVGs inherit the enclosing
 control's foreground color, including hover and disabled states. Standard inline

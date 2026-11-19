@@ -74,7 +74,7 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - Six running children per parent; no nested delegation
     - Final-only repeatable results, durable completion notices and idle-parent wake-up
     - Agents panel, live child transcript inspection, scoped Stop and family deletion
-    - Review (Sol, medium) and Explore (Luna, high)
+    - Configurable Review (default: Sol, medium) and Explore (default: Luna, high)
     - Both profiles are read-only by instruction, not filesystem sandboxing
   - [x] Questionnaires — see [tool contract and acceptance checks](docs/questionnaires.md)
     - Built-in `tools.ask_user` for main conversations, with model continuation paused until answered

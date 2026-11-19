@@ -102,7 +102,7 @@ Requests use existing Pico V2 ChatGPT OAuth and account routing, a stable callin
 conversation ID, the selected model, explicit commands, and access/output settings.
 They do **not** include user/assistant history, project files or system instructions.
 Separate conversations, including children, do not share IDs. Each subagent uses its
-own fixed profile model and retains its web identity when continued. Web references
+own configured profile model and retains its web identity when continued. Web references
 are conversation-scoped; share source URLs rather than reference IDs between agents.
 The remote reference lifetime is not promised; after expiration, open the original URL or repeat the necessary search.
 No local result cache or remote-reference replay layer is added.

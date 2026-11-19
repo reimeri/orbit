@@ -1,7 +1,7 @@
 //! Built-in delegation. The coordinator serializes acceptance, stop, delivery and
 //! deletion; it is never held across an await or a wait for another agent.
 use super::*;
-use crate::store::{id, now};
+use crate::store::{SubagentSettings, id, now};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ enum Deletion<'a> {
     Project(&'a std::path::Path),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Profile {
     Review,
@@ -23,16 +23,17 @@ impl Profile {
             Self::Explore => "Explore",
         }
     }
-    pub fn model(self) -> crate::models::Model {
-        match self {
-            Self::Review => crate::models::SOL,
-            Self::Explore => crate::models::LUNA,
-        }
-    }
-    pub fn effort(self) -> &'static str {
-        match self {
-            Self::Review => "medium",
-            Self::Explore => "high",
+    pub const ALL: [Self; 2] = [Self::Review, Self::Explore];
+
+    pub fn defaults(self) -> SubagentSettings {
+        let (model, effort) = match self {
+            Self::Review => (crate::models::SOL, "medium"),
+            Self::Explore => (crate::models::LUNA, "high"),
+        };
+        SubagentSettings {
+            model: model.id.into(),
+            effort: effort.into(),
+            fast: false,
         }
     }
     pub(super) fn instructions(self) -> &'static str {
@@ -81,6 +82,8 @@ pub struct RunInfo {
     pub parent_id: String,
     pub request_id: String,
     pub profile: Profile,
+    /// Snapshot at acceptance; independent of later edits to this profile.
+    pub configuration: Option<SubagentSettings>,
     pub title: String,
     pub status: RunStatus,
     pub assignment: usize,
@@ -335,7 +338,8 @@ impl Harness {
                 "Six subagents are already running. Wait for one to finish before spawning another."
             );
         }
-        let settings = owner.last_settings.lock().expect("settings lock").clone();
+        // Read the committed preferences for this assignment, even within a long-running parent turn.
+        let settings = self.store.load_catalog()?.settings;
         let existing = args
             .session_id
             .as_deref()
@@ -365,11 +369,12 @@ impl Harness {
                 parent_id: parent.into(),
                 profile: args.profile,
             });
-            session.model = args.profile.model().id.into();
-            session.effort = args.profile.effort().into();
-            session.fast = false;
             session
         };
+        let configuration = &settings.subagents[&args.profile];
+        session.model.clone_from(&configuration.model);
+        session.effort.clone_from(&configuration.effort);
+        session.fast = configuration.fast;
         let title = args
             .title
             .filter(|s| !s.trim().is_empty())
@@ -391,6 +396,7 @@ impl Harness {
             parent_id: parent.into(),
             request_id: request.into(),
             profile: args.profile,
+            configuration: Some(configuration.clone()),
             title,
             status: RunStatus::Running,
             // Skipped, unreadable assignments still occupy their original positions.
@@ -1050,7 +1056,7 @@ mod tests {
             // Keep provider streams open while inspecting the children's catalogs.
             let mut pending = vec![];
             for profile in [Profile::Explore, Profile::Review] {
-                let child = f.spawn(profile, None, profile.model().id).unwrap();
+                let child = f.spawn(profile, None, profile.label()).unwrap();
                 let request = f.request().await;
                 let mut expected = vec!["exec_command", "write_stdin", "view_image"];
                 if mode != Mode::Disabled {
@@ -1099,10 +1105,13 @@ mod tests {
             &["exec_command", "write_stdin", "web__run", "view_image"],
         )
         .await;
-        assert_eq!(explore_request.body["model"], Profile::Explore.model().id);
+        assert_eq!(
+            explore_request.body["model"],
+            Profile::Explore.defaults().model
+        );
         assert_eq!(
             explore_request.body["reasoning"]["effort"],
-            Profile::Explore.effort()
+            Profile::Explore.defaults().effort
         );
         assert!(
             !explore_request
@@ -1130,10 +1139,13 @@ mod tests {
         );
         let review = f.spawn(Profile::Review, None, "review").unwrap();
         let review_request = f.request().await;
-        assert_eq!(review_request.body["model"], Profile::Review.model().id);
+        assert_eq!(
+            review_request.body["model"],
+            Profile::Review.defaults().model
+        );
         assert_eq!(
             review_request.body["reasoning"]["effort"],
-            Profile::Review.effort()
+            Profile::Review.defaults().effort
         );
         assert_eq!(f.h.active_children(&f.parent), 2);
         assert_eq!(
@@ -1228,6 +1240,17 @@ mod tests {
             "Final sapphire finding"
         );
         assert_eq!(result["runs"][1]["status"], "running");
+        let mut catalog = f.h.store.load_catalog().unwrap();
+        let follow_up = SubagentSettings {
+            model: crate::models::ASTRA.id.into(),
+            effort: "low".into(),
+            fast: true,
+        };
+        catalog
+            .settings
+            .subagents
+            .insert(Profile::Explore, follow_up.clone());
+        f.h.store.save_catalog(&catalog).unwrap();
         let resumed = f
             .spawn(
                 Profile::Explore,
@@ -1237,6 +1260,10 @@ mod tests {
             .unwrap();
         assert_ne!(resumed.run_id, explore.run_id);
         let continuation = f.request().await;
+        assert_eq!(resumed.configuration.as_ref(), Some(&follow_up));
+        assert_eq!(continuation.body["model"], follow_up.model);
+        assert_eq!(continuation.body["reasoning"]["effort"], follow_up.effort);
+        assert_eq!(continuation.body["service_tier"], "priority");
         assert!(
             continuation.body["input"]
                 .to_string()
@@ -1691,6 +1718,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
     fn older_assignments_do_not_change_latest_child_status() {
         let mut coordinator = Coordinator::default();
         let mut old = RunInfo {
+            configuration: None,
             run_id: "old".into(),
             session_id: "child".into(),
             parent_id: "parent".into(),
@@ -1913,6 +1941,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 profile: Profile::Review,
             });
             let run = RunInfo {
+                configuration: None,
                 run_id: id(),
                 parent_id: parent.id.clone(),
                 session_id: child.id.clone(),

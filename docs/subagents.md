@@ -5,13 +5,16 @@ its own run ID; continuing a child retains its conversation but creates a new ru
 There is no profile loader, extension mechanism, context-sharing switch, or V1
 compatibility layer.
 
-| Type | Model | Reasoning | Instructions |
+| Type | Default model | Default effort | Instructions |
 | --- | --- | --- | --- |
 | `review` | Sol | `medium` | Review changes for actionable issues, with evidence and file/line references |
 | `explore` | Luna | `high` | Fast project inspection and precise answers with source references |
 
-Both profiles use Fast off. Their fixed model/effort choices do not follow the
-main session's model preferences. Both are **read-only by instruction, not by
+Fast is off by default. In **Settings → Models**, each profile has independent
+model, effort and Fast controls. Saving affects the next assignment, including
+one that resumes an existing child; assignments already running keep their settings.
+
+Both profiles are **read-only by instruction, not by
 filesystem isolation**: their shell commands run with the user's privileges.
 They share the parent's workspace, but not its transcript, code-mode store,
 runtime cells, shell sessions, or usage counters. New children receive project

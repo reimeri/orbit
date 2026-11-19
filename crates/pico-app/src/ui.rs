@@ -27,7 +27,8 @@ use iced::{
 use pico_core::CancellationToken;
 use pico_core::{
     agent::{
-        ConversationStatus, Harness, SettlementAction, SettlementOutcome, subagents::ChildStatus,
+        ConversationStatus, Harness, SettlementAction, SettlementOutcome,
+        subagents::{ChildStatus, Profile},
     },
     auth::Login,
     models::{MODELS, model},
@@ -302,6 +303,9 @@ pub enum Message {
     Model(String),
     ModelEffort(String, String),
     ModelFast(String, bool),
+    SubagentModel(Profile, pico_core::models::Model),
+    SubagentEffort(Profile, String),
+    SubagentFast(Profile, bool),
     SessionFast(bool),
     SessionSettingsEdited(Result<(), String>),
     NoticeDismiss,
@@ -1219,6 +1223,9 @@ impl App {
                 Message::Model(_)
                     | Message::ModelEffort(_, _)
                     | Message::ModelFast(_, _)
+                    | Message::SubagentModel(_, _)
+                    | Message::SubagentEffort(_, _)
+                    | Message::SubagentFast(_, _)
                     | Message::Context(_)
                     | Message::Threshold(_)
                     | Message::WebMode(_)
@@ -1935,6 +1942,31 @@ impl App {
                     .get_mut(&id)
                     .expect("catalog model")
                     .fast = fast
+            }
+            Message::SubagentModel(profile, model) => {
+                let config = self
+                    .settings
+                    .subagents
+                    .get_mut(&profile)
+                    .expect("built-in profile");
+                config.model = model.id.into();
+                if !model.efforts.contains(&config.effort.as_str()) {
+                    config.effort = profile.defaults().effort;
+                }
+            }
+            Message::SubagentEffort(profile, effort) => {
+                self.settings
+                    .subagents
+                    .get_mut(&profile)
+                    .expect("built-in profile")
+                    .effort = effort;
+            }
+            Message::SubagentFast(profile, fast) => {
+                self.settings
+                    .subagents
+                    .get_mut(&profile)
+                    .expect("built-in profile")
+                    .fast = fast;
             }
             Message::NoticeDismiss => self.notice = None,
             Message::NoticeTick => {
@@ -3020,6 +3052,13 @@ impl App {
                 MUTED
             };
             let status = activity.as_deref().unwrap_or(run.status.label());
+            let metadata = match &run.configuration {
+                Some(config) => {
+                    let name = model(&config.model).map_or(config.model.as_str(), |m| m.name);
+                    format!("{name} · {} · {elapsed}s", config.effort)
+                }
+                None => format!("{elapsed}s"),
+            };
             let card_content = column![
                 row![
                     text(run.profile.label()).size(13),
@@ -3034,14 +3073,10 @@ impl App {
                 .align_y(iced::Center),
                 row![
                     ellipsized_text(&run.title, 13., None),
-                    text(format!(
-                        "{} · {} · {elapsed}s",
-                        run.profile.model(),
-                        run.profile.effort()
-                    ))
-                    .size(10)
-                    .color(MUTED)
-                    .wrapping(text::Wrapping::None),
+                    text(metadata)
+                        .size(10)
+                        .color(MUTED)
+                        .wrapping(text::Wrapping::None),
                 ]
                 .spacing(10)
                 .align_y(iced::Center),
@@ -4145,6 +4180,11 @@ impl App {
             .spacing(6)
             .align_y(iced::Center)
         };
+        let name_cell = |icon: Element<'a, Message>, label: &'static str| {
+            row![container(icon).center_x(16), text(label).size(16)]
+                .spacing(6)
+                .align_y(iced::Center)
+        };
         let heading = |label| text(label).size(10).color(MUTED).into();
         let mut table = column![table_row(
             heading("MODEL"),
@@ -4161,9 +4201,7 @@ impl App {
                 _ => ("·", MUTED),
             };
             let name = column![
-                row![text(mark).size(16).color(color), text(model.name).size(16)]
-                    .spacing(6)
-                    .align_y(iced::Center),
+                name_cell(text(mark).size(16).color(color).into(), model.name),
                 ellipsized_text(model.id, 11., Some(MUTED))
             ]
             .spacing(2);
@@ -4181,6 +4219,68 @@ impl App {
                         .into(),
                 ))
                 .push(widget::rule::horizontal(1));
+        }
+        // Reserve room for the role, Fast switch and gutters beside two equal selectors.
+        let compact = self.panel_width() - 2. * effort_width < 182.;
+        // Let the name track absorb extra space, not the short model selector.
+        let role_and_model = |role: Element<'a, Message>, model: Element<'a, Message>| {
+            row![
+                container(role).width(Fill),
+                container(model).width(effort_width)
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+            .into()
+        };
+        table = table.push(space().height(12));
+        if !compact {
+            table = table.push(table_row(
+                role_and_model(heading("SUBAGENT"), heading("MODEL")),
+                heading("EFFORT"),
+                heading("FAST"),
+            ));
+        }
+        for profile in Profile::ALL {
+            let config = &self.settings.subagents[&profile];
+            let selected = model(&config.model).expect("catalog model");
+            let (icon, color) = match profile {
+                Profile::Review => (Icon::BookOpen, WARNING),
+                Profile::Explore => (Icon::Map, ACCENT),
+            };
+            let name = name_cell(icon.colored(14., color), profile.label());
+            let model = theme::dropdown(MODELS, Some(selected), move |m| {
+                Message::SubagentModel(profile, m)
+            });
+            let effort =
+                theme::dropdown(selected.efforts, Some(config.effort.as_str()), move |e| {
+                    Message::SubagentEffort(profile, e.into())
+                });
+            let fast =
+                theme::switch(config.fast).on_toggle(move |on| Message::SubagentFast(profile, on));
+            table = if compact {
+                table.push(
+                    column![
+                        row![
+                            name,
+                            space().width(Fill),
+                            text("Fast").size(12).color(MUTED),
+                            container(fast).center_x(44)
+                        ]
+                        .align_y(iced::Center)
+                        .spacing(6),
+                        row![model, effort].spacing(6),
+                    ]
+                    .spacing(7)
+                    .padding([8, 6]),
+                )
+            } else {
+                table.push(table_row(
+                    role_and_model(name.into(), model.into()),
+                    effort.into(),
+                    fast.into(),
+                ))
+            }
+            .push(widget::rule::horizontal(1));
         }
         table
     }
@@ -8082,6 +8182,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subagent_edits_are_staged_and_saved_independently() {
+        let mut app = app();
+        let review = Profile::Review;
+        dispatch(&mut app, Message::ToggleSettings).await;
+        dispatch(&mut app, Message::SubagentModel(review, LUNA)).await;
+        dispatch(&mut app, Message::SubagentEffort(review, "none".into())).await;
+        dispatch(&mut app, Message::SubagentFast(review, true)).await;
+        dispatch(&mut app, Message::SubagentModel(review, ASTRA)).await;
+        assert!(
+            ASTRA
+                .efforts
+                .contains(&app.settings.subagents[&review].effort.as_str())
+        );
+        dispatch(&mut app, Message::SubagentEffort(review, "max".into())).await;
+        assert_eq!(app.catalog.settings.subagents[&review], review.defaults());
+        dispatch(&mut app, Message::ApplySettings).await;
+        let saved = app
+            .harness
+            .as_ref()
+            .unwrap()
+            .store
+            .load()
+            .unwrap()
+            .0
+            .settings;
+        let config = &saved.subagents[&review];
+        assert_eq!(
+            (config.model.as_str(), config.effort.as_str(), config.fast),
+            (ASTRA.id, "max", true)
+        );
+        assert_eq!(
+            saved.subagents[&Profile::Explore],
+            Profile::Explore.defaults()
+        );
+        assert_eq!(saved.models, Settings::default().models);
+    }
+
+    #[tokio::test]
     async fn model_defaults_footer_fast_and_retired_session_recovery_persist() {
         let mut app = app();
         let h = app.harness.as_ref().unwrap().clone();
@@ -8855,8 +8993,8 @@ Then implement the fix.";
             profile: Profile::Explore,
         });
         child.title = "Inspect cancellation".into();
-        child.model = LUNA.id.into();
-        child.effort = "high".into();
+        child.model = ASTRA.id.into();
+        child.effort = "max".into();
         child.entries.push(Entry::new(
             EntryKind::User {
                 files: vec![],
@@ -8872,6 +9010,11 @@ Then implement the fix.";
         h.store.save_session(&child).unwrap();
         let finished = pico_core::store::now();
         let run = RunInfo {
+            configuration: Some(pico_core::store::SubagentSettings {
+                model: child.model.clone(),
+                effort: child.effort.clone(),
+                fast: child.fast,
+            }),
             run_id: pico_core::store::id(),
             session_id: child_id.clone(),
             parent_id: parent.clone(),
@@ -8971,7 +9114,7 @@ Then implement the fix.";
         );
         let original = app.current().unwrap().clone();
         type_message(&mut app, "Forbidden direct child edit").await;
-        dispatch(&mut app, Message::SessionModel(ASTRA.id.into())).await;
+        dispatch(&mut app, Message::SessionModel(LUNA.id.into())).await;
         dispatch(&mut app, Message::Send).await;
         assert!(app.editor.text().is_empty());
         assert_eq!(app.current().unwrap().model, original.model);
@@ -8991,7 +9134,7 @@ Then implement the fix.";
             let profile = bounds.label("Explore");
             let status = bounds.label("Completed");
             let title = bounds.label("Inspect cancellation");
-            let metadata = bounds.label("Luna · high · 17s");
+            let metadata = bounds.label("Astra · max · 17s");
             assert!((profile.center_y() - status.center_y()).abs() <= 1.);
             assert!((title.center_y() - metadata.center_y()).abs() <= 1.);
             assert!(title.y > profile.y);
@@ -9676,11 +9819,12 @@ Then implement the fix.";
         let mut app = app();
         app.settings_tab = SettingsTab::Models;
         let mut renderer = header_renderer();
-        for width in [260., 440.] {
+        app.window_width = 1800.;
+        for width in [260., 700.] {
             app.catalog.settings.settings_width = width;
             let mut ui = iced_runtime::UserInterface::build(
                 app.settings_panel(),
-                iced::Size::new(width, 560.),
+                iced::Size::new(width, 760.),
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
             );
@@ -9688,8 +9832,10 @@ Then implement the fix.";
             ui.operate(&renderer, &mut bounds);
             let fast_x = bounds.label("FAST").center_x();
             assert!(fast_x < width);
+            let name_x = bounds.label(MODELS[0].name).x;
             for model in MODELS {
                 let name = bounds.label(model.name);
+                assert_eq!(name.x, name_x);
                 let id = bounds.label(model.id);
                 let row_y = (name.y + id.y + id.height) / 2.;
                 let messages = click_at(&mut ui, &mut renderer, iced::Point::new(fast_x, row_y));
@@ -9698,6 +9844,17 @@ Then implement the fix.";
                     if id == model.id && *on != app.settings.models[model.id].fast),
                     "wrong switch at {width} for {}: {messages:?}",
                     model.name
+                );
+            }
+            for profile in Profile::ALL {
+                let name = bounds.label(profile.label());
+                assert_eq!(name.x, name_x);
+                let y = name.center_y();
+                let messages = click_at(&mut ui, &mut renderer, iced::Point::new(fast_x, y));
+                assert!(
+                    matches!(messages.as_slice(), [Message::SubagentFast(p, on)]
+                    if *p == profile && *on != app.settings.subagents[&profile].fast),
+                    "wrong switch at {width} for {profile:?}: {messages:?}"
                 );
             }
         }

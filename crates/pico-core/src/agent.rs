@@ -1444,6 +1444,7 @@ mod tests {
         });
         let child = h.insert(child);
         let mut run = subagents::RunInfo {
+            configuration: None,
             run_id: "child-run".into(),
             session_id: child.id.clone(),
             parent_id: c.id.clone(),
