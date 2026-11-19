@@ -1,3 +1,5 @@
+mod settings;
+
 use crate::activity::{self, Row as ActivityRow};
 use crate::scrollbar::scroll;
 use crate::session_wave::{self, Status as SessionStatus};
@@ -19,8 +21,8 @@ use iced::futures::SinkExt;
 use iced::{
     Color, Element, Fill, Size, Subscription, Task, keyboard, mouse,
     widget::{
-        self, column, container, markdown, mouse_area, opaque, row, scrollable, slider, space,
-        stack, text, text_editor, text_input, tooltip,
+        self, column, container, markdown, mouse_area, opaque, row, scrollable, space, stack, text,
+        text_editor, text_input, tooltip,
     },
     window,
 };
@@ -4315,129 +4317,12 @@ impl App {
         ]
         .spacing(12);
         let header = container(header).padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER));
-        let mut settings = column![].spacing(14);
-        match self.settings_tab {
-            SettingsTab::Account => {
-                if let Some(account) = &self.account {
-                    settings = settings.push(text(account).size(14)).push(
-                        theme::button(Icon::LogOut.label("Sign out", 16.))
-                            .on_press(Message::Logout)
-                            .style(secondary),
-                    );
-                } else if self.login_cancel.is_some() {
-                    settings = settings.push(text("Finish sign-in in your browser.").size(14));
-                    if let Some(url) = &self.login_url {
-                        settings = settings.push(
-                            theme::button(Icon::Copy.label("Copy login URL", 16.))
-                                .on_press(Message::Copy(url.clone()))
-                                .style(theme::text_button),
-                        );
-                    }
-                    settings =
-                        settings.push(theme::cancel("Cancel login").on_press(Message::CancelLogin));
-                } else {
-                    settings = settings
-                        .push(text("Use your ChatGPT subscription.").size(13).color(MUTED))
-                        .push(
-                            theme::button(
-                                Icon::LogIn
-                                    .label(theme::primary_label("Sign in with ChatGPT"), 16.),
-                            )
-                            .on_press_maybe(self.harness.as_ref().map(|_| Message::Login))
-                            .padding(10),
-                        );
-                }
-                settings=settings.push(widget::rule::horizontal(1))
-                    .push(text("OpenAI API key · images only").size(14))
-                    .push(text(if self.api_key_configured {"A private API key is saved."}else{"No API key saved."}).size(12).color(MUTED))
-                    .push(text_input(if self.api_key_configured {"Enter a replacement key"}else{"Enter API key"},&self.api_key_draft).style(theme::input).secure(true).on_input(Message::ApiKey).padding(8))
-                    .push(row![theme::primary_action("Save key").on_press_maybe((!self.api_key_draft.trim().is_empty()).then_some(Message::SaveApiKey)),theme::action("Remove key").style(theme::danger_text).on_press_maybe(self.api_key_configured.then_some(Message::RemoveApiKey))].spacing(8))
-                    .push(text("Stored privately, separately from settings. No environment override. Signing out of ChatGPT does not remove this key.").size(12).color(MUTED));
-            }
-            SettingsTab::Images => {
-                use pico_core::image_tools::{Backend, DEFAULT_API_MODEL, QUALITIES};
-                settings=settings
-                    .push(text("Image generation").size(18))
-                    .push(text("Billing backend").size(12))
-                    .push(theme::dropdown([Backend::Codex,Backend::Api],Some(self.settings.images.backend),Message::ImageBackend))
-                    .push(text("Codex uses your ChatGPT subscription. API generations are billed separately. Pico never switches billing automatically.").size(12).color(MUTED))
-                    .push(text("API model · generation and editing").size(12))
-                    .push(text_input(DEFAULT_API_MODEL,&self.settings.images.model).style(theme::input).on_input(Message::ImageModel).padding(8))
-                    .push(theme::button(Icon::RotateCcw.label("Reset API model to current default", 16.)).on_press(Message::ResetImageModel).style(theme::text_button))
-                    .push(text("Quality · both backends").size(12))
-                    .push(theme::dropdown(QUALITIES,Some(self.settings.images.quality.as_str()),|q|Message::ImageQuality(q.into())))
-                    .push(text("Size is automatic. GIF and quality availability depend on your model and account. Unsupported choices return an error, never a silent downgrade.").size(12).color(MUTED));
-                if self.settings.images.backend == Backend::Api && !self.api_key_configured {
-                    settings = settings.push(
-                        text("Add an API key in Account before generating.")
-                            .size(12)
-                            .color(ACCENT),
-                    );
-                }
-            }
-            SettingsTab::General => {
-                use pico_core::web_search::Mode;
-                settings = settings
-                    .push(text("Web access").size(12))
-                    .push(theme::dropdown([Mode::Live, Mode::Cached, Mode::Disabled], Some(self.settings.web_search), Message::WebMode))
-                    .push(text("Uses your ChatGPT subscription. Live permits external access; Cached requests cache-only access and may limit operations. Disabled prevents new web calls. No API billing or automatic fallback.").size(12).color(MUTED))
-                    .push(widget::rule::horizontal(1))
-                    .push(text("Default model").size(12))
-                    .push(
-                        theme::dropdown(
-                            MODELS,
-                            model(&self.settings.model),
-                            |selected| Message::Model(selected.id.into()),
-                        ),
-                    )
-                    .push(text("Context token limit").size(12))
-                    .push(
-                        text_input("272000", &self.context_text).style(theme::input)
-                            .on_input(Message::Context)
-                            .padding(8),
-                    )
-                    .push(text("Auto-compact at (%)").size(12))
-                    .push(
-                        text_input("80", &self.threshold_text).style(theme::input)
-                            .on_input(Message::Threshold)
-                            .padding(8),
-                    )
-                    .push(widget::rule::horizontal(1))
-                    .push(text("APPEARANCE").size(10).color(MUTED))
-                    .push(
-                        text(format!(
-                            "Chat text · {:.0}px",
-                            self.catalog.settings.font_size
-                        ))
-                        .size(12),
-                    )
-                    .push(
-                        slider(12.0..=24.0, self.catalog.settings.font_size, Message::Font)
-                            .step(1_f32),
-                    )
-                    .push(
-                        text(format!(
-                            "Chat width · {:.0}px",
-                            self.catalog.settings.chat_width
-                        ))
-                        .size(12),
-                    )
-                    .push(
-                        slider(
-                            480.0..=1600.0,
-                            self.catalog.settings.chat_width,
-                            Message::ChatWidth,
-                        )
-                        .step(20_f32),
-                    )
-                    .push(
-                        theme::switch(self.catalog.settings.resume_last)
-                            .label("Restore last session")
-                            .on_toggle(Message::Resume),
-                    );
-            }
-            SettingsTab::Models => settings = self.model_settings_table(),
-        }
+        let settings = match self.settings_tab {
+            SettingsTab::Account => self.account_settings(),
+            SettingsTab::General => self.general_settings(),
+            SettingsTab::Images => self.image_settings(),
+            SettingsTab::Models => self.model_settings_table(),
+        };
         let mut panel_content = column![header, scroll(settings).height(Fill)].spacing(14);
         if self.settings_tab != SettingsTab::Account {
             let save = theme::primary_action(if self.pending_settings.is_some() {
@@ -9810,6 +9695,45 @@ Then implement the fix.";
                         _ => panic!("wrong action for menu {kind}: {label}"),
                     }
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_choices_link_to_account_only_when_a_key_is_needed() {
+        use pico_core::image_tools::Backend;
+        let mut app = app();
+        app.settings_tab = SettingsTab::Images;
+        let mut renderer = header_renderer();
+        for (backend, configured, needs_key) in [
+            (Backend::Codex, false, false),
+            (Backend::Api, false, true),
+            (Backend::Api, true, false),
+        ] {
+            app.settings.images.backend = backend;
+            app.api_key_configured = configured;
+            let mut ui = iced_runtime::UserInterface::build(
+                app.settings_panel(),
+                iced::Size::new(app.panel_width(), 740.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            for (label, target) in [("Codex", Backend::Codex), ("OpenAI API", Backend::Api)] {
+                let messages = click_at(&mut ui, &mut renderer, bounds.label(label).center());
+                assert!(matches!(messages.as_slice(), [Message::ImageBackend(b)] if *b == target));
+            }
+            let link = bounds
+                .labels
+                .iter()
+                .find(|(s, _)| s == "Add key in Account");
+            assert_eq!(link.is_some(), needs_key);
+            if let Some((_, rect)) = link {
+                assert!(matches!(
+                    click_at(&mut ui, &mut renderer, rect.center()).as_slice(),
+                    [Message::SettingsTab(SettingsTab::Account)]
+                ));
             }
         }
     }
