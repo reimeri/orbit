@@ -24,8 +24,8 @@ Every question is required. The result is a JSON **string**, in question order:
 
 - 1–24 questions with unique, nonblank IDs of at most 128 UTF-8 bytes.
 - Nonblank question text; `kind` is `select` or `text`.
-- Select questions require 1–20 nonblank string options. The UI always adds
-  **Custom answer…**; agents must not include it in `options`.
+- Select questions require 1–20 nonblank string options. The UI always provides
+  a custom answer field; agents must not include it in `options`.
 - Text questions ignore `options`. Unknown request/question fields are rejected.
 - The complete serialized request is limited to **1 MiB**, checked before parsing.
 - Answers must contain non-whitespace text. Otherwise their contents are preserved,
@@ -72,24 +72,28 @@ of unlimited physical memory.
 
 ## UI behavior
 
-The non-modal, rounded dark **Answer needed** panel replaces the composer. Chat,
+The non-modal, rounded dark **Question** panel replaces the composer. Chat,
 selection/copy, sidebar navigation, search and settings remain available. Sessions
 with pending questions appear under **Needs attention**, ahead of Working.
 
-- One question at a time; Back/Next preserves all answers. The final button is Submit.
-- No option is selected initially; blank text disables Next/Submit.
+- The header shows progress and previous/next arrows. Moving forward requires a
+  valid answer; only the footer’s final **Submit** sends the questionnaire.
+- No option is selected initially. Click the inline editor or pencil to use a custom
+  answer; selecting a numbered option leaves the custom draft intact. Blank
+  custom text disables Next/Submit.
 - Each predefined option has **Edit**. Edit/E seeds Custom answer with the option
   text and puts the caret at the end, without changing the original option or
   advancing. A different nonempty custom draft requires **Keep draft / Replace**,
   defaulting to Keep draft. Typing during this confirmation does not edit the draft.
-- The centered pill toggles collapse/expand without changing shape, retaining the
+- The header collapse/resume control hides the body and footer, retaining the
   current question, answers, and replacement confirmation.
 - The panel and options use the shared app palette. Hover highlights the entire
   option, including behind Edit; Edit is muted until hovered. Option numbers are
   vertically centered alongside their labels.
 - Switching sessions preserves questionnaire drafts and the ordinary composer draft.
-- Long prompts/options scroll in a bounded body; the multiline editor, keyboard hints
-  and navigation remain accessible outside it. The editor scrolls independently, with
+- Long prompts/options scroll in a bounded body. Hover **Question** for keyboard hints.
+  The inline editor shares a persistent footer with Next/Submit. Focusing it outlines
+  the whole row without changing its size. It grows with multiline text up to a cap, with
   a scrollbar when text overflows (including wrapped lines). Drag the thumb or click
   the track to scroll without changing the text selection.
 - Submitted answers appear in the existing tool result, with no synthetic user message
@@ -137,7 +141,9 @@ live editor glyphs even though they are correctly drawn on screen.
 Live acceptance (requires a signed-in account):
 
 1. Ask the main agent to use `tools.ask_user` with a select and a text question.
-   Verify the V1-style panel and absent clarification button.
+   Verify the progress header, numbered options and always-visible answer row.
+   Click into and out of the field: the focus outline should wrap the pencil and
+   action button without moving either. No Skip or clarification button is shown.
 2. Select using click, arrows and digits; Edit/E an option. Type a custom answer,
    edit another option, and exercise both Keep draft and Replace.
 3. Try Ctrl+Backspace and Ctrl+W in the middle of a line and with a selection;

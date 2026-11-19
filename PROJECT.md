@@ -78,7 +78,7 @@ Implemented. Live account acceptance steps: [docs/phase-1-testing.md](docs/phase
     - Both profiles are read-only by instruction, not filesystem sandboxing
   - [x] Questionnaires — see [tool contract and acceptance checks](docs/questionnaires.md)
     - Built-in `tools.ask_user` for main conversations, with model continuation paused until answered
-    - V1-style select/text panel, editable options, custom answers and keyboard navigation
+    - Compact select/text panel, editable options, inline custom answers and keyboard navigation
     - Session-local drafts, Collapse/Resume, scoped cancellation; no clarification conversation
     - Lossless large answers without V1's answer byte/line limits
   - [x] Image viewing and image generation — see [contracts, settings and acceptance](docs/images.md)

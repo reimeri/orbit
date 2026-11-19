@@ -1,18 +1,19 @@
-//! V1-style composer replacement. Drafts live in the app, never in session storage.
-use crate::icons::Icon;
+//! Questionnaire composer replacement. Drafts live in the app, never in session storage.
+use crate::icons::{Icon, tip};
 use crate::scrollbar::scroll;
 use crate::theme::{self, DANGER, MUTED};
 use iced::{
     Element, Event, Fill, Length, Rectangle, Size, Task, Theme, Vector,
     advanced::{
         Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
-        widget::{Operation, Tree, tree},
+        widget::{Operation, Tree, operation, tree},
     },
     keyboard::{self, key::Named},
     mouse,
-    widget::{self, column, container, row, scrollable, space, text, text_editor},
+    widget::{self, column, container, row, scrollable, text, text_editor},
 };
 use pico_core::questionnaire::{Pending, QuestionKind};
+use std::{cell::Cell, rc::Rc};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Debug)]
@@ -80,7 +81,7 @@ impl Draft {
             QuestionKind::Text => &[],
         }
     }
-    fn text_open(&self) -> bool {
+    fn uses_editor(&self) -> bool {
         self.options().is_empty()
             || self.answers[self.current].selected == Some(self.options().len())
     }
@@ -116,7 +117,7 @@ impl Draft {
         format!("questionnaire-body-{}", self.pending.id)
     }
     pub fn focus(&self) -> Task<Message> {
-        if self.text_open() && !self.collapsed && self.answers[self.current].replace.is_none() {
+        if self.uses_editor() && !self.collapsed && self.answers[self.current].replace.is_none() {
             widget::operation::focus(self.editor_id())
         } else {
             Task::none()
@@ -247,28 +248,22 @@ impl Draft {
                 self.current = self.current.saturating_sub(1);
                 focus = true;
             }
-            Action::Editor(action)
-                if self.text_open() && self.answers[self.current].replace.is_none() =>
-            {
-                self.answers[self.current].editor.perform(action)
+            Action::Editor(action) => {
+                // A wheel over an inactive draft must not deselect a preset.
+                if !matches!(action, text_editor::Action::Scroll { .. }) {
+                    self.answers[self.current].selected = Some(count);
+                }
+                self.answers[self.current].editor.perform(action);
             }
-            Action::Scroll(scroll)
-                if self.text_open() && self.answers[self.current].replace.is_none() =>
-            {
-                scroll.apply(&mut self.answers[self.current].editor)
-            }
-            Action::DeleteWord
-                if self.text_open() && self.answers[self.current].replace.is_none() =>
-            {
+            Action::Scroll(scroll) => scroll.apply(&mut self.answers[self.current].editor),
+            Action::DeleteWord if self.uses_editor() => {
                 delete_previous_word(&mut self.answers[self.current].editor)
             }
             _ => {}
         }
         let scroll = if old_current != self.current {
             widget::operation::snap_to(self.scroll_id(), scrollable::RelativeOffset::START)
-        } else if reveal && self.text_open() {
-            widget::operation::snap_to(self.scroll_id(), scrollable::RelativeOffset::END)
-        } else if reveal {
+        } else if reveal && !self.uses_editor() {
             iced::advanced::widget::operate(Reveal {
                 scroll: self.scroll_id().into(),
                 target: format!(
@@ -300,23 +295,53 @@ impl Draft {
             action,
         };
         let a = &self.answers[self.current];
+        let editor_focused = Rc::new(Cell::new(false));
+        let last = self.current + 1 == self.answers.len();
+        let navigating = !self.collapsed && a.replace.is_none();
+        let can_advance = navigating && self.answered(self.current);
+        let header_button = |icon: Icon, action: Option<Action>, hint| {
+            tip(
+                theme::button(icon.view(14.))
+                    .style(theme::text_button)
+                    .on_press_maybe(action.map(message)),
+                hint,
+            )
+        };
+        let hint = "↑/↓ or digits select · E edits · Enter/Tab continues
+Shift+Tab goes back · Shift+Enter adds a line";
         let header = row![
-            container(text("Answer needed").size(12)).width(Fill),
-            theme::button(
-                container(space().width(32).height(4)).style(theme::questionnaire_handle)
-            )
-            .padding([10, 10])
-            .on_press(message(Action::Toggle))
-            .style(theme::text_button),
-            container(
-                text(format!("{} / {}", self.current + 1, self.answers.len()))
-                    .size(12)
-                    .color(MUTED)
-            )
-            .align_right(Fill),
+            container(tip(Icon::Info.label("Question", 12.), hint))
+                .width(Fill)
+                .style(|_| container::Style::default().color(MUTED)),
+            header_button(
+                Icon::ArrowLeft,
+                (navigating && self.current > 0).then_some(Action::Back),
+                "Previous question"
+            ),
+            text(format!("{} of {}", self.current + 1, self.answers.len()))
+                .size(12)
+                .color(MUTED),
+            header_button(
+                Icon::ArrowRight,
+                (can_advance && !last).then_some(Action::Next),
+                "Next question"
+            ),
+            header_button(
+                if self.collapsed {
+                    Icon::ChevronUp
+                } else {
+                    Icon::ChevronDown
+                },
+                Some(Action::Toggle),
+                if self.collapsed {
+                    "Resume questionnaire"
+                } else {
+                    "Collapse questionnaire"
+                }
+            ),
         ]
         .align_y(iced::Center)
-        .spacing(8);
+        .spacing(4);
         let mut panel = column![header].spacing(10);
         if !self.collapsed {
             let mut body = column![
@@ -337,33 +362,29 @@ impl Draft {
                             .color(MUTED),
                     );
             } else {
-                for (index, option) in self
-                    .options()
-                    .iter()
-                    .map(String::as_str)
-                    .chain((!self.options().is_empty()).then_some("Custom answer…"))
-                    .enumerate()
-                {
+                for (index, option) in self.options().iter().enumerate() {
                     let selected = a.selected == Some(index);
                     let label = container(
                         row![
-                            text((index + 1).to_string()).size(12).color(MUTED),
-                            text(option).size(font_size)
+                            text((index + 1).to_string())
+                                .size(12)
+                                .color(MUTED)
+                                .width(20),
+                            text(option.as_str()).size(font_size)
                         ]
                         .align_y(iced::Center)
                         .spacing(10),
                     )
                     .width(Fill)
                     .padding([7, 10]);
-                    let mut option_row = row![label].align_y(iced::Center);
-                    if index < self.options().len() {
-                        option_row = option_row.push(
-                            theme::button(Icon::Pencil.label("Edit", 12.))
-                                .padding([7, 10])
-                                .on_press(message(Action::Edit(index)))
-                                .style(theme::sidebar_control),
-                        );
-                    }
+                    let option_row = row![
+                        label,
+                        theme::button(Icon::Pencil.label("Edit", 12.))
+                            .padding([7, 10])
+                            .on_press(message(Action::Edit(index)))
+                            .style(theme::sidebar_control),
+                    ]
+                    .align_y(iced::Center);
                     // The row owns the background, including behind Edit. The nested
                     // Edit button captures its clicks before the row can select.
                     body = body.push(
@@ -380,24 +401,42 @@ impl Draft {
                     );
                 }
             }
-            let editor_open = self.text_open() && a.replace.is_none();
             let editor_height = (max_height * 0.3).clamp(80., 160.);
-            let reserved = 130. + if editor_open { editor_height + 10. } else { 0. };
-            // Keep the editor and navigation stationary while long prompts/options
-            // scroll independently. The editor has its own multiline scrolling.
+            // Reserve room for the tallest answer row so the actions stay accessible.
             panel = panel.push(
                 container(scroll(body).id(self.scroll_id()).height(Length::Shrink))
-                    .max_height((max_height - reserved).max(60.)),
+                    .max_height((max_height - editor_height - 90.).max(60.)),
             );
-            if editor_open {
+            if a.replace.is_some() {
+                panel = panel.push(
+                    row![
+                        theme::button("Keep draft")
+                            .on_press(message(Action::Replace(false)))
+                            .style(move |theme, status| theme::option_button(
+                                theme,
+                                status,
+                                !a.replace_focused
+                            )),
+                        theme::button("Replace")
+                            .on_press(message(Action::Replace(true)))
+                            .style(move |theme, status| theme::option_button(
+                                theme,
+                                status,
+                                a.replace_focused
+                            ))
+                    ]
+                    .spacing(8),
+                );
+            } else {
                 let editor = text_editor(&a.editor)
-                    .style(theme::editor)
+                    .style(theme::inline_answer_editor)
                     .id(self.editor_id())
-                    .placeholder("Your answer…")
+                    .placeholder(if self.options().is_empty() {
+                        "Your answer…"
+                    } else {
+                        "Or write your own response"
+                    })
                     .size(font_size)
-                    // Keep the answer field fixed-height while sharing the
-                    // composer's overflow gutter and 12 px vertical padding.
-                    .min_height(editor_height - 2. * crate::growing_editor::PADDING)
                     .on_action(move |action| message(Action::Editor(action)))
                     .key_binding(move |event| {
                         if matches!(event.status, text_editor::Status::Focused { .. })
@@ -408,7 +447,7 @@ impl Draft {
                             text_editor::Binding::from_key_press(event)
                         }
                     });
-                panel = panel.push(crate::growing_editor::growing_editor(
+                let editor = crate::growing_editor::growing_editor(
                     editor,
                     &a.editor,
                     editor_height,
@@ -417,57 +456,35 @@ impl Draft {
                         Action::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
                         _ => None,
                     },
-                ));
-            }
-            if a.replace.is_none() {
-                panel = panel.push(
-                    text(if self.text_open() {
-                        "Enter next · Shift+Enter newline · Shift+Tab back"
+                );
+                let answer_row = row![
+                    tip(
+                        theme::button(Icon::Pencil.view(14.))
+                            .style(theme::sidebar_control)
+                            .on_press(message(Action::Select(self.options().len()))),
+                        "Write your own response"
+                    ),
+                    editor,
+                    theme::button(if last {
+                        Icon::Check.label("Submit", 16.)
                     } else {
-                        "Up/Down or 1–9, 0 select · E edit selected · Enter/Tab next"
+                        Icon::ArrowRight.label("Next", 16.)
                     })
-                    .size(12)
-                    .color(MUTED),
+                    .on_press_maybe(can_advance.then(|| message(Action::Next)))
+                    .style(theme::text_button),
+                ]
+                .align_y(iced::Center);
+                let focused = editor_focused.clone();
+                panel = panel.push(
+                    container(answer_row)
+                        .width(Fill)
+                        .padding([0, 4])
+                        .style(move |theme| theme::answer_row(theme, focused.get())),
                 );
             }
             if let Some(error) = &self.error {
                 panel = panel.push(text(error).size(12).color(DANGER));
             }
-            let controls = if a.replace.is_some() {
-                row![
-                    theme::button("Keep draft")
-                        .on_press(message(Action::Replace(false)))
-                        .style(move |theme, status| theme::option_button(
-                            theme,
-                            status,
-                            !a.replace_focused
-                        )),
-                    theme::button("Replace")
-                        .on_press(message(Action::Replace(true)))
-                        .style(move |theme, status| theme::option_button(
-                            theme,
-                            status,
-                            a.replace_focused
-                        ))
-                ]
-                .spacing(8)
-            } else {
-                row![
-                    theme::button(Icon::ArrowLeft.label("Back", 16.))
-                        .on_press_maybe((self.current > 0).then(|| message(Action::Back)))
-                        .style(theme::text_button),
-                    space().width(Fill),
-                    theme::button(if self.current + 1 == self.answers.len() {
-                        Icon::Check.label("Submit", 16.)
-                    } else {
-                        Icon::ArrowRight.label("Next", 16.)
-                    })
-                    .on_press_maybe(self.answered(self.current).then(|| message(Action::Next)))
-                    .style(theme::text_button)
-                ]
-                .spacing(8)
-            };
-            panel = panel.push(controls);
         }
         let content = container(panel)
             .padding(12)
@@ -479,7 +496,8 @@ impl Draft {
             enabled,
             take_focus,
             collapsed: self.collapsed,
-            text_open: self.text_open(),
+            editor_focused,
+            editor_id: self.editor_id().into(),
             confirmation: a.replace.is_some(),
             question: self.current,
             id: &self.pending.id,
@@ -579,14 +597,39 @@ struct Input<'a> {
     enabled: bool,
     take_focus: bool,
     collapsed: bool,
-    text_open: bool,
+    editor_focused: Rc<Cell<bool>>,
+    editor_id: widget::Id,
     confirmation: bool,
     question: usize,
     id: &'a str,
 }
 struct Focus {
     id: String,
+    question: usize,
     focused: bool,
+}
+impl Input<'_> {
+    // The active answer can remain custom after the native editor loses focus.
+    // Use native focus for both shortcut routing and the footer outline.
+    fn sync_editor_focus(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+    ) {
+        let mut query = operation::focusable::is_focused(self.editor_id.clone());
+        self.content.as_widget_mut().operate(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            &mut operation::black_box(&mut query),
+        );
+        self.editor_focused.set(
+            self.enabled
+                && tree.state.downcast_ref::<Focus>().focused
+                && matches!(query.finish(), operation::Outcome::Some(true)),
+        );
+    }
 }
 impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
     fn tag(&self) -> tree::Tag {
@@ -595,6 +638,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
     fn state(&self) -> tree::State {
         tree::State::new(Focus {
             id: self.id.into(),
+            question: self.question,
             focused: self.take_focus,
         })
     }
@@ -603,10 +647,16 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
     }
     fn diff(&self, tree: &mut Tree) {
         let state = tree.state.downcast_mut::<Focus>();
-        if state.id != self.id {
+        if state.id != self.id || state.question != self.question {
+            tree.children[0] = Tree::new(&self.content);
             *state = Focus {
                 id: self.id.into(),
-                focused: self.take_focus,
+                question: self.question,
+                focused: if state.id == self.id {
+                    state.focused
+                } else {
+                    self.take_focus
+                },
             };
         }
         tree.diff_children(std::slice::from_ref(&self.content));
@@ -620,9 +670,12 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
         renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        self.content
+        let node = self
+            .content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, limits);
+        self.sync_editor_focus(tree, Layout::new(&node), renderer);
+        node
     }
     fn operate(
         &mut self,
@@ -634,6 +687,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
         self.content
             .as_widget_mut()
             .operate(&mut tree.children[0], layout, renderer, operation);
+        self.sync_editor_focus(tree, layout, renderer);
     }
     fn update(
         &mut self,
@@ -678,16 +732,16 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                         keyboard::Key::Named(Named::Enter) if !modifiers.shift() => {
                             Some(Action::Next)
                         }
-                        keyboard::Key::Named(Named::ArrowDown) if !self.text_open => {
+                        keyboard::Key::Named(Named::ArrowDown) if !self.editor_focused.get() => {
                             Some(Action::Move(true))
                         }
-                        keyboard::Key::Named(Named::ArrowUp) if !self.text_open => {
+                        keyboard::Key::Named(Named::ArrowUp) if !self.editor_focused.get() => {
                             Some(Action::Move(false))
                         }
-                        keyboard::Key::Character("e" | "E") if !self.text_open => {
+                        keyboard::Key::Character("e" | "E") if !self.editor_focused.get() => {
                             Some(Action::EditSelected)
                         }
-                        keyboard::Key::Character(digit) if !self.text_open => digit
+                        keyboard::Key::Character(digit) if !self.editor_focused.get() => digit
                             .parse::<usize>()
                             .ok()
                             .filter(|n| *n <= 9)
@@ -721,6 +775,13 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             shell,
             viewport,
         );
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(_))
+                | Event::Window(iced::window::Event::Unfocused)
+        ) {
+            self.sync_editor_focus(tree, layout, renderer);
+        }
     }
     fn mouse_interaction(
         &self,
@@ -822,7 +883,9 @@ mod tests {
                 user_interface::Cache::new(),
                 &mut renderer,
             );
-            ui.operate(&renderer, &mut focusable::focus(draft.editor_id().into()));
+            if draft.uses_editor() {
+                ui.operate(&renderer, &mut focusable::focus(draft.editor_id().into()));
+            }
             if outside {
                 ui.update(
                     &[Event::Mouse(mouse::Event::ButtonPressed(
@@ -986,6 +1049,71 @@ mod tests {
         ) {
             if id.is_some_and(|id| id == &iced::advanced::widget::Id::from(self.id.clone())) {
                 self.bounds = Some(bounds);
+            }
+        }
+    }
+
+    #[test]
+    fn questionnaire_inline_field_focus_routes_typing_and_preserves_the_draft() {
+        let mut draft = draft();
+        let mut renderer = crate::test_renderer::new(14.);
+        let mut cache = user_interface::Cache::new();
+        let mut first_bounds = None;
+        // At a narrow width, the idle field must accept a first click directly.
+        // Focusing it changes the outline, not the layout or digit-key meaning
+        // outside it. Keep the actual native widget tree between these stages.
+        for stage in 0..3 {
+            let mut ui = UserInterface::build(
+                draft.view(14., 360., true, true),
+                Size::new(340., 500.),
+                cache,
+                &mut renderer,
+            );
+            let mut editor = EditorBounds {
+                id: draft.editor_id(),
+                ..Default::default()
+            };
+            ui.operate(&renderer, &mut editor);
+            let bounds = editor
+                .bounds
+                .expect("editor visible even before selecting an answer");
+            assert_eq!(*first_bounds.get_or_insert(bounds), bounds);
+            let mut messages = vec![];
+            let point = if stage == 2 {
+                // Click the card padding to blur without changing the answer.
+                iced::Point::new(1., bounds.center_y())
+            } else {
+                // Distinct click positions, not a word-selecting double-click.
+                iced::Point::new(bounds.center_x() + stage as f32 * 24., bounds.center_y())
+            };
+            ui.update(
+                &[
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                    key(
+                        keyboard::Key::Character("2".into()),
+                        keyboard::Modifiers::empty(),
+                        Some("2"),
+                    ),
+                ],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            cache = ui.into_cache();
+            for message in messages {
+                draft.update(message);
+            }
+            if stage == 0 {
+                assert_eq!(draft.value(0).as_deref(), Some("2"));
+                apply(&mut draft, Action::Select(0));
+                assert_eq!(draft.value(0).as_deref(), Some("A website"));
+            } else if stage == 1 {
+                assert_eq!(draft.value(0).as_deref(), Some("22"));
+            } else {
+                assert_eq!(draft.value(0).as_deref(), Some("A mobile app"));
+                assert_eq!(draft.answers[0].editor.text(), "22");
             }
         }
     }
@@ -1288,7 +1416,7 @@ mod tests {
             )],
             false,
         );
-        assert!(d.text_open());
+        assert!(d.uses_editor());
         events(
             &mut d,
             true,

@@ -299,10 +299,21 @@ pub fn questionnaire(_: &Theme) -> container::Style {
     }
 }
 
-pub fn questionnaire_handle(_: &Theme) -> container::Style {
+pub fn inline_answer_editor(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Default::default(),
+        ..editor(theme, status)
+    }
+}
+
+pub fn answer_row(theme: &Theme, focused: bool) -> container::Style {
     container::Style {
-        background: Some(MUTED.into()),
-        border: iced::border::rounded(RADIUS_SMALL),
+        border: if focused {
+            editor(theme, text_editor::Status::Focused { is_hovered: false }).border
+        } else {
+            Default::default()
+        },
         ..Default::default()
     }
 }
