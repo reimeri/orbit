@@ -471,6 +471,15 @@ impl Session {
         self.accept_submission(id(), message, false);
     }
     pub fn accept_submission(&mut self, submission: String, message: UserMessage, steering: bool) {
+        self.accept_submission_at(submission, message, steering, now());
+    }
+    pub(crate) fn accept_submission_at(
+        &mut self,
+        submission: String,
+        message: UserMessage,
+        steering: bool,
+        accepted_at: u64,
+    ) {
         if self.needs_title()
             || (!self.title_manually_set
                 && self
@@ -487,7 +496,7 @@ impl Session {
                 .take(64)
                 .collect();
         }
-        self.updated = now();
+        self.updated = accepted_at;
         self.unchecked_completion = false;
         self.settled_at = None;
         self.pending_submissions.push(submission.clone());

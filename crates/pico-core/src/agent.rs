@@ -756,12 +756,19 @@ impl Harness {
                     candidate.checkpoint();
                 }
                 let points = candidate.points.clone();
-                candidate.accept_submission(submission.to_owned(), message.clone(), steering);
+                // The durable and live copies record the same acceptance time.
+                let accepted_at = crate::store::now();
+                candidate.accept_submission_at(
+                    submission.to_owned(),
+                    message.clone(),
+                    steering,
+                    accepted_at,
+                );
                 self.store.save_changes(saved.as_ref(), &candidate)?;
                 *saved = Some(candidate);
                 let mut state = conversation.state.lock().expect("session lock");
                 state.points = points;
-                state.accept_submission(submission.to_owned(), message, steering);
+                state.accept_submission_at(submission.to_owned(), message, steering, accepted_at);
                 if let Some(message) = naming_message {
                     self.name_session(&conversation, message);
                 }
