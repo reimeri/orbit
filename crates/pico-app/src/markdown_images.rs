@@ -244,12 +244,18 @@ impl Cache {
                 // too little room for a separate padded button. Details live in
                 // an overlay, not in the chat flow.
                 Some(Err(error)) => tooltip(
-                    theme::button(text("Image unavailable · Retry image").size(12))
-                        .padding(0)
-                        .width(size.width)
-                        .height(size.height)
-                        .on_press(crate::ui::Message::RetryMarkdownImage(url.clone()))
-                        .style(theme::danger),
+                    theme::button(
+                        text("Image unavailable · Retry image")
+                            .size(14)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .center(),
+                    )
+                    .padding(0)
+                    .width(size.width)
+                    .height(size.height)
+                    .on_press(crate::ui::Message::RetryMarkdownImage(url.clone()))
+                    .style(theme::secondary),
                     container(
                         text(format!(
                             "Image unavailable: {error}\nClick the rectangle to retry."
