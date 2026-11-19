@@ -307,7 +307,6 @@ pub struct Viewer<'a> {
     selection: Shared,
     entry: usize,
     next: Cell<usize>,
-    in_table: Cell<bool>,
     pub blocks: RefCell<Vec<Block>>,
 }
 impl<'a> Viewer<'a> {
@@ -317,7 +316,6 @@ impl<'a> Viewer<'a> {
             selection,
             entry,
             next: Cell::new(0),
-            in_table: Cell::new(false),
             blocks: RefCell::new(Vec::new()),
         }
     }
@@ -348,28 +346,13 @@ impl<'a> Viewer<'a> {
                 block,
                 byte: 0,
             },
-            if self.in_table.get() {
-                SelectableText::TableCell
-            } else {
-                SelectableText::Block
-            },
+            SelectableText::Block,
         )
     }
 }
 impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
     fn on_link_click(url: String) -> Message {
         Message::Link(url)
-    }
-    fn table(
-        &self,
-        settings: markdown::Settings,
-        columns: &'a [markdown::Column],
-        rows: &'a [markdown::Row],
-    ) -> Element<'a, Message> {
-        let previous = self.in_table.replace(true);
-        let table = markdown::table(self, settings, columns, rows);
-        self.in_table.set(previous);
-        table
     }
     fn paragraph(
         &self,
@@ -513,7 +496,6 @@ pub fn tool_row(
 
 enum SelectableText {
     Block,
-    TableCell,
     Plain,
     Row { height: f32, units: Arc<TextUnits> },
 }
@@ -528,16 +510,15 @@ fn selectable(
 ) -> Element<'static, Message> {
     let row_height = match &kind {
         SelectableText::Row { height, .. } => Some(*height),
-        SelectableText::Block | SelectableText::TableCell | SelectableText::Plain => None,
+        SelectableText::Block | SelectableText::Plain => None,
     };
     let line_height = row_height
         .map(|h| text::LineHeight::Absolute(h.into()))
         .unwrap_or_default();
     let wrapping = match &kind {
         SelectableText::Row { .. } => text::Wrapping::None,
-        // Paths and other unbroken Markdown text must also fit a bounded cell.
-        SelectableText::TableCell => text::Wrapping::WordOrGlyph,
-        SelectableText::Block | SelectableText::Plain => text::Wrapping::default(),
+        // Prefer word breaks, but keep unbroken log lines and paths inside the card.
+        SelectableText::Block | SelectableText::Plain => text::Wrapping::WordOrGlyph,
     };
     Element::new(Selectable {
         height: row_height.map_or(Length::Shrink, Length::Fixed),
@@ -751,9 +732,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             // viewport position. Retain them with the mounted paragraph instead
             // of segmenting unchanged text during every view reconstruction.
             match &self.kind {
-                SelectableText::Block | SelectableText::TableCell | SelectableText::Plain => {
+                SelectableText::Block | SelectableText::Plain => {
                     let paragraphs = match self.kind {
-                        SelectableText::Block | SelectableText::TableCell => Paragraphs::Block,
+                        SelectableText::Block => Paragraphs::Block,
                         _ => Paragraphs::BlankLines,
                     };
                     let key = (self.at.byte, paragraphs);
@@ -1169,6 +1150,41 @@ pub(crate) mod tests {
                     .collect(),
             )],
         )
+    }
+
+    #[test]
+    fn unbroken_progress_bar_reflows_inside_chat_width() {
+        let progress = format!("[{}|] 1835/1835 100%", "=".repeat(158));
+        let renderer = renderer();
+        for kind in [SelectableText::Plain, SelectableText::Block] {
+            let mut view = selectable(
+                Arc::from([Span::new(progress.clone())]),
+                Pixels(16.),
+                Font::DEFAULT,
+                Shared::default(),
+                Position {
+                    entry: 0,
+                    block: 0,
+                    byte: 0,
+                },
+                kind,
+            );
+            let mut tree = Tree::new(view.as_widget());
+            let mut previous_height = 0.;
+            for width in [820., 320.] {
+                let node = view.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, Size::new(width, 1000.)),
+                );
+                let state = tree.state.downcast_ref::<State>();
+                for run in state.paragraph.buffer().layout_runs() {
+                    assert!(run.line_w <= width, "text overflows at width {width}");
+                }
+                assert!(node.size().height > previous_height);
+                previous_height = node.size().height;
+            }
+        }
     }
 
     #[test]
@@ -1911,7 +1927,11 @@ pub(crate) mod tests {
                 for reference in [true, false] {
                     let passes = DECORATION_PASSES.get();
                     let text: Element<'_, Message> = if reference {
-                        rich_text(spans.clone()).size(text_size).font(font).into()
+                        rich_text(spans.clone())
+                            .size(text_size)
+                            .font(font)
+                            .wrapping(text::Wrapping::WordOrGlyph)
+                            .into()
                     } else {
                         selectable(
                             spans.clone(),
