@@ -405,9 +405,9 @@ rendered smoke includes collapsed/live groups and expanded/narrow activity detai
 
 ### Shared UI theme
 
-`crates/pico-app/src/theme.rs` is the developer-editable source of the app's dark
-palette, semantic colors, corner radii, borders and widget styles. It also supplies
-the Markdown palette; avoid hard-coded colors or `Theme::Dark` in production views.
+`crates/pico-app/src/theme.rs` defines Pico Dark and maps Iced’s shipped palettes
+to semantic colors. Widgets and Markdown use the active preset; geometry stays
+the same across themes. Avoid hard-coded colors or `Theme::Dark` in production views.
 
 Use `theme::button` for buttons (including those with no explicit style), and the
 shared style functions for inputs, editors, pick lists and their menus, checkboxes,

@@ -1,7 +1,7 @@
 //! Questionnaire composer replacement. Drafts live in the app, never in session storage.
 use crate::icons::{Icon, tip};
 use crate::scrollbar::scroll;
-use crate::theme::{self, DANGER, MUTED};
+use crate::theme;
 use iced::{
     Element, Event, Fill, Length, Rectangle, Size, Task, Theme, Vector,
     advanced::{
@@ -312,7 +312,7 @@ Shift+Tab goes back · Shift+Enter adds a line";
         let header = row![
             container(tip(Icon::Info.label("Question", 12.), hint))
                 .width(Fill)
-                .style(|_| container::Style::default().color(MUTED)),
+                .style(|t| container::Style::default().color(theme::colors(t).muted)),
             header_button(
                 Icon::ArrowLeft,
                 (navigating && self.current > 0).then_some(Action::Back),
@@ -320,7 +320,7 @@ Shift+Tab goes back · Shift+Enter adds a line";
             ),
             text(format!("{} of {}", self.current + 1, self.answers.len()))
                 .size(12)
-                .color(MUTED),
+                .style(theme::muted),
             header_button(
                 Icon::ArrowRight,
                 (can_advance && !last).then_some(Action::Next),
@@ -355,11 +355,15 @@ Shift+Tab goes back · Shift+Enter adds a line";
                         text("Replace your existing custom answer with this option?")
                             .size(font_size),
                     )
-                    .push(text(&self.options()[index]).size(font_size).color(MUTED))
+                    .push(
+                        text(&self.options()[index])
+                            .size(font_size)
+                            .style(theme::muted),
+                    )
                     .push(
                         text("Tab or Left/Right switches actions · Enter confirms")
                             .size(12)
-                            .color(MUTED),
+                            .style(theme::muted),
                     );
             } else {
                 for (index, option) in self.options().iter().enumerate() {
@@ -368,7 +372,7 @@ Shift+Tab goes back · Shift+Enter adds a line";
                         row![
                             text((index + 1).to_string())
                                 .size(12)
-                                .color(MUTED)
+                                .style(theme::muted)
                                 .width(20),
                             text(option.as_str()).size(font_size)
                         ]
@@ -483,7 +487,9 @@ Shift+Tab goes back · Shift+Enter adds a line";
                 );
             }
             if let Some(error) = &self.error {
-                panel = panel.push(text(error).size(12).color(DANGER));
+                panel = panel.push(text(error).size(12).style(|t| text::Style {
+                    color: Some(theme::colors(t).danger),
+                }));
             }
         }
         let content = container(panel)
@@ -838,6 +844,8 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
 }
 
 #[cfg(test)]
+use crate::theme::PICO;
+#[cfg(test)]
 mod tests {
     use super::*;
     use iced::advanced::widget::operation::focusable;
@@ -947,12 +955,20 @@ mod tests {
             .unwrap();
 
         for (cursor, background, edit_color) in [
-            (mouse::Cursor::Unavailable, theme::BACKGROUND.into(), MUTED),
-            (mouse::Cursor::Available(label), hover_background, MUTED),
+            (
+                mouse::Cursor::Unavailable,
+                theme::PICO.background.into(),
+                PICO.muted,
+            ),
+            (
+                mouse::Cursor::Available(label),
+                hover_background,
+                PICO.muted,
+            ),
             (
                 mouse::Cursor::Available(edit),
                 hover_background,
-                theme::TEXT,
+                theme::PICO.text,
             ),
         ] {
             let mut messages = vec![];
@@ -970,7 +986,7 @@ mod tests {
                 &mut renderer,
                 &theme,
                 &renderer::Style {
-                    text_color: theme::TEXT,
+                    text_color: theme::PICO.text,
                 },
                 cursor,
             );
@@ -1151,7 +1167,7 @@ mod tests {
                     &mut renderer,
                     &theme,
                     &renderer::Style {
-                        text_color: theme::TEXT,
+                        text_color: theme::PICO.text,
                     },
                     mouse::Cursor::Unavailable,
                 );
@@ -1159,7 +1175,7 @@ mod tests {
                     &mut renderer,
                     Size::new(600, 700),
                     1.,
-                    theme::BACKGROUND,
+                    theme::PICO.background,
                 );
                 let mut editor = EditorBounds {
                     id: draft.editor_id(),
@@ -1237,7 +1253,7 @@ mod tests {
             &mut renderer,
             &theme::app(),
             &iced::advanced::renderer::Style {
-                text_color: theme::TEXT,
+                text_color: theme::PICO.text,
             },
             mouse::Cursor::Unavailable,
         );
@@ -1251,9 +1267,9 @@ mod tests {
             &mut renderer,
             Size::new(600, 500),
             1.,
-            theme::BACKGROUND,
+            theme::PICO.background,
         );
-        let foreground = theme::TEXT.into_rgba8();
+        let foreground = theme::PICO.text.into_rgba8();
         let padding = crate::growing_editor::PADDING;
         let columns: Vec<_> = ((bounds.x + padding).ceil() as usize
             ..(bounds.x + bounds.width - padding).floor() as usize)

@@ -10,11 +10,17 @@ pub fn status_circle<'a, Message: 'a>(running: bool, tick: u64) -> Element<'a, M
     } else {
         "●"
     };
-    container(text(dot).size(11).color(if running {
-        crate::theme::ACCENT
-    } else {
-        crate::theme::MUTED
-    }))
+    container(
+        text(dot)
+            .size(11)
+            .style(move |t| iced::widget::text::Style {
+                color: Some(if running {
+                    crate::theme::colors(t).accent
+                } else {
+                    crate::theme::colors(t).muted
+                }),
+            }),
+    )
     .width(12)
     .into()
 }

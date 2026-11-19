@@ -294,7 +294,7 @@ impl Completion {
             None
         };
         if let Some(status) = status {
-            rows = rows.push(text(status).size(11).color(theme::MUTED));
+            rows = rows.push(text(status).size(11).style(theme::muted));
         }
         if self
             .token

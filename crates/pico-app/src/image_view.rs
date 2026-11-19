@@ -1206,7 +1206,7 @@ mod tests {
                 1.,
                 Color::BLACK,
             );
-            let foreground = theme::TEXT.into_rgba8();
+            let foreground = theme::PICO.text.into_rgba8();
             let remove_painted =
                 (corner.y as usize..(corner.y + corner.height) as usize).any(|y| {
                     (corner.x as usize..(corner.x + corner.width) as usize).any(|x| {

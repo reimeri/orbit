@@ -3,10 +3,9 @@ mod settings;
 use crate::activity::{self, Row as ActivityRow};
 use crate::scrollbar::scroll;
 use crate::session_wave::{self, Status as SessionStatus};
-use crate::theme::{
-    self, ACCENT, BORDER, DANGER, MUTED, SUCCESS, WARNING, card, footer_surface, panel,
-    right_panel, secondary, sidebar_control,
-};
+#[cfg(test)]
+use crate::theme::PICO;
+use crate::theme::{self, card, footer_surface, panel, right_panel, secondary, sidebar_control};
 use crate::{
     chat_selection::{self, Position},
     chevron_icon::chevron_icon,
@@ -15,7 +14,6 @@ use crate::{
     pointer_input::{Press, dismiss_layer, pointer_input},
     tool_output,
 };
-#[cfg(test)]
 use iced::Theme;
 use iced::futures::SinkExt;
 use iced::{
@@ -316,6 +314,7 @@ pub enum Message {
     SessionEffort(String),
     Context(String),
     Threshold(String),
+    Theme(&'static str),
     Font(f32),
     ChatWidth(f32),
     Resume(bool),
@@ -355,6 +354,14 @@ pub enum Message {
     Exit(Result<(), String>),
 }
 impl App {
+    fn preset(&self) -> &'static theme::Preset {
+        theme::preset(&self.catalog.settings.theme)
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.preset().theme.clone()
+    }
+
     pub fn new(smoke: bool, smoke_passed: Arc<AtomicBool>) -> (Self, Task<Message>) {
         let smoke_dir = smoke.then(|| {
             std::env::temp_dir().join(format!("pico-evo-smoke-{}", pico_core::store::id()))
@@ -1212,6 +1219,7 @@ impl App {
                     | Message::Favorite(_)
                     | Message::StashProject(_)
                     | Message::ApplySettings
+                    | Message::Theme(_)
                     | Message::Font(_)
                     | Message::ChatWidth(_)
                     | Message::Resume(_)
@@ -1237,6 +1245,7 @@ impl App {
                     | Message::ResetImageModel
                     | Message::SettingsTab(_)
                     | Message::ApiKey(_)
+                    | Message::Theme(_)
                     | Message::Font(_)
                     | Message::ChatWidth(_)
                     | Message::Resume(_)
@@ -1982,6 +1991,11 @@ impl App {
             }
             Message::Context(value) => self.context_text = value,
             Message::Threshold(value) => self.threshold_text = value,
+            Message::Theme(name) => {
+                self.settings.theme = name.to_owned();
+                self.catalog.settings.theme = name.to_owned();
+                self.save_catalog();
+            }
             Message::Font(value) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings.font_size = value;
@@ -2199,7 +2213,7 @@ impl App {
                 {
                     let settings = markdown::Settings::with_text_size(
                         self.catalog.settings.font_size,
-                        theme::markdown_style(),
+                        theme::markdown_style(&self.preset().theme),
                     );
                     let entries = self
                         .transcript
@@ -2700,6 +2714,7 @@ impl App {
         )
     }
     fn content(&self) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         if let Some(check) = &self.screenshot_check {
             return check.view();
         }
@@ -2708,7 +2723,7 @@ impl App {
             center = center.push(
                 container(
                     row![
-                        Icon::Info.colored(16., ACCENT),
+                        Icon::Info.colored(16., colors.accent),
                         text(notice).size(13).width(Fill),
                         icon_tip(
                             theme::button(container(Icon::X.view(16.)).center_x(20).center_y(22))
@@ -2728,7 +2743,7 @@ impl App {
             center = center.push(
                 container(
                     row![
-                        Icon::CircleAlert.colored(16., DANGER),
+                        Icon::CircleAlert.colored(16., colors.danger),
                         text(error).size(13).width(Fill),
                         theme::button(theme::primary_label("Dismiss"))
                             .on_press(Message::ErrorDismiss)
@@ -2736,8 +2751,8 @@ impl App {
                     .spacing(12),
                 )
                 .padding(12)
-                .style(|_| container::Style {
-                    background: Some(theme::ERROR_SURFACE.into()),
+                .style(move |_| container::Style {
+                    background: Some(colors.error_surface.into()),
                     ..Default::default()
                 }),
             );
@@ -2796,7 +2811,7 @@ impl App {
         // otherwise iced discards its scroll offsets and other widget state.
         let layers = stack![body.push(rail)];
         if let Some(modal) = &self.modal {
-            let shade = mouse_area(container(space().width(Fill).height(Fill)).style(|_| {
+            let shade = mouse_area(container(space().width(Fill).height(Fill)).style(move |_| {
                 container::Style {
                     background: Some(
                         iced::Color {
@@ -2905,9 +2920,10 @@ impl App {
         }
     }
     fn divider(&self, right: bool) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         mouse_area(
-            container(space().width(5).height(Fill)).style(|_| container::Style {
-                background: Some(BORDER.into()),
+            container(space().width(5).height(Fill)).style(move |_| container::Style {
+                background: Some(colors.border.into()),
                 ..Default::default()
             }),
         )
@@ -3022,12 +3038,13 @@ impl App {
     }
 
     fn agents_panel(&self) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let mut content = column![
             container(right_panel_header("Agents", Message::ToggleAgents))
                 .padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER)),
             text(format!("{} running", self.agent_count()))
                 .size(12)
-                .color(MUTED)
+                .style(theme::muted)
         ]
         .spacing(14);
         let runs = self
@@ -3047,11 +3064,11 @@ impl App {
                 .filter(|_| run.status == pico_core::agent::subagents::RunStatus::Running)
                 .map(|c| c.status().to_string());
             let status_color = if run.status.needs_attention() {
-                DANGER
+                colors.danger
             } else if activity.is_some() {
-                ACCENT
+                colors.accent
             } else {
-                MUTED
+                colors.muted
             };
             let status = activity.as_deref().unwrap_or(run.status.label());
             let metadata = match &run.configuration {
@@ -3077,7 +3094,7 @@ impl App {
                     ellipsized_text(&run.title, 13., None),
                     text(metadata)
                         .size(10)
-                        .color(MUTED)
+                        .style(theme::muted)
                         .wrapping(text::Wrapping::None),
                 ]
                 .spacing(10)
@@ -3097,6 +3114,7 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let mut list = column![
             container(self.sidebar_header()).padding(
                 iced::Padding::ZERO
@@ -3114,11 +3132,13 @@ impl App {
         )];
         for index in range.clone() {
             let content: Element<'_, Message> = match &self.sidebar_rows[index] {
-                SidebarRow::Heading(title, count) => {
-                    container(text(format!("{title}  {count}")).size(10).color(MUTED))
-                        .padding([10., SIDEBAR_CONTENT_PADDING])
-                        .into()
-                }
+                SidebarRow::Heading(title, count) => container(
+                    text(format!("{title}  {count}"))
+                        .size(10)
+                        .style(theme::muted),
+                )
+                .padding([10., SIDEBAR_CONTENT_PADDING])
+                .into(),
                 SidebarRow::Session(session_index, status) => {
                     let session = &self.sessions[*session_index];
                     let active = self.parent_id() == Some(session.id.as_str());
@@ -3140,9 +3160,9 @@ impl App {
                     };
                     let status = *status;
                     let trailing: Element<'_, Message> = if status == SessionStatus::Unchecked {
-                        container(container(space().width(8).height(8)).style(|_| {
+                        container(container(space().width(8).height(8)).style(move |_| {
                             container::Style::default()
-                                .background(theme::ACCENT)
+                                .background(colors.accent)
                                 .border(iced::Border {
                                     radius: 4.into(),
                                     ..Default::default()
@@ -3154,7 +3174,7 @@ impl App {
                     } else if status == SessionStatus::Idle {
                         crate::session_action::slot(crate::session_action::WIDTH)
                     } else {
-                        text(age.clone()).size(10).color(MUTED).into()
+                        text(age.clone()).size(10).style(theme::muted).into()
                     };
                     let content = mouse_area(
                         theme::button(session_wave::wave(
@@ -3163,7 +3183,7 @@ impl App {
                                     ellipsized_text(&session.title, 13., None),
                                     row![
                                         badge,
-                                        ellipsized_text(&project, 11., Some(MUTED)),
+                                        ellipsized_text(&project, 11., Some(colors.muted)),
                                         trailing
                                     ]
                                     .spacing(6)
@@ -3231,7 +3251,7 @@ impl App {
                 container(
                     text("Your sessions will appear here.")
                         .size(13)
-                        .color(MUTED),
+                        .style(theme::muted),
                 )
                 .padding([0., SIDEBAR_CONTENT_PADDING])
                 .into(),
@@ -3365,6 +3385,7 @@ impl App {
     }
 
     fn center(&self) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let Some(session) = self.current() else {
             return self.new_session();
         };
@@ -3375,7 +3396,11 @@ impl App {
                     text("What are we building?").size(36).align_x(iced::Center),
                     row![
                         project_badge_sized(&session.project, &name, 32.),
-                        crate::ellipsized_text::shrinking_ellipsized_text(&name, 24., Some(MUTED)),
+                        crate::ellipsized_text::shrinking_ellipsized_text(
+                            &name,
+                            24.,
+                            Some(colors.muted)
+                        ),
                     ]
                     .spacing(12)
                     .align_y(iced::Center),
@@ -3457,11 +3482,11 @@ impl App {
                 })
                 .map(|r| r.status);
             let status_color = match status {
-                Some(RunStatus::Running) => ACCENT,
-                Some(RunStatus::Completed) => SUCCESS,
-                Some(RunStatus::Failed | RunStatus::Interrupted) => DANGER,
-                Some(RunStatus::Cancelled) => WARNING,
-                None => MUTED,
+                Some(RunStatus::Running) => colors.accent,
+                Some(RunStatus::Completed) => colors.success,
+                Some(RunStatus::Failed | RunStatus::Interrupted) => colors.danger,
+                Some(RunStatus::Cancelled) => colors.warning,
+                None => colors.muted,
             };
             let header = widget::responsive(move |size| {
                 let compact = size.width < 640.;
@@ -3639,6 +3664,7 @@ impl App {
     }
 
     fn activity_row(&self, projected: ActivityRow) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let session = self.current().expect("visible transcript");
         let index = projected.source();
         let entry = &session.entries[index];
@@ -3652,7 +3678,11 @@ impl App {
                 let mut header = row![space().width(12).height(12)]
                     .spacing(8)
                     .align_y(iced::Center);
-                header = header.push(ellipsized_text(&summary.label(active), 12., Some(MUTED)));
+                header = header.push(ellipsized_text(
+                    &summary.label(active),
+                    12.,
+                    Some(colors.muted),
+                ));
                 if working && summary.tools > 0 {
                     let progress = if summary.running > 0 {
                         format!(
@@ -3662,13 +3692,13 @@ impl App {
                     } else {
                         format!("{} completed", summary.completed)
                     };
-                    header = header.push(text(progress).size(11).color(MUTED));
+                    header = header.push(text(progress).size(11).style(theme::muted));
                 }
                 if summary.show_failures() {
                     header = header.push(
                         text(format!("{} failed", summary.failed))
                             .size(12)
-                            .color(DANGER),
+                            .color(colors.danger),
                     );
                 }
                 theme::button(stack![
@@ -3696,7 +3726,7 @@ impl App {
                                 if wrappers == 1 { "" } else { "s" }
                             ))
                             .size(11)
-                            .color(MUTED)
+                            .style(theme::muted)
                         ]
                         .spacing(8)
                         .align_y(iced::Center),
@@ -3720,7 +3750,7 @@ impl App {
                     theme::button(
                         row![
                             chevron_icon(self.expanded.contains(&entry.id)),
-                            ellipsized_text(&preview, 12., Some(MUTED))
+                            ellipsized_text(&preview, 12., Some(colors.muted))
                         ]
                         .spacing(8)
                         .align_y(iced::Center),
@@ -3742,6 +3772,7 @@ impl App {
             .subagent_run(&self.current()?.id, activity::subagent_notice(entry)?)
     }
     fn subagent_notice_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
+        let colors = &self.preset().colors;
         let open = self.expanded.contains(&entry.id);
         let run = self.subagent_notice_run(entry);
         let (label, color) = match &run {
@@ -3753,21 +3784,21 @@ impl App {
                     run.status.label()
                 ),
                 if run.status.needs_attention() {
-                    DANGER
+                    colors.danger
                 } else if run.status == pico_core::agent::subagents::RunStatus::Completed {
-                    SUCCESS
+                    colors.success
                 } else {
-                    MUTED
+                    colors.muted
                 },
             ),
-            None => ("Subagent update".into(), MUTED),
+            None => ("Subagent update".into(), colors.muted),
         };
         let mut block = column![
             theme::button(
                 row![
                     chevron_icon(open),
                     text("●").size(11).color(color),
-                    ellipsized_text(&label, 12., Some(MUTED))
+                    ellipsized_text(&label, 12., Some(colors.muted))
                 ]
                 .spacing(8)
                 .align_y(iced::Center)
@@ -3789,7 +3820,7 @@ impl App {
             block = block.push(chat_selection::plain(
                 &entry.text,
                 12.,
-                Some(MUTED),
+                Some(colors.muted),
                 self.chat_selection.clone(),
                 Position {
                     entry: index,
@@ -3806,6 +3837,7 @@ impl App {
     }
 
     fn entry_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
+        let colors = &self.preset().colors;
         match &entry.kind {
             EntryKind::Tool {
                 name,
@@ -3822,17 +3854,17 @@ impl App {
                 let preview = activity::tool_preview(name, input);
                 let status = activity::tool_status(*complete, *failed, *command_status);
                 let status_color = match status {
-                    CommandStatus::Running => WARNING,
-                    CommandStatus::Succeeded => SUCCESS,
-                    CommandStatus::Failed | CommandStatus::Interrupted => DANGER,
+                    CommandStatus::Running => colors.warning,
+                    CommandStatus::Succeeded => colors.success,
+                    CommandStatus::Failed | CommandStatus::Interrupted => colors.danger,
                 };
                 let mut block = column![
                     theme::button(
                         row![
                             chevron_icon(open),
                             text("●").size(11).color(status_color),
-                            text(activity::tool_name(name)).size(12).color(theme::TEXT),
-                            ellipsized_text(&preview, 12., Some(MUTED)),
+                            text(activity::tool_name(name)).size(12).color(colors.text),
+                            ellipsized_text(&preview, 12., Some(colors.muted)),
                             text(match status {
                                 CommandStatus::Running => "running",
                                 CommandStatus::Succeeded => "",
@@ -3845,9 +3877,9 @@ impl App {
                                     status,
                                     CommandStatus::Failed | CommandStatus::Interrupted
                                 ) {
-                                    DANGER
+                                    colors.danger
                                 } else {
-                                    MUTED
+                                    colors.muted
                                 }
                             )
                         ]
@@ -3884,9 +3916,12 @@ impl App {
                     let raw = self.raw_tool_inputs.contains(&entry.id);
                     details = details.push(
                         theme::button(
-                            row![chevron_icon(raw), text("Raw input").size(11).color(MUTED)]
-                                .spacing(6)
-                                .align_y(iced::Center),
+                            row![
+                                chevron_icon(raw),
+                                text("Raw input").size(11).style(theme::muted)
+                            ]
+                            .spacing(6)
+                            .align_y(iced::Center),
                         )
                         .padding([2, 0])
                         .style(theme::text_button)
@@ -3900,13 +3935,17 @@ impl App {
                                 age(metadata.searched_at)
                             ))
                             .size(11)
-                            .color(MUTED),
+                            .style(theme::muted),
                         );
                         for source in &metadata.sources {
                             details = details.push(
-                                theme::button(ellipsized_text(&source.title, 12., Some(ACCENT)))
-                                    .on_press(Message::Link(source.url.clone()))
-                                    .style(theme::text_button),
+                                theme::button(ellipsized_text(
+                                    &source.title,
+                                    12.,
+                                    Some(colors.accent),
+                                ))
+                                .on_press(Message::Link(source.url.clone()))
+                                .style(theme::text_button),
                             );
                         }
                     }
@@ -3926,7 +3965,7 @@ impl App {
                     details = details.push(chat_selection::plain(
                         &tool_reference(&entry.id, parent.as_deref()),
                         11.,
-                        Some(MUTED),
+                        Some(colors.muted),
                         self.chat_selection.clone(),
                         Position {
                             entry: index,
@@ -3951,7 +3990,7 @@ impl App {
             EntryKind::Notice => container(chat_selection::plain(
                 &entry.text,
                 12.,
-                Some(WARNING),
+                Some(colors.warning),
                 self.chat_selection.clone(),
                 Position {
                     entry: index,
@@ -3967,7 +4006,10 @@ impl App {
                     if let Some(markdown) = self.markdown.get(&entry.id) {
                         markdown::view_with(
                             markdown.content.items(),
-                            markdown::Settings::with_text_size(12., theme::markdown_style()),
+                            markdown::Settings::with_text_size(
+                                12.,
+                                theme::markdown_style(&self.preset().theme),
+                            ),
                             &chat_selection::Viewer::new(self.chat_selection.clone(), index)
                                 .with_images(&self.markdown_images),
                         )
@@ -3975,7 +4017,7 @@ impl App {
                         chat_selection::plain(
                             &entry.text,
                             12.,
-                            Some(MUTED),
+                            Some(colors.muted),
                             self.chat_selection.clone(),
                             Position {
                                 entry: index,
@@ -4002,7 +4044,7 @@ impl App {
                         content = content.push(
                             text("Steering · waiting for the next boundary")
                                 .size(11)
-                                .color(ACCENT),
+                                .color(colors.accent),
                         );
                     }
                     for media in images {
@@ -4012,7 +4054,7 @@ impl App {
                         content = content.push(
                             text(format!("{} · {} bytes captured", file.name, file.bytes))
                                 .size(11)
-                                .color(MUTED),
+                                .style(theme::muted),
                         );
                         if let Some(image) = &file.image {
                             content = content.push(self.image_view.thumbnail(image));
@@ -4024,7 +4066,7 @@ impl App {
                         markdown.content.items(),
                         markdown::Settings::with_text_size(
                             self.catalog.settings.font_size,
-                            theme::markdown_style(),
+                            theme::markdown_style(&self.preset().theme),
                         ),
                         &chat_selection::Viewer::new(self.chat_selection.clone(), index)
                             .with_images(&self.markdown_images),
@@ -4125,7 +4167,7 @@ impl App {
                 text("New session").size(18),
                 text("Choose a project to get started")
                     .size(13)
-                    .color(MUTED),
+                    .style(theme::muted),
             ]
             .spacing(10),
             projects,
@@ -4154,10 +4196,10 @@ impl App {
             }
         }
         if self.catalog.projects.is_empty() {
-            content=content.push(text("Add a local folder to begin. Pico can read and edit files and run commands in your projects.").size(13).color(MUTED));
+            content=content.push(text("Add a local folder to begin. Pico can read and edit files and run commands in your projects.").size(13).style(theme::muted));
         }
         if self.account.is_none() {
-            content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).color(MUTED),theme::button(Icon::Settings.label("Open Settings", 16.)).on_press(Message::ToggleSettings).style(theme::text_button)].spacing(10)).padding(18).style(card));
+            content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private pico-evo configuration directory.").size(13).style(theme::muted),theme::button(Icon::Settings.label("Open Settings", 16.)).on_press(Message::ToggleSettings).style(theme::text_button)].spacing(10)).padding(18).style(card));
         }
         container(scroll(
             container(content)
@@ -4170,6 +4212,7 @@ impl App {
         .into()
     }
     fn model_settings_table<'a>(&'a self) -> widget::Column<'a, Message> {
+        let colors = &self.preset().colors;
         // The model column absorbs resizing; header and data share the other two tracks.
         let effort_width = (self.panel_width() * 0.30).clamp(84., 140.);
         let tracks = |name: Element<'a, Message>, effort, fast| {
@@ -4198,15 +4241,15 @@ impl App {
         for model in MODELS {
             let defaults = &self.settings.models[model.id];
             let (mark, color) = match *model {
-                pico_core::models::ASTRA => ("✦", ACCENT),
-                pico_core::models::SOL => ("☼", WARNING),
-                pico_core::models::TERRA => ("◎", SUCCESS),
-                pico_core::models::LUNA => ("☾", ACCENT),
-                _ => ("·", MUTED),
+                pico_core::models::ASTRA => ("✦", colors.accent),
+                pico_core::models::SOL => ("☼", colors.warning),
+                pico_core::models::TERRA => ("◎", colors.success),
+                pico_core::models::LUNA => ("☾", colors.accent),
+                _ => ("·", colors.muted),
             };
             let name = column![
                 name_cell(text(mark).size(16).color(color).into(), model.name),
-                ellipsized_text(model.id, 11., Some(MUTED))
+                ellipsized_text(model.id, 11., Some(colors.muted))
             ]
             .spacing(2);
             table = table
@@ -4248,8 +4291,8 @@ impl App {
             let config = &self.settings.subagents[&profile];
             let selected = model(&config.model).expect("catalog model");
             let (icon, color) = match profile {
-                Profile::Review => (Icon::BookOpen, WARNING),
-                Profile::Explore => (Icon::Map, ACCENT),
+                Profile::Review => (Icon::BookOpen, colors.warning),
+                Profile::Explore => (Icon::Map, colors.accent),
             };
             let name = name_cell(icon.colored(14., color), profile.label());
             let model = theme::dropdown(MODELS, Some(selected), move |m| {
@@ -4267,7 +4310,7 @@ impl App {
                         row![
                             name,
                             space().width(Fill),
-                            text("Fast").size(12).color(MUTED),
+                            text("Fast").size(12).style(theme::muted),
                             container(fast).center_x(44)
                         ]
                         .align_y(iced::Center)
@@ -4290,6 +4333,7 @@ impl App {
     }
 
     fn settings_panel(&self) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let mut tabs = row![].spacing(4);
         for (tab, label) in [
             (SettingsTab::Account, "Account"),
@@ -4305,12 +4349,17 @@ impl App {
                 .style(move |theme, status| {
                     let mut style = theme::text_button(theme, status);
                     if selected {
-                        style.text_color = ACCENT;
+                        style.text_color = colors.accent;
                     }
                     style
                 });
-            let underline = container(space().width(Fill).height(2))
-                .style(move |_| container::background(if selected { ACCENT } else { BORDER }));
+            let underline = container(space().width(Fill).height(2)).style(move |_| {
+                container::background(if selected {
+                    colors.accent
+                } else {
+                    colors.border
+                })
+            });
             tabs = tabs.push(column![button, underline].width(Fill));
         }
         let header = column![
@@ -4357,12 +4406,13 @@ impl App {
     }
 
     fn footer_content(&self, width: f32) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let Some(session) = self.current() else {
             return container(
                 row![
                     text("Pico V2")
                         .size(11)
-                        .color(MUTED)
+                        .style(theme::muted)
                         .wrapping(text::Wrapping::None),
                     space().width(Fill),
                     text(if self.account.is_some() {
@@ -4371,7 +4421,7 @@ impl App {
                         "Not signed in"
                     })
                     .size(11)
-                    .color(MUTED)
+                    .style(theme::muted)
                     .wrapping(text::Wrapping::None),
                 ]
                 .align_y(iced::Center),
@@ -4525,7 +4575,7 @@ impl App {
         let path_view = container(crate::ellipsized_text::shrinking_ellipsized_text(
             &path_label,
             11.,
-            Some(MUTED),
+            Some(colors.muted),
         ))
         .max_width(path_width);
         info = info.push(
@@ -4543,7 +4593,7 @@ impl App {
                     branch,
                     added: 0,
                     removed: 0,
-                } => container(ellipsized_text(branch, 11., Some(MUTED)))
+                } => container(ellipsized_text(branch, 11., Some(colors.muted)))
                     .width(text_width(branch, 11.).ceil().min(126.))
                     .into(),
                 crate::git::Info::Changes {
@@ -4556,9 +4606,9 @@ impl App {
                     let counts_width =
                         text_width(&additions, 11.) + text_width(&deletions, 11.) + 8.;
                     row![
-                        ellipsized_text(branch, 11., Some(MUTED)),
-                        text(additions).size(11).color(SUCCESS),
-                        text(deletions).size(11).color(DANGER),
+                        ellipsized_text(branch, 11., Some(colors.muted)),
+                        text(additions).size(11).color(colors.success),
+                        text(deletions).size(11).color(colors.danger),
                     ]
                     .spacing(4)
                     .align_y(iced::Center)
@@ -4566,7 +4616,7 @@ impl App {
                     .into()
                 }
                 crate::git::Info::Unavailable(message) => {
-                    container(ellipsized_text(message, 11., Some(MUTED)))
+                    container(ellipsized_text(message, 11., Some(colors.muted)))
                         .width(126.)
                         .into()
                 }
@@ -4577,25 +4627,27 @@ impl App {
         }
         if layout.usage {
             info = info.push(footer_separator()).push(footer_tip(
-                text(tokens).size(11).color(MUTED),
+                text(tokens).size(11).style(theme::muted),
                 token_details,
             ));
         }
         if layout.rate {
             info = info.push(footer_separator()).push(footer_tip(
-                text(format!("TPS: {rate:.0}")).size(11).color(MUTED),
+                text(format!("TPS: {rate:.0}")).size(11).style(theme::muted),
                 rate_details,
             ));
         }
         if layout.cache {
             info = info.push(footer_separator()).push(footer_tip(
-                text(format!("{cache:.0}% cache")).size(11).color(MUTED),
+                text(format!("{cache:.0}% cache"))
+                    .size(11)
+                    .style(theme::muted),
                 cache_details,
             ));
         }
         if !hidden.is_empty() {
             info = info.push(footer_separator()).push(footer_tip(
-                text("…").size(13).color(MUTED),
+                text("…").size(13).style(theme::muted),
                 hidden.join("\n\n"),
             ));
         }
@@ -4622,6 +4674,7 @@ impl App {
     }
 
     fn footer_popup(&self, available_width: f32) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let session = self.current().expect("footer menu has a session");
         let enabled = !self.io_busy && !self.running();
         let list_height = (self.window_height - 170.).clamp(60., 240.);
@@ -4646,7 +4699,7 @@ impl App {
                     row![
                         ellipsized_text(label, FOOTER_MENU_TEXT_SIZE, None),
                         if chosen {
-                            Icon::Check.colored(16., ACCENT)
+                            Icon::Check.colored(16., colors.accent)
                         } else {
                             space().width(16).height(16).into()
                         },
@@ -4662,7 +4715,7 @@ impl App {
                 options = options.push(item);
             }
             column![
-                container(text(title).size(12).color(MUTED))
+                container(text(title).size(12).style(theme::muted))
                     .height(heading_height)
                     .padding([6, 8]),
                 scroll(options).height(list_height),
@@ -4708,6 +4761,7 @@ impl App {
         )
     }
     fn modal_view(&self, modal: &Modal) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
         let (title, body, confirm) = match modal {
             Modal::Image(media) => {
                 return self.image_view.view(
@@ -4776,8 +4830,11 @@ impl App {
                 "Open link",
             ),
         };
-        let mut content =
-            column![text(title).size(24), text(body).size(14).color(MUTED)].spacing(18);
+        let mut content = column![
+            text(title).size(24),
+            text(body).size(14).style(theme::muted)
+        ]
+        .spacing(18);
         match modal {
             Modal::AddProject | Modal::Rename(_) | Modal::RenameProject(_) => {
                 content = content.push(
@@ -4800,7 +4857,11 @@ impl App {
                 if let Some(project) = self.catalog.projects.iter().find(|p| p.path == *path) {
                     content = content.push(text(project.name()).size(16));
                 }
-                content = content.push(text(path.display().to_string()).size(13).color(MUTED));
+                content = content.push(
+                    text(path.display().to_string())
+                        .size(13)
+                        .style(theme::muted),
+                );
             }
             Modal::StopCommandsAndSettle(id) => {
                 if let Some(session) = self.sessions.iter().find(|s| s.id == *id) {
@@ -4811,7 +4872,7 @@ impl App {
             _ => {}
         }
         if let Some(error) = &self.error {
-            content = content.push(text(error).size(12).color(DANGER));
+            content = content.push(text(error).size(12).color(colors.danger));
         }
         let confirm = if matches!(modal, Modal::Delete(_) | Modal::DeleteProject(_)) {
             theme::action(confirm).style(theme::danger)
@@ -4928,6 +4989,8 @@ impl App {
                     },
                 );
                 self.settings_open = true;
+                self.settings_tab = SettingsTab::General;
+                let _ = self.update_inner(Message::Theme("Solarized Light"));
                 return Task::batch([
                     self.update_inner(Message::ToggleSearch),
                     bottom(),
@@ -4935,12 +4998,30 @@ impl App {
                 ]);
             }
             3 => {
+                // A populated chat and its sidebar must actually repaint, not just
+                // update the selected name on disk.
+                for color in [self.preset().colors.panel, self.preset().colors.background] {
+                    let expected = color.into_rgba8();
+                    assert!(
+                        pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .filter(|p| { (0..3).all(|i| p[i].abs_diff(expected[i]) <= 1) })
+                            .take(1024)
+                            .count()
+                            == 1024,
+                        "missing switched theme surface"
+                    );
+                }
                 self.chat_selection.borrow_mut().clear();
                 let _ = self.update_inner(Message::ToggleSearch);
                 self.modal = Some(Modal::AddProject);
                 self.modal_input = "/tmp/example-project".into();
             }
             4 => {
+                let _ = self.update_inner(Message::Theme(pico_core::store::DEFAULT_THEME));
+                self.settings_tab = SettingsTab::Account;
                 self.modal = None;
                 self.settings_open = false;
                 self.context_menu = self
@@ -5733,7 +5814,12 @@ fn text_width(value: &str, size: f32) -> f32 {
     .min_width()
 }
 fn footer_separator() -> Element<'static, Message> {
-    text("·").size(11).color(MUTED).width(8).center().into()
+    text("·")
+        .size(11)
+        .style(theme::muted)
+        .width(8)
+        .center()
+        .into()
 }
 fn footer_tip<'a>(
     content: impl Into<Element<'a, Message>>,
@@ -5781,12 +5867,15 @@ fn project_badge_sized(path: &Path, name: &str, size: f32) -> Element<'static, M
     container(
         text(project_initials(name))
             .size(size / 2.)
-            .line_height(text::LineHeight::Absolute((size * 0.625).into()))
-            .color(color),
+            .line_height(text::LineHeight::Absolute((size * 0.625).into())),
     )
     .center_x(size)
     .center_y(size)
-    .style(move |_| container::Style {
+    .style(move |t| container::Style {
+        text_color: Some(theme::contrasting_ink(
+            color,
+            iced::theme::palette::mix(theme::colors(t).panel, color, theme::BADGE_ALPHA),
+        )),
         background: Some(
             Color {
                 a: theme::BADGE_ALPHA,
@@ -6238,7 +6327,7 @@ mod tests {
                                 &mut renderer,
                                 &theme::app(),
                                 &iced::advanced::renderer::Style {
-                                    text_color: theme::TEXT,
+                                    text_color: theme::PICO.text,
                                 },
                                 cursor,
                             );
@@ -6246,7 +6335,7 @@ mod tests {
                                 &mut renderer,
                                 iced::Size::new(width as u32, size.height as u32),
                                 1.,
-                                theme::BACKGROUND,
+                                theme::PICO.background,
                             );
                             icons.push(
                                 pixels
@@ -6303,20 +6392,27 @@ mod tests {
                 None,
                 false,
                 false,
-                WARNING,
+                PICO.warning,
                 "running",
             ),
-            ("image_gen__imagegen", None, true, false, SUCCESS, ""),
-            ("image_gen__imagegen", None, true, true, DANGER, "failed"),
-            ("web__run", None, false, false, WARNING, "running"),
-            ("exec", None, false, false, WARNING, "running"),
-            ("exec_command", None, false, false, WARNING, "running"),
+            ("image_gen__imagegen", None, true, false, PICO.success, ""),
+            (
+                "image_gen__imagegen",
+                None,
+                true,
+                true,
+                PICO.danger,
+                "failed",
+            ),
+            ("web__run", None, false, false, PICO.warning, "running"),
+            ("exec", None, false, false, PICO.warning, "running"),
+            ("exec_command", None, false, false, PICO.warning, "running"),
             (
                 "exec_command",
                 Some(CommandStatus::Running),
                 true,
                 false,
-                WARNING,
+                PICO.warning,
                 "running",
             ),
             (
@@ -6324,7 +6420,7 @@ mod tests {
                 Some(CommandStatus::Succeeded),
                 true,
                 false,
-                SUCCESS,
+                PICO.success,
                 "",
             ),
             (
@@ -6332,7 +6428,7 @@ mod tests {
                 Some(CommandStatus::Failed),
                 true,
                 false,
-                DANGER,
+                PICO.danger,
                 "failed",
             ),
             (
@@ -6340,7 +6436,7 @@ mod tests {
                 Some(CommandStatus::Interrupted),
                 true,
                 false,
-                DANGER,
+                PICO.danger,
                 "interrupted",
             ),
         ] {
@@ -6374,7 +6470,7 @@ mod tests {
                 &mut renderer,
                 &theme::app(),
                 &iced::advanced::renderer::Style {
-                    text_color: theme::TEXT,
+                    text_color: theme::PICO.text,
                 },
                 mouse::Cursor::Unavailable,
             );
@@ -6382,7 +6478,7 @@ mod tests {
                 &mut renderer,
                 iced::Size::new(400, 80),
                 1.,
-                theme::BACKGROUND,
+                theme::PICO.background,
             );
             let expected = color.into_rgba8();
             assert!(
@@ -7242,7 +7338,7 @@ mod tests {
                     &mut renderer,
                     &theme::app(),
                     &iced::advanced::renderer::Style {
-                        text_color: theme::TEXT,
+                        text_color: theme::PICO.text,
                     },
                     cursor,
                 );
@@ -7250,10 +7346,15 @@ mod tests {
                     &mut renderer,
                     iced::Size::new(size.width as u32, size.height as u32),
                     1.,
-                    theme::BACKGROUND,
+                    theme::PICO.background,
                 );
                 if !settled && matches!(phase, 1 | 2) {
-                    let expected = if phase == 1 { MUTED } else { theme::TEXT }.into_rgba8();
+                    let expected = if phase == 1 {
+                        PICO.muted
+                    } else {
+                        theme::PICO.text
+                    }
+                    .into_rgba8();
                     let icon_right = bounds.label("Settle").x.floor() as usize;
                     let closest = (action.y.ceil() as usize
                         ..(action.y + action.height).floor() as usize)
@@ -7326,7 +7427,7 @@ mod tests {
                     &mut renderer,
                     &theme::app(),
                     &iced::advanced::renderer::Style {
-                        text_color: theme::TEXT,
+                        text_color: theme::PICO.text,
                     },
                     mouse::Cursor::Available(point),
                 );
@@ -7334,7 +7435,7 @@ mod tests {
                     &mut renderer,
                     iced::Size::new(size.width as u32, size.height as u32),
                     1.,
-                    theme::BACKGROUND,
+                    theme::PICO.background,
                 );
                 // Tooltips do not expose text operations. Compare the painted
                 // area above the slot, excluding the button's hover-color change.
@@ -8028,9 +8129,11 @@ mod tests {
             }
             // The autosave runs after Apply on disk, but before its reply in the UI.
             dispatch(&mut app, Message::Font(21.)).await;
+            dispatch(&mut app, Message::Theme("Solarized Light")).await;
             let expected = if fail { original } else { 96_000 };
             let saved = store.load().unwrap().0.settings;
             assert_eq!((saved.context_limit, saved.font_size), (expected, 21.));
+            assert_eq!(saved.theme, "Solarized Light");
             drain(&mut app, apply).await;
             assert!(
                 app.settings_open,
@@ -8039,6 +8142,7 @@ mod tests {
             assert_eq!(app.context_text, "144000");
             assert_eq!(app.catalog.settings.context_limit, expected);
             assert_eq!(app.catalog.settings.font_size, 21.);
+            assert_eq!(app.theme(), Theme::SolarizedLight);
             if fail {
                 assert!(
                     app.error
@@ -9620,7 +9724,7 @@ Then implement the fix.";
                     &mut renderer,
                     &theme::app(),
                     &iced::advanced::renderer::Style {
-                        text_color: theme::TEXT,
+                        text_color: theme::PICO.text,
                     },
                     mouse::Cursor::Unavailable,
                 );
@@ -9628,7 +9732,7 @@ Then implement the fix.";
                     &mut renderer,
                     iced::Size::new(width as u32, height as u32),
                     1.,
-                    theme::BACKGROUND,
+                    theme::PICO.background,
                 );
                 let rename = bounds.label("Rename");
                 for label in ["Rename", middle, "Delete"] {
@@ -11605,7 +11709,7 @@ Then implement the fix.";
                 &mut renderer,
                 &theme::app(),
                 &iced::advanced::renderer::Style {
-                    text_color: theme::TEXT,
+                    text_color: theme::PICO.text,
                 },
                 mouse::Cursor::Unavailable,
             );

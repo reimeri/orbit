@@ -1,6 +1,7 @@
 //! Account connections, session preferences, and image generation settings.
 use super::{App, Message, SettingsTab};
 use crate::{ellipsized_text::ellipsized_text, icons::Icon, theme};
+use iced::theme::Base;
 use iced::{
     Center, Element, Fill, Right,
     widget::{Column, column, container, row, rule, slider, space, svg, text, text_input},
@@ -10,12 +11,11 @@ use pico_core::{
     models::{MODELS, model},
     web_search::Mode,
 };
-use theme::{ACCENT, MUTED, SUCCESS, WARNING};
 
 pub(super) fn caption(label: &'static str) -> iced::widget::Text<'static> {
     text(label)
         .size(10)
-        .color(MUTED)
+        .style(theme::muted)
         .font(iced::Font::MONOSPACE)
 }
 
@@ -29,18 +29,21 @@ pub(super) fn section_bar<'a>(content: impl Into<Element<'a, Message>>) -> Eleme
     container(content)
         .width(Fill)
         .padding([6, SECTION_INSET])
-        .style(|_| {
-            container::background(theme::PANEL).border(iced::border::rounded(theme::RADIUS_SMALL))
+        .style(|t| {
+            container::background(theme::colors(t).panel)
+                .border(iced::border::rounded(theme::RADIUS_SMALL))
         })
         .into()
 }
 
 fn status(label: &'static str, active: bool) -> Element<'static, Message> {
-    let color = if active { SUCCESS } else { MUTED };
-    container(text(label).size(11).color(color))
+    container(text(label).size(11))
         .padding([3, 8])
-        .style(move |_| {
+        .style(move |t| {
+            let c = theme::colors(t);
+            let color = if active { c.success } else { c.muted };
             container::background(color.scale_alpha(theme::BADGE_ALPHA))
+                .color(color)
                 .border(iced::border::rounded(12))
         })
         .into()
@@ -54,7 +57,7 @@ impl App {
                     row![text("ChatGPT").size(16), status("Connected", true)]
                         .spacing(6)
                         .align_y(Center),
-                    ellipsized_text(account, 13., Some(MUTED))
+                    ellipsized_text(account, 13., Some(self.preset().colors.muted))
                 ]
                 .spacing(4)
                 .width(Fill),
@@ -164,7 +167,7 @@ impl App {
                 control,
                 text(format!("{value:.0} px"))
                     .size(12)
-                    .color(MUTED)
+                    .style(theme::muted)
                     .width(49)
                     .align_x(Right)
             ]
@@ -210,9 +213,25 @@ impl App {
                     Message::WebMode
                 )
             ),
-            container(text(web_help).size(12).color(MUTED)).padding([3, 4]),
+            container(text(web_help).size(12).style(theme::muted)).padding([3, 4]),
             space().height(8),
             section("APPEARANCE"),
+            row![
+                text("Theme").size(14).width(Fill),
+                container(theme::dropdown(
+                    theme::PRESETS
+                        .iter()
+                        .map(|p| p.theme.name())
+                        .collect::<Vec<_>>(),
+                    Some(self.preset().theme.name()),
+                    Message::Theme
+                ))
+                .width(180)
+            ]
+            .padding([7, 4])
+            .spacing(8)
+            .align_y(Center),
+            rule::horizontal(1),
             measure(
                 "Chat text",
                 slider(12.0..=24.0, appearance.font_size, Message::Font)
@@ -234,11 +253,16 @@ impl App {
 
     pub(super) fn image_settings(&self) -> Column<'_, Message> {
         let images = &self.settings.images;
+        let colors = &self.preset().colors;
         // Leave room for the longer subscription label beside the circle in each half.
         let inline = self.panel_width() >= 400.;
         let choice = |backend, label, detail| {
             let selected = images.backend == backend;
-            let color = if selected { ACCENT } else { MUTED };
+            let color = if selected {
+                colors.accent
+            } else {
+                colors.muted
+            };
             // Rasterize the ring and dot together so pixel snapping cannot offset their centers.
             let mark: &[u8] = if selected {
                 br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><circle cx="8" cy="8" r="7" fill="none" stroke="black" stroke-width="1.5"/><circle cx="8" cy="8" r="4"/></svg>"#
@@ -251,7 +275,7 @@ impl App {
                 .style(move |_, _| svg::Style { color: Some(color) });
             let labels = column![
                 theme::primary_label(label).size(16),
-                text(detail).size(12).color(MUTED)
+                text(detail).size(12).style(theme::muted)
             ]
             .spacing(5);
             let content: Element<'_, Message> = if inline {
@@ -274,8 +298,8 @@ impl App {
                 .style(move |t, s| {
                     let mut style = theme::card_button(t, s);
                     if selected {
-                        style.border.color = ACCENT;
-                        style.background = Some(ACCENT.scale_alpha(0.13).into());
+                        style.border.color = colors.accent;
+                        style.background = Some(colors.accent.scale_alpha(0.13).into());
                     }
                     style
                 })
@@ -293,15 +317,15 @@ impl App {
             settings = settings.push(
                 row![
                     container(space().width(3).height(20))
-                        .style(move |_| container::background(WARNING)),
+                        .style(move |_| container::background(colors.warning)),
                     column![
                         text("An API key is required before you can generate.")
                             .size(13)
-                            .color(MUTED),
+                            .style(theme::muted),
                         theme::button(
                             row![
-                                text("Add key in Account").size(13).color(ACCENT),
-                                Icon::ArrowRight.colored(13., ACCENT)
+                                text("Add key in Account").size(13).color(colors.accent),
+                                Icon::ArrowRight.colored(13., colors.accent)
                             ]
                             .align_y(Center)
                             .spacing(4)
@@ -329,7 +353,12 @@ impl App {
         .spacing(3);
         if images.model != DEFAULT_API_MODEL {
             let reset = theme::button(
-                Icon::RotateCcw.label(text("Reset to current default").size(13).color(ACCENT), 13.),
+                Icon::RotateCcw.label(
+                    text("Reset to current default")
+                        .size(13)
+                        .color(colors.accent),
+                    13.,
+                ),
             )
             .style(theme::text_button)
             .padding([4, 0])
@@ -346,7 +375,7 @@ impl App {
                 }),
             ),
             rule::horizontal(1),
-            self.preference_row("Size", text("Automatic").size(13).color(MUTED))
+            self.preference_row("Size", text("Automatic").size(13).style(theme::muted))
         ]
         .spacing(3);
         settings.push(model_settings).push(output)

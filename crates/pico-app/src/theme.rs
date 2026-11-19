@@ -3,6 +3,7 @@
 //! Controls/rows use 8 px corners; cards, editors and floating surfaces use 12 px.
 //! Tiny decorations use 4 px. Edge-to-edge panels, dividers, selection rectangles,
 //! and icon geometry intentionally do not use the surface radius.
+use iced::theme::{Base, palette::mix};
 use iced::{
     Color, Element, Theme,
     widget::{
@@ -10,26 +11,11 @@ use iced::{
         pick_list as pick_list_widget, text_editor, text_input, toggler,
     },
 };
+use pico_core::store::DEFAULT_THEME;
+use std::sync::LazyLock;
 
-pub const BACKGROUND: Color = Color::from_rgb8(24, 26, 30);
-pub const TEXT: Color = Color::from_rgb8(225, 228, 234);
-pub const SUCCESS: Color = Color::from_rgb8(125, 192, 154);
-pub const DANGER: Color = Color::from_rgb8(224, 130, 130);
-pub const WARNING: Color = Color::from_rgb8(224, 186, 120);
-pub const MUTED: Color = Color::from_rgb8(141, 149, 164);
-pub const PANEL: Color = Color::from_rgb8(29, 32, 37);
-pub const BORDER: Color = Color::from_rgb8(48, 53, 61);
-pub const ACCENT: Color = Color::from_rgb8(137, 175, 210);
-const RIGHT_PANEL: Color = Color::from_rgb8(24, 27, 31);
-const SECONDARY: Color = Color::from_rgb8(43, 49, 58);
-const SECONDARY_HOVER: Color = Color::from_rgb8(55, 62, 74);
-const POPOVER: Color = Color::from_rgb8(30, 30, 36);
-const SEARCH: Color = Color::from_rgb8(39, 42, 48);
-pub const ERROR_SURFACE: Color = Color::from_rgb8(66, 39, 43);
 pub const SCRIM: Color = Color::from_rgba(0., 0., 0., 0.65);
-pub const SELECTION: Color = Color::from_rgba8(100, 160, 230, 0.35);
 pub const IMAGE_TEXT: Color = Color::WHITE;
-const CODE: Color = Color::from_rgb8(17, 17, 17);
 
 pub const RADIUS_SMALL: f32 = 4.;
 pub const RADIUS_CONTROL: f32 = 8.;
@@ -44,21 +30,143 @@ pub const SCROLLBAR_THUMB_WIDTH: f32 = 3.;
 pub const SCROLLBAR_ALPHA: f32 = 0.25;
 pub const SCROLLBAR_ACTIVE_ALPHA: f32 = 0.4;
 
-pub fn palette() -> iced::theme::Palette {
+fn pico_palette() -> iced::theme::Palette {
     iced::theme::Palette {
-        background: BACKGROUND,
-        text: TEXT,
-        primary: ACCENT,
-        success: SUCCESS,
-        danger: DANGER,
-        warning: WARNING,
+        background: PICO.background,
+        text: PICO.text,
+        primary: PICO.accent,
+        success: PICO.success,
+        danger: PICO.danger,
+        warning: PICO.warning,
     }
 }
 
-pub fn app() -> Theme {
-    Theme::custom("Pico", palette())
+/// Derived once per preset; view construction and draw callbacks share these roles.
+pub struct Colors {
+    pub background: Color,
+    pub text: Color,
+    pub success: Color,
+    pub danger: Color,
+    pub warning: Color,
+    pub muted: Color,
+    pub panel: Color,
+    pub border: Color,
+    pub accent: Color,
+    pub right_panel: Color,
+    pub secondary: Color,
+    pub secondary_hover: Color,
+    pub popover: Color,
+    pub search: Color,
+    pub error_surface: Color,
+    pub selection: Color,
+    pub code: Color,
 }
 
+pub const PICO: Colors = Colors {
+    background: Color::from_rgb8(24, 26, 30),
+    text: Color::from_rgb8(225, 228, 234),
+    success: Color::from_rgb8(125, 192, 154),
+    danger: Color::from_rgb8(224, 130, 130),
+    warning: Color::from_rgb8(224, 186, 120),
+    muted: Color::from_rgb8(141, 149, 164),
+    panel: Color::from_rgb8(29, 32, 37),
+    border: Color::from_rgb8(48, 53, 61),
+    accent: Color::from_rgb8(137, 175, 210),
+    right_panel: Color::from_rgb8(24, 27, 31),
+    secondary: Color::from_rgb8(43, 49, 58),
+    secondary_hover: Color::from_rgb8(55, 62, 74),
+    popover: Color::from_rgb8(30, 30, 36),
+    search: Color::from_rgb8(39, 42, 48),
+    error_surface: Color::from_rgb8(66, 39, 43),
+    selection: Color::from_rgba8(100, 160, 230, 0.35),
+    code: Color::from_rgb8(17, 17, 17),
+};
+
+/// Keep the hue of a foreground (notably project badges and status text) as
+/// close to its original color as the surface allows.
+pub fn contrasting_ink(ink: Color, surface: Color) -> Color {
+    let target =
+        if surface.relative_contrast(Color::BLACK) > surface.relative_contrast(Color::WHITE) {
+            Color::BLACK
+        } else {
+            Color::WHITE
+        };
+    if ink.relative_contrast(surface) >= 4.5 {
+        return ink;
+    }
+    for step in 1..=20 {
+        let candidate = mix(ink, target, step as f32 / 20.);
+        if candidate.relative_contrast(surface) >= 4.5 {
+            return candidate;
+        }
+    }
+    target
+}
+
+impl Colors {
+    fn from_iced(theme: &Theme) -> Self {
+        let p = theme.palette();
+        let bg = theme.extended_palette().background;
+        // Semantic text is also used on cards and controls, not just the window.
+        let ink = |color| contrasting_ink(color, bg.weak.color);
+        Self {
+            background: p.background,
+            text: bg.base.text,
+            success: ink(p.success),
+            danger: ink(p.danger),
+            warning: ink(p.warning),
+            accent: ink(p.primary),
+            muted: ink(mix(p.text, p.background, 0.26)),
+            panel: bg.weaker.color,
+            right_panel: bg.weakest.color,
+            border: bg.strong.color,
+            secondary: bg.weak.color,
+            secondary_hover: bg.strong.color,
+            popover: bg.weaker.color,
+            search: bg.weak.color,
+            error_surface: mix(p.background, p.danger, 0.12),
+            selection: p.primary.scale_alpha(0.35),
+            code: bg.weak.color,
+        }
+    }
+}
+
+pub struct Preset {
+    pub theme: Theme,
+    pub colors: Colors,
+}
+pub static PRESETS: LazyLock<Vec<Preset>> = LazyLock::new(|| {
+    let mut presets = vec![Preset {
+        theme: Theme::custom(DEFAULT_THEME, pico_palette()),
+        colors: PICO,
+    }];
+    presets.extend(Theme::ALL.iter().map(|theme| Preset {
+        theme: theme.clone(),
+        colors: Colors::from_iced(theme),
+    }));
+    presets
+});
+
+pub fn preset(name: &str) -> &'static Preset {
+    PRESETS
+        .iter()
+        .find(|p| p.theme.name() == name)
+        .unwrap_or(&PRESETS[0])
+}
+
+pub fn colors(theme: &Theme) -> &'static Colors {
+    &preset(theme.name()).colors
+}
+pub fn muted(theme: &Theme) -> widget::text::Style {
+    widget::text::Style {
+        color: Some(colors(theme).muted),
+    }
+}
+
+#[cfg(test)]
+pub fn app() -> Theme {
+    PRESETS[0].theme.clone()
+}
 /// Use this constructor so buttons without an explicit variant get our radius too.
 pub fn button<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
@@ -87,17 +195,18 @@ pub fn cancel<'a, Message: 'a>(label: &'a str) -> widget::Button<'a, Message> {
 }
 
 pub fn primary(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
+    let c = colors(theme);
     let mut style = button_widget::primary(theme, status);
-    if !matches!(status, button_widget::Status::Disabled) {
+    if theme.name() == DEFAULT_THEME && !matches!(status, button_widget::Status::Disabled) {
         style.background = Some(
             match status {
                 button_widget::Status::Hovered => Color::from_rgb8(183, 211, 235),
-                button_widget::Status::Pressed => ACCENT,
+                button_widget::Status::Pressed => c.accent,
                 _ => Color::from_rgb8(167, 201, 232),
             }
             .into(),
         );
-        style.text_color = BACKGROUND;
+        style.text_color = c.background;
     }
     style.border.radius = RADIUS_CONTROL.into();
     style
@@ -140,16 +249,17 @@ pub fn completion_item(
     status: button_widget::Status,
     selected: bool,
 ) -> button_widget::Style {
+    let c = colors(theme);
     let mut style = text_button(theme, status);
     style.text_color = if selected {
-        ACCENT
+        c.accent
     } else if matches!(
         status,
         button_widget::Status::Hovered | button_widget::Status::Pressed
     ) {
-        ACCENT.scale_alpha(0.85)
+        c.accent.scale_alpha(0.85)
     } else {
-        MUTED
+        c.muted
     };
     style
 }
@@ -158,13 +268,14 @@ pub fn completion_item(
 pub fn danger_text(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let mut style = text_button(theme, status);
     if !matches!(status, button_widget::Status::Disabled) {
-        style.text_color = theme.palette().danger.scale_alpha(
-            if matches!(status, button_widget::Status::Hovered) {
-                1.
-            } else {
-                0.8
-            },
-        );
+        style.text_color =
+            colors(theme)
+                .danger
+                .scale_alpha(if matches!(status, button_widget::Status::Hovered) {
+                    1.
+                } else {
+                    0.8
+                });
     }
     style
 }
@@ -174,14 +285,15 @@ pub fn menu_button(
     status: button_widget::Status,
     selected: bool,
 ) -> button_widget::Style {
+    let c = colors(theme);
     let mut style = text_button(theme, status);
     if matches!(
         status,
         button_widget::Status::Hovered | button_widget::Status::Pressed
     ) {
-        style.background = Some(SECONDARY_HOVER.into());
+        style.background = Some(c.secondary_hover.into());
     } else if selected {
-        style.background = Some(SECONDARY.into());
+        style.background = Some(c.secondary.into());
     }
     style
 }
@@ -193,9 +305,10 @@ pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
 }
 
 pub fn search_input(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let c = colors(theme);
     let mut style = input(theme, status);
-    style.background = SEARCH.into();
-    style.placeholder = MUTED;
+    style.background = c.search.into();
+    style.placeholder = c.muted;
     style
 }
 
@@ -227,29 +340,33 @@ where
         .width(iced::Fill)
 }
 
-fn pick_list(_: &Theme, status: pick_list_widget::Status) -> pick_list_widget::Style {
+fn pick_list(theme: &Theme, status: pick_list_widget::Status) -> pick_list_widget::Style {
+    let c = colors(theme);
     pick_list_widget::Style {
-        text_color: TEXT,
-        placeholder_color: MUTED,
-        handle_color: MUTED,
-        background: SECONDARY.into(),
+        text_color: c.text,
+        placeholder_color: c.muted,
+        handle_color: c.muted,
+        background: c.secondary.into(),
         border: iced::border::rounded(RADIUS_CONTROL)
             .width(BORDER_WIDTH)
             .color(if matches!(status, pick_list_widget::Status::Active) {
-                SECONDARY_HOVER
+                c.secondary_hover
             } else {
-                ACCENT
+                c.accent
             }),
     }
 }
 
 pub fn pick_list_menu(theme: &Theme) -> menu::Style {
+    let c = colors(theme);
     let mut style = menu::default(theme);
-    style.background = POPOVER.into();
-    style.selected_background = Color::from_rgb8(52, 73, 91).into();
-    style.selected_text_color = TEXT;
+    style.background = c.popover.into();
+    if theme.name() == DEFAULT_THEME {
+        style.selected_background = Color::from_rgb8(52, 73, 91).into();
+        style.selected_text_color = c.text;
+    }
     style.border = iced::border::rounded(RADIUS_CONTROL)
-        .color(SECONDARY_HOVER)
+        .color(c.secondary_hover)
         .width(BORDER_WIDTH);
     style
 }
@@ -259,15 +376,21 @@ pub fn switch<'a, Message>(on: bool) -> widget::Toggler<'a, Message> {
         .size(18)
         .text_size(14)
         .style(|theme, status| {
+            let c = colors(theme);
             let mut style = toggler::default(theme, status);
             match status {
                 toggler::Status::Active { is_toggled }
                 | toggler::Status::Hovered { is_toggled } => {
-                    style.background = if is_toggled { ACCENT } else { SECONDARY_HOVER }.into();
-                    style.foreground = if is_toggled { BACKGROUND } else { TEXT }.into();
+                    style.background = if is_toggled {
+                        c.accent
+                    } else {
+                        c.secondary_hover
+                    }
+                    .into();
+                    style.foreground = if is_toggled { c.background } else { c.text }.into();
                     if matches!(status, toggler::Status::Hovered { .. }) {
                         style.background_border_width = BORDER_WIDTH;
-                        style.background_border_color = MUTED;
+                        style.background_border_color = c.muted;
                     }
                 }
                 toggler::Status::Disabled { .. } => {}
@@ -277,23 +400,30 @@ pub fn switch<'a, Message>(on: bool) -> widget::Toggler<'a, Message> {
         })
 }
 
-pub fn markdown_style() -> markdown::Style {
-    let mut style = markdown::Style::from_palette(palette());
-    style.inline_code_highlight.background = CODE.into();
+pub fn markdown_style(theme: &Theme) -> markdown::Style {
+    let c = colors(theme);
+    let mut style = markdown::Style::from_palette(theme.palette());
+    style.inline_code_highlight.background = c.code.into();
     style.inline_code_highlight.border.radius = RADIUS_SMALL.into();
-    style.inline_code_color = TEXT;
+    style.inline_code_color = c.text;
+    style.link_color = c.accent;
     style
 }
 
 pub fn code_block(theme: &Theme) -> container::Style {
-    let mut style = container::dark(theme);
+    let c = colors(theme);
+    let mut style = if theme.name() == DEFAULT_THEME {
+        container::dark(theme)
+    } else {
+        container::background(c.code).color(c.text)
+    };
     style.border.radius = RADIUS_SURFACE.into();
     style
 }
 
-pub fn questionnaire(_: &Theme) -> container::Style {
+pub fn questionnaire(theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(PANEL.into()),
+        background: Some(colors(theme).panel.into()),
         border: iced::border::rounded(RADIUS_SURFACE),
         ..Default::default()
     }
@@ -323,26 +453,27 @@ pub fn option_button(
     status: button_widget::Status,
     selected: bool,
 ) -> button_widget::Style {
+    let c = colors(theme);
     let mut style = text_button(theme, status);
     style.background = Some(
         if matches!(
             status,
             button_widget::Status::Hovered | button_widget::Status::Pressed
         ) {
-            SECONDARY_HOVER
+            c.secondary_hover
         } else if selected {
-            SECONDARY
+            c.secondary
         } else {
-            BACKGROUND
+            c.background
         }
         .into(),
     );
     style
 }
 
-pub fn footer_surface(_: &Theme) -> container::Style {
+pub fn footer_surface(theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(POPOVER.into()),
+        background: Some(colors(theme).popover.into()),
         border: iced::Border {
             radius: RADIUS_SURFACE.into(),
             ..Default::default()
@@ -359,54 +490,56 @@ pub fn sidebar_control(theme: &Theme, status: button_widget::Status) -> button_w
     ) {
         theme.palette().text
     } else {
-        MUTED
+        colors(theme).muted
     };
     style
 }
 
 pub fn secondary(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
+    let c = colors(theme);
     let mut style = button_widget::secondary(theme, status);
     style.border.radius = RADIUS_CONTROL.into();
     style.background = Some(
         if matches!(status, button_widget::Status::Hovered) {
-            SECONDARY_HOVER
+            c.secondary_hover
         } else {
-            SECONDARY
+            c.secondary
         }
         .into(),
     );
     style.text_color = if matches!(status, button_widget::Status::Disabled) {
-        MUTED
+        c.muted
     } else {
         theme.palette().text
     };
     style
 }
 
-pub fn right_panel(_: &Theme) -> container::Style {
+pub fn right_panel(theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(RIGHT_PANEL.into()),
+        background: Some(colors(theme).right_panel.into()),
         ..Default::default()
     }
 }
-pub fn panel(_: &Theme) -> container::Style {
+pub fn panel(theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(PANEL.into()),
+        background: Some(colors(theme).panel.into()),
         ..Default::default()
     }
 }
 pub fn attachment_button(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
+    let c = colors(theme);
     button_widget::Style {
-        background: Some(PANEL.into()),
+        background: Some(c.panel.into()),
         text_color: theme.palette().text,
         border: iced::Border {
             color: if matches!(
                 status,
                 button_widget::Status::Hovered | button_widget::Status::Pressed
             ) {
-                ACCENT
+                c.accent
             } else {
-                BORDER
+                c.border
             },
             width: BORDER_WIDTH,
             radius: RADIUS_SURFACE.into(),
@@ -420,11 +553,12 @@ pub fn attachment_remove(theme: &Theme, status: button_widget::Status) -> button
     style
 }
 
-pub fn card(_: &Theme) -> container::Style {
+pub fn card(theme: &Theme) -> container::Style {
+    let c = colors(theme);
     container::Style {
-        background: Some(PANEL.into()),
+        background: Some(c.panel.into()),
         border: iced::Border {
-            color: BORDER,
+            color: c.border,
             width: BORDER_WIDTH,
             radius: RADIUS_SURFACE.into(),
         },
@@ -440,7 +574,7 @@ pub fn card_button(theme: &Theme, status: button_widget::Status) -> button_widge
             status,
             button_widget::Status::Hovered | button_widget::Status::Pressed
         ) {
-            Some(SECONDARY.into())
+            Some(colors(theme).secondary.into())
         } else {
             surface.background
         },
@@ -462,10 +596,33 @@ pub const PROJECT_COLORS: [Color; 8] = [
 ];
 
 /// Quiet inset for tool code; the enclosing detail panel owns the only border.
-pub fn tool_code(_: &Theme) -> container::Style {
+pub fn tool_code(theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(BACKGROUND.into()),
+        background: Some(colors(theme).background.into()),
         border: iced::border::rounded(RADIUS_SMALL),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_shipped_palettes_have_readable_labels_on_window_and_card_surfaces() {
+        for shipped in Theme::ALL {
+            let preset = preset(shipped.name());
+            assert_eq!(&preset.theme, shipped);
+            let c = &preset.colors;
+            for surface in [c.background, c.panel, c.code] {
+                for ink in [c.text, c.muted, c.accent, c.success, c.warning, c.danger] {
+                    assert!(
+                        ink.relative_contrast(surface) >= 4.5,
+                        "{shipped}: {ink:?} on {surface:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(preset("unknown").theme.name(), DEFAULT_THEME);
     }
 }

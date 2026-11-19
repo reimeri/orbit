@@ -31,7 +31,10 @@ fn selection_motion_benchmark() {
         let viewer = Viewer::new(selection.clone(), 0);
         let element = markdown::view_with(
             content.items(),
-            markdown::Settings::with_text_size(16., crate::theme::markdown_style()),
+            markdown::Settings::with_text_size(
+                16.,
+                crate::theme::markdown_style(&crate::theme::app()),
+            ),
             &viewer,
         );
         let blocks = viewer.blocks.borrow().len();
@@ -173,7 +176,10 @@ fn selection_scroll_benchmark() {
             let viewer = Viewer::new(selection.clone(), 0);
             let element = markdown::view_with(
                 content.items(),
-                markdown::Settings::with_text_size(16., crate::theme::markdown_style()),
+                markdown::Settings::with_text_size(
+                    16.,
+                    crate::theme::markdown_style(&crate::theme::app()),
+                ),
                 &viewer,
             );
             blocks = viewer.blocks.borrow().len();
@@ -245,7 +251,7 @@ fn selection_scroll_benchmark() {
                 &mut renderer,
                 &crate::theme::app(),
                 &renderer::Style {
-                    text_color: crate::theme::TEXT,
+                    text_color: crate::theme::PICO.text,
                 },
                 mouse::Cursor::Unavailable,
             );

@@ -79,7 +79,7 @@ pub fn assert_matches_fresh<Message>(
 ) {
     use iced::advanced::Renderer as _;
     let physical = iced::Size::new(size.width as u32, size.height as u32);
-    let actual = screenshot(renderer, physical, 1., crate::theme::BACKGROUND);
+    let actual = screenshot(renderer, physical, 1., crate::theme::PICO.background);
     let mut reference = iced_runtime::UserInterface::build(
         fresh,
         size,
@@ -101,14 +101,14 @@ pub fn assert_matches_fresh<Message>(
         renderer,
         &crate::theme::app(),
         &iced::advanced::renderer::Style {
-            text_color: crate::theme::TEXT,
+            text_color: crate::theme::PICO.text,
         },
         iced::mouse::Cursor::Unavailable,
     );
-    let expected = screenshot(renderer, physical, 1., crate::theme::BACKGROUND);
+    let expected = screenshot(renderer, physical, 1., crate::theme::PICO.background);
     // Inspect an actual visible text run, not arbitrary bright controls elsewhere
     // in the view. Allow antialiased edges around the shared foreground color.
-    let foreground = crate::theme::TEXT.into_rgba8();
+    let foreground = crate::theme::PICO.text.into_rgba8();
     let text_region = text_region
         .intersection(&iced::Rectangle::with_size(size))
         .expect("reference text must intersect the viewport");

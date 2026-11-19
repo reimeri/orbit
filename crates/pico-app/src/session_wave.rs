@@ -37,11 +37,11 @@ impl Status {
         }
     }
 
-    fn color(self) -> Option<Color> {
+    fn color(self, theme: &iced::Theme) -> Option<Color> {
         match self {
-            Self::Working => Some(crate::theme::ACCENT),
-            Self::Question => Some(crate::theme::WARNING),
-            Self::Error => Some(crate::theme::DANGER),
+            Self::Working => Some(crate::theme::colors(theme).accent),
+            Self::Question => Some(crate::theme::colors(theme).warning),
+            Self::Error => Some(crate::theme::colors(theme).danger),
             Self::Unchecked | Self::Idle => None,
         }
     }
@@ -76,7 +76,7 @@ impl Motion {
             self.elapsed = self.displayed.get();
             self.last_frame = None;
         }
-        if status.color().is_none() {
+        if matches!(status, Status::Unchecked | Status::Idle) {
             self.elapsed = 0.;
             self.displayed.set(0.);
         }
@@ -204,7 +204,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Wave<'_, Message>
                 viewport,
             );
         };
-        if let Some(color) = self.status.color()
+        if let Some(color) = self.status.color(theme)
             && let Some(clip) = bounds.intersection(viewport)
         {
             let motion = tree.state.downcast_ref::<Motion>();
@@ -354,7 +354,7 @@ mod tests {
                 &mut renderer,
                 &crate::theme::app(),
                 &renderer::Style {
-                    text_color: crate::theme::TEXT,
+                    text_color: crate::theme::PICO.text,
                 },
                 Layout::new(&node),
                 mouse::Cursor::Unavailable,
@@ -364,7 +364,7 @@ mod tests {
                 &mut renderer,
                 Size::new(320, 80),
                 1.,
-                crate::theme::BACKGROUND,
+                crate::theme::PICO.background,
             ));
         }
         assert_ne!(frames[0], frames[1], "working wave moves");

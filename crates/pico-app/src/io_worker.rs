@@ -7,6 +7,7 @@ use std::sync::mpsc;
 /// Immediate controls are independent of the preferences submitted by Save.
 pub fn with_live_controls(staged: &Settings, live: &Settings) -> Settings {
     Settings {
+        theme: live.theme.clone(),
         font_size: live.font_size,
         chat_width: live.chat_width,
         resume_last: live.resume_last,

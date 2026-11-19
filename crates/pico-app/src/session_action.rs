@@ -30,7 +30,7 @@ pub fn row<'a, Message: Clone + 'a>(
     tip: &'static str,
     on_press: Message,
 ) -> Element<'a, Message> {
-    let age = container(text(age).size(AGE_SIZE).color(theme::MUTED))
+    let age = container(text(age).size(AGE_SIZE).style(theme::muted))
         .align_right(width)
         .center_y(HEIGHT);
     // Only the button owns the tooltip, not the surrounding alignment space.

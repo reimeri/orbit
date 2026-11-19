@@ -149,7 +149,7 @@ mod tests {
                     &mut renderer,
                     &theme,
                     &renderer::Style {
-                        text_color: theme::TEXT,
+                        text_color: theme::PICO.text,
                     },
                     mouse::Cursor::Unavailable,
                 );
@@ -248,7 +248,7 @@ mod tests {
                 &mut renderer,
                 &theme,
                 &renderer::Style {
-                    text_color: theme::TEXT,
+                    text_color: theme::PICO.text,
                 },
                 mouse::Cursor::Unavailable,
             );

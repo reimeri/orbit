@@ -85,8 +85,16 @@ fn subagent_defaults() -> BTreeMap<Profile, SubagentSettings> {
         .collect()
 }
 
+pub const DEFAULT_THEME: &str = "Pico Dark";
+
+fn default_theme() -> String {
+    DEFAULT_THEME.to_owned()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default)]
     pub web_search: crate::web_search::Mode,
     #[serde(default)]
@@ -107,6 +115,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            theme: default_theme(),
             images: crate::image_tools::Settings::default(),
             web_search: crate::web_search::Mode::Live,
             model: DEFAULT_MODEL.into(),

@@ -344,7 +344,7 @@ mod tests {
                 &mut renderer,
                 &crate::theme::app(),
                 &iced::advanced::renderer::Style {
-                    text_color: crate::theme::TEXT,
+                    text_color: crate::theme::PICO.text,
                 },
                 iced::mouse::Cursor::Unavailable,
             );

@@ -69,7 +69,7 @@ fn main() -> ExitCode {
         App::view,
     )
     .title("Pico V2")
-    .theme(theme::app())
+    .theme(App::theme)
     .subscription(App::subscription)
     .window(window::Settings {
         size: iced::Size::new(1200., 800.),

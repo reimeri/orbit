@@ -475,9 +475,8 @@ pub fn tool_row(
     heading: bool,
     units: Arc<TextUnits>,
 ) -> Element<'static, Message> {
-    let mut span = Span::new(value.to_owned());
-    span.color = heading.then_some(crate::theme::MUTED);
-    selectable(
+    let span = Span::new(value.to_owned());
+    let row = selectable(
         Arc::from([span]),
         12.into(),
         if heading {
@@ -491,7 +490,14 @@ pub fn tool_row(
         selection,
         at,
         SelectableText::Row { height, units },
-    )
+    );
+    if heading {
+        container(row)
+            .style(|t| container::Style::default().color(crate::theme::colors(t).muted))
+            .into()
+    } else {
+        row
+    }
 }
 
 enum SelectableText {
@@ -905,7 +911,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         &self,
         tree: &Tree,
         renderer: &mut iced::Renderer,
-        _theme: &iced::Theme,
+        theme: &iced::Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
         _cursor: mouse::Cursor,
@@ -1002,7 +1008,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                             ),
                             ..Default::default()
                         },
-                        crate::theme::SELECTION,
+                        crate::theme::colors(theme).selection,
                     );
                 }
             }
