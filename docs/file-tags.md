@@ -24,6 +24,7 @@ interpret embedded `@` characters as separate tags.
 ## What gets attached
 
 **Tags capture file contents at send time, not when selected and not when replayed.**
+A fork draft is the exception: original file tags reuse their captured snapshots; new tags capture from the workspace.
 This applies to first messages, ordinary messages and steering. The authored text
 is unchanged in the transcript; a small manifest records each captured file's name
 and exact byte size, with thumbnails for supported images. A tag that does not resolve

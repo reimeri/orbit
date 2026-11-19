@@ -8,7 +8,7 @@ Do not try to directly translate the C code to Rust. Use idiomatic rust instead 
 
 - Session and workspace format on disk
 - Generally session management works quite well
-  - Some features like session forking, session tree are missing and will be needed to be added in the future
+  - [Fork user prompts and navigate conversation families](docs/session-forks.md)
 - UI layout is generally good
 
 ## What most likely should be overhauled

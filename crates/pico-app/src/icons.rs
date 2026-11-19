@@ -14,6 +14,7 @@ use iced::{
 #[derive(Clone, Copy)]
 pub enum Icon {
     Pencil,
+    GitFork,
     Copy,
     Trash2,
     Archive,
@@ -52,6 +53,7 @@ pub enum Icon {
 impl Icon {
     fn handle(self) -> svg::Handle {
         let bytes: &'static [u8] = match self {
+            Self::GitFork => include_bytes!("icons/git-fork.svg"),
             Self::Pencil => include_bytes!("icons/pencil.svg"),
             Self::Copy => include_bytes!("icons/copy.svg"),
             Self::Trash2 => include_bytes!("icons/trash-2.svg"),

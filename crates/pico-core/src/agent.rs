@@ -528,6 +528,7 @@ impl Harness {
                 .expect("summary lock")
                 .insert(c.id.clone(), SessionSummary::from(&*state));
             // Keep runtime IDs, unread results and JS store values, not the full transcript.
+            state.points = Default::default();
             state.entries = Default::default();
             state.input = Default::default();
             *saved = None;
@@ -660,6 +661,16 @@ impl Harness {
         }).context("Could not save the settlement change. It is retained in memory for the next save attempt; check available disk space and permissions, then retry")?;
         Ok(SettlementOutcome::Applied)
     }
+    /// Forking publishes a new, idle main conversation only after the complete
+    /// independently restorable session has committed.
+    pub fn fork(&self, source: &str, entry: &str, settings: &Settings) -> Result<String> {
+        let _coordinator = self.subagents.lock().expect("subagent lock");
+        let session = self.load(source)?.snapshot().fork(entry, settings)?;
+        let id = session.id.clone();
+        self.store.save_session(&session)?;
+        self.make_conversation(session, true);
+        Ok(id)
+    }
     pub fn send_new(
         self: &Arc<Self>,
         mut session: Session,
@@ -679,6 +690,7 @@ impl Harness {
             &message.text,
         )?;
         let naming_message = session.needs_title().then(|| message.clone());
+        session.checkpoint();
         session.accept_submission(submission.to_owned(), message, false);
         self.store.commit_new_session(&session)?;
         let id = session.id.clone();
@@ -704,7 +716,8 @@ impl Harness {
         }
         let snapshot = conversation.snapshot();
         if snapshot.entries.by_id(submission).is_none() {
-            message.files = crate::file_tags::capture(
+            message.files = crate::file_tags::capture_reusing(
+                &snapshot.draft_files,
                 &snapshot.project,
                 &self.store.root().join("files"),
                 &message.text,
@@ -719,6 +732,7 @@ impl Harness {
         self.deliver_notices(&mut coordinator, id)?;
         let needs_start = {
             let mut saved = conversation.persisted.lock().expect("persistence lock");
+            let idle_boundary = !conversation.is_running();
             let mut candidate = conversation.snapshot();
             if candidate.entries.by_id(submission).is_some() {
                 candidate
@@ -738,10 +752,15 @@ impl Harness {
                         .expect("cancel lock")
                         .is_cancelled();
                 let naming_message = candidate.needs_title().then(|| message.clone());
+                if idle_boundary && candidate.in_progress_response.is_none() {
+                    candidate.checkpoint();
+                }
+                let points = candidate.points.clone();
                 candidate.accept_submission(submission.to_owned(), message.clone(), steering);
                 self.store.save_changes(saved.as_ref(), &candidate)?;
                 *saved = Some(candidate);
                 let mut state = conversation.state.lock().expect("session lock");
+                state.points = points;
                 state.accept_submission(submission.to_owned(), message, steering);
                 if let Some(message) = naming_message {
                     self.name_session(&conversation, message);

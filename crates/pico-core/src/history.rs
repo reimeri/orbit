@@ -33,6 +33,17 @@ impl<T: Record> History<T> {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+    pub(crate) fn truncate(&mut self, len: usize) {
+        while self.len() > len {
+            let value = self
+                .rows
+                .remove(&(self.len() - 1))
+                .expect("contiguous history");
+            if let Some(id) = value.id() {
+                self.ids.remove(id);
+            }
+        }
+    }
     pub fn push(&mut self, value: T) {
         let index = self.len();
         if let Some(id) = value.id() {

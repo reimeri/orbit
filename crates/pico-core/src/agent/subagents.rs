@@ -720,14 +720,7 @@ impl Harness {
             .filter_map(|c| c.code.media_lifecycle())
             .collect();
         // Delete the whole family atomically before evicting runtime state.
-        {
-            let mut db = self.store.db.lock().expect("database lock");
-            let tx = db.transaction()?;
-            for id in &ids {
-                tx.execute("DELETE FROM sessions WHERE id=?1", [id])?;
-            }
-            tx.commit()?;
-        }
+        let unused_media = self.store.delete_sessions(&ids)?;
         for lease in &mut media_leases {
             **lease = false;
         }
@@ -738,11 +731,6 @@ impl Harness {
                 c.deleted.store(true, Ordering::Release);
                 c.naming_cancel.cancel();
                 c.cancel();
-                if let Err(e) = c.code.remove_media() {
-                    cleanup_errors.push(format!("{id}: {e:#}"));
-                }
-            } else if let Err(e) = crate::media::remove(&self.store.root().join("media").join(id)) {
-                cleanup_errors.push(format!("{id}: {e:#}"));
             }
             self.notifications.clear(id);
             self.conversations
@@ -750,6 +738,11 @@ impl Harness {
                 .expect("conversations lock")
                 .remove(id);
             self.summaries.lock().expect("summary lock").remove(id);
+        }
+        for owner in unused_media {
+            if let Err(e) = crate::media::remove(&self.store.root().join("media").join(&owner)) {
+                cleanup_errors.push(format!("{owner}: {e:#}"));
+            }
         }
         for parent in parents {
             coordinator.families.remove(&parent);

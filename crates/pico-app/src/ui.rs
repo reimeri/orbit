@@ -1,3 +1,4 @@
+mod forks;
 mod settings;
 
 use crate::activity::{self, Row as ActivityRow};
@@ -55,6 +56,7 @@ use unicode_segmentation::UnicodeSegmentation;
 // Measurement epochs reject stale sensor messages; they are not widget identity.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum TranscriptKey {
+    ForkPoint,
     Top,
     Entry {
         session: String,
@@ -141,7 +143,10 @@ pub struct App {
     markdown_images: crate::markdown_images::Cache,
     api_key_draft: String,
     api_key_configured: bool,
-    context_menu: Option<(MenuTarget, iced::Point)>,
+    forks: forks::Index,
+    fork_panel: Option<forks::Panel>,
+    jump_after_select: Option<(String, String)>,
+    context_menu: Option<ContextMenu>,
     stashed_open: bool,
     footer_menu_open: bool,
     selected: Option<String>,
@@ -202,6 +207,11 @@ pub enum SettingsTab {
 enum FooterControl {
     Model,
     Effort,
+}
+#[derive(Clone, Debug)]
+enum ContextMenu {
+    Prompt(String, String),
+    At(MenuTarget, iced::Point),
 }
 #[derive(Clone, Debug)]
 enum MenuTarget {
@@ -274,6 +284,10 @@ pub enum Message {
     ToggleStashed,
     CopySessionId(String),
     CloseMenu,
+    PromptMenu(String, String),
+    Fork(String, String),
+    ShowForks(Option<String>),
+    ViewOriginal(String, String),
     ToggleFooterMenu,
     CloseFooterMenu,
     ToolOutput(String, tool_output::Event),
@@ -436,6 +450,9 @@ impl App {
             markdown_images: Default::default(),
             api_key_draft: String::new(),
             api_key_configured: false,
+            forks: Default::default(),
+            fork_panel: None,
+            jump_after_select: None,
             context_menu: None,
             stashed_open: false,
             footer_menu_open: false,
@@ -604,6 +621,7 @@ impl App {
             self.sessions = h.summaries();
             self.sessions
                 .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+            self.forks = forks::Index::build(&self.sessions);
             self.catalog_revision = catalog_revision;
             self.prepare_sidebar();
         }
@@ -1060,6 +1078,9 @@ impl App {
         );
     }
     fn select(&mut self, selection: Selection) {
+        self.select_with_fork(selection, None);
+    }
+    fn select_with_fork(&mut self, selection: Selection, fork_entry: Option<String>) {
         self.chat_selection.borrow_mut().clear();
         self.footer_menu_open = false;
         if self.io_busy {
@@ -1087,6 +1108,13 @@ impl App {
                     (|| {
                         if let Some((old, draft)) = draft {
                             h.edit(&old, |s| { s.draft = draft.text; s.draft_images = draft.images; })?;
+                        }
+                        if let (Selection::Session(source), Some(entry)) = (&selection, fork_entry) {
+                            h.store.save_new_draft(&new_draft)?;
+                            h.evict_inactive(Some(source))?;
+                            // Create last: a failed switch must never leave a hidden duplicate fork.
+                            let fork = h.fork(source, &entry, &settings)?;
+                            return Ok((Selection::Session(fork), None));
                         }
                         let id = if let Selection::Session(id) = &selection {
                             if h.load(id)?.snapshot().unchecked_completion {
@@ -1154,6 +1182,14 @@ impl App {
             self.transcript.total(),
         );
         let task = self.update_inner(message);
+        if self
+            .fork_panel
+            .as_ref()
+            .is_some_and(|p| self.fork_family() != Some(p.family.as_str()))
+        {
+            self.fork_panel = None;
+            self.view_epoch = self.view_epoch.wrapping_add(1);
+        }
         if geometry
             != (
                 self.view_epoch,
@@ -1480,6 +1516,11 @@ impl App {
                         let git = self.refresh_git();
                         self.tasks.push(git);
                         self.save_catalog();
+                        if let Some((source, entry)) = self.jump_after_select.take()
+                            && Some(&source) == self.selected.as_ref()
+                        {
+                            return self.jump_to_prompt(&entry);
+                        }
                         if let Some((offset, follow)) = self
                             .selected
                             .as_ref()
@@ -1502,6 +1543,7 @@ impl App {
                         return bottom();
                     }
                     Err(error) => {
+                        self.jump_after_select = None;
                         self.error = Some(error);
                         self.draft_dirty = self.selected.is_some();
                     }
@@ -1611,11 +1653,29 @@ impl App {
                 }
             }
             Message::GitTick => return self.refresh_git(),
+            Message::PromptMenu(s, e) => {
+                if self.selected.as_ref() == Some(&s) && !self.io_busy {
+                    self.context_menu = Some(ContextMenu::Prompt(s, e));
+                }
+            }
+            Message::Fork(s, e) => {
+                self.context_menu = None;
+                if self.selected.as_ref() == Some(&s) && !self.closing && !self.close_requested {
+                    self.select_with_fork(Selection::Session(s), Some(e));
+                }
+            }
+            Message::ShowForks(entry) => return self.show_forks(entry),
+            Message::ViewOriginal(s, e) => {
+                if !self.io_busy {
+                    self.jump_after_select = Some((s.clone(), e));
+                    self.select(Selection::Session(s));
+                }
+            }
             Message::SessionMenu(id, position) => {
-                self.context_menu = Some((MenuTarget::Session(id), position));
+                self.context_menu = Some(ContextMenu::At(MenuTarget::Session(id), position));
             }
             Message::ProjectMenu(path, position) => {
-                self.context_menu = Some((MenuTarget::Project(path), position));
+                self.context_menu = Some(ContextMenu::At(MenuTarget::Project(path), position));
             }
             Message::ToggleStashed => self.stashed_open = !self.stashed_open,
             Message::RenameProject(path) => {
@@ -1863,6 +1923,7 @@ impl App {
                 }
             }
             Message::ToggleAgents => {
+                self.fork_panel = None;
                 self.agents_open = !self.agents_open;
                 if self.settings_open {
                     return self.update_inner(Message::CancelSettings);
@@ -1876,6 +1937,7 @@ impl App {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.settings_open = true;
                 self.agents_open = false;
+                self.fork_panel = None;
             }
             Message::ApplySettings => {
                 if self.pending_settings.is_some() {
@@ -2429,6 +2491,8 @@ impl App {
                             return self.update_inner(Message::ToggleSearch);
                         } else if self.settings_open {
                             return self.update_inner(Message::CancelSettings);
+                        } else if self.fork_panel.is_some() {
+                            return self.show_forks(None);
                         } else if self.agents_open {
                             self.agents_open = false;
                             self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -2709,7 +2773,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         pointer_input(
             self.content(),
-            self.footer_menu_open,
+            self.footer_menu_open || matches!(self.context_menu, Some(ContextMenu::Prompt(..))),
             self.chat_selection.clone(),
         )
     }
@@ -2767,41 +2831,64 @@ impl App {
             body = body.push(self.divider(true)).push(self.settings_panel());
         } else if self.agents_open {
             body = body.push(self.divider(true)).push(self.agents_panel());
+        } else if let Some(panel) = &self.fork_panel {
+            body = body.push(self.divider(true)).push(self.forks_panel(panel));
         }
-        let rail = container(
-            column![
-                space().height(Fill),
+        let mut controls = column![space().height(Fill)];
+        if self.fork_family().is_some() {
+            controls = controls.push(
                 tooltip(
                     theme::button(
-                        container(crate::agent_icon::agent_icon(self.agent_count() > 0))
+                        container(Icon::GitFork.view(22.))
                             .center_x(Fill)
-                            .center_y(34)
+                            .center_y(34),
                     )
                     .width(Fill)
                     .padding(0)
-                    .on_press(Message::ToggleAgents)
+                    .on_press(Message::ShowForks(None))
                     .style(theme::text_button),
-                    text("Agents").size(12),
+                    text("Forks").size(12),
                     tooltip::Position::Left,
                 )
                 .style(card),
-                tooltip(
-                    theme::button(
-                        container(Icon::Settings.view(24.))
-                            .center_x(Fill)
-                            .center_y(34)
+            );
+        }
+        let rail = container(
+            controls
+                .push(
+                    tooltip(
+                        theme::button(
+                            container(crate::agent_icon::agent_icon(self.agent_count() > 0))
+                                .center_x(Fill)
+                                .center_y(34),
+                        )
+                        .width(Fill)
+                        .padding(0)
+                        .on_press(Message::ToggleAgents)
+                        .style(theme::text_button),
+                        text("Agents").size(12),
+                        tooltip::Position::Left,
                     )
-                    .width(Fill)
-                    .padding(0)
-                    .on_press(Message::ToggleSettings)
-                    .style(theme::text_button),
-                    text("Settings").size(12),
-                    tooltip::Position::Left,
+                    .style(card),
                 )
-                .style(card)
-            ]
-            .spacing(12)
-            .width(Fill),
+                .push(
+                    tooltip(
+                        theme::button(
+                            container(Icon::Settings.view(24.))
+                                .center_x(Fill)
+                                .center_y(34),
+                        )
+                        .width(Fill)
+                        .padding(0)
+                        .on_press(Message::ToggleSettings)
+                        .style(theme::text_button),
+                        text("Settings").size(12),
+                        tooltip::Position::Left,
+                    )
+                    .style(card),
+                )
+                .spacing(12)
+                .width(Fill),
         )
         .padding([14, 8])
         .height(Fill)
@@ -2832,7 +2919,10 @@ impl App {
                         .center_y(Fill),
                 )
                 .into()
-        } else if let Some((target, position)) = &self.context_menu {
+        } else if matches!(self.context_menu, Some(ContextMenu::Prompt(..))) {
+            // The icon menu is a native overlay on its trigger, above this dismissal layer.
+            layers.push(dismiss_layer(Message::CloseMenu)).into()
+        } else if let Some(ContextMenu::At(target, position)) = &self.context_menu {
             let dismiss = dismiss_layer(Message::CloseMenu);
             let actions = match target {
                 MenuTarget::Session(id) => column![
@@ -2892,7 +2982,7 @@ impl App {
         } else if self.footer_menu_open {
             let dismiss = dismiss_layer(Message::CloseFooterMenu);
             let right = 50.
-                + if self.settings_open || self.agents_open {
+                + if self.right_panel_open() {
                     self.panel_width() + 5.
                 } else {
                     0.
@@ -3020,6 +3110,9 @@ impl App {
         self.parent_id()
             .and_then(|id| self.harness.as_ref().map(|h| h.active_children(id)))
             .unwrap_or(0)
+    }
+    fn right_panel_open(&self) -> bool {
+        self.settings_open || self.agents_open || self.fork_panel.is_some()
     }
     fn panel_width(&self) -> f32 {
         self.catalog
@@ -3389,7 +3482,10 @@ impl App {
         let Some(session) = self.current() else {
             return self.new_session();
         };
-        let chat: Element<'_, Message> = if session.entries.is_empty() && session.child.is_none() {
+        let chat: Element<'_, Message> = if session.entries.is_empty()
+            && session.child.is_none()
+            && session.origin.is_none()
+        {
             let name = self.project_name(&session.project);
             container(
                 column![
@@ -3419,13 +3515,35 @@ impl App {
                 TranscriptKey::Top,
                 space().height(self.transcript.prefix(range.start)).into(),
             )];
-            for &index in &self.transcript.order[range.clone()] {
+            // Attach the marker to the last projected inherited row. The same
+            // resize sensor accounts for it when groups expand or rows reflow.
+            let boundary = session.origin.as_ref().map(|o| {
+                self.transcript
+                    .order
+                    .partition_point(|&id| ActivityRow::from_id(id).source() < o.inherited)
+            });
+            if self.transcript.order.is_empty()
+                && let Some(o) = &session.origin
+            {
+                children.push((TranscriptKey::ForkPoint, self.fork_separator(o)));
+            }
+            for (position, &index) in range.clone().zip(&self.transcript.order[range.clone()]) {
                 let projected = ActivityRow::from_id(index);
                 let entry = &session.entries[projected.source()];
                 // Resize-only sensors measure every mounted row, even outside the
                 // viewport. Adding on_show would gate measurements on visibility,
                 // mixing real scroll offsets with stale height estimates.
-                let row = widget::sensor(self.activity_row(projected))
+                let content = self.fork_row(session, entry, projected);
+                let content: Element<'_, Message> = match (&session.origin, boundary) {
+                    (Some(o), Some(0)) if position == 0 => {
+                        column![self.fork_separator(o), content].into()
+                    }
+                    (Some(o), Some(n)) if position + 1 == n => {
+                        column![content, self.fork_separator(o)].into()
+                    }
+                    _ => content,
+                };
+                let row = widget::sensor(content)
                     .on_resize(move |size| Message::RowSize(epoch, index, size.height));
                 children.push((
                     TranscriptKey::Entry {
@@ -3443,16 +3561,15 @@ impl App {
                     .into(),
             ));
             let transcript = crate::keyed_column::keyed_column(children);
-            // The shared gutter replaces part of the existing transcript padding;
-            // keep the text width and centered alignment unchanged.
+            // Borrow the action gap from the left inset instead of narrowing the message.
             let transcript = container(transcript)
                 .max_width(self.catalog.settings.chat_width - crate::scrollbar::GUTTER)
                 .width(Fill)
                 .padding(iced::Padding {
                     top: 20.,
                     bottom: 20.,
-                    left: 26.,
-                    right: 26. - crate::scrollbar::GUTTER,
+                    left: 26. - forks::ACTION_GAP,
+                    right: 0.,
                 });
             let content = crate::transcript_viewport::observe(
                 container(transcript).center_x(Fill),
@@ -5024,10 +5141,9 @@ impl App {
                 self.settings_tab = SettingsTab::Account;
                 self.modal = None;
                 self.settings_open = false;
-                self.context_menu = self
-                    .selected
-                    .clone()
-                    .map(|id| (MenuTarget::Session(id), iced::Point::new(160., 260.)));
+                self.context_menu = self.selected.clone().map(|id| {
+                    ContextMenu::At(MenuTarget::Session(id), iced::Point::new(160., 260.))
+                });
             }
             5 => {
                 self.context_menu = None;
@@ -5089,6 +5205,7 @@ impl App {
                 self.refresh();
                 for i in 0..10000 {
                     self.sessions.push(SessionSummary {
+                        origin: None,
                         child: None,
                         id: format!("smoke-sidebar-{i}"),
                         title: format!("Historical session {i} with wrapping title"),
@@ -5663,7 +5780,7 @@ impl App {
             }
             50 => {
                 self.stashed_open = true;
-                self.context_menu = Some((
+                self.context_menu = Some(ContextMenu::At(
                     MenuTarget::Project(PathBuf::from("/tmp/smoke-project-9")),
                     iced::Point::new(660., 400.),
                 ));
@@ -6135,6 +6252,171 @@ mod tests {
     fn app() -> App {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
+    #[tokio::test]
+    async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root).await;
+        let source = app.selected.clone().unwrap();
+        type_message(&mut app, "Explore the parser").await;
+        dispatch(&mut app, Message::Send).await;
+        let entry = app.current().unwrap().entries[0].id.clone();
+        type_message(&mut app, "Keep this source draft").await;
+        let menu = {
+            let mut renderer = header_renderer();
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(1200., 800.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let prompt = bounds.label("Explore the parser");
+            let action = bounds.label("⋯");
+            assert!(action.x >= prompt.x + prompt.width && action.y < prompt.y + prompt.height);
+            click_at(&mut ui, &mut renderer, action.center())
+                .into_iter()
+                .find(|m| matches!(m, Message::PromptMenu(..)))
+                .expect("gutter click opens message actions")
+        };
+        dispatch(&mut app, menu).await;
+        assert!(matches!(app.context_menu, Some(ContextMenu::Prompt(..))));
+        let fork_action = {
+            let mut renderer = header_renderer();
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(1200., 800.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let dots = bounds.label("⋯");
+            let below = iced::Point::new(dots.center_x(), dots.center_y() + 1.5 * dots.height);
+            let messages = click_at(&mut ui, &mut renderer, below);
+            assert!(
+                matches!(messages.as_slice(), [Message::Fork(s,e)] if s == &source && e == &entry),
+                "click directly below the dots: {messages:?}"
+            );
+            messages.into_iter().next().unwrap()
+        };
+        dispatch(&mut app, fork_action).await;
+        let fork = app.selected.clone().unwrap();
+        assert_ne!(source, fork);
+        assert_eq!(app.editor.text(), "Explore the parser");
+        assert!(app.current().unwrap().entries.is_empty());
+        assert!(!app.running());
+        let back = {
+            let mut renderer = header_renderer();
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(1200., 800.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let target = bounds.label("View parent");
+            click_at(&mut ui, &mut renderer, target.center())
+                .into_iter()
+                .find(|m| matches!(m,Message::ViewOriginal(s,e) if s==&source && e==&entry))
+                .expect("first-prompt fork divider opens the source prompt")
+        };
+        dispatch(&mut app, back).await;
+        assert_eq!(app.selected.as_ref(), Some(&source));
+        assert_eq!(app.editor.text(), "Keep this source draft");
+        dispatch(&mut app, Message::ShowForks(Some(entry))).await;
+        assert!(app.fork_panel.is_some() && app.modal.is_none());
+        let open = {
+            let mut renderer = header_renderer();
+            let mut ui = iced_runtime::UserInterface::build(
+                app.view(),
+                iced::Size::new(1200., 800.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            assert!(
+                bounds
+                    .labels
+                    .iter()
+                    .any(|(label, _)| label == "From this prompt")
+            );
+            assert!(bounds.labels.iter().any(|(label, _)| label == "Original"));
+            let picker = bounds
+                .scrolls
+                .iter()
+                .find(|(id, _)| *id == iced::advanced::widget::Id::new("fork-list"))
+                .expect("fork picker");
+            let target = bounds
+                .labels
+                .iter()
+                .find(|(label, rect)| {
+                    label == "Fork · Explore the parser" && picker.1.contains(rect.center())
+                })
+                .expect("branch in picker")
+                .1;
+            click_at(&mut ui, &mut renderer, target.center())
+                .into_iter()
+                .find(|m| matches!(m, Message::Select(id) if id == &fork))
+                .expect("click on branch opens fork")
+        };
+        dispatch(&mut app, open).await;
+        assert_eq!(app.selected.as_ref(), Some(&fork));
+        assert_eq!(app.editor.text(), "Explore the parser");
+        assert!(
+            app.fork_panel.is_some(),
+            "stay open while switching within the family"
+        );
+        let other = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, other).await;
+        assert!(app.fork_panel.is_none() && app.fork_family().is_none());
+    }
+
+    #[tokio::test]
+    async fn fork_separator_marks_the_inherited_boundary_with_and_without_new_messages() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root.clone()).await;
+        let parent = app.selected.clone().unwrap();
+        let h = app.harness.as_ref().unwrap().clone();
+        let mut fork = Session::new(root, &app.catalog.settings);
+        fork.entries
+            .push(Entry::new(EntryKind::Assistant, "Inherited reply"));
+        fork.origin = Some(pico_core::store::ForkOrigin {
+            family: parent.clone(),
+            parent: parent.clone(),
+            entry: "parent-prompt".into(),
+            excerpt: "Choose an approach".into(),
+            inherited: 1,
+        });
+        let id = fork.id.clone();
+        h.store.save_session(&fork).unwrap();
+        h.insert(fork);
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        let transcript = chat_text(&app);
+        assert!(
+            transcript.find("Inherited reply").unwrap() < transcript.find("Forked here").unwrap()
+        );
+        h.edit(&id, |s| s.accept("Only on this branch".into()))
+            .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        let transcript = chat_text(&app);
+        let marker = transcript.find("Forked here").unwrap();
+        assert_eq!(transcript.matches("Forked here").count(), 1);
+        assert!(
+            transcript.find("Inherited reply").unwrap() < marker
+                && marker < transcript.find("Only on this branch").unwrap()
+        );
+        dispatch(&mut app, Message::ShowForks(None)).await;
+        h.remove(&parent).unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert!(app.fork_panel.is_none());
+        assert!(chat_text(&app).contains("Parent deleted"));
+    }
+
     #[tokio::test]
     async fn user_messages_render_and_copy_literally_after_newline_and_paste() {
         use iced::advanced::widget::Operation;
@@ -9700,7 +9982,10 @@ Then implement the fix.";
                     1 => "Stash",
                     _ => "Restore",
                 };
-                app.context_menu = Some((target, iced::Point::new(width - 1., height - 1.)));
+                app.context_menu = Some(ContextMenu::At(
+                    target,
+                    iced::Point::new(width - 1., height - 1.),
+                ));
                 let mut ui = iced_runtime::UserInterface::build(
                     app.view(),
                     iced::Size::new(width, height),
@@ -10008,7 +10293,7 @@ Then implement the fix.";
             MenuTarget::Project(project.clone()),
         ] {
             // Keep the menu away from the project row and Settings header.
-            app.context_menu = Some((target, iced::Point::ORIGIN));
+            app.context_menu = Some(ContextMenu::At(target, iced::Point::ORIGIN));
             app.settings_open = true;
             let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
             let mut bounds = UiBounds::default();
@@ -10057,7 +10342,7 @@ Then implement the fix.";
                 dispatch(&mut app, message).await;
             }
             assert!(matches!(&app.context_menu,
-                Some((MenuTarget::Project(path), position)) if path == &project && *position == point));
+                Some(ContextMenu::At(MenuTarget::Project(path), position)) if path == &project && *position == point));
         }
     }
 
@@ -11123,6 +11408,7 @@ Then implement the fix.";
         app.tasks.clear();
         app.sessions = (0..40)
             .map(|i| SessionSummary {
+                origin: None,
                 child: None,
                 id: format!("sticky-session-{i}"),
                 title: format!("Session {i}"),
@@ -11457,7 +11743,10 @@ Then implement the fix.";
         dispatch(&mut app, Message::ToggleSearch).await;
         dispatch(&mut app, Message::Search("no matches".into())).await;
         app.modal = Some(Modal::AddProject);
-        app.context_menu = Some((MenuTarget::Session(other.id.clone()), iced::Point::ORIGIN));
+        app.context_menu = Some(ContextMenu::At(
+            MenuTarget::Session(other.id.clone()),
+            iced::Point::ORIGIN,
+        ));
         dispatch(&mut app, escape.clone()).await;
         assert!(app.context_menu.is_none());
         assert!(app.modal.is_some());
@@ -12194,6 +12483,7 @@ Then implement the fix.";
                 format!("Message {i}: asymmetric café text."),
             ));
             app.sessions.push(SessionSummary {
+                origin: None,
                 child: None,
                 id: format!("scroll-session-{i}"),
                 title: format!("Session {i}"),

@@ -21,26 +21,25 @@ impl Harness {
             match result {
                 Ok(title) => {
                     let worker = conversation.clone();
-                    let result = tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         let mut saved = worker.persisted.lock().expect("persistence lock");
                         if worker.deleted.load(Ordering::Acquire) {
-                            return Ok(());
+                            return;
                         }
                         {
                             let mut state = worker.state.lock().expect("session lock");
                             if state.title_manually_set {
-                                return Ok(());
+                                return;
                             }
                             state.title = title;
                         }
-                        worker.save_locked(&mut saved)
+                        if let Err(error) = worker.save_locked(&mut saved) {
+                            worker.state.lock().expect("session lock").entries.push(Entry::new(
+                                EntryKind::Notice,
+                                format!("Could not save the automatic session title: {error:#}. The title is retained in memory; keep Pico open, free disk space or fix permissions, then retry saving."),
+                            ));
+                        }
                     }).await.expect("session naming worker");
-                    if let Err(error) = result {
-                        conversation.state.lock().expect("session lock").entries.push(Entry::new(
-                            EntryKind::Notice,
-                            format!("Could not save the automatic session title: {error:#}. The title is retained in memory; keep Pico open, free disk space or fix permissions, then retry saving."),
-                        ));
-                    }
                 }
                 Err(error) => {
                     // The first-message fallback is already durable. Naming must not

@@ -153,12 +153,6 @@ impl CodeMode {
     pub(crate) fn media_lifecycle(&self) -> Option<std::sync::MutexGuard<'_, bool>> {
         self.services.images.as_ref().map(|i| i.media.lifecycle())
     }
-    pub fn remove_media(&self) -> Result<()> {
-        if let Some(images) = &self.services.images {
-            images.media.remove()?;
-        }
-        Ok(())
-    }
     #[cfg(test)]
     pub fn exec(&self, source: &str, parent: &str, cancel: &CancellationToken) -> Result<String> {
         self.exec_output(source, parent, cancel)

@@ -311,29 +311,40 @@ fn open_file(root: &File, relative: &Path) -> Result<Option<File>> {
 }
 
 pub fn capture(root: &Path, storage: &Path, text: &str) -> Result<Vec<Attachment>> {
+    capture_reusing(&[], root, storage, text)
+}
+pub(crate) fn capture_reusing(
+    saved: &[Attachment],
+    root: &Path,
+    storage: &Path,
+    text: &str,
+) -> Result<Vec<Attachment>> {
     let paths = mentions(text);
     if paths.is_empty() {
         return Ok(vec![]);
     }
-    let Some(root) = resolve_path(rustix::fs::open(
-        root,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    ))
-    .context("Open workspace for file tags")?
-    else {
-        return Ok(vec![]);
-    };
+    let mut root_fd = None;
     let mut seen = HashSet::new();
     let mut attachments = Vec::new();
     let mut remaining = INLINE_MESSAGE_BYTES;
     for path in paths {
         let name = encode(&path);
         let attachment = (|| -> Result<Option<Attachment>> {
-            let Some(mut source) = open_file(&root, &path)? else { return Ok(None); };
+            if let Some(file) = saved.iter().find(|file| file.name == name) {
+                if attachments.iter().any(|f: &Attachment| f.name == name) { return Ok(None); }
+                let mut file = file.clone();
+                if let Some(inline) = &file.inline {
+                    if inline.len() <= remaining { remaining -= inline.len(); }
+                    else { file.inline = None; file.materialize()?; }
+                }
+                return Ok(Some(file));
+            }
+            if root_fd.is_none() { root_fd = resolve_path(rustix::fs::open(root, rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())).context("Open workspace for file tags")?; }
+            let Some(root_fd) = &root_fd else { return Ok(None); };
+            let Some(mut source) = open_file(root_fd, &path)? else { return Ok(None); };
             let before = source.metadata()?;
             if !seen.insert((before.dev(), before.ino())) { return Ok(None); }
-            if attachments.is_empty() {
+            if seen.len() == 1 {
                 fs::create_dir_all(storage)?;
                 fs::set_permissions(storage, fs::Permissions::from_mode(0o700))?;
             }
@@ -365,7 +376,7 @@ pub fn capture(root: &Path, storage: &Path, text: &str) -> Result<Vec<Attachment
             attachments.push(attachment);
         }
     }
-    if !attachments.is_empty() {
+    if !seen.is_empty() {
         File::open(storage)?.sync_all()?;
     }
     Ok(attachments)

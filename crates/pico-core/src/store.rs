@@ -1,10 +1,12 @@
 //! Durable V2 state. Provider context and the complete visible transcript are separate.
+mod forks;
 use crate::{
     agent::subagents::Profile,
     history::{History, Record},
     models::{DEFAULT_MODEL, MODELS, model},
 };
 use anyhow::{Context, Result, bail};
+pub use forks::ForkOrigin;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -358,6 +360,12 @@ pub struct InProgressResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default)]
+    pub origin: Option<ForkOrigin>,
+    #[serde(skip)]
+    pub(crate) points: im::OrdMap<usize, Arc<forks::Point>>,
+    #[serde(default)]
+    pub draft_files: Vec<crate::file_tags::Attachment>,
     pub id: String,
     #[serde(default)]
     pub child: Option<crate::agent::subagents::Child>,
@@ -402,6 +410,9 @@ impl Session {
     pub fn new(project: PathBuf, settings: &Settings) -> Self {
         Self {
             id: id(),
+            origin: None,
+            points: Default::default(),
+            draft_files: vec![],
             child: None,
             subagent_notices: vec![],
             project,
@@ -460,11 +471,17 @@ impl Session {
         self.accept_submission(id(), message, false);
     }
     pub fn accept_submission(&mut self, submission: String, message: UserMessage, steering: bool) {
-        if self.needs_title() {
+        if self.needs_title()
+            || (!self.title_manually_set
+                && self
+                    .origin
+                    .as_ref()
+                    .is_some_and(|o| o.inherited == self.entries.len()))
+        {
             self.title = message
                 .text
                 .lines()
-                .find(|line| !line.trim().is_empty())
+                .find(|s| !s.trim().is_empty())
                 .unwrap_or("Image message")
                 .chars()
                 .take(64)
@@ -486,6 +503,7 @@ impl Session {
         self.pending.push(message);
         self.draft.clear();
         self.draft_images.clear();
+        self.draft_files.clear();
     }
     pub fn consume_pending(&mut self) {
         for notice in self.subagent_notices.drain(..) {
@@ -523,6 +541,8 @@ impl Session {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
     #[serde(default)]
+    pub origin: Option<ForkOrigin>,
+    #[serde(default)]
     pub child: Option<crate::agent::subagents::Child>,
     pub needs_attention: bool,
     /// A successful main turn completed since the session was last opened.
@@ -541,6 +561,7 @@ impl From<&Session> for SessionSummary {
     fn from(s: &Session) -> Self {
         Self {
             child: s.child.clone(),
+            origin: s.origin.clone(),
             needs_attention: s.needs_attention,
             unchecked_completion: s.unchecked_completion,
             settled_at: s.settled_at,
@@ -582,6 +603,9 @@ impl Store {
             CREATE TABLE IF NOT EXISTS entries (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));
             CREATE TABLE IF NOT EXISTS subagent_runs (id TEXT PRIMARY KEY, parent TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, request TEXT NOT NULL, metadata TEXT NOT NULL, result TEXT, error TEXT, UNIQUE(parent,request));
             CREATE INDEX IF NOT EXISTS subagent_parent ON subagent_runs(parent);
+            CREATE TABLE IF NOT EXISTS fork_media (session TEXT REFERENCES sessions(id) ON DELETE CASCADE, owner TEXT NOT NULL, PRIMARY KEY(session,owner));
+            CREATE INDEX IF NOT EXISTS fork_media_owner ON fork_media(owner);
+            CREATE TABLE IF NOT EXISTS fork_points (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, state TEXT NOT NULL, entries TEXT NOT NULL, input TEXT NOT NULL, PRIMARY KEY(session,position));
             CREATE TABLE IF NOT EXISTS context (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));")?;
         Ok(Self {
             root,
@@ -651,6 +675,7 @@ impl Store {
         }
         session.entries = read_history(&db, "entries", id)?;
         session.input = read_history(&db, "context", id)?;
+        forks::load(&db, &mut session)?;
         Ok(session)
     }
     pub fn read_optional<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
@@ -723,6 +748,7 @@ impl Store {
             before.map(|s| &s.input),
             &session.input,
         )?;
+        forks::save(&tx, before, session)?;
         if let Some(run) = run {
             tx.execute("INSERT INTO subagent_runs (id,parent,session,request,metadata) VALUES (?1,?2,?3,?4,?5)", params![run.run_id,run.parent_id,run.session_id,run.request_id,serde_json::to_string(run)?])?;
         }
@@ -732,12 +758,31 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    pub fn delete_session(&self, id: &str) -> Result<()> {
-        self.db
-            .lock()
-            .expect("database lock")
-            .execute("DELETE FROM sessions WHERE id=?1", [id])?;
-        Ok(())
+    /// Media paths are embedded in immutable tool/context records (including
+    /// compacted context). Keep ancestor directories until their last user goes.
+    pub(crate) fn delete_sessions(
+        &self,
+        ids: &std::collections::HashSet<String>,
+    ) -> Result<Vec<String>> {
+        let mut db = self.db.lock().expect("database lock");
+        let tx = db.transaction()?;
+        let mut candidates = ids.clone();
+        for id in ids {
+            let mut stmt = tx.prepare_cached("SELECT owner FROM fork_media WHERE session=?1")?;
+            for row in stmt.query_map([id], |r| r.get::<_, String>(0))? {
+                candidates.insert(row?);
+            }
+            tx.execute("DELETE FROM sessions WHERE id=?1", [id])?;
+        }
+        let mut unused = Vec::new();
+        for owner in candidates {
+            Uuid::parse_str(&owner)?;
+            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 UNION ALL SELECT 1 FROM fork_media WHERE owner=?1)", [&owner], |r| r.get::<_,bool>(0))? {
+                unused.push(owner);
+            }
+        }
+        tx.commit()?;
+        Ok(unused)
     }
     pub fn api_key(&self) -> Result<Option<String>> {
         self.read_optional::<String>("image-api-key.json")
