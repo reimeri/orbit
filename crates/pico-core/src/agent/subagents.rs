@@ -1040,8 +1040,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_child_profiles_have_web_search() {
+    async fn both_child_profiles_have_web_search_and_workspace_skill_metadata() {
         let mut f = Fixture::new().await;
+        let dir = f._dir.path().join(".agents/skills/audit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: audit\ndescription: Inspect test coverage\n---\nBody for selected skill only.").unwrap();
         let mut pending = vec![];
         for profile in [Profile::Explore, Profile::Review] {
             let child = f.spawn(profile, None, profile.label()).unwrap();
@@ -1053,6 +1056,16 @@ mod tests {
                 &["exec_command", "write_stdin", "web__run", "view_image"],
             )
             .await;
+            let input = request.body["input"].as_array().unwrap();
+            assert!(!input[0].to_string().contains("Inspect test coverage"));
+            assert!(input[1..].iter().any(|item| item["role"] == "developer"
+                && item.to_string().contains("Inspect test coverage")));
+            assert!(
+                !request
+                    .body
+                    .to_string()
+                    .contains("Body for selected skill only.")
+            );
             pending.push(request);
         }
     }

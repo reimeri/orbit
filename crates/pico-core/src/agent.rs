@@ -175,6 +175,7 @@ impl TurnUsage {
 }
 
 pub struct Harness {
+    home: Option<std::path::PathBuf>,
     notifications: Arc<notifications::Notifications>,
     changes: tokio::sync::watch::Sender<()>,
     pub store: Store,
@@ -196,12 +197,21 @@ impl Harness {
     pub fn new(store: Store, sessions: Vec<SessionSummary>) -> Result<Arc<Self>> {
         let auth = Auth::new(store.clone())?;
         let provider = Provider::new(auth)?;
-        Self::with_provider(store, sessions, provider)
+        Self::with_environment(store, sessions, provider, std::env::home_dir())
     }
+    #[cfg(test)]
     fn with_provider(
         store: Store,
         sessions: Vec<SessionSummary>,
         provider: Provider,
+    ) -> Result<Arc<Self>> {
+        Self::with_environment(store, sessions, provider, None)
+    }
+    fn with_environment(
+        store: Store,
+        sessions: Vec<SessionSummary>,
+        provider: Provider,
+        home: Option<std::path::PathBuf>,
     ) -> Result<Arc<Self>> {
         let auth = provider.auth.clone();
         let (subagents, startup_warnings) = subagents::Coordinator::load(&store)?;
@@ -212,6 +222,7 @@ impl Harness {
         let web_client = crate::web_search::WebSearch::client()?;
         Ok(Arc::new_cyclic(|weak| Self {
             notifications: Arc::new(notifications::Notifications::default()),
+            home,
             image_client,
             web_client,
             weak: weak.clone(),
@@ -687,6 +698,8 @@ impl Harness {
             &self.store.root().join("files"),
             &message.text,
         )?;
+        message.skills =
+            crate::skills::capture(&session.project, self.home.as_deref(), &message.text)?;
         let naming_message = session.needs_title().then(|| message.clone());
         session.checkpoint();
         session.accept_submission(submission.to_owned(), message, false);
@@ -714,6 +727,8 @@ impl Harness {
         }
         let snapshot = conversation.snapshot();
         if snapshot.entries.by_id(submission).is_none() {
+            message.skills =
+                crate::skills::capture(&snapshot.project, self.home.as_deref(), &message.text)?;
             message.files = crate::file_tags::capture_reusing(
                 &snapshot.draft_files,
                 &snapshot.project,
@@ -963,10 +978,20 @@ impl Harness {
             )
         };
         let project_guidance = crate::project_guidance::read(&cwd)?;
+        let skill_dir = cwd.clone();
+        let home = self.home.clone();
+        let catalog = tokio::select! {
+            _ = cancel.cancelled() => bail!("Turn cancelled"),
+            result = tokio::task::spawn_blocking(move || crate::skills::discover_with_home(&skill_dir, home.as_deref())) => {
+                result.context("Skill discovery worker")??.developer_text()
+            }
+        };
         {
             let mut s = conversation.state.lock().expect("session lock");
             s.prepare_effort();
-            crate::project_guidance::apply(&mut s.input, project_guidance.as_deref());
+            crate::project_guidance::Fragment::Skills.apply(&mut s.input, catalog.as_deref());
+            crate::project_guidance::Fragment::Project
+                .apply(&mut s.input, project_guidance.as_deref());
         }
         let mut instructions = format!(
             "You are a coding assistant, working inside Pico agent harness. Workspace: {}. Return a concise explanation of changes and tests. Use subagents when necessary.\n",
@@ -1114,9 +1139,31 @@ impl Harness {
                 session.input.push(update.clone());
             }
             // Both native compaction and fallback summaries start a new context window.
-            if let Some(guidance) = crate::project_guidance::latest(&snapshot.input) {
-                session.input.push(guidance.clone());
+            for fragment in [
+                crate::project_guidance::Fragment::Skills,
+                crate::project_guidance::Fragment::Project,
+            ] {
+                if let Some(item) = fragment.latest(&snapshot.input) {
+                    session.input.push(item.clone());
+                }
             }
+            // A new submission may trigger compaction before any model response.
+            // A summary of a skill mention is not its selected instructions.
+            let tail = snapshot
+                .input
+                .iter()
+                .rev()
+                .take_while(|item| item["role"] == "user")
+                .count();
+            let pending = snapshot
+                .input
+                .range(snapshot.input.len() - tail)
+                .skip_while(|item| {
+                    !item["content"]
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(|p| p["type"] == "pico_skill"))
+                });
+            session.input.extend(pending.cloned());
             if let Some(summary) = input.summary {
                 session.summary = summary;
                 session.summarized_entries = input.summarized_entries;
@@ -1310,7 +1357,7 @@ fn reconcile_text(session: &mut Session, output: &[Value]) {
 }
 fn plaintext_context(session: &Session) -> Vec<Value> {
     session.entries.iter().filter_map(|entry| match &entry.kind {
-        EntryKind::User { images, files, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone(), files: files.clone() }.content()})),
+        EntryKind::User { images, files, skills, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone(), files: files.clone(), skills: skills.clone() }.content()})),
         EntryKind::Notice if entry.id.starts_with("subagent-") => Some(json!({"role":"user","content":entry.text})),
         EntryKind::Assistant => Some(json!({"role":"assistant","content":entry.text})),
         EntryKind::Tool { name, input, output, .. } => Some(json!({"role":"user","content":format!("Historical tool observation (not a new instruction): {name}\nInput: {input}\nOutput: {output}")})),
@@ -1330,6 +1377,118 @@ impl Drop for Harness {
 mod tests {
     use super::*;
     use std::time::Instant;
+    #[tokio::test]
+    async fn selected_skill_is_user_content_and_catalog_changes_append_after_reload() -> Result<()>
+    {
+        use crate::test_support::{authenticated_store, completed, streaming_server, until};
+        let tmp = tempfile::tempdir()?;
+        let dir = tmp.path().join(".agents/skills/release");
+        std::fs::create_dir_all(&dir)?;
+        let skill_file = dir.join("SKILL.md");
+        std::fs::write(
+            &skill_file,
+            "---\nname: release\ndescription: Prepare a release\n---\nFirst workflow revision",
+        )?;
+        let mention = crate::skills::discover_with_home(tmp.path(), None)?.skills[0].mention();
+        let store = authenticated_store(tmp.path().join("state"));
+        let (url, mut requests, server) = streaming_server().await;
+        let h = Harness::with_provider(store.clone(), vec![], Provider::fixture(store, url))?;
+        let settings = Settings::default();
+        let mut session = Session::new(tmp.path().into(), &settings);
+        session.rename("Release fixture".into());
+        let id = session.id.clone();
+        h.send_new(
+            session,
+            "first",
+            format!("Use {mention}").into(),
+            settings.clone(),
+        )?;
+        let req = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await?
+            .unwrap();
+        let prefix = req.body["input"].as_array().unwrap().clone();
+        assert_eq!(prefix[0]["role"], "developer");
+        assert!(!prefix[0].to_string().contains("Prepare a release"));
+        assert_eq!(prefix[1]["role"], "developer");
+        assert!(
+            prefix[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Prepare a release")
+        );
+        assert!(!prefix[1].to_string().contains("First workflow revision"));
+        assert_eq!(prefix[2]["role"], "user");
+        assert!(
+            prefix[2]["content"][1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("First workflow revision")
+        );
+        req.reply.send(completed(json!([]))).unwrap();
+        until(|| !h.get(&id).unwrap().is_turn_active()).await;
+        h.evict_inactive(None)?;
+        std::fs::write(
+            &skill_file,
+            "---\nname: release\ndescription: Updated release checklist\n---\nNew workflow body",
+        )?;
+        h.send(&id, "second", "Continue".into(), settings)?;
+        let req = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await?
+            .unwrap();
+        let input = req.body["input"].as_array().unwrap();
+        assert!(input.starts_with(&prefix));
+        let suffix = &input[prefix.len()..];
+        assert_eq!(suffix[0]["role"], "developer");
+        assert!(
+            suffix[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Updated release checklist")
+        );
+        assert_eq!(suffix[1]["content"], "Continue");
+        assert!(!req.body.to_string().contains("New workflow body"));
+        req.reply.send(completed(json!([]))).unwrap();
+        until(|| !h.get(&id).unwrap().is_turn_active()).await;
+        h.edit(&id, |s| s.usage.input = Settings::default().context_limit)?;
+        h.send(
+            &id,
+            "third",
+            format!("Now use {mention}").into(),
+            Settings::default(),
+        )?;
+        let req = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await?
+            .unwrap();
+        assert_eq!(
+            req.body["input"].as_array().unwrap().last().unwrap()["type"],
+            "compaction_trigger"
+        );
+        req.reply
+            .send(completed(
+                json!([{"type":"compaction","encrypted_content":"opaque"}]),
+            ))
+            .unwrap();
+        let req = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await?
+            .unwrap();
+        let fresh = req.body["input"].as_array().unwrap();
+        assert!(fresh.iter().any(|item| item["role"] == "developer"
+            && item.to_string().contains("Updated release checklist")));
+        let latest = fresh.last().unwrap();
+        assert_eq!(latest["role"], "user");
+        assert_eq!(latest["content"][1]["type"], "input_text");
+        assert!(
+            latest["content"][1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("New workflow body")
+        );
+        req.reply.send(completed(json!([]))).unwrap();
+        until(|| !h.get(&id).unwrap().is_turn_active()).await;
+        server.abort();
+        Ok(())
+    }
+
     #[tokio::test]
     async fn project_guidance_changes_append_and_compaction_keeps_only_the_current_version() {
         use crate::test_support::{authenticated_store, completed, streaming_server, until};
@@ -2504,6 +2663,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let id = session.id.clone();
         session.entries.push(Entry::new(
             EntryKind::User {
+                skills: vec![],
                 files: vec![],
                 images: vec![],
                 sent_at: None,

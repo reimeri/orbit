@@ -228,13 +228,16 @@ pub struct UserMessage {
     pub images: Vec<crate::media::Media>,
     #[serde(default)]
     pub files: Vec<crate::file_tags::Attachment>,
+    /// Explicit skill bodies captured at submission, never developer instructions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 }
 impl UserMessage {
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.images.is_empty()
     }
     pub fn content(&self) -> Value {
-        if self.images.is_empty() && self.files.is_empty() {
+        if self.images.is_empty() && self.files.is_empty() && self.skills.is_empty() {
             return serde_json::json!(self.text);
         }
         let mut parts = Vec::new();
@@ -263,6 +266,9 @@ impl UserMessage {
             .into_iter()
             .map(|part| serde_json::to_value(part).expect("content part"))
             .collect();
+        for skill in &self.skills {
+            parts.push(serde_json::json!({"type":"pico_skill", "text":skill}));
+        }
         for file in &self.files {
             if file.image.is_some() {
                 parts.push(serde_json::json!({"type":"input_text", "text":format!("Attached workspace image {} ({} bytes)", file.name, file.bytes)}));
@@ -277,6 +283,7 @@ impl From<String> for UserMessage {
         Self {
             text,
             images: vec![],
+            skills: vec![],
             files: vec![],
         }
     }
@@ -302,6 +309,8 @@ pub enum EntryKind {
         images: Vec<crate::media::Media>,
         #[serde(default)]
         files: Vec<crate::file_tags::Attachment>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
         /// Submitted during an active turn and not yet consumed at a model boundary.
         #[serde(default)]
         steering: bool,
@@ -572,6 +581,7 @@ impl Session {
             kind: EntryKind::User {
                 images: message.images.clone(),
                 files: message.files.clone(),
+                skills: message.skills.clone(),
                 sent_at: Some(accepted_at),
                 steering,
             },
@@ -984,6 +994,7 @@ mod tests {
             .image(png.get_ref())
             .unwrap();
         let message = UserMessage {
+            skills: vec![],
             files: vec![],
             text: String::new(),
             images: vec![image.clone()],
@@ -997,6 +1008,7 @@ mod tests {
         session.accept_submission(
             "steering".into(),
             UserMessage {
+                skills: vec![],
                 files: vec![],
                 text: "Compare this image".into(),
                 images: vec![image.clone()],

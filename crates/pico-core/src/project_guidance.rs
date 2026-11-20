@@ -1,12 +1,31 @@
-//! Project guidance belongs to its provider history window, not the developer prompt.
-//! Store a local item so forks, retries and restarts retain the applied version and a
-//! user writing the same marker text in chat cannot impersonate a previous snapshot.
+//! Versioned workspace context belongs to provider history, not the stable base
+//! prompt. Local item types distinguish our snapshots from conversation text.
 use crate::history::History;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
 
-const KIND: &str = "pico_project_instructions";
+#[derive(Clone, Copy)]
+pub(crate) enum Fragment {
+    Project,
+    Skills,
+}
+impl Fragment {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Project => "pico_project_instructions",
+            Self::Skills => "pico_skill_catalog",
+        }
+    }
+    pub(crate) fn latest(self, input: &History<Value>) -> Option<&Value> {
+        input.iter().rev().find(|item| item["type"] == self.kind())
+    }
+    pub(crate) fn apply(self, input: &mut History<Value>, text: Option<&str>) {
+        if self.latest(input).and_then(|item| item["text"].as_str()) != text {
+            input.push(json!({"type": self.kind(), "text": text}));
+        }
+    }
+}
 
 pub(crate) fn read(cwd: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(cwd.join("AGENTS.md")) {
@@ -16,18 +35,11 @@ pub(crate) fn read(cwd: &Path) -> Result<Option<String>> {
     }
 }
 
-pub(crate) fn latest(input: &History<Value>) -> Option<&Value> {
-    input.iter().rev().find(|item| item["type"] == KIND)
-}
-
-pub(crate) fn apply(input: &mut History<Value>, text: Option<&str>) {
-    if latest(input).and_then(|item| item["text"].as_str()) != text {
-        input.push(json!({"type": KIND, "text": text}));
-    }
-}
-
 pub(crate) fn wire_item(item: &Value) -> Value {
-    if item["type"] != KIND {
+    if item["type"] == Fragment::Skills.kind() {
+        return json!({"type":"message","role":"developer","content":item["text"].as_str().unwrap_or("No skills are currently advertised. This replaces any earlier skill catalog.")});
+    }
+    if item["type"] != Fragment::Project.kind() {
         return item.clone();
     }
     let content = match item["text"].as_str() {

@@ -9,6 +9,7 @@ impl Harness {
         mut message: UserMessage,
     ) {
         message.files.clear();
+        message.skills.clear();
         // Set before spawning so an idle session cannot be evicted underneath the result.
         conversation.naming.store(true, Ordering::Release);
         let harness = self.clone();

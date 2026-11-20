@@ -22,6 +22,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum Message {
     Results(Response),
+    Skills(u64, Result<pico_core::skills::Catalog, String>),
     Move(bool),
     Accept {
         request: u64,
@@ -36,12 +37,44 @@ pub struct Completion {
     services: VecDeque<Arc<Service>>,
     service: Option<Arc<Service>>,
     session: Option<String>,
-    token: Option<(usize, Token)>,
-    dismissed: Option<(usize, Token)>,
+    token: Option<(usize, Trigger, Token)>,
+    dismissed: Option<(usize, Trigger, Token)>,
+    in_code: bool,
+    skill_epoch: u64,
+    catalog: Option<Result<pico_core::skills::Catalog, String>>,
+    skill_rows: Vec<usize>,
     request: u64,
     response: Response,
     selected: usize,
     ignored: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    File,
+    Skill,
+}
+
+fn active(text: &str, cursor: usize) -> Option<(Trigger, Token)> {
+    if let Some(token) = file_tags::active(text, cursor) {
+        return Some((Trigger::File, token));
+    }
+    let start = text[..cursor].rfind('$')?;
+    if start > 0 && !text[..start].ends_with(char::is_whitespace) {
+        return None;
+    }
+    let is_name = |c: char| c.is_ascii_alphanumeric() || c == '-';
+    let end = text[start + 1..]
+        .find(|c| !is_name(c))
+        .map_or(text.len(), |n| n + start + 1);
+    (cursor <= end).then(|| {
+        (
+            Trigger::Skill,
+            Token {
+                range: start..end,
+                query: text.as_bytes()[start + 1..cursor].to_vec(),
+            },
+        )
+    })
 }
 impl Completion {
     pub fn workspace(
@@ -85,8 +118,8 @@ impl Completion {
         let next = if cursor.selection.is_none() && self.service.is_some() {
             editor
                 .line(cursor.position.line)
-                .and_then(|line| file_tags::active(&line.text, cursor.position.column))
-                .map(|token| (cursor.position.line, token))
+                .and_then(|line| active(&line.text, cursor.position.column))
+                .map(|(kind, token)| (cursor.position.line, kind, token))
         } else {
             None
         };
@@ -96,14 +129,40 @@ impl Completion {
         if self.dismissed != next {
             self.dismissed = None;
         }
-        let same_token =
-            self.token
-                .as_ref()
-                .zip(next.as_ref())
-                .is_some_and(|((line, old), (new_line, new))| {
-                    line == new_line && old.range.start == new.range.start
-                });
+        let same_token = self.token.as_ref().zip(next.as_ref()).is_some_and(
+            |((line, kind, old), (new_line, new_kind, new))| {
+                kind == new_kind && line == new_line && old.range.start == new.range.start
+            },
+        );
         if !same_token {
+            // Only parse Markdown when entering a new skill token, not on each
+            // keystroke. A link embedded in a code example is not a selection.
+            self.in_code = next.as_ref().is_some_and(|(line, kind, token)| {
+                if *kind != Trigger::Skill {
+                    return false;
+                }
+                let prefix: usize = editor
+                    .lines()
+                    .take(*line)
+                    .map(|line| line.text.len() + line.ending.as_str().len().max(1))
+                    .sum();
+                let pos = prefix + token.range.start;
+                pulldown_cmark::Parser::new(&editor.text())
+                    .into_offset_iter()
+                    .any(|(e, r)| {
+                        r.contains(&pos)
+                            && matches!(
+                                e,
+                                pulldown_cmark::Event::Code(_)
+                                    | pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(
+                                        _
+                                    ))
+                            )
+                    })
+            });
+            self.skill_epoch += 1;
+            self.catalog = None;
+            self.skill_rows.clear();
             self.response = Response::default();
             self.selected = 0;
             self.ignored = false;
@@ -116,15 +175,49 @@ impl Completion {
             self.request += 1;
         }
     }
+    fn picking_skill(&self) -> bool {
+        matches!(self.token, Some((_, Trigger::Skill, _)))
+    }
     fn query(&mut self) {
-        if let (Some(service), Some((_, token))) = (&self.service, &self.token) {
+        if let (Some(service), Some((_, kind, token))) = (&self.service, &self.token) {
             self.request += 1;
             self.response.phase = SearchPhase::Pending;
-            service.query(self.request, token.query.clone(), self.ignored);
+            if *kind == Trigger::Skill {
+                self.response = Response {
+                    request: self.request,
+                    phase: SearchPhase::Pending,
+                    ..Default::default()
+                };
+                if let Some(result) = &self.catalog {
+                    self.response.phase = SearchPhase::Complete;
+                    match result {
+                        Ok(catalog) => {
+                            let query = String::from_utf8_lossy(&token.query).to_ascii_lowercase();
+                            self.skill_rows = catalog
+                                .skills
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, skill)| skill.name.contains(&query))
+                                .map(|(i, _)| i)
+                                .collect();
+                            self.response.paths = self
+                                .skill_rows
+                                .iter()
+                                .map(|&i| catalog.skills[i].mention())
+                                .collect();
+                            self.response.status = catalog.warnings.join("\n");
+                        }
+                        Err(error) => self.response.status.clone_from(error),
+                    }
+                }
+                self.selected = 0;
+            } else {
+                service.query(self.request, token.query.clone(), self.ignored);
+            }
         }
     }
     pub fn is_open(&self) -> bool {
-        self.token.is_some() && self.token != self.dismissed
+        !self.in_code && self.token.is_some() && self.token != self.dismissed
     }
     pub fn dismiss(&mut self) {
         self.dismissed = self.token.clone();
@@ -136,8 +229,14 @@ impl Completion {
     /// Returns whether the editor was mutated; drafts use the normal autosave path.
     pub fn update(&mut self, message: Message, editor: &mut text_editor::Content) -> bool {
         match message {
+            Message::Skills(epoch, result) => {
+                if self.is_open() && self.picking_skill() && epoch == self.skill_epoch {
+                    self.catalog = Some(result);
+                    self.query();
+                }
+            }
             Message::Results(response) => {
-                if response.request != self.request || !self.is_open() {
+                if self.picking_skill() || response.request != self.request || !self.is_open() {
                     return false;
                 }
                 let selected = self.response.paths.get(self.selected).cloned();
@@ -151,7 +250,7 @@ impl Completion {
                     .unwrap_or(0);
                 self.response = response;
                 // An exact accepted token does not reopen just because the cursor returned.
-                if let Some((line, token)) = &self.token
+                if let Some((line, _, token)) = &self.token
                     && let Some(value) = editor.line(*line)
                     && self
                         .response
@@ -184,7 +283,7 @@ impl Completion {
                     return false;
                 }
                 if let Some(path) = path.filter(|path| self.response.paths.contains(path))
-                    && let Some((line, token)) = &self.token
+                    && let Some((line, _, token)) = &self.token
                 {
                     let mut cursor = editor.cursor();
                     cursor.position.line = *line;
@@ -202,7 +301,10 @@ impl Completion {
                 }
             }
             Message::Refresh => {
-                if let Some(service) = &self.service {
+                if self.picking_skill() {
+                    self.skill_epoch += 1;
+                    self.catalog = None;
+                } else if let Some(service) = &self.service {
                     service.refresh();
                 }
                 self.query();
@@ -231,6 +333,9 @@ impl Completion {
         {
             return None;
         }
+        if self.picking_skill() && self.response.paths.is_empty() {
+            return None;
+        }
         match event.key {
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::Move(true)),
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::Move(false)),
@@ -251,7 +356,18 @@ impl Completion {
         self.service
             .as_ref()
             .map_or_else(Subscription::none, |service| {
-                Subscription::run_with(Events(service.clone()), events)
+                let files = Subscription::run_with(Events(service.clone()), events);
+                if self.is_open() && self.picking_skill() && self.catalog.is_none() {
+                    Subscription::batch([
+                        files,
+                        Subscription::run_with(
+                            (self.skill_epoch, service.root.clone()),
+                            skill_events,
+                        ),
+                    ])
+                } else {
+                    files
+                }
             })
     }
     pub fn view(&self) -> Element<'_, Message> {
@@ -275,7 +391,31 @@ impl Completion {
             .take(VISIBLE)
         {
             let selected = index == self.selected;
-            let label = crate::ellipsized_text::ellipsized_text(path, LABEL_SIZE, None);
+            let label: Element<'_, Message> = if self.picking_skill() {
+                let skill = &self
+                    .catalog
+                    .as_ref()
+                    .expect("loaded skills")
+                    .as_ref()
+                    .expect("skill rows")
+                    .skills[self.skill_rows[index]];
+                let scope = if skill.personal { "Personal" } else { "Repo" };
+                column![
+                    crate::ellipsized_text::ellipsized_text(
+                        &format!("{} · {scope} · {}", skill.name, skill.path.display()),
+                        LABEL_SIZE,
+                        None
+                    ),
+                    crate::ellipsized_text::ellipsized_text(
+                        skill.description.as_str(),
+                        LABEL_SIZE,
+                        None
+                    ),
+                ]
+                .into()
+            } else {
+                crate::ellipsized_text::ellipsized_text(path, LABEL_SIZE, None)
+            };
             rows = rows.push(
                 theme::button(label)
                     .padding(ROW_PADDING)
@@ -290,7 +430,11 @@ impl Completion {
         let status = if !self.response.status.is_empty() {
             Some(self.response.status.as_str())
         } else if self.response.phase != SearchPhase::Pending && self.response.paths.is_empty() {
-            Some("No matching files")
+            Some(if self.picking_skill() {
+                "No matching skills"
+            } else {
+                "No matching files"
+            })
         } else {
             None
         };
@@ -299,10 +443,11 @@ impl Completion {
                 container(text(status).size(LABEL_SIZE).style(theme::muted)).padding(ROW_PADDING),
             );
         }
-        if self
-            .token
-            .as_ref()
-            .is_some_and(|(_, token)| token.query.contains(&b'/'))
+        if !self.picking_skill()
+            && self
+                .token
+                .as_ref()
+                .is_some_and(|(_, _, token)| token.query.contains(&b'/'))
         {
             rows = rows.push(
                 theme::button(
@@ -324,7 +469,11 @@ impl Completion {
             .padding(4)
             .style(theme::sidebar_control)
             .on_press(Message::Refresh),
-            "Refresh workspace files",
+            if self.picking_skill() {
+                "Refresh skills"
+            } else {
+                "Refresh workspace files"
+            },
         );
         container(row![rows, refresh].spacing(4))
             .padding(INSET)
@@ -332,6 +481,18 @@ impl Completion {
             .style(theme::card)
             .into()
     }
+}
+fn skill_events(
+    (epoch, path): &(u64, PathBuf),
+) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let (epoch, path) = (*epoch, path.clone());
+    iced::futures::stream::once(async move {
+        let result = tokio::task::spawn_blocking(move || pico_core::skills::discover(&path))
+            .await
+            .expect("skill discovery worker")
+            .map_err(|e| format!("Could not discover skills: {e:#}"));
+        Message::Skills(epoch, result)
+    })
 }
 #[derive(Clone)]
 struct Events(Arc<Service>);
@@ -364,6 +525,45 @@ fn events(events: &Events) -> impl iced::futures::Stream<Item = Message> + use<>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skill_picker_filters_and_inserts_a_path_qualified_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".agents/skills/work flow");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: fixture-lookup\ndescription: Look it up\n---\nSteps",
+        )
+        .unwrap();
+        let mut picker = Completion::default();
+        picker
+            .workspace(Some(("s".into(), root.path().into())), cache.path().into())
+            .unwrap();
+        let mut editor = text_editor::Content::with_text("λ $fixture-look later");
+        let mut cursor = editor.cursor();
+        cursor.position.column = "λ $fixture".len();
+        editor.move_to(cursor);
+        picker.edited(&editor);
+        assert!(picker.is_open());
+        let catalog = pico_core::skills::discover(root.path()).unwrap();
+        picker.update(
+            Message::Skills(picker.skill_epoch, Ok(catalog)),
+            &mut editor,
+        );
+        assert!(picker.update(picker.accept_selected(), &mut editor));
+        let authored = editor.text();
+        assert!(authored.starts_with("λ [$fixture-lookup](<skill:///"));
+        assert!(authored.ends_with("work%20flow/SKILL.md>) later"));
+        assert!(!picker.is_open());
+        let mut example = text_editor::Content::with_text("```sh\n$fixture\n```");
+        let mut cursor = example.cursor();
+        cursor.position.line = 1;
+        cursor.position.column = 1;
+        example.move_to(cursor);
+        picker.edited(&example);
+        assert!(!picker.is_open());
+    }
     #[test]
     fn loading_does_not_add_a_row_to_retained_matches() {
         use iced::{

@@ -55,6 +55,7 @@ changing the draft or transcript. Access, priority availability and usage limits
 
 ## Chat and tools
 
+- Use [repo and personal skills](docs/skills.md) automatically or select one with `$` in the composer.
 - Attach [workspace files with `@`](docs/file-tags.md) or [paste and drop images](docs/images.md).
   [Spell check](docs/spellcheck.md) runs locally.
 - Expand [chat activity](docs/chat-activity.md) to inspect reasoning, commands and

@@ -506,6 +506,7 @@ mod tests {
             entry(
                 "user",
                 EntryKind::User {
+                    skills: vec![],
                     files: vec![],
                     images: vec![],
                     sent_at: None,

@@ -1094,6 +1094,7 @@ impl App {
     }
     fn composer_message(&self) -> UserMessage {
         UserMessage {
+            skills: vec![],
             files: vec![],
             text: self.editor.text(),
             images: self.attachments.clone(),
@@ -1918,7 +1919,11 @@ impl App {
                 }
             }
             Message::FileCompletion(message) => {
-                let result = matches!(&message, crate::file_completion::Message::Results(_));
+                let result = matches!(
+                    &message,
+                    crate::file_completion::Message::Results(_)
+                        | crate::file_completion::Message::Skills(..)
+                );
                 if !result && !self.file_completion_enabled() {
                     return Task::none();
                 }
@@ -5209,7 +5214,7 @@ impl App {
                 s.usage.total_cached = 126_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
-                    Entry::new(EntryKind::User { files: vec![],  images: vec![], sent_at: None, steering: false }, "Inspect this project and run its tests."),
+                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: None, steering: false }, "Inspect this project and run its tests."),
                     Entry::new(
                         EntryKind::Assistant,
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Pico V2\"); }\n```\n\n[Documentation](https://openai.com)",
@@ -5494,6 +5499,7 @@ impl App {
                 child.effort = "high".into();
                 child.entries.push(Entry::new(
                     EntryKind::User {
+                        skills: vec![],
                         files: vec![],
                         images: vec![],
                         sent_at: None,
@@ -5800,7 +5806,7 @@ impl App {
                         }
                     };
                 session.entries = vec![
-                    Entry::new(EntryKind::User { files: vec![],  images: vec![], sent_at: None, steering: false }, "Check the implementation and run validation."),
+                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: None, steering: false }, "Check the implementation and run validation."),
                     Entry { id: "activity-reason".into(), kind: EntryKind::Reasoning, text: "**Inspecting the build configuration**\n\nReviewing the existing Nix development environment.".into() },
                     Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
                     tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),
@@ -8794,6 +8800,7 @@ mod tests {
         session.fast = false;
         session.entries.push(Entry::new(
             EntryKind::User {
+                skills: vec![],
                 files: vec![],
                 images: vec![],
                 sent_at: None,
@@ -9616,6 +9623,7 @@ Then implement the fix.";
             .edit(&id, |s| {
                 s.entries.push(Entry::new(
                     EntryKind::User {
+                        skills: vec![],
                         files: vec![],
                         images: vec![],
                         sent_at: None,
@@ -9668,6 +9676,7 @@ Then implement the fix.";
         child.effort = "max".into();
         child.entries.push(Entry::new(
             EntryKind::User {
+                skills: vec![],
                 files: vec![],
                 images: vec![],
                 sent_at: None,
@@ -11769,6 +11778,7 @@ Then implement the fix.";
 
         app.draft_session.as_mut().unwrap().entries.push(Entry::new(
             EntryKind::User {
+                skills: vec![],
                 files: vec![],
                 images: vec![],
                 sent_at: None,
@@ -12707,6 +12717,7 @@ Then implement the fix.";
         let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
         session.entries.push(Entry::new(
             EntryKind::User {
+                skills: vec![],
                 files: vec![],
                 images: vec![],
                 sent_at: None,
@@ -12838,6 +12849,7 @@ Then implement the fix.";
         for (kind, text) in [
             (
                 EntryKind::User {
+                    skills: vec![],
                     files: vec![],
                     images: vec![],
                     sent_at: None,
@@ -12852,6 +12864,7 @@ Then implement the fix.";
             ),
             (
                 EntryKind::User {
+                    skills: vec![],
                     files: vec![],
                     images: vec![],
                     sent_at: None,

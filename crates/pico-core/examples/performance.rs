@@ -42,6 +42,7 @@ fn main() -> Result<()> {
         session.entries.push(Entry::new(
             if i % 3 == 0 {
                 EntryKind::User {
+                    skills: vec![],
                     files: vec![],
                     images: vec![],
                     sent_at: None,
