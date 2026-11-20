@@ -14,7 +14,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -963,7 +962,15 @@ impl Harness {
                 session.child.as_ref().map(|child| child.profile),
             )
         };
-        let mut instructions = instructions(&cwd)?;
+        let project_guidance = crate::project_guidance::read(&cwd)?;
+        {
+            let mut s = conversation.state.lock().expect("session lock");
+            crate::project_guidance::apply(&mut s.input, project_guidance.as_deref());
+        }
+        let mut instructions = format!(
+            "You are a coding assistant, working inside Pico agent harness. Workspace: {}. Return a concise explanation of changes and tests. Use subagents when necessary.\n",
+            cwd.display()
+        );
         instructions.push_str(profile.map_or(
             crate::questionnaire::INSTRUCTIONS,
             subagents::Profile::instructions,
@@ -1102,6 +1109,10 @@ impl Harness {
         let size = {
             let mut session = conversation.state.lock().expect("session lock");
             session.input = input.input.into();
+            // Both native compaction and fallback summaries start a new context window.
+            if let Some(guidance) = crate::project_guidance::latest(&snapshot.input) {
+                session.input.push(guidance.clone());
+            }
             if let Some(summary) = input.summary {
                 session.summary = summary;
                 session.summarized_entries = input.summarized_entries;
@@ -1302,23 +1313,6 @@ fn plaintext_context(session: &Session) -> Vec<Value> {
         _ => None,
     }).collect()
 }
-fn instructions(cwd: &Path) -> Result<String> {
-    let mut text = format!(
-        "You are a coding assistant, working inside Pico agent harness. Workspace: {}. Return a concise explanation of changes and tests. Use subagents when necessary.\n",
-        cwd.display()
-    );
-    let path = cwd.join("AGENTS.md");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            text.push_str("\nProject instructions (AGENTS.md):\n");
-            text.push_str(&content);
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).context("Read project AGENTS.md"),
-    }
-    Ok(text)
-}
-
 impl Drop for Harness {
     fn drop(&mut self) {
         self.stop_all();
@@ -1332,6 +1326,92 @@ impl Drop for Harness {
 mod tests {
     use super::*;
     use std::time::Instant;
+    #[tokio::test]
+    async fn project_guidance_changes_append_and_compaction_keeps_only_the_current_version() {
+        use crate::test_support::{authenticated_store, completed, streaming_server, until};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let store = authenticated_store(dir.path().join("state"));
+        let (url, mut requests, server) = streaming_server().await;
+        let h =
+            Harness::with_provider(store.clone(), vec![], Provider::fixture(store, url)).unwrap();
+        let settings = Settings::default();
+        let mut session = Session::new(dir.path().into(), &settings);
+        session.rename("Guidance fixture".into());
+        let id = session.id.clone();
+        h.insert(session);
+
+        let mut previous = Vec::new();
+        for (step, (file, expected_update)) in [
+            (Some("Use sapphire."), Some("Use sapphire.")),
+            (Some("Use sapphire."), None),
+            (Some("Use amber."), Some("Use amber.")),
+            (None, Some("no longer apply")),
+            (None, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(text) = file {
+                std::fs::write(&path, text).unwrap();
+            } else if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+            if step == 2 {
+                h.edit(&id, |s| s.usage.input = settings.context_limit)
+                    .unwrap();
+            }
+            let submission = format!("turn-{step}");
+            h.send(
+                &id,
+                &submission,
+                submission.clone().into(),
+                settings.clone(),
+            )
+            .unwrap();
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let input = request.body["input"].as_array().unwrap();
+            assert_eq!(input[0]["role"], "developer");
+            assert!(!input[0].to_string().contains("Use sapphire."));
+            assert!(input.starts_with(&previous));
+            let start = previous.len().max(1);
+            let mut suffix = &input[start..];
+            if let Some(update) = expected_update {
+                assert_eq!(suffix[0]["role"], "user");
+                assert!(suffix[0]["content"].as_str().unwrap().contains(update));
+                suffix = &suffix[1..];
+            }
+            assert_eq!(suffix[0]["content"], submission);
+            if step == 2 {
+                assert_eq!(suffix.len(), 2);
+                assert_eq!(suffix[1]["type"], "compaction_trigger");
+                let compact = json!({"type":"compaction", "encrypted_content":"opaque"});
+                request.reply.send(completed(json!([compact]))).unwrap();
+                let next = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                previous = next.body["input"].as_array().unwrap().clone();
+                assert_eq!(previous.len(), 3);
+                assert_eq!(previous[0], input[0]);
+                assert_eq!(previous[1], compact);
+                assert_eq!(previous[2], input[start]);
+                next.reply.send(completed(json!([]))).unwrap();
+            } else {
+                assert_eq!(suffix.len(), 1);
+                previous = input.clone();
+                request.reply.send(completed(json!([]))).unwrap();
+            }
+            until(|| !h.get(&id).unwrap().is_turn_active()).await;
+            // Exercise the durable context rather than an in-memory "already sent" flag.
+            h.evict_inactive(None).unwrap();
+        }
+        server.abort();
+    }
+
     #[tokio::test]
     async fn settlement_persists_retries_and_only_accepted_messages_unsettle() {
         let dir = tempfile::tempdir().unwrap();

@@ -249,6 +249,8 @@ impl Provider {
             frame["type"] = json!("response.create");
             let checkpoint = cached.take();
             if let Some(history) = history {
+                // The base request carries the stable developer prefix. It participates
+                // in the properties comparison above, but is inherited on a continuation.
                 let mut start = 0;
                 if let Some(c) = &checkpoint
                     && history.len() >= c.input_and_output.len()
@@ -258,8 +260,12 @@ impl Provider {
                 {
                     frame["previous_response_id"] = json!(c.response_id);
                     start = c.input_and_output.len();
+                    frame["input"] = json!([]);
                 }
-                frame["input"] = Value::Array(history.range(start).cloned().collect());
+                frame["input"]
+                    .as_array_mut()
+                    .expect("request input")
+                    .extend(history.range(start).map(crate::project_guidance::wire_item));
             }
             let chained = frame.get("previous_response_id").is_some();
             let frame = tokio::task::spawn_blocking(move || {
@@ -474,7 +480,10 @@ mod tests {
             };
             let full = body(&first);
             assert!(full.get("previous_response_id").is_none());
-            assert_eq!(full["input"][0]["content"][0]["type"], "input_image");
+            assert!(full.get("instructions").is_none());
+            assert_eq!(full["input"][0]["role"], "developer");
+            assert_eq!(full["input"][0]["content"][0]["text"], "fixture");
+            assert_eq!(full["input"][1]["content"][0]["type"], "input_image");
             reply.send(completion("R1", json!([call]))).unwrap();
 
             let (second, reply) = requests.recv().await.unwrap();
@@ -494,7 +503,7 @@ mod tests {
             assert!(body(&reset).get("previous_response_id").is_none());
             assert_eq!(
                 body(&reset)["input"],
-                json!([full["input"][0], call, result, question])
+                json!([full["input"][0], full["input"][1], call, result, question])
             );
             reply.send(completion("R3", json!([]))).unwrap();
         };

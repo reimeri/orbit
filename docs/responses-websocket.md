@@ -9,9 +9,16 @@ Each active conversation has its own socket with one request in flight.
 After a validated completion, the client keeps the response ID, logical input,
 output and request properties in memory. If the next input extends that input
 **and output**, and the properties still match, the next `response.create`
-includes `previous_response_id` and only the new items. Instructions, tools and
-settings still travel with the request. Pico chooses the suffix before reading
+includes `previous_response_id` and only the new items. Full requests start
+with Pico’s developer message; continuations inherit it rather than resending
+it. Tools and settings still travel with each request. Pico chooses the suffix before reading
 and encoding media, so unchanged images are not uploaded again.
+
+At turn start Pico reads `AGENTS.md` directly from the selected project directory.
+It sends the file as user-role project guidance, separate from Pico’s own
+instructions. If the file changes, Pico appends the new guidance; if removed or
+emptied, it appends a removal notice. Unchanged guidance is not appended again.
+After compaction, only the latest guidance item is carried forward explicitly.
 
 A changed prefix, compaction, socket loss, cancellation, restart or account
 change invalidates continuation. The next request sends full current input.

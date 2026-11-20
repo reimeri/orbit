@@ -127,7 +127,9 @@ mod tests {
                 if body["tools"] == json!([]) {
                     assert_eq!(body["model"], crate::models::LUNA.id);
                     assert_eq!(body["tool_choice"], "none");
-                    assert_eq!(body["input"], json!([{"role":"user", "content":first}]));
+                    let input = body["input"].as_array().unwrap();
+                    assert_eq!(input[0]["role"], "developer");
+                    assert_eq!(input[1..], [json!({"role":"user", "content":first})]);
                     assert!(body.get("service_tier").is_none());
                     naming_reply = Some(reply);
                 } else {

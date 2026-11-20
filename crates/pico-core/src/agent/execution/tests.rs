@@ -158,10 +158,10 @@ async fn calls_execute_before_response_completion_exclusively_and_commit_in_mode
     stream.reply.send(completed(output.clone())).unwrap();
     let next = f.request().await;
     let input = next.body["input"].as_array().unwrap();
-    assert_eq!(&input[1..4], output.as_array().unwrap());
-    assert_eq!(input[4]["call_id"], "a");
-    assert!(input[4]["output"].as_str().unwrap().contains("A result"));
-    assert_eq!(input[5]["call_id"], "b");
+    assert_eq!(&input[2..5], output.as_array().unwrap());
+    assert_eq!(input[5]["call_id"], "a");
+    assert!(input[5]["output"].as_str().unwrap().contains("A result"));
+    assert_eq!(input[6]["call_id"], "b");
     for id in ["a", "b"] {
         assert_eq!(
             f.c.snapshot()
@@ -201,8 +201,8 @@ async fn missing_earlier_items_cannot_reverse_execution_order() {
             .unwrap()
             .contains("first call finished")
     );
-    assert_eq!(next.body["input"][3]["call_id"], "a");
-    assert_eq!(next.body["input"][4]["call_id"], "b");
+    assert_eq!(next.body["input"][4]["call_id"], "a");
+    assert_eq!(next.body["input"][5]["call_id"], "b");
     next.reply.send(completed(json!([]))).unwrap();
     until(|| !f.c.is_turn_active()).await;
     assert!(!f.saved().needs_attention);

@@ -13,6 +13,7 @@ pub mod markdown_image;
 pub mod media;
 pub mod models;
 mod output;
+mod project_guidance;
 pub mod provider;
 pub mod questionnaire;
 pub mod shell;

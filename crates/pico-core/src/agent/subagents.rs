@@ -867,7 +867,9 @@ mod tests {
         assert_eq!(exec["format"]["definition"], crate::code_mode::GRAMMAR);
         assert_eq!(wait["type"], "function");
         let description = exec["description"].as_str().unwrap();
-        let instructions = request["instructions"].as_str().unwrap();
+        assert!(request.get("instructions").is_none());
+        assert_eq!(request["input"][0]["role"], "developer");
+        let instructions = request["input"][0]["content"][0]["text"].as_str().unwrap();
         let c = f.h.get(session).unwrap();
         let output = tokio::task::spawn_blocking(move || {
             c.code.exec(
@@ -1113,19 +1115,23 @@ mod tests {
                 .contains("PRIVATE PARENT CONTEXT")
         );
         assert!(
-            explore_request.body["instructions"]
-                .as_str()
+            explore_request.body["input"]
+                .as_array()
                 .unwrap()
-                .contains("sapphire invariant")
+                .iter()
+                .any(|item| item["role"] == "user"
+                    && item["content"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("sapphire invariant")))
         );
         assert!(
-            explore_request.body["instructions"]
+            explore_request.body["input"][0]["content"][0]["text"]
                 .as_str()
                 .unwrap()
                 .contains("READ-ONLY")
         );
         assert!(
-            !explore_request.body["instructions"]
+            !explore_request.body["input"][0]["content"][0]["text"]
                 .as_str()
                 .unwrap()
                 .contains("tools.spawn_subagent")
