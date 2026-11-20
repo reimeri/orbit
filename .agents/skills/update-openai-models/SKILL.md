@@ -10,6 +10,8 @@ description: Check official OpenAI documentation for newer Astra, Sol, Terra, Lu
 1. Use web search and read official OpenAI model pages, reasoning guidance,
    changelog, and (where documented) ChatGPT/Codex availability:
    - https://developers.openai.com/api/docs/models
+   - https://developers.openai.com/api/docs/guides/latest-model — read the migration
+     guidance for the models being replaced, noting changes that affect Pico.
    - https://developers.openai.com/api/docs/guides/reasoning
    - https://developers.openai.com/api/docs/changelog
 2. Find the newest generally available **Astra**, **Sol**, **Terra**, and **Luna** family
