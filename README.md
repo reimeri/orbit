@@ -64,9 +64,9 @@ research and replace these families with newer versions.
   Markdown and code blocks, link confirmation, copy actions, expandable reasoning,
   tool groups and individual tool inputs/results. Large tool details are virtualized: only
   visible rows are shaped, while scrolling and Copy retain access to the complete output.
-- The composer has a model selector and a send arrow. Beneath it, the single-row
-  footer shows a status dot, project badge and name, Git info, and right-aligned
-  context, throughput and cache metrics. Hover the dot for status or the project for
+- The send arrow points up when idle and right while the selected session is running.
+  Its tooltip reads “Send message” or “Steer agent”, respectively. Beneath the composer, the single-row footer shows
+  project, Git info, and right-aligned context, throughput and cache metrics. Hover the project for
   its full path. As space narrows, TPS, cache, project, Git, then context disappear.
 - Concurrent sessions. Sending while a turn is working **steers it after the
   current response/tool batch**. Stop cancels the turn and its command sessions;

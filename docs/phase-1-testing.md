@@ -171,7 +171,8 @@ lose details; the original transcript remains the source of truth.
   is focused. Check that a running agent in another session is unaffected. New
   session is available from the left-sidebar top plus and Ctrl+N. The right
   sidebar has no plus button.
-- The status dot has no inline label; hover it for session status. Hover the
+- During a turn the send arrow points right, including with an empty draft.
+  Send a steering message, then stop the turn and verify the arrow points up again. Hover the
   project badge or name for the full path. Resize the window or either sidebar:
   the footer shares the composer's edges and never wraps. TPS, cache, project
   badge/name, Git info, and finally context usage disappear in that order.

@@ -3783,11 +3783,16 @@ impl App {
                 self.file_completion.view().map(Message::FileCompletion),
             );
         }
+        let (send_icon, action) = if running {
+            (Icon::ArrowRight, "Steer agent")
+        } else {
+            (Icon::ArrowUp, "Send message")
+        };
         let toolbar = row![
             self.model_selector(session, running),
             space().width(Fill),
-            icon_tip(
-                theme::button(Icon::ArrowUp.view(16.))
+            footer_tip(
+                theme::button(send_icon.view(16.))
                     .width(TOOLBAR_BUTTON_HEIGHT)
                     .height(TOOLBAR_BUTTON_HEIGHT)
                     .padding(5)
@@ -3797,11 +3802,7 @@ impl App {
                             && (!self.editor.is_empty() || !self.attachments.is_empty()))
                         .then_some(Message::Send)
                     ),
-                if running {
-                    "Steer agent"
-                } else {
-                    "Send message"
-                },
+                action.into(),
             ),
         ]
         .align_y(iced::Center)
@@ -4720,12 +4721,6 @@ impl App {
             .into();
         };
         let conversation = self.harness.as_ref().and_then(|h| h.get(&session.id));
-        let running = conversation.as_ref().is_some_and(|c| c.is_running());
-        let status = conversation
-            .as_ref()
-            .map(|c| c.status())
-            .unwrap_or_default()
-            .to_string();
         let turn_usage = conversation
             .as_ref()
             .map_or(pico_core::agent::TurnUsage::default(), |c| {
@@ -4793,22 +4788,18 @@ impl App {
 
         // Reserve from most to least important. Once an item doesn't fit, no
         // lower-priority item may reappear in the remaining gap.
-        let mut remaining = width - crate::status_circle::WIDTH;
+        let mut remaining = width;
         let mut reserve = |cost| {
             remaining -= cost;
             remaining >= 0.
         };
-        let context = reserve(10. + text_width(&tokens, 11.).ceil());
+        let context = reserve(text_width(&tokens, 11.).ceil());
         let show_git = git.as_ref().is_none_or(|(width, _)| reserve(10. + width));
         let project = reserve(10. + 16. + 4. + name_width);
         let cache = reserve(16. + text_width(&cache_label, 11.).ceil());
         let tps = reserve(16. + text_width(&rate_label, 11.).ceil());
 
-        let mut info = row![footer_tip(
-            crate::status_circle::status_circle(running, self.tick),
-            status
-        )]
-        .align_y(iced::Center);
+        let mut info = row![].align_y(iced::Center);
         if project {
             let badge = row![
                 project_badge_named(&session.project, &name),
@@ -4817,11 +4808,11 @@ impl App {
             .spacing(4)
             .align_y(iced::Center);
             info = info
-                .push(space().width(10))
-                .push(footer_tip(badge, session.project.display().to_string()));
+                .push(footer_tip(badge, session.project.display().to_string()))
+                .push(space().width(10));
         }
         if show_git && let Some((_, git)) = git {
-            info = info.push(space().width(10)).push(git);
+            info = info.push(git).push(space().width(10));
         }
         info = info.push(space().width(Fill));
         if context {
@@ -10628,12 +10619,17 @@ Then implement the fix.";
             if counts.last() != Some(&count) {
                 counts.push(count);
             }
-            let dot = bounds.label("●");
+            assert!(!has("●"));
+            if count == 0 {
+                assert!(bounds.labels.is_empty());
+                continue;
+            }
+            let baseline = bounds.labels[0].1.center_y();
             assert!(
                 bounds
                     .labels
                     .iter()
-                    .all(|(_, b)| (b.center_y() - dot.center_y()).abs() < 1.
+                    .all(|(_, b)| (b.center_y() - baseline).abs() < 1.
                         && b.x + b.width <= width + 1.)
             );
         }
@@ -10702,16 +10698,16 @@ Then implement the fix.";
                 model(&session.model).unwrap().name,
                 effort_name(&session.effort)
             ));
-            let dot = bounds
+            let context = bounds
                 .labels
                 .iter()
-                .find(|(text, b)| text == "●" && b.y > label.y && b.x > left)
-                .unwrap()
+                .find(|(text, b)| text.ends_with(" tokens") && b.y > label.y && b.x > left)
+                .expect("context usage remains visible at these widths")
                 .1;
             let footer = bounds
                 .containers
                 .iter()
-                .filter(|b| b.y + b.height == height && b.contains(dot.center()))
+                .filter(|b| b.y + b.height == height && b.contains(context.center()))
                 .min_by(|a, b| {
                     a.height
                         .total_cmp(&b.height)
@@ -10722,8 +10718,8 @@ Then implement the fix.";
             assert!(footer.x > left && footer.x + footer.width < width - right);
             let settled = bounds.label("Settled");
             assert!(
-                (settled.center_y() - dot.center_y()).abs() < 1.,
-                "settled={settled:?} dot={dot:?} footer={footer:?}"
+                (settled.center_y() - context.center_y()).abs() < 1.,
+                "settled={settled:?} context={context:?} footer={footer:?}"
             );
             assert!(label.width > 0. && label.height > 0.);
             let composer = bounds
@@ -10800,7 +10796,7 @@ Then implement the fix.";
                 for text in ["Pico V2", status] {
                     let idle_label = picker_bounds.label(text);
                     assert!(
-                        (idle_label.center_y() - dot.center_y()).abs() < 1.,
+                        (idle_label.center_y() - context.center_y()).abs() < 1.,
                         "no-session footer must align with session footer: {idle_label:?}, {label:?}"
                     );
                 }
