@@ -385,7 +385,8 @@ configuration state, without touching the desktop clipboard or real sessions.
 
 ### Growing message composer
 
-The composer starts at two visual lines, grows to ten, and then scrolls internally.
+The composer starts at one visual line, grows to ten, and then scrolls internally.
+Clicking empty space in its toolbar focuses the editor.
 A scrollbar in its right padding appears only for overflow; it supports thumb
 dragging and track clicks without changing the text selection. Native wheel and
 cursor scrolling update the same thumb. Scrollbar height uses cached native rows

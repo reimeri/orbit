@@ -96,7 +96,7 @@ const FOOTER_HEIGHT: f32 = 36.;
 const FOOTER_MENU_TEXT_SIZE: f32 = 12.;
 const CHAT_OVERSCAN: f32 = 120.;
 const COMPOSER_LINE_HEIGHT_FACTOR: f32 = 1.3;
-const COMPOSER_MIN_LINES: usize = 2;
+const COMPOSER_MIN_LINES: usize = 1;
 const COMPOSER_MAX_LINES: usize = 10;
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
 const ACTIVITY_INTERVAL: Duration = Duration::from_millis(100);
@@ -316,6 +316,7 @@ pub enum Message {
     Search(String),
     ToggleSearch,
     Favorite(PathBuf),
+    FocusComposer,
     Editor(text_editor::Action),
     EditorScroll(crate::growing_editor::ScrollTo),
     DeletePreviousWord,
@@ -1917,6 +1918,7 @@ impl App {
                     return widget::operation::focus("composer");
                 }
             }
+            Message::FocusComposer => return widget::operation::focus("composer"),
             Message::Editor(_) | Message::EditorScroll(_) | Message::DeletePreviousWord => {
                 if self.active_questionnaire.is_some()
                     || self.io_busy
@@ -3827,9 +3829,9 @@ impl App {
             (Icon::ArrowUp, "Send message")
         };
         let toolbar = row![
-            self.model_selector(session, running),
+            opaque(self.model_selector(session, running)),
             space().width(Fill),
-            footer_tip(
+            opaque(footer_tip(
                 theme::button(send_icon.view(16.))
                     .width(TOOLBAR_BUTTON_HEIGHT)
                     .height(TOOLBAR_BUTTON_HEIGHT)
@@ -3841,10 +3843,13 @@ impl App {
                         .then_some(Message::Send)
                     ),
                 action.into(),
-            ),
+            )),
         ]
         .align_y(iced::Center)
         .padding(iced::Padding::new(TOOLBAR_INSET).top(0.));
+        let toolbar = mouse_area(toolbar)
+            .on_press(Message::FocusComposer)
+            .interaction(mouse::Interaction::Text);
         let editor = container(column![self.composer_editor(running), toolbar]).style(card);
         compose = compose.push("editor", editor);
         column![chat, self.composer_lane(compose)]
@@ -11028,6 +11033,44 @@ Then implement the fix.";
         dispatch(&mut app, messages.into_iter().next().unwrap()).await;
         assert!(!app.footer_menu_open);
         assert!(app.settings_open);
+    }
+
+    #[tokio::test]
+    async fn composer_toolbar_background_focuses_without_intercepting_buttons() {
+        let mut app = app();
+        dispatch(&mut app, Message::Create(PathBuf::from("/toolbar-project"))).await;
+        type_message(&mut app, "Ready to send").await;
+        let mut renderer = header_renderer();
+        let mut ui = iced_runtime::UserInterface::build(
+            app.center(),
+            iced::Size::new(800., 600.),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let session = app.current().unwrap();
+        let picker = bounds
+            .label(&format!(
+                "{} {}",
+                model(&session.model).unwrap().name,
+                effort_name(&session.effort)
+            ))
+            .center();
+        let send = bounds.rightmost_control_at(picker.y).center();
+        let background = iced::Point::new((picker.x + send.x) / 2., picker.y);
+        assert!(matches!(
+            click_at(&mut ui, &mut renderer, background).as_slice(),
+            [Message::FocusComposer]
+        ));
+        assert!(matches!(
+            click_at(&mut ui, &mut renderer, picker).as_slice(),
+            [Message::ToggleFooterMenu]
+        ));
+        assert!(matches!(
+            click_at(&mut ui, &mut renderer, send).as_slice(),
+            [Message::Send]
+        ));
     }
 
     #[tokio::test]
