@@ -3869,7 +3869,11 @@ impl App {
         }
         if self.file_completion.is_open() && self.file_completion_enabled() {
             above_editor = above_editor
-                .push(self.file_completion.view().map(Message::FileCompletion))
+                .push(
+                    self.file_completion
+                        .view(colors)
+                        .map(Message::FileCompletion),
+                )
                 .push(space().height(gap));
         }
         let (send_icon, action) = if running {

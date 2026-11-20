@@ -1,5 +1,6 @@
 //! Composer-local completion state; the shared index never runs on the UI worker.
 use crate::{
+    ellipsized_text::{ellipsized_text, shrinking_ellipsized_text},
     icons::{self, Icon},
     theme,
 };
@@ -370,7 +371,7 @@ impl Completion {
                 }
             })
     }
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, colors: &theme::Colors) -> Element<'_, Message> {
         const VISIBLE: usize = 8;
         const INSET: f32 = 6.;
         const ROW_PADDING: [f32; 2] = [3., crate::growing_editor::PADDING - INSET];
@@ -399,22 +400,21 @@ impl Completion {
                     .as_ref()
                     .expect("skill rows")
                     .skills[self.skill_rows[index]];
-                let scope = if skill.personal { "Personal" } else { "Repo" };
-                column![
-                    crate::ellipsized_text::ellipsized_text(
-                        &format!("{} · {scope} · {}", skill.name, skill.path.display()),
-                        LABEL_SIZE,
-                        None
-                    ),
-                    crate::ellipsized_text::ellipsized_text(
-                        skill.description.as_str(),
-                        LABEL_SIZE,
-                        None
-                    ),
+                let (icon, scope) = if skill.personal {
+                    (Icon::User, "Personal skill")
+                } else {
+                    (Icon::FolderOpen, "Repo skill")
+                };
+                row![
+                    icons::tip(icon.view(14.), scope),
+                    shrinking_ellipsized_text(&skill.name, LABEL_SIZE, None),
+                    ellipsized_text(&skill.description, LABEL_SIZE - 1., Some(colors.muted)),
                 ]
+                .align_y(iced::Center)
+                .spacing(8)
                 .into()
             } else {
-                crate::ellipsized_text::ellipsized_text(path, LABEL_SIZE, None)
+                ellipsized_text(path, LABEL_SIZE, None)
             };
             rows = rows.push(
                 theme::button(label)
@@ -575,7 +575,7 @@ mod tests {
         let mut completion = Completion::default();
         completion.response.paths = vec!["@src/lib.rs".into(), "@src/main.rs".into()];
         let height = |completion: &Completion| {
-            let mut panel = completion.view();
+            let mut panel = completion.view(theme::default_colors());
             let mut tree = Tree::new(panel.as_widget());
             panel
                 .as_widget_mut()

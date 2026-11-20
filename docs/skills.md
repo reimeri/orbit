@@ -26,9 +26,10 @@ Read the proposed migration and check whether existing rows remain valid.
 ```
 
 Use lowercase letters, digits and hyphens for the name. Names can repeat: the
-picker shows each skill's scope and file path. Symlinked skill folders are
-supported. Pico reads local skills; it does not install packages, register new
-tools or execute anything during discovery.
+picker shows a person icon for personal skills or a folder icon for repo skills,
+followed by the name and description. Hover over the icon to see the scope.
+Symlinked skill folders are supported. Pico reads local skills; it does not
+install packages, register new tools or execute anything during discovery.
 
 ## How to use a skill
 
