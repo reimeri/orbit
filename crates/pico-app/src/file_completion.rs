@@ -9,7 +9,7 @@ use iced::{
     widget::{column, container, row, text, text_editor},
 };
 use pico_core::{
-    file_index::{Response, Service},
+    file_index::{Response, SearchPhase, Service},
     file_tags::{self, Token},
 };
 use std::{
@@ -119,7 +119,7 @@ impl Completion {
     fn query(&mut self) {
         if let (Some(service), Some((_, token))) = (&self.service, &self.token) {
             self.request += 1;
-            self.response.pending = true;
+            self.response.phase = SearchPhase::Pending;
             service.query(self.request, token.query.clone(), self.ignored);
         }
     }
@@ -141,8 +141,8 @@ impl Completion {
                     return false;
                 }
                 let selected = self.response.paths.get(self.selected).cloned();
-                if response.pending && response.paths.is_empty() {
-                    self.response.pending = true;
+                if response.phase == SearchPhase::Pending {
+                    self.response.phase = SearchPhase::Pending;
                     self.response.status = response.status;
                     return false;
                 }
@@ -176,7 +176,7 @@ impl Completion {
                 path,
             } if self.is_open() => {
                 // Never accept retained rows from an obsolete query.
-                if self.response.pending
+                if self.response.phase == SearchPhase::Pending
                     || request != self.request
                     || generation != self.response.generation
                     || self.response.request != self.request
@@ -236,7 +236,8 @@ impl Completion {
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::Move(false)),
             // With no match to accept, Enter belongs to the composer (send).
             keyboard::Key::Named(keyboard::key::Named::Enter)
-                if !self.response.pending && self.response.paths.is_empty() =>
+                if self.response.phase != SearchPhase::Pending
+                    && self.response.paths.is_empty() =>
             {
                 None
             }
@@ -256,6 +257,8 @@ impl Completion {
     pub fn view(&self) -> Element<'_, Message> {
         const VISIBLE: usize = 8;
         const INSET: f32 = 6.;
+        const ROW_PADDING: [f32; 2] = [3., crate::growing_editor::PADDING - INSET];
+        const LABEL_SIZE: f32 = 12.;
         let mut rows = column![].width(Fill);
         // Keep one result below the selection when possible, but never scroll
         // past the last full window of results.
@@ -272,10 +275,10 @@ impl Completion {
             .take(VISIBLE)
         {
             let selected = index == self.selected;
-            let label = crate::ellipsized_text::ellipsized_text(path, 12., None);
+            let label = crate::ellipsized_text::ellipsized_text(path, LABEL_SIZE, None);
             rows = rows.push(
                 theme::button(label)
-                    .padding([3., crate::growing_editor::PADDING - INSET])
+                    .padding(ROW_PADDING)
                     .style(move |theme, status| theme::completion_item(theme, status, selected))
                     .on_press(Message::Accept {
                         request: self.request,
@@ -284,17 +287,17 @@ impl Completion {
                     }),
             );
         }
-        let status = if self.response.pending {
-            Some("Searching workspace files…")
-        } else if !self.response.status.is_empty() {
+        let status = if !self.response.status.is_empty() {
             Some(self.response.status.as_str())
-        } else if self.response.paths.is_empty() {
+        } else if self.response.phase != SearchPhase::Pending && self.response.paths.is_empty() {
             Some("No matching files")
         } else {
             None
         };
         if let Some(status) = status {
-            rows = rows.push(text(status).size(11).style(theme::muted));
+            rows = rows.push(
+                container(text(status).size(LABEL_SIZE).style(theme::muted)).padding(ROW_PADDING),
+            );
         }
         if self
             .token
@@ -315,10 +318,12 @@ impl Completion {
             );
         }
         let refresh = icons::tip(
-            theme::button(Icon::RefreshCw.view(12.))
-                .padding(4)
-                .style(theme::sidebar_control)
-                .on_press(Message::Refresh),
+            theme::button(
+                Icon::RefreshCw.spinning(12., self.response.phase != SearchPhase::Complete),
+            )
+            .padding(4)
+            .style(theme::sidebar_control)
+            .on_press(Message::Refresh),
             "Refresh workspace files",
         );
         container(row![rows, refresh].spacing(4))
@@ -359,6 +364,36 @@ fn events(events: &Events) -> impl iced::futures::Stream<Item = Message> + use<>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn loading_does_not_add_a_row_to_retained_matches() {
+        use iced::{
+            Size,
+            advanced::{layout::Limits, widget::Tree},
+        };
+
+        let renderer = crate::test_renderer::new(16.);
+        let mut completion = Completion::default();
+        completion.response.paths = vec!["@src/lib.rs".into(), "@src/main.rs".into()];
+        let height = |completion: &Completion| {
+            let mut panel = completion.view();
+            let mut tree = Tree::new(panel.as_widget());
+            panel
+                .as_widget_mut()
+                .layout(
+                    &mut tree,
+                    &renderer,
+                    &Limits::new(Size::ZERO, Size::new(400., 600.)),
+                )
+                .size()
+                .height
+        };
+        let ready_height = height(&completion);
+        for phase in [SearchPhase::Pending, SearchPhase::Partial] {
+            completion.response.phase = phase;
+            assert_eq!(height(&completion), ready_height);
+        }
+    }
+
     #[test]
     fn completion_replaces_whole_quoted_token_and_rejects_stale_results() {
         let root = tempfile::tempdir().unwrap();
@@ -411,6 +446,7 @@ mod tests {
             Message::Results(Response {
                 request: c.request,
                 generation: c.response.generation + 1,
+                phase: SearchPhase::Partial,
                 paths: vec!["@wrong".into(), "@\"some replacement\"".into()],
                 ..Response::default()
             }),

@@ -1,14 +1,16 @@
 //! Embedded Lucide SVGs. Foreground is inherited from the entire enclosing control,
 //! not just the icon's own hover bounds. Asset provenance and license: icons/README.md.
 use iced::{
-    Color, Element, Length, Rectangle, Size,
+    Color, Element, Event, Length, Rectangle, Size,
     advanced::{
-        Layout, Widget, layout, renderer,
+        Clipboard, Layout, Shell, Widget, layout, renderer,
         svg::{self, Renderer as _},
-        widget::Tree,
+        widget::{Tree, tree},
     },
     mouse,
+    time::Instant,
     widget::{row, text, tooltip},
+    window,
 };
 
 #[derive(Clone, Copy)]
@@ -95,10 +97,15 @@ impl Icon {
     }
 
     pub fn view<'a, Message: 'a>(self, size: f32) -> Element<'a, Message> {
+        self.spinning(size, false)
+    }
+
+    pub fn spinning<'a, Message: 'a>(self, size: f32, spinning: bool) -> Element<'a, Message> {
         Element::new(SvgIcon {
             handle: self.handle(),
             size,
             color: None,
+            spinning,
         })
     }
 
@@ -107,6 +114,7 @@ impl Icon {
             handle: self.handle(),
             size,
             color: Some(color),
+            spinning: false,
         })
     }
 
@@ -136,9 +144,45 @@ struct SvgIcon {
     handle: svg::Handle,
     size: f32,
     color: Option<Color>,
+    spinning: bool,
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SvgIcon {
+    fn tag(&self) -> tree::Tag {
+        if self.spinning {
+            tree::Tag::of::<Instant>()
+        } else {
+            tree::Tag::stateless()
+        }
+    }
+
+    fn state(&self) -> tree::State {
+        if self.spinning {
+            tree::State::new(Instant::now())
+        } else {
+            tree::State::None
+        }
+    }
+
+    fn update(
+        &mut self,
+        _tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if self.spinning
+            && matches!(event, Event::Window(window::Event::RedrawRequested(_)))
+            && layout.bounds().intersects(viewport)
+        {
+            shell.request_redraw();
+        }
+    }
+
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fixed(self.size), Length::Fixed(self.size))
     }
@@ -154,19 +198,21 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SvgIcon {
 
     fn draw(
         &self,
-        _tree: &Tree,
+        tree: &Tree,
         renderer: &mut iced::Renderer,
         _theme: &iced::Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
         _cursor: mouse::Cursor,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) {
-        renderer.draw_svg(
-            svg::Svg::new(self.handle.clone()).color(self.color.unwrap_or(style.text_color)),
-            layout.bounds(),
-            layout.bounds(),
-        );
+        let mut svg =
+            svg::Svg::new(self.handle.clone()).color(self.color.unwrap_or(style.text_color));
+        if self.spinning {
+            let turns = tree.state.downcast_ref::<Instant>().elapsed().as_secs_f32();
+            svg = svg.rotation(turns.fract() * std::f32::consts::TAU);
+        }
+        renderer.draw_svg(svg, layout.bounds(), *viewport);
     }
 }
 

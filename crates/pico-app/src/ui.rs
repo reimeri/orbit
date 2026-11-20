@@ -3848,8 +3848,9 @@ impl App {
             .height(Fill)
             .into();
         }
-        // Keep editor state when the attachment strip is inserted or removed.
-        let mut compose = widget::keyed_column([]).spacing(10);
+        // Keep the editor in a fixed sibling slot as attachments and completions come and go.
+        let mut above_editor = column![];
+        let gap = 10;
         if !self.attachments.is_empty() {
             let images = row(self
                 .attachments
@@ -3857,13 +3858,14 @@ impl App {
                 .enumerate()
                 .map(|(index, media)| self.image_view.attachment(media, index)))
             .spacing(8);
-            compose = compose.push("attachments", crate::scrollbar::horizontal(images));
+            above_editor = above_editor
+                .push(crate::scrollbar::horizontal(images))
+                .push(space().height(gap));
         }
         if self.file_completion.is_open() && self.file_completion_enabled() {
-            compose = compose.push(
-                "file-completion",
-                self.file_completion.view().map(Message::FileCompletion),
-            );
+            above_editor = above_editor
+                .push(self.file_completion.view().map(Message::FileCompletion))
+                .push(space().height(gap));
         }
         let (send_icon, action) = if running {
             (Icon::ArrowRight, "Steer agent")
@@ -3893,7 +3895,7 @@ impl App {
             .on_press(Message::FocusComposer)
             .interaction(mouse::Interaction::Text);
         let editor = container(column![self.composer_editor(running), toolbar]).style(card);
-        compose = compose.push("editor", editor);
+        let compose = column![above_editor, editor];
         column![chat, self.chat_lane(compose, 0.)]
             .width(Fill)
             .height(Fill)
@@ -8924,23 +8926,8 @@ mod tests {
 
     #[tokio::test]
     async fn image_paste_preserves_composer_focus_across_attachment_changes() {
-        use iced::advanced::widget::{Operation, operation::Focusable};
+        use iced::advanced::widget::operation::focusable;
         use iced_runtime::{UserInterface, user_interface::Cache};
-
-        struct FocusComposer;
-        impl Operation for FocusComposer {
-            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
-                operate(self);
-            }
-            fn focusable(
-                &mut self,
-                _: Option<&iced::advanced::widget::Id>,
-                _: iced::Rectangle,
-                state: &mut dyn Focusable,
-            ) {
-                state.focus();
-            }
-        }
 
         let mut app = app();
         let root = app.smoke_dir.clone().unwrap();
@@ -8951,12 +8938,13 @@ mod tests {
         let mut renderer = header_renderer();
         let size = iced::Size::new(930., 800.);
         let mut ui = UserInterface::build(app.center(), size, Cache::new(), &mut renderer);
-        ui.operate(&renderer, &mut FocusComposer);
+        ui.operate(&renderer, &mut focusable::focus("composer".into()));
         let mut cache = ui.into_cache();
 
         // Keep the real widget cache through the first image, another image,
         // and removal of the strip. Typing must work without refocusing.
-        for change in 0..4 {
+        let mut expected = String::new();
+        for (change, keys) in ["@x ", "y", "z", "w"].into_iter().enumerate() {
             match change {
                 0 | 1 => {
                     app.importing = 1;
@@ -8972,32 +8960,38 @@ mod tests {
                 _ => dispatch(&mut app, Message::RemoveAttachment(0)).await,
             }
             assert_eq!(app.attachments.len(), [1, 2, 1, 0][change]);
-            let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
-            let mut messages = Vec::new();
-            ui.update(
-                &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Character("x".into()),
-                    modified_key: keyboard::Key::Character("x".into()),
-                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyX),
-                    location: keyboard::Location::Standard,
-                    modifiers: keyboard::Modifiers::empty(),
-                    text: Some("x".into()),
-                    repeat: false,
-                })],
-                mouse::Cursor::Unavailable,
-                &mut renderer,
-                &mut iced::advanced::clipboard::Null,
-                &mut messages,
-            );
-            cache = ui.into_cache();
-            assert!(
-                matches!(messages.as_slice(), [Message::Editor(_)]),
-                "composer must still accept typing after attachment change {change}"
-            );
-            for message in messages {
-                dispatch(&mut app, message).await;
+            for ch in keys.chars() {
+                let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+                let mut messages = Vec::new();
+                ui.update(
+                    &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: keyboard::Key::Character(ch.to_string().into()),
+                        modified_key: keyboard::Key::Character(ch.to_string().into()),
+                        physical_key: keyboard::key::Physical::Unidentified(
+                            keyboard::key::NativeCode::Unidentified,
+                        ),
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                        text: Some(ch.to_string().into()),
+                        repeat: false,
+                    })],
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                cache = ui.into_cache();
+                assert!(
+                    matches!(messages.as_slice(), [Message::Editor(_)]),
+                    "composer must still accept typing after attachment change {change}"
+                );
+                for message in messages {
+                    dispatch(&mut app, message).await;
+                }
+                expected.push(ch);
+                assert_eq!(app.editor.text(), expected);
+                assert_eq!(app.file_completion.is_open(), matches!(ch, '@' | 'x'));
             }
-            assert_eq!(app.editor.text(), "x".repeat(change + 1));
         }
     }
 
@@ -9181,7 +9175,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10),async {
             loop {
                 let message=messages.next().await.unwrap();
-                let ready=matches!(&message,crate::file_completion::Message::Results(r) if !r.pending && r.paths.contains(&"@\"source notes.md\"".to_owned()));
+                let ready=matches!(&message,crate::file_completion::Message::Results(r) if r.phase != pico_core::file_index::SearchPhase::Pending && r.paths.contains(&"@\"source notes.md\"".to_owned()));
                 dispatch(&mut app,Message::FileCompletion(message)).await;
                 if ready {break;}
             }

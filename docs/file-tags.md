@@ -5,7 +5,8 @@ picker supports Up/Down, Tab/Enter, mouse selection and Escape. Enter selects a
 suggestion when one is available; if the search finishes with no matches, Enter sends the message. Shift+Enter
 still inserts a newline. An unhandled Escape retains the app's stop/dismiss behavior.
 Long labels are ellipsized only on screen; selecting a suggestion inserts the full tag. Up to 24 results
-are retained and at most eight suggestion rows are mounted.
+are retained and at most eight suggestion rows are mounted. The refresh icon spins while the picker
+loads matches; early results can be selected while the search continues.
 
 Tags are ordinary editable text, not rich-text chips. They persist with drafts,
 copy/paste normally, and can be edited in their middle. Examples:

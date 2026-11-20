@@ -30,13 +30,23 @@ const RECONCILE: Duration = Duration::from_secs(30);
 const DEBOUNCE: Duration = Duration::from_millis(250);
 const CACHE_MAGIC: &[u8] = b"pico-evo-files-2\0";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchPhase {
+    /// No results for this search are ready to accept yet.
+    Pending,
+    /// Current results are usable while more filenames are loaded or searched.
+    Partial,
+    #[default]
+    Complete,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Response {
     pub request: u64,
     pub generation: u64,
     /// Encoded, complete mention strings; never truncated filesystem paths.
     pub paths: Vec<String>,
-    pub pending: bool,
+    pub phase: SearchPhase,
     pub status: String,
 }
 #[derive(Clone)]
@@ -298,7 +308,7 @@ impl Service {
                 generation: 0,
                 revision: 0,
                 request: None,
-                status: "Discovering workspace files…".into(),
+                status: String::new(),
                 refreshing: true,
                 dirty: None,
                 force: false,
@@ -393,7 +403,7 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
                 state.scope_revision,
                 state.revision,
                 state.status.clone(),
-                state.refreshing,
+                state.refreshing || state.force,
             )
         };
         let cancelled = || stopped(&shared) || shared.serial.load(Ordering::Relaxed) != request.id;
@@ -401,7 +411,11 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
             request: request.id,
             generation,
             paths: vec![],
-            pending: snapshot.is_none() && refreshing,
+            phase: if refreshing {
+                SearchPhase::Pending
+            } else {
+                SearchPhase::Complete
+            },
             status,
         };
         let mut source = snapshot.as_deref();
@@ -435,7 +449,7 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
                     Err(error) => {
                         response.status = format!("Could not search ignored directory: {error:#}");
                         source = None;
-                        response.pending = false;
+                        response.phase = SearchPhase::Complete;
                     }
                 }
             }
@@ -451,21 +465,24 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
         }
         if let Some(snapshot) = source {
             shared.responses.send_replace(Response {
-                pending: true,
+                phase: SearchPhase::Pending,
                 ..response.clone()
             });
             let Some(paths) = snapshot.search(&request.query, cancelled, |paths| {
                 shared.responses.send_replace(Response {
                     paths: paths.to_vec(),
-                    pending: false,
-                    status: format!("{} Searching remaining filenames…", response.status),
+                    phase: SearchPhase::Partial,
                     ..response.clone()
                 });
             }) else {
                 continue;
             };
             response.paths = paths;
-            response.pending = false;
+            response.phase = if refreshing {
+                SearchPhase::Partial
+            } else {
+                SearchPhase::Complete
+            };
         }
         if !cancelled() {
             shared.responses.send_replace(response);
@@ -1070,7 +1087,7 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf, reconcil
         state.snapshot = Some(Arc::new(index));
         state.generation += 1;
         state.revision += 1;
-        state.status = "Cached filenames; refreshing…".into();
+        state.status = "Cached filenames".into();
         shared.wake.notify_all();
     }
     let mut base_paths = HashSet::new();
@@ -1393,7 +1410,7 @@ mod tests {
             loop {
                 rx.changed().await.unwrap();
                 let r = rx.borrow_and_update().clone();
-                if r.request == 2 && !r.pending && !r.paths.is_empty() {
+                if r.request == 2 && r.phase != SearchPhase::Pending && !r.paths.is_empty() {
                     assert_eq!(r.paths, vec!["@first"]);
                     break;
                 }
@@ -1404,7 +1421,10 @@ mod tests {
             loop {
                 rx.changed().await.unwrap();
                 let r = rx.borrow_and_update().clone();
-                if r.request == 3 && !r.pending && r.paths == vec!["@empty/second"] {
+                if r.request == 3
+                    && r.phase != SearchPhase::Pending
+                    && r.paths == vec!["@empty/second"]
+                {
                     break;
                 }
             }
@@ -1455,7 +1475,10 @@ mod tests {
         let service = Service::start(root.path().into(), cache.path().into(), interval).unwrap();
         let mut rx = service.subscribe();
         service.query(1, b"visible".to_vec(), false);
-        let first = until(&mut rx, |r| !r.pending && r.paths == ["@visible"]).await;
+        let first = until(&mut rx, |r| {
+            r.phase != SearchPhase::Pending && r.paths == ["@visible"]
+        })
+        .await;
         let cached = || {
             fs::metadata(cache_path(root.path(), cache.path()))
                 .unwrap()
@@ -1465,7 +1488,10 @@ mod tests {
         fs::write(root.path().join("visible"), "ordinary content edit").unwrap();
         tokio::time::sleep(interval * 4).await;
         service.query(2, b"visible".to_vec(), false);
-        let idle = until(&mut rx, |r| r.request == 2 && !r.pending).await;
+        let idle = until(&mut rx, |r| {
+            r.request == 2 && r.phase != SearchPhase::Pending
+        })
+        .await;
         assert_eq!(idle.generation, first.generation);
         assert_eq!(
             cached(),
@@ -1477,7 +1503,7 @@ mod tests {
         // still notice an external policy edit and rerun the active query.
         fs::write(excludes, "visible\n").unwrap();
         until(&mut rx, |r| {
-            r.generation > idle.generation && !r.pending && r.paths.is_empty()
+            r.generation > idle.generation && r.phase != SearchPhase::Pending && r.paths.is_empty()
         })
         .await;
     }
@@ -1499,13 +1525,16 @@ mod tests {
         let service = Service::open(root.path().into(), cache.path().into()).unwrap();
         let mut rx = service.subscribe();
         service.query(1, b"visible".to_vec(), false);
-        let initial = until(&mut rx, |r| !r.pending && r.paths == ["@visible"]).await;
+        let initial = until(&mut rx, |r| {
+            r.phase != SearchPhase::Pending && r.paths == ["@visible"]
+        })
+        .await;
         for (request, scope) in [(2, "generated-a"), (3, "generated-b")] {
             let previous = service.shared.state.lock().unwrap().scope_revision;
             service.query(request, format!("{scope}/").into_bytes(), true);
             until(&mut rx, |r| {
                 r.request == request
-                    && !r.pending
+                    && r.phase != SearchPhase::Pending
                     && r.paths == [format!("@{scope}/nested/first")]
                     && service.shared.state.lock().unwrap().scope_revision > previous
             })
@@ -1521,7 +1550,7 @@ mod tests {
         fs::write(root.path().join("generated-b/nested/second"), "x").unwrap();
         let refreshed = until(&mut rx, |r| {
             r.request == 3
-                && !r.pending
+                && r.phase != SearchPhase::Pending
                 && r.paths == ["@generated-b/nested/first", "@generated-b/nested/second"]
         })
         .await;
@@ -1550,7 +1579,7 @@ mod tests {
         service.query(4, b"generated-b/".to_vec(), true);
         until(&mut rx, |r| {
             r.request == 4
-                && !r.pending
+                && r.phase != SearchPhase::Pending
                 && r.paths
                     == [
                         "@generated-b/nested/first",
@@ -1620,22 +1649,28 @@ mod tests {
         .unwrap();
         let mut rx = service.subscribe();
         service.query(1, vec![], false);
-        until(&mut rx, |r| r.paths == vec!["@original"] && !r.pending).await;
+        until(&mut rx, |r| {
+            r.paths == vec!["@original"] && r.phase != SearchPhase::Pending
+        })
+        .await;
         fs::rename(&root, parent.path().join("old")).unwrap();
         service.refresh();
         let failed = until(&mut rx, |r| {
-            r.status.contains("refresh failed") && !r.pending
+            r.status.contains("refresh failed") && r.phase != SearchPhase::Pending
         })
         .await;
         assert_eq!(failed.paths, vec!["@original"]);
         fs::create_dir(&root).unwrap();
         fs::write(root.join("replacement"), "x").unwrap();
         // Failed discovery must retry without a watch on the new inode.
-        until(&mut rx, |r| r.paths == vec!["@replacement"] && !r.pending).await;
+        until(&mut rx, |r| {
+            r.paths == vec!["@replacement"] && r.phase != SearchPhase::Pending
+        })
+        .await;
         // No manual refresh: this must be a watch on the replacement inode.
         fs::write(root.join("added"), "x").unwrap();
         until(&mut rx, |r| {
-            r.paths == vec!["@added", "@replacement"] && !r.pending
+            r.paths == vec!["@added", "@replacement"] && r.phase != SearchPhase::Pending
         })
         .await;
     }
@@ -1749,10 +1784,12 @@ mod tests {
                 let mut rx = service.subscribe();
                 service.query(1, vec![], false);
                 let response = tokio::time::timeout(Duration::from_secs(120), async {
-                    rx.wait_for(|r| r.request == 1 && !r.pending && !r.paths.is_empty())
-                        .await
-                        .unwrap()
-                        .clone()
+                    rx.wait_for(|r| {
+                        r.request == 1 && r.phase != SearchPhase::Pending && !r.paths.is_empty()
+                    })
+                    .await
+                    .unwrap()
+                    .clone()
                 })
                 .await
                 .unwrap();
