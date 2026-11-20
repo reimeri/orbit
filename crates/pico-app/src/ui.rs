@@ -602,6 +602,13 @@ impl App {
         }
         self.questionnaires.retain(|id, _| live.contains(id));
         if active != self.active_questionnaire {
+            if let Some(previous) = self
+                .active_questionnaire
+                .as_ref()
+                .and_then(|id| self.questionnaires.get_mut(id))
+            {
+                previous.separate_edits();
+            }
             if let Some(id) = &active
                 && !self.settings_open
                 && !self.search_active
@@ -2588,6 +2595,13 @@ impl App {
                 iced::Event::Window(window::Event::Unfocused) => {
                     self.window_focused = false;
                     self.histories.active.separate();
+                    if let Some(draft) = self
+                        .active_questionnaire
+                        .as_ref()
+                        .and_then(|id| self.questionnaires.get_mut(id))
+                    {
+                        draft.separate_edits();
+                    }
                 }
                 iced::Event::Window(window::Event::FileDropped(path)) => self.import_file(path),
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
@@ -6283,19 +6297,12 @@ fn updates(data: &Updates) -> iced::futures::stream::BoxStream<'static, Message>
 }
 
 fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    if let Some(direction) = Direction::from_key_press(&event) {
+        return Some(text_editor::Binding::Custom(Message::ComposerHistory(
+            direction,
+        )));
+    }
     if matches!(event.status, text_editor::Status::Focused { .. }) {
-        if event.modifiers == keyboard::Modifiers::CTRL {
-            let direction = match event.key.as_ref() {
-                keyboard::Key::Character("z") => Some(Direction::Undo),
-                keyboard::Key::Character("y") => Some(Direction::Redo),
-                _ => None,
-            };
-            if let Some(direction) = direction {
-                return Some(text_editor::Binding::Custom(Message::ComposerHistory(
-                    direction,
-                )));
-            }
-        }
         if (event.modifiers.command() && event.key.as_ref() == keyboard::Key::Character("v"))
             || (event.modifiers.shift()
                 && event.key == keyboard::Key::Named(keyboard::key::Named::Insert))

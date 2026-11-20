@@ -1,7 +1,8 @@
-//! In-memory undo for the composer. Only native text deltas are retained.
+//! In-memory undo for multiline editors. Only native text deltas are retained.
 use iced::{
     advanced::graphics::text::cosmic_text::{Change, ChangeItem, Cursor, Selection},
-    widget::text_editor::{Action, Content, Edit},
+    keyboard,
+    widget::text_editor::{self, Action, Content, Edit},
 };
 use std::{
     collections::VecDeque,
@@ -19,6 +20,22 @@ pub enum Direction {
     Undo,
     Redo,
 }
+impl Direction {
+    pub fn from_key_press(event: &text_editor::KeyPress) -> Option<Self> {
+        if matches!(event.status, text_editor::Status::Focused { .. })
+            && event.modifiers == keyboard::Modifiers::CTRL
+        {
+            match event.key.as_ref() {
+                keyboard::Key::Character("z") => Some(Self::Undo),
+                keyboard::Key::Character("y") => Some(Self::Redo),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Group {
     Insert,

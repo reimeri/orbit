@@ -85,6 +85,10 @@ with pending questions appear under **Needs attention**, ahead of Working.
   defaulting to Keep draft. Typing during this confirmation does not edit the draft.
 - The header collapse/resume control hides the body and footer, retaining the
   current question, answers, and replacement confirmation.
+- Each answer keeps its own in-memory text edit history across question navigation,
+  collapse, and session switches. Undoing **Edit** or **Replace** restores the prior
+  custom text (empty if there was none), not the selected preset. History goes
+  away with the questionnaire; undo cannot retract a submission.
 - Switching sessions preserves questionnaire drafts and the ordinary composer draft.
 - Long prompts/options scroll in a bounded body. Hover **Question** for keyboard hints.
   The editor grows with multiline text, then scrolls without moving the selection.
@@ -100,6 +104,7 @@ While the expanded panel is focused:
 | Enter / Tab | Next or Submit |
 | Shift+Tab | Back |
 | Shift+Enter | Newline in text |
+| Ctrl+Z / Ctrl+Y | Undo / redo a text edit in the focused answer editor |
 | Ctrl+Backspace / Ctrl+W | Delete previous word, or selected text |
 | Escape | Scoped Stop, unless higher-priority UI handles it |
 

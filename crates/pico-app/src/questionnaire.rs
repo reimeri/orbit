@@ -1,4 +1,5 @@
 //! Questionnaire composer replacement. Drafts live in the app, never in session storage.
+use crate::editor_history::{Direction, History};
 use crate::icons::{Icon, tip};
 use crate::scrollbar::scroll;
 use crate::theme;
@@ -31,6 +32,7 @@ pub enum Action {
     Editor(text_editor::Action),
     Scroll(crate::growing_editor::ScrollTo),
     DeleteWord,
+    History(Direction),
 }
 #[derive(Clone, Debug)]
 pub struct Message {
@@ -40,9 +42,21 @@ pub struct Message {
 struct Answer {
     selected: Option<usize>,
     editor: text_editor::Content,
+    history: History,
     replace: Option<usize>,
     replace_focused: bool,
 }
+impl Answer {
+    fn replace_text(&mut self, text: String) {
+        self.history.transaction(&mut self.editor, |editor| {
+            editor.perform(text_editor::Action::SelectAll);
+            editor.perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                text.into(),
+            )));
+        });
+    }
+}
+
 pub struct Draft {
     pub pending: Pending,
     answers: Vec<Answer>,
@@ -63,6 +77,7 @@ impl Draft {
             .map(|_| Answer {
                 selected: None,
                 editor: text_editor::Content::new(),
+                history: History::default(),
                 replace: None,
                 replace_focused: false,
             })
@@ -75,6 +90,10 @@ impl Draft {
             error: None,
         }
     }
+    pub fn separate_edits(&mut self) {
+        self.answers[self.current].history.separate();
+    }
+
     fn options(&self) -> &[String] {
         match &self.pending.request.questions()[self.current].kind {
             QuestionKind::Select(options) => options,
@@ -194,9 +213,12 @@ impl Draft {
                     a.replace = Some(index);
                     a.replace_focused = false;
                 } else {
-                    a.editor = text_editor::Content::with_text(&option);
-                    a.editor
-                        .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                    if draft == option {
+                        a.editor
+                            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                    } else {
+                        a.replace_text(option);
+                    }
                     a.selected = Some(count);
                     focus = true;
                     reveal = true;
@@ -216,10 +238,7 @@ impl Draft {
                 if let Some(index) = self.answers[self.current].replace.take() {
                     if replace {
                         let option = self.options()[index].clone();
-                        let a = &mut self.answers[self.current];
-                        a.editor = text_editor::Content::with_text(&option);
-                        a.editor
-                            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                        self.answers[self.current].replace_text(option);
                     }
                     self.answers[self.current].selected = Some(count);
                     focus = true;
@@ -249,17 +268,26 @@ impl Draft {
                 focus = true;
             }
             Action::Editor(action) => {
+                let a = &mut self.answers[self.current];
                 // A wheel over an inactive draft must not deselect a preset.
                 if !matches!(action, text_editor::Action::Scroll { .. }) {
-                    self.answers[self.current].selected = Some(count);
+                    a.selected = Some(count);
                 }
-                self.answers[self.current].editor.perform(action);
+                a.history.perform(&mut a.editor, action);
             }
             Action::Scroll(scroll) => scroll.apply(&mut self.answers[self.current].editor),
             Action::DeleteWord if self.uses_editor() => {
-                delete_previous_word(&mut self.answers[self.current].editor)
+                let a = &mut self.answers[self.current];
+                a.history.transaction(&mut a.editor, delete_previous_word);
+            }
+            Action::History(direction) if self.uses_editor() => {
+                let a = &mut self.answers[self.current];
+                a.history.replay(&mut a.editor, direction);
             }
             _ => {}
+        }
+        if focus || self.answers[old_current].replace.is_some() {
+            self.answers[old_current].history.separate();
         }
         let scroll = if old_current != self.current {
             widget::operation::snap_to(self.scroll_id(), scrollable::RelativeOffset::START)
@@ -443,7 +471,11 @@ Shift+Tab goes back · Shift+Enter adds a line";
                     .size(font_size)
                     .on_action(move |action| message(Action::Editor(action)))
                     .key_binding(move |event| {
-                        if matches!(event.status, text_editor::Status::Focused { .. })
+                        if let Some(direction) = Direction::from_key_press(&event) {
+                            Some(text_editor::Binding::Custom(message(Action::History(
+                                direction,
+                            ))))
+                        } else if matches!(event.status, text_editor::Status::Focused { .. })
                             && word_delete(&event.key, event.modifiers)
                         {
                             Some(text_editor::Binding::Custom(message(Action::DeleteWord)))
@@ -1359,6 +1391,73 @@ mod tests {
         assert_eq!(
             apply(&mut d, Action::Next).answers.unwrap(),
             ["A command-line tool".to_owned(), long]
+        );
+    }
+
+    #[test]
+    fn questionnaire_history_restores_custom_text_and_selection_after_replace() {
+        let mut d = draft();
+        let undo = key(
+            keyboard::Key::Character("z".into()),
+            keyboard::Modifiers::CTRL,
+            None,
+        );
+        let redo = key(
+            keyboard::Key::Character("y".into()),
+            keyboard::Modifiers::CTRL,
+            None,
+        );
+        apply(&mut d, Action::Edit(0));
+        events(&mut d, true, std::slice::from_ref(&undo), false);
+        assert!(
+            !d.answered(0),
+            "undoing an option seed leaves an empty custom answer"
+        );
+        let custom = "first line\n東京 λ";
+        paste(&mut d, custom);
+        apply(
+            &mut d,
+            Action::Editor(text_editor::Action::Select(text_editor::Motion::Left)),
+        );
+        let cursor = d.answers[0].editor.cursor();
+        apply(&mut d, Action::Edit(1));
+        assert!(events(&mut d, true, std::slice::from_ref(&undo), false).is_empty());
+        apply(&mut d, Action::Replace(true));
+        assert_eq!(d.value(0).as_deref(), Some("A mobile app"));
+        assert!(events(&mut d, true, std::slice::from_ref(&undo), true).is_empty());
+        events(&mut d, true, &[undo], false);
+        assert_eq!(d.value(0).as_deref(), Some(custom));
+        assert_eq!(d.answers[0].editor.cursor(), cursor);
+        events(&mut d, true, &[redo], false);
+        assert_eq!(d.value(0).as_deref(), Some("A mobile app"));
+    }
+
+    #[test]
+    fn questionnaire_histories_follow_answers_not_panel_navigation() {
+        let mut d = draft();
+        paste(&mut d, "my platform");
+        apply(&mut d, Action::Select(0));
+        apply(&mut d, Action::History(Direction::Undo));
+        assert_eq!(d.value(0).as_deref(), Some("A website"));
+        apply(&mut d, Action::Select(3));
+        assert_eq!(d.value(0).as_deref(), Some("my platform"));
+        apply(&mut d, Action::Next);
+        paste(&mut d, "offline only");
+        apply(&mut d, Action::DeleteWord);
+        assert_eq!(d.value(1).as_deref(), Some("offline "));
+        apply(&mut d, Action::Back);
+        apply(&mut d, Action::History(Direction::Undo));
+        assert!(!d.answered(0));
+        apply(&mut d, Action::History(Direction::Redo));
+        apply(&mut d, Action::Next);
+        apply(&mut d, Action::Toggle);
+        apply(&mut d, Action::History(Direction::Undo));
+        assert_eq!(d.value(1).as_deref(), Some("offline "));
+        apply(&mut d, Action::Toggle);
+        apply(&mut d, Action::History(Direction::Undo));
+        assert_eq!(
+            apply(&mut d, Action::Next).answers.unwrap(),
+            ["my platform", "offline only"]
         );
     }
 
