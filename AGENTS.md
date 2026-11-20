@@ -2,16 +2,9 @@
 
 Project-specific requirements override these defaults.
 
-Use `nix develop` environment for development tooling.
-
-## Project
-
-- Start by reading the PROJECT.md file for information about this project and the goals
-
-## Priorities and scope
-
-- Identify the primary user task and prioritize it over supporting features.
-- Keep implementation simple without reducing useful functionality to a barebones demo.
+Read [README](README.md) for the project overview and [Development](docs/development.md)
+for the pinned environment, build commands and troubleshooting. Prioritize the
+requested task and keep the implementation simple without cutting useful functionality.
 
 ## Preserve agent-relevant data
 
@@ -22,17 +15,15 @@ Use `nix develop` environment for development tooling.
 
 ## Failure recovery
 
-- When something inevitably goes wrong the last thing you want to do is to just present the user a error message and let them figure out how to continue
-- Think of this like the user is the customer. When our service fails for some reason we don't just abandon the user and let them sort it out, no we try to everything we can to make our customer happy
-- Always try to automatically recover from failures and if that is not possible provide a friendly error message to the user with succinct steps to fix the issue
+Automatically recover when safe. If recovery needs user action, explain what
+failed, what was preserved, and the shortest way to continue.
 
-## Backwards compatability
+## Compatibility
 
-- No backwards compatability should be maintained in this project.
+Do not maintain backward compatibility.
 
 ## Rust development workflow
 
-- Read `docs/development.md` for build strategy and troubleshooting.
 - Use `nix develop --command <tool> ...` or work inside `nix develop`.
 - Prefer `cargo check --locked` for iteration and `cargo test --locked -p pico-core` for core-only changes.
 - Preserve `target/`; do not routinely run `cargo clean`, release builds, or `nix build` in the edit loop.
@@ -53,20 +44,9 @@ Write idiomatic, straightforward Rust. Trust the type system and established inv
 
 ## Testing guidelines
 
-### Philosophy
-
-- Optimize for confidence in correctness, not the number of tests or coverage percentage.
-- Write the smallest set of tests that meaningfully protects important behavior.
-- Every test should detect a plausible bug. If you cannot explain what bug a test would catch, reconsider adding it.
-- Tests are not mandatory for every change. Avoid adding tests for trivial, cosmetic, or already adequately covered changes.
-
-### Choosing what to test
-
-- Before writing tests, inspect existing coverage and identify what could realistically go wrong.
-- Prioritize complex logic, boundary conditions, error handling, state transitions, interactions between components, and previously observed bugs.
-- Consider plausible incorrect implementations, then design inputs that distinguish correct behavior from those mistakes.
-- Prefer a few carefully chosen, discriminating cases over many similar examples.
-- Avoid redundant tests that exercise the same behavior without providing additional confidence.
+Inspect existing coverage before adding tests. Choose the smallest set that
+would catch plausible bugs, prioritizing boundaries, state transitions, failure
+recovery and interactions. Trivial or already covered changes need no new tests.
 
 ### Test design
 
@@ -77,7 +57,6 @@ Write idiomatic, straightforward Rust. Trust the type system and established inv
 - Keep independent expected values for actual contracts (protocols, persisted formats, specified algorithms, and deliberate fixtures). Do not replace meaningful assertions with calls to the same implementation being tested, or make a test tautological merely to remove literals.
 - Exercise behavior such as alignment, containment, overflow, state transitions, and bounded work rather than exact pixels, current defaults, or internal operation counts unless those exact values are the contract.
 - Derive expected results independently from requirements, specifications, or manually verified examples. Do not simply copy results produced by the implementation under test.
-- Include meaningful assertions about outcomes, not merely that code executes without crashing.
 - Use asymmetric inputs, boundaries, and contrasting cases to expose mistakes that simple or uniform inputs would miss.
 - Prefer realistic inputs and scenarios over artificially simplified cases that avoid the difficult parts of the problem.
 - For regression tests, reproduce the original failure and verify the fix where practical.

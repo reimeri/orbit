@@ -50,10 +50,6 @@ context handle. `declare` and `load` must therefore release the extra owned
 `JSValue` they receive after extracting its pointer. Native-module borrowed
 pointers and `eval`'s duplicate/consume pair are unchanged.
 
-This fixes the engine used by both tests and normal code-mode. It does not
-change ES-module semantics, run cancelled jobs, retry failed tests, disable
-assertions, or serialize production cells.
-
 ## Regression checks and maintenance
 
 `crates/pico-core/tests/quickjs_lifetime.rs` covers retained unresolved top-level

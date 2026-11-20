@@ -30,9 +30,7 @@ Every question is required. The result is a JSON **string**, in question order:
 - The complete serialized request is limited to **1 MiB**, checked before parsing.
 - Answers must contain non-whitespace text. Otherwise their contents are preserved,
   including leading/trailing whitespace and multiline text.
-- **No questionnaire-specific answer byte or line cap.** V1's 16 KiB answer,
-  64 KiB aggregate-answer and fixed 512-line wrapping limits are not carried over.
-  The structural limits bound UI complexity, not C buffer allocation.
+- Answers have no questionnaire-specific byte or line cap.
 
 The full answer JSON is retained in the nested tool transcript. The copy delivered
 to JavaScript is saved in full to a private `/tmp` file when it exceeds 40,000
@@ -68,11 +66,11 @@ of unlimited physical memory.
   storage is fixed; do not blindly repeat the tool.
 - Pending requests and UI drafts are **not persisted**. After a restart, unfinished
   `ask_user` rows are marked cancelled, with an explanatory notice. Already submitted,
-  saved answers remain available. There is no cell-resumption or V1 migration layer.
+  saved answers remain available.
 
 ## UI behavior
 
-The non-modal, rounded dark **Question** panel replaces the composer. Chat,
+The non-modal **Question** panel replaces the composer. Chat,
 selection/copy, sidebar navigation, search and settings remain available. Sessions
 with pending questions appear under **Needs attention**, ahead of Working.
 
@@ -87,18 +85,11 @@ with pending questions appear under **Needs attention**, ahead of Working.
   defaulting to Keep draft. Typing during this confirmation does not edit the draft.
 - The header collapse/resume control hides the body and footer, retaining the
   current question, answers, and replacement confirmation.
-- The panel and options use the shared app palette. Hover highlights the entire
-  option, including behind Edit; Edit is muted until hovered. Option numbers are
-  vertically centered alongside their labels.
 - Switching sessions preserves questionnaire drafts and the ordinary composer draft.
 - Long prompts/options scroll in a bounded body. Hover **Question** for keyboard hints.
-  The inline editor shares a persistent footer with Next/Submit. Focusing it outlines
-  the whole row without changing its size. It grows with multiline text up to a cap, with
-  a scrollbar when text overflows (including wrapped lines). Drag the thumb or click
-  the track to scroll without changing the text selection.
+  The editor grows with multiline text, then scrolls without moving the selection.
 - Submitted answers appear in the existing tool result, with no synthetic user message
   or separate answer-summary entry.
-- There is deliberately **no Ask about this button or clarification conversation**.
 
 While the expanded panel is focused:
 
@@ -118,50 +109,7 @@ selection/copy/cut/paste, word movement, Home/End, Shift selection and mouse sel
 In replacement confirmation, Tab or Left/Right switches actions; Enter activates.
 Questionnaire shortcuts stop when focus moves outside the panel or it is collapsed.
 
-## Verification
-
-Run within `nix develop`:
-
-```sh
-cargo test --locked --workspace questionnaire
-just verify
-just smoke-gpu # on a real Wayland desktop
-```
-
-Tests cover boundary validation, ordered/custom/large answers, actual code-mode
-round trips, model-continuation blocking across exec/wait deadlines and queued asks,
-Stop with retained output, capability enforcement, cell cleanup/cancellation, FIFO
-routing, persistence failures, restart cancellation, session switching, draft retention,
-keyboard focus/navigation and both Unicode-aware word-deletion shortcuts.
-Smoke frames include select, seeded editor, replacement confirmation, collapsed,
-large multiline text and long options with Settings open. When inspecting seeded
-text, also inspect the actual compositor window: iced's screenshot task can omit
-live editor glyphs even though they are correctly drawn on screen.
-
-Live acceptance (requires a signed-in account):
-
-1. Ask the main agent to use `tools.ask_user` with a select and a text question.
-   Verify the progress header, numbered options and always-visible answer row.
-   Click into and out of the field: the focus outline should wrap the pencil and
-   action button without moving either. No Skip or clarification button is shown.
-2. Select using click, arrows and digits; Edit/E an option. Type a custom answer,
-   edit another option, and exercise both Keep draft and Replace.
-3. Try Ctrl+Backspace and Ctrl+W in the middle of a line and with a selection;
-   verify suffix preservation, Unicode and multiline clipboard editing.
-4. Use Shift+Enter, Back, Next, collapse/expand and switch to another session.
-   Return and verify both questionnaire and ordinary composer drafts remain intact.
-5. Leave the questionnaire open beyond the code-cell yield deadline. Verify the
-   turn remains active without repeated model `wait` calls or a final response.
-   Submit and verify the model resumes automatically and receives the complete
-   ordered answers through its waiting cell, without an extra user message.
-6. Queue two parallel asks and answer them in order. Terminate one owning cell and
-   verify only its questions disappear. Stop/Escape must cancel remaining work.
-7. Paste an answer larger than 64 KiB. Verify the complete transcript result and
-   private output-file contents, not a truncated prefix.
-8. Open Settings, search and menus while a question is open. Confirm their keyboard
-   input and Escape priority, and that question shortcuts do not steal text input.
-9. Restart with an unanswered question. Expect cancellation and a notice, not a
-   restored draft or a permanently pending tool row.
-
-Rendered smoke checks are not a substitute for a live provider/account round trip
-or manual clipboard/IME testing on the user's desktop.
+For local validation and UI tests, run `just test questionnaire` inside
+`nix develop`. To check live continuation, leave an ask open past the cell yield
+deadline. The agent should wait without polling, then receive the ordered answers
+after submission without an extra user message.

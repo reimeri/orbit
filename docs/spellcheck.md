@@ -26,8 +26,5 @@ There is no automatic language fallback or dictionary download.
 ## Packaging
 
 The Nix shell and package supply the `en_US` pair and its license from
-Nixpkgs. A future AppImage can stage the same files in
-`usr/share/pico-evo/dictionaries/` and set `PICO_DICTIONARY_DIR` to that
-directory under `$APPDIR` in its launcher. Use an absolute resource path; it
-must not depend on the workspace or current working directory. Dictionary
-files need no Enchant or Hunspell runtime libraries.
+Nixpkgs. For other packaging layouts, set `PICO_DICTIONARY_DIR` to the absolute
+path of the packaged dictionaries. No Enchant or Hunspell runtime is required.

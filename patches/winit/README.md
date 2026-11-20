@@ -24,36 +24,10 @@ there is no polling timer. Selection follows the seat delivering the latest key
 press and is cleared on keyboard-focus loss/removal. Pipe descriptors are created
 close-on-exec so agent subprocesses cannot inherit clipboard transfers. The app waits for replies only off its UI thread.
 
-Modified upstream files: `Cargo.toml`, `src/platform/wayland.rs`, Wayland `mod.rs`,
-`state.rs`, `seat/mod.rs`, `seat/keyboard/mod.rs`. Added `data_device.rs` and `data_device/uri_list.rs`.
-`url` decodes spaces/Unicode and rejects nonlocal file URIs. The app test suite
-includes this exact URI parser, including its regressions; `just verify` runs it.
-The release archive's `Cargo.lock` is not used: the application root lockfile is
-canonical. Remove this patch when the pinned GUI stack provides these features
-upstream; never edit Cargo's registry source cache.
-
-
-## How builds use it
-
-- Nix fetches the checksum-pinned archive and applies the patch with `--fuzz=0`.
-  A download/hash mismatch or rejected patch fails preparation.
-- `nix develop` creates/refreshes the Git-ignored `.build-deps/winit` symlink to
-  that immutable patched source. Enter the shell from this checkout (the root
-  or a subdirectory); `nix develop --command cargo …` works too. A missing link
-  after a fresh clone is expected until the first `nix develop`.
-- The root `[patch.crates-io]` redirects winit to this generated path. Pico's
-  direct dependency is exactly `=0.30.13`; `Cargo.lock` pins the resolved graph.
-- Package and formatting checks create the same link in a separate prepared
-  source tree. They never depend on an existing working-tree link or network
-  access during Cargo compilation.
-- Cargo's registry cache is never modified. There is no remote fork, Cargo
-  wrapper, or change to compiler flags, and `target/` remains reusable.
-- The URI parser regression is compiled from the patched source by the app's
-  tests (`include!`), not duplicated in the project. Formatting the app does
-  not try to rewrite the read-only dependency in the Nix store.
-
-Re-enter `nix develop` after editing the patch or pin. Do not edit `.build-deps`:
-its source is immutable and the link is managed automatically.
+Cargo uses the application's root lockfile, not the release archive's. App tests
+include the patched URI parser directly so spaces, Unicode and rejection of
+nonlocal URIs are checked against the production code. A missing
+`.build-deps/winit` link on a fresh checkout is expected until `nix develop`.
 
 ## Updating the pin or patch
 

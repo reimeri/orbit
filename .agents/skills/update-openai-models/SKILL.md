@@ -5,10 +5,6 @@ description: Check official OpenAI documentation for newer Astra, Sol, Terra, Lu
 
 # Update the OpenAI model catalog
 
-Use this skill when asked to refresh Pico's OpenAI models or check for newer
-Astra, Sol, Terra, Luna, or API image-model versions. This is a repository maintenance workflow, not a
-runtime model-discovery feature. Read `PROJECT.md` and `docs/development.md` first.
-
 ## Research before editing
 
 1. Use web search and read official OpenAI model pages, reasoning guidance,
@@ -77,8 +73,7 @@ Current capability reference links (refreshed 2026-11-17):
   retries and compaction; do not invent additional headers.
 - The context limit is currently user-configured, not inferred per model. Do not
   silently change users' limits based on a model's advertised total window.
-- Update this skill's reference links, README, acceptance checklist, and affected
-  tests. No V1 compatibility layer; all state remains under `pico-evo`.
+- Update this skill's reference links, README, and affected tests.
 
 Image references:
 - https://developers.openai.com/api/reference/resources/images/methods/generate
@@ -98,4 +93,4 @@ image defaults. Update `docs/images.md` and its live acceptance checklist. Avoid
 
 Report replacements, evidence, checks run, and any unverified subscription
 availability. If there are no verified newer models, report that result without
-making speculative edits. Never modify the V1 reference.
+making speculative edits.

@@ -102,28 +102,7 @@ routing, withdrawal and dismissal deduplication without touching the real deskto
 bus or user data. Nix provides `dbus-daemon` for development and package tests;
 it is **not** an installed runtime dependency or an app-launched service.
 
-Manual desktop acceptance (use isolated Pico state):
-
-1. Run a main turn while focused on it: no desktop notification.
-2. Switch to another conversation, then finish the first: its title and
-   **Agent finished** appear. Click it and verify session selection/draft retention.
-3. Unfocus Pico with that conversation selected and repeat: it notifies.
-4. Ask several questions in one questionnaire: one **Answer needed**; answer or
-   stop it and verify withdrawal. Queue another questionnaire and verify it alerts
-   only when it becomes actionable.
-5. Keep a child running while the parent pauses: no completion alert until the
-   parent finishes processing the children's results.
-6. Cause a terminal provider/auth failure: one generic error notification, with
-   details only in Pico. Stop a running turn: no error/completion notification.
-7. Dismiss a notification; refresh/switch/restart Pico: no historical replay.
-8. Complete a background session: its blue sidebar circle replaces the age. Close
-   Pico normally and restart before opening it: the circle remains. Open it: the
-   age returns and remains after another restart. Complete the selected conversation
-   while unfocused: its dot remains until Pico gains focus. Complete it while focused:
-   no dot remains. Opening or focusing its child does not clear the parent's dot.
-9. Observe working, questionnaire and error rows: blue waves move; yellow/red waves
-   stay frozen, including during other animations. Answering resumes the wave.
-   Scroll/reorder/filter rows and check selection, hover and context-menu targets.
-10. Enable desktop DND and verify Pico does not bypass it. Where safe, stop/restart
-   the notification service and verify automatic recovery, without interrupting
-   an agent or repeating previously delivered notifications.
+To check desktop integration, use isolated state. Finish a turn outside the
+focused session and click the notification: Pico should select the right session
+without losing its draft. Repeat with DND enabled to check desktop policy. The
+private-bus test does not verify compositor behavior or window raising.

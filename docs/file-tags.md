@@ -72,8 +72,7 @@ and strips internal `pico_file` records from wire input.
   and a coalescing result channel bound pending work. Closing an evicted service
   cancels without joining on the UI thread.
 - A snapshot contains one byte arena, compact entry offsets, and full-path and
-  basename sort orders. Paths are complete; there are no V1-style fixed query/path
-  buffers. ASCII-insensitive matching preserves all original path bytes.
+  basename sort orders. ASCII-insensitive matching preserves all original path bytes.
 - Ranking is exact basename, basename prefix, full-path prefix, then substring,
   with deterministic path ties. Binary lookup handles prefixes. Prefix results
   are published **before** substring backfill, so a single good match need not
@@ -123,7 +122,7 @@ and strips internal `pico_file` records from wire input.
   stdout pipes, closed stdout followed by a hanging process, and a 120-second
   discovery timeout. No process mutex is held across a blocking wait.
 
-The snapshot construction budget is 512 MiB (the same construction ceiling as V1), accounting for arena/entry capacities,
+The snapshot construction budget is 512 MiB, accounting for arena/entry capacities,
 sort indexes and merge scratch. Exceeding it rejects the replacement, not silently
 truncates the searchable corpus; narrow the workspace or ignore generated trees.
 Watch bookkeeping has separate 8,192-path/8 MiB bounds. These are **not process RSS
@@ -131,34 +130,7 @@ limits**: current/replacement/search-pinned/scoped snapshots, cache serializatio
 enumerator buffers, watcher internals and both LRU services can coexist. Retention
 and worker counts are bounded, but peak RSS needs workload-specific measurement.
 
-## Differences from V1
-
-V2 keeps V1's asynchronous discovery/search split, compact path corpus, prefix
-indexes, bounded results, cache-first startup, debounce and reconciliation.
-Differences are deliberate:
-
-- Built-in Rust service instead of plugin hooks; event-driven UI instead of polling.
-- Workspace-only, kernel-enforced attachment opening instead of arbitrary absolute
-  paths/escaping symlinks.
-- Lossless long/non-UTF-8 names instead of silently unselectable long paths.
-- Ignore-aware native fallback; ignored directory discovery is a visible opt-in.
-- Immediately usable prefix batches, current-generation refresh, and stable clicked
-  path identity rather than stale token snapshots or row-index acceptance.
-- Empty-directory/scoped watches, bounded watch bookkeeping and root-replacement
-  recovery, with periodic fallback when watches cannot cover the tree.
-- Aggregate inline budgeting, complete binary/overflow preservation, immutable
-  replay data, and explicit failed-send retention instead of omitted attachments.
-- No V1 configuration, cache, session or plugin compatibility layer.
-
 ## Verification and benchmarks
-
-Normal `just verify` includes parser/path-byte round trips; real service refresh,
-empty-directory watching, root replacement and failure recovery; cache corruption;
-scoped descriptor containment; cancellation and Git subprocess shutdown;
-attachment containment/FIFO rejection/deduplication/aggregate overflow; persistent
-replay/idempotent first-send retries; stale-result/click rejection; composer
-completion/deleted-file submission; and real-widget Escape/modal routing. Native
-smoke includes the file-tag picker as well as the existing large composer scenes.
 
 Run all tools through `nix develop`. Performance checks are opt-in, not
 machine-dependent CI timing assertions:

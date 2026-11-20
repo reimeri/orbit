@@ -1,11 +1,8 @@
 # Sidebar wave CPU experiment — 2026-11-15
 
-This is the historical benchmark report, recorded **before the production change**.
-The subsequent minimal implementation selects `tick-driven`: waves reuse existing
-activity redraws. The shared widget-local-clock redesign was not implemented.
-Production Rust sources were unchanged during the measurements. `experiment.patch` contains the temporary fixture,
-variants, and instrumentation so the measurements can be reproduced without
-permanently adding benchmark switches to the application.
+This experiment compared sidebar wave redraw schedules before Pico adopted
+`tick-driven` (reuse existing activity redraws). The [raw samples](results.json)
+are checked in; the temporary instrumented variants and runner are not.
 
 Base commit: `79d9a2f04e13c15f103806ec6e78d2fee4442763`.
 
@@ -142,52 +139,6 @@ it should not be generalized to every possible caching design. Its lack of an
 observed improvement and the GPU-static diagnostic both point to redraw cadence
 as the higher-value first change.
 
-**Subsequent decision:** implement the small change that reuses current activity
-redraws for visual evaluation. Coordinated widget-local animation remains a
-possible follow-up. No production optimization was applied during the measurements
-recorded here, and the archived patch still targets the base commit above.
-
-## Reproduce
-
-Use an otherwise unchanged checkout at the base commit. Keep the window visible,
-leave its size/output unchanged, and avoid interacting with it during sampling.
-Do not run builds or tests concurrently. A desktop session is required: the
-headless smoke configuration is not a substitute for this measurement.
-
-```sh
-# Run from the repository root inside nix develop.
-patch=docs/benchmarks/session-wave-2026-11-15/experiment.patch
-artifacts=$(mktemp -d /tmp/pico-wave-repeat-XXXXXXXX)
-git apply --check "$patch"
-git apply "$patch"
-cargo build --locked --release -p pico-evo
-cp target/release/pico-evo "$artifacts/pico-evo-benchmark"
-git apply -R "$patch"  # Keep experiments out of production source.
-
-# Select your hardware Vulkan ICD if needed. The original machine used:
-export VK_DRIVER_FILES=/run/opengl-driver/share/vulkan/icd.d/radeon_icd.x86_64.json
-python3 docs/benchmarks/session-wave-2026-11-15/run.py \
-  --binary "$artifacts/pico-evo-benchmark" --output "$artifacts/one-row" \
-  --modes none,current,gpu-static,cap10,tick-driven \
-  --rounds 3 --seconds 20 --warmup 4
-```
-
-`run.py` requires Python 3 (standard library only) in the development environment.
-The output directory must not exist. It retains the full application log, raw
-process samples, derived results, case order/settings, and an initial RGBA
-screenshot; the log includes screenshot dimensions. Use `--rows 6` for the
-multi-wave fixture. `--tick 0` disables the app activity timer **as a diagnostic**;
-use at least 6 s warm-up for this mode, because switching away from a no-redraw
-case may wait for the ordinary five-second Git tick. This diagnostic also freezes
-other tick-driven status indicators; it is not a complete implementation of
-widget-local replacements for them. The runner rejects low-cadence timer-enabled
-results as suspicious after saving them; still inspect cadence and window
-visibility for all runs, especially timer-disabled diagnostics.
-
-After reproducing, rebuild the normal application if you use `target/release`
-directly. Leave experiment artifacts in `/tmp` for inspection; do not overwrite
-or silently discard failed runs.
-
 ## Limits and rejected trials
 
 - This measures a non-streaming working session. Provider traffic, Markdown
@@ -202,19 +153,3 @@ or silently discard failed runs.
   produced only ~0.4–0.6 wave redraw visits/s; one compositor also crashed. These
   stalled trials are **excluded**, not reported as low-CPU successes. Software
   compositor/readback paths were not substituted for hardware presentation.
-- Temporary fixture state and all original logs, binaries, patches, and captured
-  pixels are retained under `/tmp/pico-wave-bench-20261115`. Failed pilot logs are
-  retained there too. The checked-in dataset preserves complete successful raw
-  samples and run settings; screenshots/binaries are not committed.
-
-## Validation
-
-- The existing rendered wave regression passed with the experimental code (no
-  benchmark environment variables): animation, freeze/resume, visibility, clipping,
-  and absence of app messages/layout invalidation.
-- After restoring production sources: **`just verify` and `just smoke-gpu` passed**.
-  The normal release binary was rebuilt successfully too, so `target/release`
-  does not retain the instrumented application.
-- `git apply --check` confirms the archived experiment applies to the base Rust
-  sources. The runner was exercised by the native measurement suites; no timing
-  threshold was added to the ordinary test suite.

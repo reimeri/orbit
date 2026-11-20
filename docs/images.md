@@ -1,7 +1,7 @@
 # Images and code-mode media
 
 Pico's built-in image tools use the calling session's workspace, never the currently
-selected UI workspace. `exec` and `wait` remain the only top-level tools.
+selected UI workspace.
 
 ## Attach images to chat
 
@@ -36,21 +36,15 @@ Attachment references remain in persistent context and fallback context recovery
 ### Native input implementation and acceptance
 
 The pinned iced/winit stack does not implement Wayland file drops or expose image
-clipboard reads. `patches/winit/README.md` documents Pico's narrow backend patch.
+clipboard reads. See the [winit patch notes](../patches/winit/README.md).
 It uses ordinary `wl_data_device` on the application's connection, not X11 or
 clipboard-manager/data-control protocols. Transfers are nonblocking and time out
 after ten seconds. File drops negotiate **Copy**, never Move.
 
-Manual checks on a Wayland desktop:
-
-1. Paste a screenshot and ordinary text; confirm text isn't lost or duplicated.
-2. Drop several PNG/JPEG/WebP/GIF files (including spaces/Unicode in filenames).
-3. Hover/remove one thumbnail; click another and inspect/play it in the modal.
-4. Switch sessions and restart before sending; confirm unsent images remain.
-5. Send images without text, and send images while an agent is running. Confirm
-   the model sees them and the transcript previews reopen after restart.
-6. Drop corrupt/unsupported files and try a source that stalls; the app remains
-   responsive, errors are reported, and existing attachments remain intact.
+Check native input on a Wayland desktop: paste both a screenshot and plain text,
+then drop several files (including spaces or Unicode in their paths). Verify
+the images keep their order and survive a restart before sending. Smoke fixtures
+do not exercise transfers from another Wayland client.
 
 ## View
 
@@ -181,12 +175,9 @@ Codex separately, not inferred from public API availability.
 - `generatedImage({image_url, output_hint?})` emits image then optional hint.
 
 Only inline base64 data URLs are accepted, not HTTP(S) URLs or filesystem paths.
-`text`, `notify`, and existing text tools keep their text contracts. The three
-current catalog models support images but **not native audio**: `audio` preserves
-the artifact and returns an explicit capability error before adding unsupported
-content to model history. Audio playback, recording and generation are not part
-of this phase. The provider transport supports typed inline audio for future
-verified audio-capable catalog entries.
+`text`, `notify`, and existing text tools keep their text contracts. Current chat models accept images but **not native audio**:
+`audio` preserves the artifact and reports a capability error instead of adding
+unsupported content to model history.
 
 JavaScript sees Codex-shaped result objects. Rust, SQLite and UI snapshots use
 ordered typed text/media parts and private file references, not repeated base64
@@ -198,25 +189,13 @@ model summaries.
 
 Private originals, prepared images and thumbnails live in `media/<session-id>/`
 under the existing **pico-evo storage root**. They survive restart and source-file
-changes. They are removed with their owning session/family, not during compaction
-or transcript eviction. Failed cleanup
-after committed deletion is reported without allowing late callbacks to recreate
-sessions.
+changes. Deletion releases media only when no session (including a fork)
+still references it; compaction and transcript eviction do not remove media.
+Failed cleanup after a committed deletion is reported without recreating the session.
 
-Expanded tool results show static thumbnails. Click one for a modal on a dark
-overlay, with no solid panel. Images retain their natural size unless they must
-shrink to fit the window. Path, resolution and byte size appear in a compact,
-translucent panel at the image’s top left only while hovering over the image.
-Long paths and URLs are ellipsized to keep the panel compact.
-Clicking a loaded chat preview (including Markdown images and attachments) smoothly
-expands it from its visible position into the centered viewer, while the backdrop
-fades in. Closing reverses the transition; it can also interrupt an opening
-animation. The preview remains visible until the original has both decoded and
-finished uploading to the GPU, so large images cannot leave a blank handoff frame.
-If the window was resized or the transcript changed/scrolled, closing fades in
-place instead of returning to stale thumbnail coordinates.
-Click the image or outside it, or press Escape, to close. GIFs animate with an
-icon-only Play/Pause button centered below the image. Closing the modal cancels
+Click a thumbnail to view the image at natural size, scaled down if needed
+to fit the window. Hover for the path, resolution and byte size. Use Play/Pause
+for GIFs; click the image or backdrop, or press Escape, to close. Closing the modal cancels
 obsolete decoding and stops animation subscriptions. Decoding runs on workers,
 with at most two UI decoders. Recently viewed decoded thumbnails can be reused
 when scrolling back, without rereading the saved thumbnail file.
@@ -295,12 +274,8 @@ contracts in Rust/QuickJS, not Codex/V8 or its extension/attachment machinery.
 Image preparation shares its budget and validation approach, not byte-identical
 encoding. Metadata is not retained in prepared PNGs; originals remain unchanged.
 
-Official capability/reference pages checked 2026-11-14:
-- <https://developers.openai.com/api/reference/resources/images/methods/generate>
-- <https://developers.openai.com/api/reference/resources/images/methods/edit>
-- <https://developers.openai.com/api/docs/models/gpt-6-astra>
-- <https://developers.openai.com/api/docs/models/gpt-6.1-sol>
-- <https://developers.openai.com/api/docs/models/gpt-6-luna>
+API references: [generate](https://developers.openai.com/api/reference/resources/images/methods/generate)
+and [edit](https://developers.openai.com/api/reference/resources/images/methods/edit).
 
 Automated tests use local fixtures, never user credentials. The following live
 acceptance checks consume account usage and must be authorized separately:

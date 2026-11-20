@@ -7,15 +7,10 @@ Nested tool documentation lives in `exec.description`, not the system instructio
 Each entry has a one-line purpose and a TypeScript declaration generated from its
 input and output JSON schemas in `crates/pico-core/src/code_mode/catalog.rs`.
 The same catalog supplies JavaScript `tools`, `ALL_TOOLS` (including both schemas),
-and nested-call availability checks. Main requests include nine tools when web access is enabled; child
-requests include shell tools, `view_image`, and `web__run` when web access is enabled.
-Text-returning tools are
+and nested-call availability checks. Text-returning tools are
 correctly declared as `Promise<string>`, even when the string contains JSON.
-General assistant/project policies remain in system instructions.
 
-The schema renderer handles only the shapes used by these built-ins (objects,
-arrays, scalar types and enums); no general schema framework or dependency is
-needed. When adding a tool or changing its arguments/results, update its schemas
+When adding a tool or changing its arguments/results, update its schemas
 alongside its Rust handler. Field descriptions become TypeScript comments.
 
 `exec` is an OpenAI **custom/freeform** tool using Codex's Lark source grammar.
@@ -43,9 +38,7 @@ include `text`, `exit`, `store`/`load`, timers, `ALL_TOOLS`, `notify` and `yield
 `notify` injects an additional custom-tool output into the conversation;
 `yield_control` yields the accumulated cell output while execution continues.
 Unawaited promises do not keep a completed module alive. `store` values survive
-cells/turns in the current app process, not restarts. Image/audio helpers and image
-tools are now implemented; see [images](images.md) for schemas, billing, file
-ownership, capability handling and media limits.
+cells/turns in the current app process, not restarts.
 
 Nested shell inputs:
 
@@ -109,26 +102,6 @@ pending questionnaire. Stop still cancels the invocation and reconnection.
 Provider protocol errors, unaccounted-for side effects, and storage failures
 are not transport retries. Restart repair never automatically starts work.
 
-## Reference provenance
-
-The top-level grammar/schema and execution semantics were checked against the
-public OpenAI Codex source (Apache-2.0), retrieved during implementation:
-
-- `codex-rs/core/src/tools/code_mode/execute_spec.rs`
-- `codex-rs/core/src/tools/code_mode/wait_spec.rs`
-- `codex-rs/code-mode-protocol/src/description.rs`
-- `codex-rs/code-mode-protocol/src/json_schema_types.rs`
-- `codex-rs/core/src/tools/spec_plan.rs`
-- `codex-rs/core/src/tools/handlers/unified_exec.rs`
-
-The generated exec catalog follows Codex's code-mode-only description assembly,
-checked at revision `b1573f102413e96a6481087922bf425231222dee`. Pico does not need
-Codex's deferred-tool discovery or general-purpose schema renderer.
-
-Repository: <https://github.com/openai/codex>. Pico has its own Rust/QuickJS runtime;
-it does not embed Codex/V8, Codex's remote execution service, approval/sandbox
-machinery, or its extension/attachment infrastructure. No backwards-compatibility adapters exist.
-
 Cell text buffers spill to `/tmp` after 4 MiB of UTF-8 (including inserted separators),
 retaining all text. The outer `exec`/`wait` budget also uses complete-file references
 for oversized output, independently of nested shell tool budgets. Large JavaScript
@@ -147,32 +120,24 @@ Service error details also use complete-file references when oversized. If savin
 one-shot diagnostics fails, Pico reports the failure and returns the complete data
 inline (hexadecimal for non-UTF-8 bytes), rather than silently discarding it.
 
-## Subagents
+## Other built-in tools
 
-Main conversations additionally expose `tools.spawn_subagent`,
-`tools.wait_subagent`, and `tools.list_subagents`. Children expose shell tools,
-`view_image`, and policy-enabled `web__run`, but not generation, questionnaires
-or delegation. See [subagents](subagents.md) for the complete
-contract, profile defaults, final-only results and completion/Stop lifecycle.
-A successful spawn creates an assignment independent of the JavaScript cell: it
-continues after the cell completes or is terminated. Use the returned persistent
-`run_id` with `wait_subagent`; it is not a process ID or a code-cell ID.
+See [subagents](subagents.md), [questionnaires](questionnaires.md),
+[web access](web-search.md), and [image tools](images.md) for their schemas,
+permissions and lifecycles.
 
-## Questionnaires
+## Reference provenance
 
-Main conversations expose `tools.ask_user` for required select/text questions.
-The promise waits for user input without a questionnaire timeout. Cells may yield,
-but the harness pauses model continuation until pending questions are answered or
-cancelled; use `wait` to retrieve any remaining cell output after resuming.
-Unawaited calls end with the cell. Children do not have this capability. Answers are ordered JSON strings; large results use complete-file
-references. See [questionnaires](questionnaires.md) for the schema, limits, UI,
-cancellation/restart behavior and acceptance checklist.
+The top-level grammar/schema and execution semantics were checked against the
+[public OpenAI Codex source](https://github.com/openai/codex) (Apache-2.0):
 
-## Web access
+- `codex-rs/core/src/tools/code_mode/execute_spec.rs`
+- `codex-rs/core/src/tools/code_mode/wait_spec.rs`
+- `codex-rs/code-mode-protocol/src/description.rs`
+- `codex-rs/code-mode-protocol/src/json_schema_types.rs`
+- `codex-rs/core/src/tools/spec_plan.rs`
+- `codex-rs/core/src/tools/handlers/unified_exec.rs`
 
-Main conversations and subagents expose `tools.web__run` when global web access is enabled.
-It returns `Promise<string>` and supports search, image search, open, click, find,
-PDF screenshot requests, finance, weather, sports and time. Structured backend
-metadata is persisted for the UI, never returned to JS or included in model-facing
-compaction archives. See [web access](web-search.md) for the complete contract,
-Live/Cached/Disabled policy, text-only screenshot limitation and acceptance results.
+The generated exec catalog follows Codex's code-mode-only description assembly,
+checked at revision `b1573f102413e96a6481087922bf425231222dee`. Pico does not need
+Codex's deferred-tool discovery or general-purpose schema renderer.

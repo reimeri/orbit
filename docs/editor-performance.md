@@ -99,43 +99,12 @@ itself took about 2.3 ms. This corrects the earlier hypothesis that scrollbar
 measurement alone explained the collapsed smoke frame: that specific transition
 is dominated by native layout, while the visible-composer path hits the scrollbar.
 
-## Baseline diagnosis
-
-1. **The smoke pause is primarily native initialization, not our scrollbar.**
-   In the pinned `iced_graphics::text::Editor::update`, metrics are applied before
-   viewport size. Cosmic-text's `set_metrics` immediately shapes using the old
-   bounds; a new buffer has no height limit. The unlaid benchmark caches every
-   logical line natively. A mounted editor instead caches only a small viewport.
-   First candidate: apply valid metrics and bounds together, avoiding the
-   unbounded intermediate layout. This needs a focused regression in the pinned
-   dependency patch; merely optimizing Pico's scrollbar will not fix this path.
-2. **For an already-visible editor, Pico's full-document scrollbar measurement
-   dominates large multiline pastes and width changes.** Unchanged layout and
-   small edits are much cheaper; the immediate problem is eager cold-cache work,
-   not simply the cached line-count summation. Evaluate bounded/lazy measurement
-   with viewport anchoring and estimated offscreen heights, or incremental work,
-   after fixing native initialization. Retain all text and normal wrapping.
-3. **Multiline insertion itself has poor scaling.** Cosmic-text 0.15's `insert_at`
-   repeatedly inserts middle lines at the same index in its `Vec`, shifting the
-   suffix on each insertion. The measurements warrant a separate bulk-insertion
-   experiment; reducing layout cost alone does not eliminate paste latency at
-   much larger line counts.
-4. **One enormous logical line is a separate risk.** Native shaping dominates
-   even in a mounted editor, including a one-character edit. Logical-line
-   virtualization alone cannot solve this. Profile shaping/wrapping before
-   choosing a deeper editor change; do not split Unicode text arbitrarily.
-5. **CJK-containing text is much more expensive than the ASCII/Greek controls
-   on this font setup.** This narrows the investigation to font/shaping behavior,
-   not plain UTF-8 byte handling. These stage timings do not isolate font fallback
-   from shaping; investigate that path rather than attributing every Unicode
-   input to the same cost or relying only on ASCII benchmarks.
-
-These are exploratory local measurements, not cross-machine guarantees. The
-benchmark does not measure clipboard transfer, draft persistence, selection
-replacement, peak memory, actual frame latency, or all Unicode/wrapping patterns.
-Keep existing interaction/Unicode tests when implementing improvements; add
-bounded-work regressions for the chosen approach rather than hard wall-clock
-thresholds. The implementation and remaining limitations are described below.
+The baseline exposed three costs: shaping with unbounded dimensions before the
+first layout, measuring offscreen rows for the scrollbar at mounted widths, and
+repeatedly shifting lines during multiline insertion. CJK was slower than the
+Greek and ASCII controls on this font setup; these stage timings alone do not
+separate fallback from shaping. They exclude clipboard transfer, persistence,
+peak memory and frame presentation.
 
 ## Implemented optimizations and remeasurement
 
@@ -167,13 +136,10 @@ The focused debug smoke-input case dropped from about **12.28 seconds to 2.55 ms
 
 A new **294,000-byte distinct-word paragraph** deliberately exceeds the useful working set of the word cache. It takes **80.1 ms** for paste/layout and **81.0 ms** for a tail edit in release. There is no baseline measurement for this additional fixture. It prevents interpreting the repeated-word speedups as a guarantee for arbitrary input.
 
-Native layout still processes an entire logical line, and cache pressure can cause reshaping. Therefore enormous single paragraphs/minified input are not yet guaranteed to stay within a frame budget. Further improvement would require incremental/intra-paragraph layout work with careful Unicode/bidi handling, not more scrollbar changes. Peak memory and all Unicode/font combinations have not been benchmarked.
-
-### Regression coverage
-
-The new checks cover lossless middle/selection-replacement paste with mixed line endings; bounded newly shaped logical-line counts for large pastes and middle/end seeks; cursor preservation; preferred non-exact font weights and font removal; cached-vs-fresh bidi/cluster/attribute layout; and focused drawing plus IME commit after edit/seek/reflow. Existing growing-height, wrapped overflow, wheel/drag batching, fractional viewport, ligature/copy and questionnaire tests remain in the verification suite.
-
-See the patch maintenance notes under `patches/cosmic-text`, `patches/iced-graphics`, and `patches/iced-widget`. Cargo and the Nix package use the same checksum-pinned patched sources.
+This result motivated the incremental shaping measurements below. See the patch
+notes for the [cosmic-text](../patches/cosmic-text/README.md),
+[iced-graphics](../patches/iced-graphics/README.md) and
+[iced-widget](../patches/iced-widget/README.md) regressions.
 
 ## Profiling and incremental prefix shaping
 

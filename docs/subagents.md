@@ -2,8 +2,6 @@
 
 Pico's built-in subagents are persistent child conversations. Each assignment has
 its own run ID; continuing a child retains its conversation but creates a new run.
-There is no profile loader, extension mechanism, context-sharing switch, or V1
-compatibility layer.
 
 | Type | Default model | Default effort | Instructions |
 | --- | --- | --- | --- |
@@ -145,19 +143,11 @@ reports any that still cannot be saved, without rerunning assignments. Keep Pico
 
 ## UI
 
-The robot-shaped **Agents** button on the right rail shows a small blue dot when
-the current family has running children. The panel header shows the running count. Its panel shares the Settings slot and lists titles, profiles, statuses,
-elapsed times and current runtime activity. Spawn tool rows link to the child
-and show assignment status separately from the completed spawn call.
-
-Each clickable card uses two lines: profile and live activity (or terminal status)
-on the first; title and right-aligned model, effort and elapsed time on the second.
-Long titles are ellipsized for display only. Clicking anywhere on the card displays
-the child's live, full-width transcript with **Back to parent**
-and **Stop**. The existing Markdown, selection, Copy and expandable tool views
-are reused. There is no child composer or editable model selector. Parent drafts
-and scroll positions survive navigation. Request child continuations through the
-parent rather than messaging children directly.
+Open **Agents** on the right rail to inspect running and completed assignments.
+Spawn rows link to the child and distinguish a successful spawn from the outcome
+of the assignment. Select a child to read its transcript or stop it; **Back to
+parent** restores the parent's draft and scroll position. Request continuations
+through the parent; children have no composer or editable model selector.
 
 Children do not clutter the main session list. Their parent remains in Working
 while children run, and unacknowledged child failures/interruption contribute to
@@ -166,33 +156,5 @@ existing child alerts without changing their outcomes. Children and results rema
 saved with the parent. Confirmed parent deletion atomically deletes the whole
 family and is refused while related turns are active. Project files are never deleted by session deletion.
 
-## Acceptance checks
-
-Automated local-provider tests cover parallel work, independent context, profile
-selection, cell-independent child lifetime, continuation ownership, immutable run
-results, wait-any, six-child races, independent capacity across parents, terminal
-failures/empty responses, Stop scope, coalesced notifications with user steering,
-transaction rollback, terminal-write retry, lossless result budgets, restart
-recovery, and family deletion. UI tests cover child read-only controls, sidebar
-filtering, parent draft/scroll restoration, family deletion while inspecting a
-child, and layouts at 1200×800 and 860×560. Software/GPU smoke views also render
-the Agents panel and child inspection screen.
-
-For live account acceptance in a disposable project:
-
-1. Ask the parent to run independent Explore and Review tasks and continue its own
-   work. Open Agents and verify parallel activity and the parent Working count.
-2. Open each child, expand a command, copy its output, and return to the parent.
-   Verify the parent's draft and scrolled position are preserved.
-3. Let a child finish after the parent becomes idle. Verify the parent wakes,
-   retrieves the final response, and does not receive intermediate child text.
-4. Ask for a follow-up in the same Explore session. Verify retained child context
-   and a new run ID; the old run's result remains retrievable.
-5. Stop one child; verify its siblings continue and the parent acknowledges it.
-   Then stop the parent; verify all children stop and no automatic wake follows.
-6. Restart with saved results; verify results remain inspectable, no provider work
-   starts automatically, and interrupted work requires an explicit continuation.
-7. Delete a stopped parent while viewing a child. Confirm the deletion dialog
-   mentions children and the UI leaves the deleted family.
-
-Live OpenAI access is not exercised by the deterministic fixtures or smoke tests.
+For focused scheduler and recovery tests, run
+`cargo test --locked -p pico-core agent::subagents` inside `nix develop`.

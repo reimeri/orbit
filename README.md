@@ -1,175 +1,91 @@
 # Pico V2
 
-A native Wayland coding harness written in Rust with iced. **Phase 1 is implemented:**
-project/session management, streaming Markdown chat, ChatGPT subscription login,
-an agent loop, and JavaScript code mode over interactive shell tools. Phase 2 now
-also includes asynchronous Review/Explore subagents, questionnaires, image
-viewing/generation, multimodal code-mode helpers, and [local composer spell check](docs/spellcheck.md).
+Pico is a native Wayland coding assistant written in Rust with iced. Sign in with
+a ChatGPT subscription to work on local projects in persistent chat sessions.
 
 ## Run
 
-Target: **x86_64 Linux / NixOS, native Wayland only**. Start from your Wayland desktop:
+On **x86_64 Linux with Nix and a Wayland desktop**, run `nix run` from the
+checkout. For development:
 
 ```sh
 nix develop
 just run
 ```
 
-`nix develop` also prepares the locally patched, checksum-pinned winit dependency.
-Only the [patch and pin](patches/winit/README.md) live in this repository; upstream
-source stays in the Nix store, linked through the generated `.build-deps/` folder.
-
-1. Open **Settings** (gear on the right) and **Sign in with ChatGPT**.
-2. Complete the browser login. If browser launch fails, use **Copy login URL**.
-3. Choose **Add project**, browse to a folder or enter its absolute path.
-4. Select the project and send a request. Enter sends; Shift+Enter adds a newline.
+1. Open **Settings → Account → Sign in with ChatGPT**. If the browser does not
+   open, use **Copy login URL**.
+2. Choose **Add project**, browse to a folder or enter its absolute path.
+3. Select the project and send a request. Enter sends; Shift+Enter adds a newline.
 
 **Commands run with your user privileges, without a sandbox or approval prompts.**
-Use a disposable project for initial testing. Selecting a project sets the command
-working directory; it does not restrict filesystem or network access.
+The project sets the working directory; it does not restrict filesystem or network
+access. Use a disposable project for initial testing.
 
-Settings has **Account**, **General**, and **Models** tabs. The fixed catalog is
-**Astra**, **Sol** (the default), **Terra**, and **Luna**. Choose the app default
-from the dropdown in General. Models has per-model effort and Fast defaults;
-initially all use Medium with Fast off. Use **Save** to save these
-changes. They take effect only after the write succeeds. Save closes Settings
-unless you have continued editing or reopened the panel. Reopening during a
-save shows the submitted draft; a failed save leaves your edits available to
-retry. Cancel discards unsaved edits, not a write already in flight. Appearance
-controls apply immediately.
+## Working with sessions
 
-The composer toolbar selects a session's model and reasoning effort, and also toggles
-**Fast mode**. Switching models applies the new model's defaults. Saved sessions
-keep their selections; opening a session whose model has left the catalog
-replaces it with the app default and shows an informational toast. The replacement
-and its effort/Fast settings are saved without changing the transcript or draft.
+- Selecting a project opens a draft. Its text follows project changes and survives
+  restarts; a session is created on first send. Existing sessions have separate drafts.
+  A background request to Luna uses the first message (including attached images)
+  to suggest a title. You can rename it; a manual title wins.
+- Sessions run concurrently. Sending to a running session steers it **after the
+  current response and tool batch**. Stop cancels the turn and its commands; it
+  does not undo changes. Send another message to continue from saved context.
+  A [fork](docs/session-forks.md) starts a separate conversation at an earlier
+  prompt, not a separate copy of the working directory.
+- Hover over an idle, checked session to **Settle** it. If it still has running
+  shell commands, Pico asks before stopping them. Find it in search or expand
+  **Settled** and choose **Undo** to return it to the main list.
+- Right-click a project to rename, stash or delete it. Stashing hides the project
+  in the picker but keeps its conversations. Deleting it removes its sessions,
+  **not** the project folder.
 
-Fast requests priority service using `service_tier: "priority"` and a matching
-Codex routing hint. Model access, priority availability, and usage limits depend
-on your ChatGPT subscription. Set the usable input context limit in General;
-the initial limit is 272,000 tokens. The repo-local
-[model-update skill](.agents/skills/update-openai-models/SKILL.md) describes how to
-research and replace these families with newer versions.
+Select a model, reasoning effort and **Fast** (priority service) in the composer.
+Changing models applies the new model's defaults. Set the default model and
+usable input context limit in **Settings → General**; set per-model effort and
+Fast defaults in **Models**, then **Save**. Appearance changes apply immediately.
+If a session's model is retired, Pico switches it to the app default without
+changing the draft or transcript. Access, priority availability and usage limits depend on your subscription.
 
-## What works
+## Chat and tools
 
-- Project picker, favorites, session search by title/project, automatic initial
-  titles, right-click Rename/Delete menus with confirmations, saved drafts, restored selection.
-  Choosing a project opens a shared new-session draft; no session is created until
-  the first message is sent. Its text follows project changes and survives restarts.
-  Switching projects resets model/effort/Fast to defaults; existing sessions retain
-  their own separate unsent messages.
-- Theme chooser in **Settings → General → Appearance**: all 22 Iced palettes, with Moonfly as the default. The choice applies immediately and persists across restarts.
-- Three-column layout, resizable sidebar/settings panes, animated activity,
-  Markdown and code blocks, link confirmation, copy actions, expandable reasoning,
-  tool groups and individual tool inputs/results. Large tool details are virtualized: only
-  visible rows are shaped, while scrolling and Copy retain access to the complete output.
-- Assistant and reasoning messages render display equations locally with RaTeX.
-  Start a line with `\[` or `$$` and end the block with `\]` or `$$`, respectively.
-  For example, `$$E = mc^2$$` on its own line renders immediately in a saved
-  reply. Click a rendered equation to copy its LaTeX, delimiters included.
-  Wide equations scroll horizontally. Incomplete, unsupported and oversized
-  equations stay readable as source; inline math is not typeset.
-- The send arrow points up when idle and right while the selected session is running.
-  Its tooltip reads “Send message” or “Steer agent”, respectively. Beneath the composer, the single-row footer shows
-  project, Git info, and right-aligned context, throughput and cache metrics. Hover the project for
-  its full path. As space narrows, TPS, cache, project, Git, then context disappear.
-- Concurrent sessions. Sending while a turn is working **steers it after the
-  current response/tool batch**. Stop cancels the turn and its command sessions;
-  already executed commands are not undone. Send a new message to continue from
-  saved context after a stopped or failed turn.
-- ChatGPT OAuth with PKCE/state validation, local browser callback, persisted
-  private credentials, serialized refresh and one refresh on rejected tokens.
-- Streaming Responses requests, bounded transient-service retries, cancellation,
-  incomplete-stream rejection, encrypted reasoning replay and automatic context
-  compaction. Native compaction falls back to bounded transcript summarization.
-- Only `exec` and `wait` are top-level model tools. `exec` accepts **raw JavaScript**,
-  not JSON. Each cell gets a fresh embedded QuickJS context with async calls to
-  `tools.exec_command` and `tools.write_stdin`. Running cells yield IDs for `wait`.
-  Shell sessions support polling, PTY input, output limits and cancellation.
-
-- Async [Review and Explore subagents](docs/subagents.md), with persistent child
-  sessions, six parallel assignments per parent, resumable context, repeatable
-  final results and completion-driven parent wake-up. Open **Agents** on the right
-  rail to inspect their live transcripts. Both profiles are read-only by
-  instruction, **not sandboxed**.
-
-There are **no extensions** and no V1 migration/compatibility layer. Remaining
-Phase 2 browser, diff, skill-loading and statistics features remain unimplemented;
-there is no placeholder UI for them.
+- Attach [workspace files with `@`](docs/file-tags.md) or [paste and drop images](docs/images.md).
+  [Spell check](docs/spellcheck.md) runs locally.
+- Expand [chat activity](docs/chat-activity.md) to inspect reasoning, commands and
+  results. Select transcript text and use Ctrl+C to copy. Assistant and reasoning
+  messages also render block equations: start a line with `\[` or `$$` and end
+  the block with `\]` or `$$` respectively. Click an equation to copy the LaTeX.
+  Inline math and unsupported equations remain source text.
+- [Code mode](docs/code-mode.md) runs JavaScript over shell and other built-in
+  tools. [Web access](docs/web-search.md) can be live, cached or disabled.
+  [Image generation](docs/images.md#generate-and-edit) can use your subscription
+  or a separately billed API key.
+- Open **Agents** to inspect [Review and Explore subagents](docs/subagents.md).
+  They are read-only by instruction, **not sandboxed**. Answer
+  [questionnaires](docs/questionnaires.md) in the main session;
+  [desktop notifications](docs/notifications.md) signal when input is needed or
+  a turn finishes outside the focused conversation.
 
 ## State and recovery
 
-All app state is in `$XDG_CONFIG_HOME/pico-evo`, or `~/.config/pico-evo`:
+Pico stores state under `$XDG_CONFIG_HOME/pico-evo` (default `~/.config/pico-evo`):
 
-- `settings.json`: projects, favorites, layout and defaults.
-- `sessions.sqlite3` (and its live WAL): indexed session metadata, full transcript,
-  separate provider context, pending steering, drafts, usage, child ownership and
-  durable subagent assignments/results. Compaction does
-  **not** delete transcript text. Historical `sessions/*.json` files are left
-  untouched but are not migrated or loaded by this format.
-- `auth.json`: OAuth credentials, mode `0600`, inside a mode `0700` directory.
-- `instance.lock`: prevents two processes from overwriting the same state.
+| Path | Contents |
+| --- | --- |
+| `settings.json` | Projects, favorites, layout and defaults |
+| `sessions.sqlite3` and its live WAL | Sessions, drafts, transcripts, provider context, forks and subagent results |
+| `media/`, `attachments/` | Saved tool media and snapshots of images attached to prompts |
+| `auth.json`, `image-api-key.json` | OAuth credentials and the optional image API key |
+| `instance.lock` | Prevents concurrent writes by two app instances |
 
-Credentials are permission-protected local files, **not encrypted at rest**.
-Never share `auth.json`; transcripts/tool output can also contain sensitive data.
-Session changes use incremental SQLite transactions with WAL and full synchronous
-durability. Settings/credentials use private temporary files, fsync and atomic
-replacement. Unreadable state is preserved and reported, not reset. Close Pico
-before copying its database files for a backup; a live WAL must not be omitted. Interrupted calls are closed with
-an explicit uncertainty notice: the agent must inspect effects before retrying.
-JS variables, `store` values, cell IDs and shell sessions are process-local; they
-are not resurrected after restart. User instructions, transcript and model context
-are durable. Switching ChatGPT accounts rebuilds incompatible encrypted context
-from the transcript.
+Close Pico before backing up the directory; do not omit a live WAL or the media
+files. Credentials are permission-protected, **not encrypted at rest**. Do not
+share credential files; transcripts and tool output can also contain sensitive data.
 
-See [performance](docs/performance.md) for lazy loading, rendering, durability
-boundaries and reproducible large-session measurements.
+Compaction shortens provider context, not the transcript. Switching accounts
+rebuilds incompatible encrypted context from the transcript. After a restart,
+interrupted tools are marked rather than replayed: inspect their effects before
+retrying. JavaScript store values, cells and shell sessions do not survive restart.
+Historical `sessions/*.json` files are neither loaded nor migrated.
 
-## Verify and test your account
-
-```sh
-# Inside nix develop:
-just check
-just test-core
-just test         # All tests, including wgpu rendering via a CPU Vulkan driver
-just verify       # Format, Clippy, tests, memory checks and Wayland smoke
-just smoke-gpu    # wgpu on your real Wayland desktop
-
-# Packaging verification, not the everyday edit loop:
-nix flake check
-nix run
-```
-
-Automated tests use temporary directories and loopback HTTP fixtures—no account
-or live model calls. Rendering tests and `just smoke` use wgpu with the pinned Mesa
-Lavapipe CPU Vulkan driver, so no hardware GPU is needed. Normal app startup and
-`just smoke-gpu` use the host graphics drivers; Pico has no software-renderer fallback.
-The rendered smoke test visits the project picker, Markdown
-chat/tool details, settings and a modal using isolated temporary application state.
-
-**Live OAuth and model access are intentionally left for you to test.** Follow
-[the Phase 1 acceptance checklist](docs/phase-1-testing.md), including streaming,
-shell/PTYS, steering, Stop, restart persistence and compaction.
-
-## Layout
-
-- `crates/pico-app`: iced application, UI state, platform folder picker.
-- `crates/pico-core`: storage, authentication, provider, agent, shell and code mode;
-  no iced dependency.
-- `scripts/smoke-wayland.sh`: isolated headless Wayland window check.
-- `flake.nix` / `flake.lock`: pinned development shell and runnable package.
-- `docs/development.md`: incremental builds, verification and troubleshooting.
-- `docs/code-mode.md`: tool contract, runtime limits and upstream references.
-
-### Image tools
-
-[Image tools and settings](docs/images.md) are built in: main/child `view_image`,
-main-only `image_gen__imagegen` with required caller-owned output paths, PNG/GIF
-generation/editing through Codex subscription or explicit OpenAI API billing,
-and `image`/`audio`/`content`/`generatedImage` code-mode helpers. Expanded results
-show durable thumbnails with an in-app full-size/animated GIF viewer.
-Settings → Images selects backend, API model and quality; Account stores a masked
-private API key separately from OAuth. Current chat models do not accept audio;
-the helper reports this explicitly. Live generation acceptance consumes usage and
-is documented separately from credential-free fixture tests.
+For build commands, tests and troubleshooting, see [Development](docs/development.md).

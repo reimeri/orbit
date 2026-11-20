@@ -1,9 +1,7 @@
 # Iced widget patches
 
-Base: checksum-pinned crates.io iced_widget **0.14.2**. The Nix development
-shell, package, and formatting check prepare .build-deps/iced-widget using
-default.nix; Cargo redirects this dependency to that immutable patched source.
-No registry cache or upstream source is modified in the checkout.
+Base: crates.io `iced_widget` **0.14.2**. See [development](../../docs/development.md#environment)
+for how Nix prepares the patched sources.
 
 The editor-access.patch adds Content::with_editor, a read-only callback exposing the
 underlying renderer editor. Pico's composer needs its actual shaped buffer and
@@ -47,12 +45,6 @@ width constraint is opt-in: code blocks and other scrollers remain unbounded.
 Keeping it in the native Markdown widget (which owns the private row cells)
 preserves the same viewer traversal for rendering, selection and copy.
 
-When updating iced, regenerate the patch against the official release, update
-the version/hash and root lockfile, and re-enter nix develop. Never edit the
-generated symlink or registry source. Remove the patch when upstream provides
-equivalent read access. Run just verify, nix flake check, and just smoke-gpu
-from the Nix environment after patch changes.
-
 The existing input-method fallback anchors empty paint geometry at the text
 viewport origin while keeping the focused editor enabled. This lets IME commits
 reveal an offscreen caret without requiring offscreen measurement.
@@ -60,3 +52,7 @@ reveal an offscreen caret without requiring offscreen measurement.
 display-math.patch carries a block equation as one source-preserving item
 through incremental parsing, rendering and copy. Its parser option comes from
 the [pulldown-cmark block extension](../pulldown-cmark/README.md).
+
+When updating iced, check which patches have upstream equivalents, regenerate
+the remaining diffs, and update the pin and root lockfile. Re-enter the dev
+shell and run `just verify`, `nix flake check` and `just smoke-gpu`.

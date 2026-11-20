@@ -51,9 +51,9 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   retain dedicated worker threads, bounded by the existing per-conversation limits.
   Waiting cells wake on completion, cancellation or their next timer deadline,
   not a 2 ms polling cycle. Output/store size accounting is incremental.
-- Git refresh is immediate on selection, normally every 5 seconds for an active
-  selected turn and 60 seconds when idle, with cost-based backoff up to 5 minutes.
-  Requests have a 15-second timeout and do not block the UI.
+- Git status refreshes on project selection and every five seconds for the
+  selected session. Captures coalesce per project, run off the UI thread and
+  time out after 15 seconds. See [untracked line counts](#git-status-untracked-line-counts).
 
 ### Durability and recovery
 
@@ -80,11 +80,8 @@ again once it has been delivered. Failed ordinary edits stay in memory for retry
 Cancellation frees inaccessible command slots; actual cell-thread lifetime is
 tracked independently of retrievable cell IDs so eviction cannot race callbacks.
 
-**Format change:** old `sessions/*.json` files are neither migrated nor loaded.
-They remain untouched. Only the new SQLite library is displayed. Settings and
-credentials retain their existing files under `pico-evo`. Close Pico before making
-a file-level backup; if copying a live database, its WAL is part of the state—use
-SQLite's backup facility rather than copying just the main database file.
+For file locations, backup and format compatibility, see
+[State and recovery](../README.md#state-and-recovery).
 
 ## Reproducing the measurements
 
@@ -162,12 +159,11 @@ that cost. Normal full-output normalization/reflow remains linear in text size.
 Deterministic regressions count new paragraphs for forward/reverse tool and chat
 scrolling, changed text, width reflow, measurement epochs and session/entry identity.
 They also check eviction rather than an unbounded offscreen paragraph cache.
-Software and opt-in GPU pixel comparisons against iced Rich cover span styles,
-Unicode/bidi, wrapping, fractional scaling and scroll clipping. Run the GPU
-comparison explicitly on a machine with a GPU adapter:
+To run the wgpu comparison against iced Rich (including Unicode/bidi,
+fractional scaling and clipping):
 
 ```sh
-nix develop --command cargo test --locked -p pico-evo shared_paragraph_matches_rich_text_pixels_gpu -- --ignored
+nix develop --command just test shared_paragraph_matches_rich_text_pixels
 ```
 
 ## Activity-group label fitting
@@ -263,8 +259,7 @@ The scrolling simulation uses the same estimated row heights in both versions
 and excludes draw/present, real wheel-event cadence and subsequent measurement
 corrections. It does not establish end-to-end frame latency. Tests cover narrow
 viewport boundaries, large jumps, tall rows, scroll-anchor retention, cache
-refresh after shrinking measurements, and unchanged sidebar ranges. The rendered
-software/GPU smoke retains mixed activity/detail layouts and long-list reflow.
+refresh after shrinking measurements, and unchanged sidebar ranges.
 
 ## Width-aware prefix shaping
 
@@ -324,16 +319,6 @@ width, grapheme integrity, actual fit, and existing cache/overflow behavior.
 
 ## Verification and remaining measurement limits
 
-Regression coverage includes incremental SQL writes and atomic rollback, failed
-submission retry/restart, interrupted-session reload positions, runtime-preserving
-body eviction, cancelled native callbacks, command-slot reuse, exact tail overflow,
-Unicode output caps, timer fairness, compaction checkpoint reuse, overlapping UI
-transitions/autosaves/shutdown, stale measurements, and bounded 20,000-entry caches.
-
-Software and GPU smoke scenarios exercise a real Wayland window: large-output
-scrolling, long transcript middle/end/reflow, a 10,000-session sidebar, and renewed
-measurement identity. They do not replace exhaustive interaction testing.
-
 These measurements do not include live model latency, eight simultaneous real
 model streams, or a full frame-time/allocation profile. Loading one huge selected
 body still takes time off the UI thread; formatting one enormous indivisible
@@ -347,18 +332,13 @@ conversations because the requested policy has no global cap.
 See the [2026-11-15 native-GPU benchmark](benchmarks/session-wave-2026-11-15/README.md)
 for full-window measurements of continuous redraws, timed redraws, geometry
 reuse, a static GPU-cache diagnostic, and reuse of the existing activity cadence.
-It includes raw samples and a reproducible experimental patch; no production
-animation behavior was changed as part of the investigation.
-
-The subsequent minimal implementation reuses the existing activity redraws:
-sidebar waves no longer request their own frames. The activity timer also remains
-active for prepared Working rows, covering finalization and child work. This is
-the report's `tick-driven` approach, not the larger widget-local-clock redesign.
+The measured `tick-driven` variant is the one used in production: waves
+reuse the activity timer, including during finalization and child work.
 
 ## Large text editor input
 
 See [editor performance](editor-performance.md) for the opt-in paste/layout/
-scrollbar benchmark, debug and release baselines, and proposed follow-up work.
+scrollbar benchmark, debug and release baselines, and remaining single-paragraph costs.
 
 ## Transcript selection hit-testing
 

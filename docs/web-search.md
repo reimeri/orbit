@@ -1,10 +1,8 @@
 # Web access in code mode
 
 `tools.web__run` is Pico's built-in implementation of Codex's
-standalone `web.run` tool for main agents and subagents. `exec` and `wait` remain
-the only top-level tools.
-No extensions, browser cookies, additional Responses model roundtrip, or API-key
-billing path are involved.
+standalone `web.run` tool for main agents and subagents. It uses the ChatGPT
+subscription, not browser cookies or API-key billing.
 
 ## Contract
 
@@ -172,14 +170,7 @@ alone does not establish subscription entitlement.
 
 ## Verification and live acceptance
 
-Automated tests use isolated storage and local HTTP fixtures. They cover all ten
-command families, filtering, sports normalization, model/policy snapshots, stable
-reference identity, main/child catalogs, Disabled enforcement, authentication refresh,
-redirect rejection, cancellation, errors, UI-only diagnostics, durable large metadata,
-code-mode text output, compaction isolation, restart, and settings/UI persistence.
-
-The software/GPU window smoke includes the web settings and an expanded source row.
-Run `nix develop --command just verify` before handoff.
+Run `cargo test --locked -p pico-core web` for credential-free fixture tests.
 
 **Live checks consume ChatGPT subscription usage and require explicit authorization.**
 The ignored end-to-end check uses the actual Harness, QuickJS and Rust transport in
@@ -194,9 +185,3 @@ PICO_WEB_ACCEPTANCE_AUTH="$HOME/.config/pico-evo/auth.json" \
 ```
 
 Refresh the Pico login first if less than ten minutes of token validity remain.
-
-Authorized checks on 2026-11-14 passed with saved Codex and Pico V2 credentials.
-The production Rust/QuickJS path passed all ten operations, chained navigation,
-Live and Cached search, metadata persistence, and Disabled enforcement. The PDF
-screenshot limitation above was observed directly. These results establish behavior
-for the tested account/model at that time, not universal backend availability.

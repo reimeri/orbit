@@ -38,16 +38,10 @@ tables.
 
 ## Maintenance and tests
 
-The editor regression tests in `growing_editor.rs` exercise the real patched
-renderer editor. They require DejaVu Sans (provided by the pinned Nix fontconfig),
-assert that their fixtures actually form ligatures, and cover both arrow
-directions, combining marks, RTL lam-alef (including a separate mark glyph),
-mixed-direction boundaries,
-wrapped-away spaces, wrapping affinity and scroll geometry. Selection regressions
-check individual graphemes in both directions, actual click/drag and copied text,
-combining marks in multi-glyph clusters, disjoint bidi spans, empty/wrapped rows,
-and scrolling.
-They run as part of normal workspace tests, including the packaged build.
+The renderer tests in `growing_editor.rs` require DejaVu Sans (in the pinned
+fontconfig). They check real ligatures, multi-glyph clusters, mixed-direction
+boundaries, wrapping affinity and agreement between selection geometry and
+copied text.
 
 When updating iced, regenerate the patch against the official crate, update the
 version/hash and Cargo lockfile, and re-enter `nix develop`. When revising an

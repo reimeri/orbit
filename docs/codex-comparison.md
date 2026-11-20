@@ -9,20 +9,6 @@ provider capabilities and configuration; supported paths are not universal defau
 This is a source comparison, not a performance benchmark or a commitment to copy
 all Codex features.
 
-## Shared architecture
-
-Both harnesses follow the same basic loop:
-
-```text
-Collect input -> request a model response -> execute tools
-             -> append results -> request another response or finish
-```
-
-Pico already implements streaming responses, code mode, queued steering,
-automatic compaction, cancellation and asynchronous subagents. Code mode is not
-a missing architectural change: Pico exposes `exec` and `wait` as top-level
-Responses tools, with built-ins available through JavaScript's `tools` object.
-
 ## Loop behavior
 
 | Area | Pico V2 | Public Codex |
@@ -33,186 +19,35 @@ Responses tools, with built-ins available through JavaScript's `tools` object.
 | Transport | Uses WebSockets only for Responses; compatible follow-ups send the new input with a previous response ID. | Also supports persistent WebSockets, preconnection, request prewarming and incremental continuation. |
 | Compaction | Pauses the loop at a reported-usage threshold, or after a context-limit error. Tries native encrypted compaction, with bounded chunked summarization as fallback. | Includes an asynchronous/background compaction path in addition to foreground compaction machinery. |
 
-**Sequential dispatch does not mean Pico has no concurrency.** A JavaScript cell
-can run nested calls with `Promise.all`, yielded cells can remain running, shell
-sessions can outlive a call, and subagents run asynchronously. Pico advertises
-`parallel_tool_calls: true`, allowing the model to return multiple calls, but
-serializes its two top-level tools. That matches the pinned Codex
-code-mode handlers: [`exec`][codex-exec] and [`wait`][codex-wait] inherit the
-[executor's non-parallel default][codex-executor]. This is invocation exclusivity,
-not a prohibition on concurrent work inside or beyond a yielded cell.
-
-Pico dispatches from validated `response.output_item.done` events, never from partial
-arguments. A durable in-progress response retains completed items and tool results
-before the final response arrives. Calls are saved before execution; results are
-saved as invocations finish or yield. Final reconciliation does not dispatch a call
-twice, and model context retains response-item order followed by tool-result order.
-
-Recovery pairs unfinished calls with an explicit interrupted result rather than
-blindly repeating potentially completed side effects. A dropped socket stops new dispatch but lets an already-running invocation
-finish before saving its result and reconnecting. An interrupted stream is not
-replayed: a new request starts from recovered history. Context-limit recovery cannot compact and retry a
-stale snapshot after completed response items have arrived. Stop cancels ongoing
-work; it does not undo completed commands.
-Fallback compaction preserves historical context and oversized output references
-rather than treating a summary as the only surviving copy.
-
-Implementation references: Pico's [agent loop](../crates/pico-core/src/agent.rs),
-[early execution](../crates/pico-core/src/agent/execution.rs), [provider](../crates/pico-core/src/provider.rs) and [code-mode contract](code-mode.md);
-Codex's [turn execution][codex-turn], [tool scheduling][codex-parallel],
-[retry handling][codex-retry] and [background compaction][codex-compaction].
+Pico's exclusive top-level dispatch matches the pinned Codex [exec][codex-exec]
+and [wait][codex-wait] handlers' [executor default][codex-executor]. It does
+not prevent concurrent nested calls, background shell commands or subagents.
+For durability and recovery boundaries see [code mode](code-mode.md).
+Upstream references: [turn execution][codex-turn], [tool scheduling][codex-parallel],
+[retry handling][codex-retry] and [compaction][codex-compaction].
 
 ## Tool discovery
 
-### Pico: a complete built-in catalog upfront
+Pico advertises its entire capability-filtered catalog in `exec.description`;
+`ALL_TOOLS` inspects it rather than discovering new integrations.
+Codex can register MCP, app and client-provided tools. When configured for
+deferred exposure, [tool search][codex-tool-search] returns definitions for
+already registered, eligible tools. It neither installs tools nor bypasses
+permissions. See [upstream catalog assembly][codex-specs].
 
-Pico constructs its nested tool catalog from built-in definitions, filtered by
-conversation capabilities such as web policy and main-versus-child status. That
-same catalog supplies:
+## Transport
 
-- Descriptions and generated TypeScript signatures inside `exec.description`.
-- The callable JavaScript `tools` object.
-- `ALL_TOOLS`, including input and output schemas.
-- Availability checks before nested tool execution.
+Pico opens connections on demand. The [Codex client][codex-client] can also
+**preconnect** (open the socket without sending a prompt) or **prewarm** (send
+`response.create` with `generate: false`, then continue from its ID). Prewarming
+does not generate an answer or run tools.
 
-The model therefore already has documentation for every available nested tool:
-
-```js
-text(await tools.exec_command({cmd: "git status"}));
-```
-
-`ALL_TOOLS` provides introspection over that existing list; it does not discover
-additional integrations. Pico has no `tool_search`, deferred-tool loading,
-client-supplied dynamic tool registration, or extension registry. Its schema
-renderer supports the shapes used by the built-ins rather than arbitrary external
-tool schemas.
-
-See [catalog construction](../crates/pico-core/src/code_mode/catalog.rs),
-[execution checks](../crates/pico-core/src/code_mode.rs) and
-[JavaScript bindings](../crates/pico-core/src/code_mode.js).
-
-### Codex: immediate and deferred tool exposure
-
-Codex assembles a registry that can include built-ins, MCP/app integrations and
-client-provided dynamic tools. Depending on configuration, some tools are
-advertised immediately and others are deferred, avoiding full documentation for
-every integration in the initial prompt.
-
-When model support and eligible deferred tools permit it, Codex exposes
-`tool_search`. The model can search for a capability, receive matching tool
-definitions, then invoke a selected tool. This also works with nested code-mode
-calls. Codex's code-mode description assembly distinguishes ranked-search and
-catalog discovery paths; discovery is not synonymous with code mode, and not
-every Codex configuration requires a search before calling tools.
-
-```text
-User asks for an issue-tracker lookup
-    -> model searches available tool metadata
-    -> harness returns matching definitions
-    -> model invokes the selected tool
-```
-
-Searching does not create an integration or bypass its permissions: the tool must
-already be registered and eligible. Dynamic tool registration is a separate
-capability from searching registered tools.
-
-See Codex's [registry/exposure assembly][codex-specs] and
-[search handler][codex-tool-search]. With Pico's small built-in toolbox, upfront
-documentation is reasonable. Deferred discovery is principally a toolbox-scaling
-feature, not a prerequisite for using Pico's existing tools.
-
-## Preconnection and request prewarming
-
-These are distinct operations in the [Codex client][codex-client]:
-
-| Operation | Work performed |
-| --- | --- |
-| Preconnect | Opens a WebSocket connection ahead of use, without sending prompt payloads. |
-| Request prewarm | Sends `response.create` with `generate: false`, preparing request state without generating assistant output. |
-
-A request prewarm can submit already-known instructions, tools and input. It
-returns a response ID that a later generation can continue from:
-
-```text
-Preparation: open connection -> submit known state with generate:false -> ID W
-Generation:  continue from W, adding new input -> generate assistant output
-```
-
-This does not generate a speculative answer or execute tools. It moves setup work
-earlier and can reduce time to useful output when preparation overlaps other work.
-An extra warmup round trip is not automatically faster if nothing can overlap it.
-Pico currently has neither a WebSocket preconnect nor this no-generation warmup
-path; it opens the socket on demand and reuses it across compatible requests.
-
-See also the [OpenAI WebSocket guide][api-websocket].
-
-## Incremental requests with `previous_response_id`
-
-Let `H` be existing conversation input. The model returns response `R1`, containing
-tool call `C1`, and the harness executes it to obtain result `O1`.
-
-Without continuation, a client sends accumulated context again:
-
-```text
-Request 1: input = H
-Response R1: tool call C1
-Request 2: input = H + C1 + O1
-```
-
-Pico and Codex can instead send:
-
-```text
-Request 1: input = H
-Response R1: tool call C1
-Request 2: previous_response_id = R1, input = O1
-```
-
-The server combines the context associated with `R1`, including its output, with
-the new tool result. **The logical conversation is the same; less history travels
-over the wire.** These examples omit other request fields: required settings and
-instructions still need to be supplied appropriately.
-
-Both clients verify that the current input extends the previous known input and output,
-and that relevant request properties remain compatible. If history was replaced,
-shortened or otherwise changed, or relevant settings differ, each uses full input
-instead of an invalid delta. Auth ownership changes invalidate cached transport
-and continuation state.
-
-### Benefits and limits
-
-- Smaller repeated uploads and reusable server-side request state can reduce
-  latency over many tool round trips. This does not itself change model reasoning
-  or make tools execute remotely.
-- Chaining does not provide unlimited context or remove the need for compaction.
-- It does not make earlier context free. OpenAI's API documentation says previous
-  input tokens in a response chain remain billable; prompt caching is a separate
-  mechanism. This is not a prediction of ChatGPT subscription quota accounting.
-- WebSocket continuation supports `store: false` through connection-local
-  in-memory state; it does not require permanent response storage. If that state
-  is unavailable, the client must recover with full context rather than relying
-  on an unresolved response ID.
-- The harness still needs its durable transcript for restart, recovery and replay.
-
-See [Codex's incremental-request checks][codex-client],
-[WebSocket state/recovery][api-websocket] and
-[API conversation-state and billing documentation][api-state]. The API also
-supports response-ID chaining over HTTP; it is not inherently a WebSocket-only
-concept, although the connection-local low-latency path discussed here is.
-
-## Other harness differences and implications
-
-Pico implements its own fresh-context QuickJS runtime rather than embedding
-Codex's runtime. Its shell is unrestricted: it has no Codex-style approval/sandbox
-machinery. Pico's subagents are read-only **by instruction**, not filesystem
-isolation. They use fixed profiles, isolated context, no nested delegation and
-idle-child continuation; see [subagent contracts](subagents.md).
-
-The remaining direct loop-behavior gaps include preemptive steering. Early exclusive dispatch now matches the code-mode-only top-level
-scheduling needed by Pico; it does not implement Codex's general capability-based
-scheduler for other top-level tool catalogs. Prewarming and incremental
-requests are primarily performance work. Deferred discovery primarily matters if
-the tool ecosystem grows. These distinctions do not require replacing the basic
-agent-loop architecture, and do not by themselves establish a model-quality gap.
+Both clients can send only new input with `previous_response_id`; this saves
+upload bytes, not context window space. Pico's [continuation checks](responses-websocket.md)
+allow connection-local reuse with `store: false`. Response-ID chaining is also
+possible over HTTP. Prior input tokens in an API chain remain billable; that is
+not a prediction of subscription quota accounting. See the [WebSocket guide][api-websocket]
+and [API conversation state][api-state].
 
 [codex-turn]: https://github.com/openai/codex/blob/0d07dae8c9f7b0cd390aa4340fc1376b9d7c2e33/codex-rs/core/src/session/turn.rs
 [codex-parallel]: https://github.com/openai/codex/blob/0d07dae8c9f7b0cd390aa4340fc1376b9d7c2e33/codex-rs/core/src/tools/parallel.rs
