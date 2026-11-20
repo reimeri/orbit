@@ -2,8 +2,7 @@
 use super::*;
 use iced::widget::column;
 
-pub(super) const ACTION_GAP: f32 = 8.;
-const ACTION_WIDTH: f32 = 26. - crate::scrollbar::GUTTER;
+const CONTROLS_HEIGHT: f32 = 26.;
 
 #[derive(Default)]
 pub(super) struct Index {
@@ -141,89 +140,84 @@ impl App {
         projected: ActivityRow,
     ) -> Element<'a, Message> {
         let content = self.activity_row(projected);
-        let padded =
-            container(content).padding(iced::Padding::ZERO.right(ACTION_GAP + ACTION_WIDTH));
-        if !matches!(projected, ActivityRow::Entry(i) if session.can_fork(i)) {
-            return padded.into();
+        let ActivityRow::Entry(i) = projected else {
+            return content;
+        };
+        if !matches!(entry.kind, EntryKind::User { .. }) {
+            return content;
         }
+        let prompt = if session.can_fork(i) {
+            self.prompt_controls(session, entry, content)
+        } else {
+            content
+        };
+        // Size against the actual transcript lane, including after a panel resize.
+        use iced::Length::FillPortion;
+        row![
+            space().width(FillPortion(1)),
+            container(prompt).align_right(FillPortion(2))
+        ]
+        .into()
+    }
+
+    fn prompt_controls<'a>(
+        &'a self,
+        session: &'a Session,
+        entry: &'a Entry,
+        content: Element<'a, Message>,
+    ) -> Element<'a, Message> {
         let sid = &session.id;
         let eid = &entry.id;
-        let menu_open = self.modal.is_none()
-            && matches!(&self.context_menu, Some(ContextMenu::Prompt(s,e)) if s == sid && e == eid);
-        let compact = self.window_width
-            - self
-                .catalog
-                .settings
-                .sidebar_width
-                .min(self.window_width * 0.4)
-            - 60.
-            - if self.right_panel_open() {
-                self.panel_width()
-            } else {
-                0.
-            }
-            < 400.;
-        const MENU_WIDTH: f32 = 28.;
-        let trigger_width = if compact { MENU_WIDTH } else { ACTION_WIDTH };
-        let button = theme::button(
-            container(text("⋯").size(16))
-                .center_x(trigger_width)
-                .center_y(MENU_WIDTH),
-        )
-        .padding(0)
-        .on_press_maybe((!menu_open).then(|| Message::PromptMenu(sid.clone(), eid.clone())))
-        .style(theme::text_button);
-        let mut trigger = stack![container(button).align_right(MENU_WIDTH)];
-        if menu_open {
-            let action = theme::button(container(Icon::GitFork.view(16.)).center(MENU_WIDTH - 4.))
-                .padding(0)
-                .on_press(Message::Fork(sid.clone(), eid.clone()))
-                .style(theme::text_button);
-            let menu = column![action].padding(2);
-            // Float relative to the trigger, not the click. The scrollable supplies
-            // the translated bounds even when the prompt moves during reflow.
-            trigger = trigger.push(widget::float(opaque(menu)).translate(
-                move |bounds, viewport| {
-                    let below = bounds.height + 3.;
-                    let dy = if bounds.y + below + bounds.height <= viewport.y + viewport.height {
-                        below
-                    } else {
-                        -below
-                    };
-                    iced::Vector::new((MENU_WIDTH - trigger_width) / 2., dy)
-                },
-            ));
-        }
-        let slot = if compact {
-            container(trigger).align_right(Fill)
-        } else {
-            container(trigger)
-                .align_right(Fill)
-                .padding(iced::Padding::ZERO.top(10))
-        };
-        let row: Element<'a, Message> = if compact {
-            column![padded, slot].spacing(ACTION_GAP).into()
-        } else if menu_open {
-            stack![padded, slot].into()
-        } else {
-            widget::hover(padded, slot)
-        };
+        let mut controls = row![].align_y(iced::Center).height(CONTROLS_HEIGHT);
         if let Some(n) = self.forks.descendants.get(sid).and_then(|m| m.get(eid)) {
-            column![
-                row,
+            controls = controls.push(
                 theme::button(Icon::GitFork.label(
                     text(format!("{n} {}", if *n == 1 { "fork" } else { "forks" })),
-                    12.
+                    12.,
                 ))
                 .padding([2, 8])
                 .style(theme::text_button)
-                .on_press(Message::ShowForks(Some(eid.clone())))
-            ]
-            .spacing(4)
+                .on_press(Message::ShowForks(Some(eid.clone()))),
+            );
+        }
+        let fork = theme::button(container(Icon::GitFork.view(16.)).center(CONTROLS_HEIGHT))
+            .padding(0)
+            .style(theme::sidebar_control)
+            .on_press_maybe((!self.io_busy).then(|| Message::Fork(sid.clone(), eid.clone())));
+        let time: Element<'_, Message> = if let EntryKind::User {
+            sent_at: Some(seconds),
+            ..
+        } = entry.kind
+            && let Ok(seconds) = i64::try_from(seconds)
+            && let Some(utc) = chrono::DateTime::from_timestamp(seconds, 0)
+        {
+            let local = utc
+                .with_timezone(&chrono::Local)
+                .format("%A %-I:%M %p")
+                .to_string();
+            container(crate::ellipsized_text::shrinking_ellipsized_text(
+                &local,
+                12.,
+                Some(self.preset().colors.muted),
+            ))
+            .align_right(Fill)
+            .padding(iced::Padding::ZERO.right(4))
             .into()
         } else {
-            row
-        }
+            space().width(Fill).into()
+        };
+        controls = controls.push(time).push(icon_tip(fork, "Fork from here"));
+
+        // The base includes the controls' space, so hovering either part reveals
+        // them without changing the measured row height or covering message text.
+        container(widget::hover(
+            column![content, space().height(CONTROLS_HEIGHT)]
+                .width(Fill)
+                .align_x(iced::Right),
+            container(controls).align_bottom(Fill),
+        ))
+        .padding(iced::Padding::ZERO.top(CONTROLS_HEIGHT))
+        .into()
     }
 
     pub(super) fn fork_separator<'a>(
@@ -268,10 +262,7 @@ impl App {
                     "Parent deleted",
                 ));
             }
-            container(line)
-                .center_y(Fill)
-                .padding(iced::Padding::ZERO.right(ACTION_GAP + ACTION_WIDTH))
-                .into()
+            container(line).center_y(Fill).into()
         })
         .height(36)
         .into()

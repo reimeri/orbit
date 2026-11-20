@@ -44,6 +44,7 @@ fn main() -> Result<()> {
                 EntryKind::User {
                     files: vec![],
                     images: vec![],
+                    sent_at: None,
                     steering: false,
                 }
             } else {

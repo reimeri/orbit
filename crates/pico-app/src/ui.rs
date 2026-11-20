@@ -212,10 +212,7 @@ enum FooterControl {
     Effort,
 }
 #[derive(Clone, Debug)]
-enum ContextMenu {
-    Prompt(String, String),
-    At(MenuTarget, iced::Point),
-}
+struct ContextMenu(MenuTarget, iced::Point);
 #[derive(Clone, Debug)]
 enum MenuTarget {
     Session(String),
@@ -298,7 +295,6 @@ pub enum Message {
     ToggleStashed,
     CopySessionId(String),
     CloseMenu,
-    PromptMenu(String, String),
     Fork(String, String),
     ShowForks(Option<String>),
     ViewOriginal(String, String),
@@ -1726,13 +1722,7 @@ impl App {
                 }
             }
             Message::GitTick => return self.refresh_git(),
-            Message::PromptMenu(s, e) => {
-                if self.selected.as_ref() == Some(&s) && !self.io_busy {
-                    self.context_menu = Some(ContextMenu::Prompt(s, e));
-                }
-            }
             Message::Fork(s, e) => {
-                self.context_menu = None;
                 if self.selected.as_ref() == Some(&s) && !self.closing && !self.close_requested {
                     self.select_with_fork(Selection::Session(s), Some(e));
                 }
@@ -1745,10 +1735,10 @@ impl App {
                 }
             }
             Message::SessionMenu(id, position) => {
-                self.context_menu = Some(ContextMenu::At(MenuTarget::Session(id), position));
+                self.context_menu = Some(ContextMenu(MenuTarget::Session(id), position));
             }
             Message::ProjectMenu(path, position) => {
-                self.context_menu = Some(ContextMenu::At(MenuTarget::Project(path), position));
+                self.context_menu = Some(ContextMenu(MenuTarget::Project(path), position));
             }
             Message::ToggleStashed => self.stashed_open = !self.stashed_open,
             Message::RenameProject(path) => {
@@ -2891,7 +2881,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         pointer_input(
             self.content(),
-            self.footer_menu_open || matches!(self.context_menu, Some(ContextMenu::Prompt(..))),
+            self.footer_menu_open,
             self.chat_selection.clone(),
         )
     }
@@ -3039,10 +3029,7 @@ impl App {
                         .center_y(Fill),
                 )
                 .into()
-        } else if matches!(self.context_menu, Some(ContextMenu::Prompt(..))) {
-            // The icon menu is a native overlay on its trigger, above this dismissal layer.
-            layers.push(dismiss_layer(Message::CloseMenu)).into()
-        } else if let Some(ContextMenu::At(target, position)) = &self.context_menu {
+        } else if let Some(ContextMenu(target, position)) = &self.context_menu {
             let dismiss = dismiss_layer(Message::CloseMenu);
             let actions = match target {
                 MenuTarget::Session(id) => column![
@@ -3102,7 +3089,7 @@ impl App {
         } else if self.footer_menu_open {
             let dismiss = dismiss_layer(Message::CloseFooterMenu);
             let (left, center) = self.center_dimensions();
-            let inset = self.composer_inset();
+            let inset = self.chat_inset();
             let width = (center - 2. * inset).min(self.catalog.settings.chat_width);
             let menu_width = 480_f32.min(self.window_width - 16.);
             // Follow the toolbar chip, shifting left only if needed to keep all choices on screen.
@@ -3670,18 +3657,11 @@ impl App {
                     .into(),
             ));
             let transcript = crate::keyed_column::keyed_column(children);
-            // Borrow the action gap from the left inset instead of narrowing the message.
-            let transcript = container(transcript)
-                .max_width(self.catalog.settings.chat_width - crate::scrollbar::GUTTER)
-                .width(Fill)
-                .padding(iced::Padding {
-                    top: 20.,
-                    bottom: 20.,
-                    left: 26. - forks::ACTION_GAP,
-                    right: 0.,
-                });
             let content = crate::transcript_viewport::observe(
-                container(transcript).center_x(Fill),
+                self.chat_lane(
+                    container(transcript).padding([20, 0]),
+                    crate::scrollbar::GUTTER,
+                ),
                 epoch,
                 move |offset, height, content_height| {
                     Message::Scroll(
@@ -3692,8 +3672,7 @@ impl App {
                     )
                 },
             );
-            let chat = scroll(content).id("chat").height(Fill);
-            container(chat).padding(iced::Padding::ZERO.right(6)).into()
+            scroll(content).id("chat").height(Fill).into()
         };
         let running = self.running();
         if let Some(child) = &session.child {
@@ -3852,7 +3831,7 @@ impl App {
             .interaction(mouse::Interaction::Text);
         let editor = container(column![self.composer_editor(running), toolbar]).style(card);
         compose = compose.push("editor", editor);
-        column![chat, self.composer_lane(compose)]
+        column![chat, self.chat_lane(compose, 0.)]
             .width(Fill)
             .height(Fill)
             .into()
@@ -3874,22 +3853,32 @@ impl App {
         (left, self.window_width - left - right)
     }
 
-    fn composer_inset(&self) -> f32 {
+    fn chat_inset(&self) -> f32 {
         if self.center_dimensions().1 < 240. {
-            4.
+            crate::scrollbar::GUTTER
         } else {
             24.
         }
     }
 
-    fn composer_lane<'a>(&self, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    fn chat_lane<'a>(
+        &self,
+        content: impl Into<Element<'a, Message>>,
+        reserved_right: f32,
+    ) -> Element<'a, Message> {
+        // The transcript's scroll wrapper has already supplied part of the right inset.
+        let inset = self.chat_inset();
         container(
             container(content)
                 .max_width(self.catalog.settings.chat_width)
                 .width(Fill),
         )
         .center_x(Fill)
-        .padding([0., self.composer_inset()])
+        .padding(
+            iced::Padding::ZERO
+                .left(inset)
+                .right(inset - reserved_right),
+        )
         .into()
     }
 
@@ -3902,7 +3891,7 @@ impl App {
         let width = (text_width(&label, 12.).ceil() + 28. + if session.fast { 16. } else { 0. })
             .min(
                 self.center_dimensions().1
-                    - 2. * self.composer_inset()
+                    - 2. * self.chat_inset()
                     - 2. * TOOLBAR_INSET
                     - TOOLBAR_BUTTON_HEIGHT,
             );
@@ -4368,6 +4357,7 @@ impl App {
                     images,
                     files,
                     steering,
+                    ..
                 } = &entry.kind
                 {
                     if *steering {
@@ -4415,12 +4405,11 @@ impl App {
                         },
                     ));
                 }
-                let user = matches!(entry.kind, EntryKind::User { .. });
-                container(content)
-                    .padding([if user { 12 } else { 6 }, 12])
-                    .width(Fill)
-                    .style(if user { card } else { container::transparent })
-                    .into()
+                if matches!(entry.kind, EntryKind::User { .. }) {
+                    container(content).padding(12).style(card).into()
+                } else {
+                    container(content).padding([6, 12]).width(Fill).into()
+                }
             }
         }
     }
@@ -4734,7 +4723,7 @@ impl App {
         let footer =
             widget::responsive(|size| self.footer_content(size.width)).height(FOOTER_HEIGHT);
         if self.current().is_some() {
-            self.composer_lane(footer)
+            self.chat_lane(footer, 0.)
         } else {
             footer.into()
         }
@@ -5155,7 +5144,7 @@ impl App {
                 s.usage.total_cached = 126_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
-                    Entry::new(EntryKind::User { files: vec![],  images: vec![], steering: false }, "Inspect this project and run its tests."),
+                    Entry::new(EntryKind::User { files: vec![],  images: vec![], sent_at: None, steering: false }, "Inspect this project and run its tests."),
                     Entry::new(
                         EntryKind::Assistant,
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Pico V2\"); }\n```\n\n[Documentation](https://openai.com)",
@@ -5247,9 +5236,10 @@ impl App {
                 self.settings_tab = SettingsTab::Account;
                 self.modal = None;
                 self.settings_open = false;
-                self.context_menu = self.selected.clone().map(|id| {
-                    ContextMenu::At(MenuTarget::Session(id), iced::Point::new(160., 260.))
-                });
+                self.context_menu = self
+                    .selected
+                    .clone()
+                    .map(|id| ContextMenu(MenuTarget::Session(id), iced::Point::new(160., 260.)));
             }
             5 => {
                 self.context_menu = None;
@@ -5441,6 +5431,7 @@ impl App {
                     EntryKind::User {
                         files: vec![],
                         images: vec![],
+                        sent_at: None,
                         steering: false,
                     },
                     "Inspect the completion notification path. Do not modify files.",
@@ -5744,7 +5735,7 @@ impl App {
                         }
                     };
                 session.entries = vec![
-                    Entry::new(EntryKind::User { files: vec![],  images: vec![], steering: false }, "Check the implementation and run validation."),
+                    Entry::new(EntryKind::User { files: vec![],  images: vec![], sent_at: None, steering: false }, "Check the implementation and run validation."),
                     Entry { id: "activity-reason".into(), kind: EntryKind::Reasoning, text: "**Inspecting the build configuration**\n\nReviewing the existing Nix development environment.".into() },
                     Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
                     tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),
@@ -5886,7 +5877,7 @@ impl App {
             }
             50 => {
                 self.stashed_open = true;
-                self.context_menu = Some(ContextMenu::At(
+                self.context_menu = Some(ContextMenu(
                     MenuTarget::Project(PathBuf::from("/tmp/smoke-project-9")),
                     iced::Point::new(660., 400.),
                 ));
@@ -6329,6 +6320,43 @@ mod tests {
         App::new(true, Arc::new(AtomicBool::new(false))).0
     }
     #[tokio::test]
+    async fn long_user_prompts_wrap_within_the_right_two_thirds_only() {
+        let mut app = app();
+        let mut session = Session::new("/chat".into(), &app.catalog.settings);
+        let long =
+            "Compare the wrapping of this user prompt and the assistant response. ".repeat(12);
+        // A user prompt without a fork point must use the same width limit.
+        session.accept(long.clone().into());
+        session
+            .entries
+            .push(Entry::new(EntryKind::Assistant, &long));
+        app.current_session = Some(session);
+        let session = app.current().unwrap();
+        let mut renderer = header_renderer();
+        for width in [330., 810.] {
+            let rows = [0, 1].map(|i| {
+                let mut ui = iced_runtime::UserInterface::build(
+                    app.fork_row(session, &session.entries[i], ActivityRow::Entry(i)),
+                    iced::Size::new(width, 2000.),
+                    iced_runtime::user_interface::Cache::new(),
+                    &mut renderer,
+                );
+                let mut bounds = UiBounds::default();
+                ui.operate(&renderer, &mut bounds);
+                bounds.label(&long)
+            });
+            let [prompt, reply] = rows;
+            assert!(prompt.x >= width / 3. && prompt.x + prompt.width <= width);
+            assert!(
+                reply.x < prompt.x && reply.width > prompt.width && reply.height < prompt.height
+            );
+            // Long text should actually use the available two-thirds, rather
+            // than passing the upper-bound check by wrapping at a smaller width.
+            assert!((prompt.x - width / 3. - reply.x).abs() < 32.);
+        }
+    }
+
+    #[tokio::test]
     async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
         let mut app = app();
         let root = app.smoke_dir.clone().unwrap();
@@ -6338,45 +6366,52 @@ mod tests {
         dispatch(&mut app, Message::Send).await;
         let entry = app.current().unwrap().entries[0].id.clone();
         type_message(&mut app, "Keep this source draft").await;
-        let menu = {
-            let mut renderer = header_renderer();
+        let mut renderer = header_renderer();
+        let [_, fork_action] = [720., 1800.].map(|width| {
+            app.window_width = width;
             let mut ui = iced_runtime::UserInterface::build(
-                app.view(),
-                iced::Size::new(1200., 800.),
+                app.center(),
+                iced::Size::new(app.center_dimensions().1, 800.),
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
             let prompt = bounds.label("Explore the parser");
-            let action = bounds.label("⋯");
-            assert!(action.x >= prompt.x + prompt.width && action.y < prompt.y + prompt.height);
-            click_at(&mut ui, &mut renderer, action.center())
-                .into_iter()
-                .find(|m| matches!(m, Message::PromptMenu(..)))
-                .expect("gutter click opens message actions")
-        };
-        dispatch(&mut app, menu).await;
-        assert!(matches!(app.context_menu, Some(ContextMenu::Prompt(..))));
-        let fork_action = {
-            let mut renderer = header_renderer();
-            let mut ui = iced_runtime::UserInterface::build(
-                app.view(),
-                iced::Size::new(1200., 800.),
-                iced_runtime::user_interface::Cache::new(),
-                &mut renderer,
+            let bubble = bounds
+                .containers
+                .iter()
+                .filter(|b| b.contains(prompt.center()) && b.height > prompt.height)
+                .min_by(|a, b| a.height.total_cmp(&b.height))
+                .unwrap();
+            let composer = bounds.composer.unwrap();
+            assert!(
+                (bubble.x + bubble.width - composer.x - composer.width).abs() <= 1.,
+                "width={width} prompt={prompt:?} bubble={bubble:?} composer={composer:?}"
             );
-            let mut bounds = UiBounds::default();
-            ui.operate(&renderer, &mut bounds);
-            let dots = bounds.label("⋯");
-            let below = iced::Point::new(dots.center_x(), dots.center_y() + 1.5 * dots.height);
-            let messages = click_at(&mut ui, &mut renderer, below);
+            assert!(bubble.width < composer.width * 2. / 3.);
+            assert!(
+                (prompt.x - bubble.x - (bubble.x + bubble.width - prompt.x - prompt.width)).abs()
+                    <= 1.,
+                "a short prompt should have only its padding on either side"
+            );
+            let action = bounds
+                .containers
+                .iter()
+                .filter(|b| {
+                    b.y >= bubble.y + bubble.height
+                        && (b.x + b.width - bubble.x - bubble.width).abs() <= 1.
+                        && b.width < bubble.width / 2.
+                })
+                .min_by(|a, b| a.y.total_cmp(&b.y))
+                .expect("fork control below the right edge of the prompt");
+            let messages = click_at(&mut ui, &mut renderer, action.center());
             assert!(
                 matches!(messages.as_slice(), [Message::Fork(s,e)] if s == &source && e == &entry),
-                "click directly below the dots: {messages:?}"
+                "one click on the controls row should fork: {messages:?}"
             );
             messages.into_iter().next().unwrap()
-        };
+        });
         dispatch(&mut app, fork_action).await;
         let fork = app.selected.clone().unwrap();
         assert_ne!(source, fork);
@@ -6402,7 +6437,89 @@ mod tests {
         dispatch(&mut app, back).await;
         assert_eq!(app.selected.as_ref(), Some(&source));
         assert_eq!(app.editor.text(), "Keep this source draft");
-        dispatch(&mut app, Message::ShowForks(Some(entry))).await;
+        let show_forks = {
+            use chrono::TimeZone as _;
+            use iced::advanced::Renderer as _;
+            let size = iced::Size::new(400., 150.);
+            let session = app.current().unwrap();
+            let mut example = session.entries[0].clone();
+            let EntryKind::User { sent_at, .. } = &mut example.kind else {
+                panic!("expected user prompt")
+            };
+            *sent_at = Some(
+                chrono::Local
+                    .with_ymd_and_hms(2025, 9, 15, 22, 34, 0)
+                    .single()
+                    .unwrap()
+                    .timestamp() as u64,
+            );
+            let mut ui = iced_runtime::UserInterface::build(
+                app.fork_row(session, &example, ActivityRow::Entry(0)),
+                size,
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let count = bounds.label("1 fork");
+            let prompt = bounds.label("Explore the parser");
+            assert!(count.y >= prompt.y + prompt.height);
+            assert!(
+                count.x >= size.width / 3. && count.x < prompt.x,
+                "the count starts in the two-thirds lane, not at the short bubble's edge"
+            );
+            let time = bounds.label("Monday 10:34 PM");
+            let button = bounds.rightmost_control_at(count.center_y());
+            assert!(count.x + count.width <= time.x && time.x + time.width <= button.x);
+            assert!((time.center_y() - button.center_y()).abs() <= 1.);
+            let bubble = bounds
+                .containers
+                .iter()
+                .filter(|b| b.contains(prompt.center()) && b.height > prompt.height)
+                .min_by(|a, b| a.height.total_cmp(&b.height))
+                .unwrap();
+            assert!(
+                (bubble.y - button.height).abs() <= 1.,
+                "top margin matches controls row"
+            );
+            // Inspect the controls band, not the bubble's own hover styling.
+            let mut controls_pixels = |cursor| {
+                renderer.reset(iced::Rectangle::with_size(size));
+                ui.draw(
+                    &mut renderer,
+                    &theme::app(),
+                    &iced::advanced::renderer::Style {
+                        text_color: theme::default_colors().text,
+                    },
+                    cursor,
+                );
+                let pixels = crate::test_renderer::screenshot(
+                    &mut renderer,
+                    iced::Size::new(size.width as u32, size.height as u32),
+                    1.,
+                    theme::default_colors().background,
+                );
+                let stride = size.width as usize * 4;
+                pixels[count.y.ceil() as usize * stride
+                    ..(count.y + count.height).floor() as usize * stride]
+                    .to_vec()
+            };
+            let hidden = controls_pixels(mouse::Cursor::Unavailable);
+            let over_prompt = controls_pixels(mouse::Cursor::Available(prompt.center()));
+            let over_row = controls_pixels(mouse::Cursor::Available(iced::Point::new(
+                size.width / 2.,
+                count.center_y(),
+            )));
+            assert!(
+                hidden != over_prompt && over_prompt == over_row,
+                "the controls appear in place over either the prompt or the row"
+            );
+            click_at(&mut ui, &mut renderer, count.center())
+                .into_iter()
+                .find(|m| matches!(m, Message::ShowForks(Some(e)) if e == &entry))
+                .expect("fork count opens the branches from this prompt")
+        };
+        dispatch(&mut app, show_forks).await;
         assert!(app.fork_panel.is_some() && app.modal.is_none());
         let open = {
             let mut renderer = header_renderer();
@@ -8614,6 +8731,7 @@ mod tests {
             EntryKind::User {
                 files: vec![],
                 images: vec![],
+                sent_at: None,
                 steering: false,
             },
             "Keep this transcript",
@@ -9304,6 +9422,7 @@ Then implement the fix.";
                     EntryKind::User {
                         files: vec![],
                         images: vec![],
+                        sent_at: None,
                         steering: false,
                     },
                     "Old message",
@@ -9355,6 +9474,7 @@ Then implement the fix.";
             EntryKind::User {
                 files: vec![],
                 images: vec![],
+                sent_at: None,
                 steering: false,
             },
             "Inspect without edits",
@@ -9965,6 +10085,7 @@ Then implement the fix.";
 
     #[derive(Default)]
     struct UiBounds {
+        composer: Option<iced::Rectangle>,
         focused: Option<iced::advanced::widget::Id>,
         labels: Vec<(String, iced::Rectangle)>,
         containers: Vec<iced::Rectangle>,
@@ -9983,9 +10104,12 @@ Then implement the fix.";
         fn focusable(
             &mut self,
             id: Option<&iced::advanced::widget::Id>,
-            _: iced::Rectangle,
+            bounds: iced::Rectangle,
             state: &mut dyn iced::advanced::widget::operation::Focusable,
         ) {
+            if id == Some(&iced::advanced::widget::Id::new("composer")) {
+                self.composer = Some(bounds);
+            }
             if state.is_focused() {
                 self.focused = id.cloned();
             }
@@ -10066,7 +10190,7 @@ Then implement the fix.";
                     1 => "Stash",
                     _ => "Restore",
                 };
-                app.context_menu = Some(ContextMenu::At(
+                app.context_menu = Some(ContextMenu(
                     target,
                     iced::Point::new(width - 1., height - 1.),
                 ));
@@ -10377,7 +10501,7 @@ Then implement the fix.";
             MenuTarget::Project(project.clone()),
         ] {
             // Keep the menu away from the project row and Settings header.
-            app.context_menu = Some(ContextMenu::At(target, iced::Point::ORIGIN));
+            app.context_menu = Some(ContextMenu(target, iced::Point::ORIGIN));
             app.settings_open = true;
             let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
             let mut bounds = UiBounds::default();
@@ -10426,7 +10550,7 @@ Then implement the fix.";
                 dispatch(&mut app, message).await;
             }
             assert!(matches!(&app.context_menu,
-                Some(ContextMenu::At(MenuTarget::Project(path), position)) if path == &project && *position == point));
+                Some(ContextMenu(MenuTarget::Project(path), position)) if path == &project && *position == point));
         }
     }
 
@@ -11451,6 +11575,7 @@ Then implement the fix.";
             EntryKind::User {
                 files: vec![],
                 images: vec![],
+                sent_at: None,
                 steering: false,
             },
             "Start building",
@@ -11966,7 +12091,7 @@ Then implement the fix.";
         dispatch(&mut app, Message::ToggleSearch).await;
         dispatch(&mut app, Message::Search("no matches".into())).await;
         app.modal = Some(Modal::AddProject);
-        app.context_menu = Some(ContextMenu::At(
+        app.context_menu = Some(ContextMenu(
             MenuTarget::Session(other.id.clone()),
             iced::Point::ORIGIN,
         ));
@@ -12388,6 +12513,7 @@ Then implement the fix.";
             EntryKind::User {
                 files: vec![],
                 images: vec![],
+                sent_at: None,
                 steering: false,
             },
             "Please examine these changes.\n\nKeep the first message visible.",
@@ -12518,6 +12644,7 @@ Then implement the fix.";
                 EntryKind::User {
                     files: vec![],
                     images: vec![],
+                    sent_at: None,
                     steering: false,
                 },
                 "Inspect these changes.\n".repeat(6),
@@ -12531,6 +12658,7 @@ Then implement the fix.";
                 EntryKind::User {
                     files: vec![],
                     images: vec![],
+                    sent_at: None,
                     steering: false,
                 },
                 "Please verify the result.\n".repeat(7),

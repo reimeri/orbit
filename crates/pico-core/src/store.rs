@@ -299,6 +299,9 @@ pub struct NewSessionDraft {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EntryKind {
     User {
+        /// Unix time in seconds when this submission was accepted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sent_at: Option<u64>,
         images: Vec<crate::media::Media>,
         #[serde(default)]
         files: Vec<crate::file_tags::Attachment>,
@@ -524,6 +527,7 @@ impl Session {
             kind: EntryKind::User {
                 images: message.images.clone(),
                 files: message.files.clone(),
+                sent_at: Some(accepted_at),
                 steering,
             },
             text: message.text.clone(),
@@ -942,7 +946,7 @@ mod tests {
         assert!(!message.is_empty());
         let mut session = Session::new(dir.path().into(), &Settings::default());
         session.draft_images = message.images.clone();
-        session.accept_submission("image-only".into(), message.clone(), false);
+        session.accept_submission_at("image-only".into(), message.clone(), false, 1_750_000_123);
         assert_eq!(session.title, "Image message");
         assert!(session.draft_images.is_empty());
         session.accept_submission(
@@ -963,7 +967,7 @@ mod tests {
         let mut saved = store.load_session(&id).unwrap();
         assert_eq!(saved.pending[0], message);
         assert!(
-            matches!(&saved.entries[0].kind, EntryKind::User { images, steering: false , ..} if images == &vec![image.clone()])
+            matches!(&saved.entries[0].kind, EntryKind::User { images, steering: false, sent_at: Some(1_750_000_123), .. } if images == &vec![image.clone()])
         );
         assert!(matches!(
             saved.entries[1].kind,

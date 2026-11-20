@@ -1,8 +1,10 @@
 # Session forks
 
-Hover over a user prompt, click **⋯**, then click the **fork icon** in the vertical
-menu beneath it. On narrow panes the trigger moves below the card. Nothing is sent automatically. Text and images
-start in the new session's composer. Keep an original file tag to reuse its
+Hover over a forkable user prompt or the controls row just below it. Click the
+**fork icon** on the right to start a new session. Nothing is sent automatically.
+The local weekday and send time appear beside the icon for messages that recorded a send time.
+
+Text and images start in the new session's composer. Keep an original file tag to reuse its
 captured bytes, remove it to omit the file, or add a new tag to attach another
 workspace file.
 

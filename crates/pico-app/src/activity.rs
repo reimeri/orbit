@@ -508,6 +508,7 @@ mod tests {
                 EntryKind::User {
                     files: vec![],
                     images: vec![],
+                    sent_at: None,
                     steering: false,
                 },
                 "Inspect it",

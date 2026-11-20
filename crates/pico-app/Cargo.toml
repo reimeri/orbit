@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 pico-core = { path = "../pico-core" }
 iced = { version = "0.14.0", default-features = false, features = [
     "wgpu", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs", "svg",

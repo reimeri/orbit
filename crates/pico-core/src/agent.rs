@@ -2337,6 +2337,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             EntryKind::User {
                 files: vec![],
                 images: vec![],
+                sent_at: None,
                 steering: false,
             },
             "preserved history",
