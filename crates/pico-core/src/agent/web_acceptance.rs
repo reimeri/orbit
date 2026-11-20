@@ -118,25 +118,9 @@ text(await tools.web__run({finance:[{ticker:'MSFT',type:'equity',market:'USA'}],
             );
         }
     }
-    let mut catalog = crate::store::Catalog::default();
-    catalog.settings.web_search = crate::web_search::Mode::Cached;
-    store.save_catalog(&catalog)?;
-    execute(
-        "cached",
-        r#"const result=await tools.web__run({search_query:[{q:'Rust book',domains:['doc.rust-lang.org']}],response_length:'short'}); if (!/turn\d+search\d+/.test(result) || !result.includes('https://doc.rust-lang.org/')) throw new Error('Missing cached search result'); text(result);"#,
-    )?;
     let persisted = store.load_session(&id)?;
-    if !persisted.entries.iter().any(|entry| matches!(&entry.kind, EntryKind::Tool {web:Some(metadata),..} if metadata.mode==crate::web_search::Mode::Cached)) {
-        bail!("Cached metadata was not persisted");
-    }
-    catalog.settings.web_search = crate::web_search::Mode::Disabled;
-    store.save_catalog(&catalog)?;
-    let disabled = execute(
-        "disabled",
-        r#"try { __call('web__run','{}'); } catch (e) { text(String(e)); }"#,
-    )?;
-    if !disabled.contains("Unknown nested tool") {
-        bail!("Disabled mode did not reject dispatch");
+    if !persisted.entries.iter().any(|entry| matches!(&entry.kind, EntryKind::Tool {web:Some(metadata),..} if metadata.mode==crate::web_search::Mode::Live)) {
+        bail!("Live metadata was not persisted");
     }
     println!(
         "LIVE_WEB_ACCEPTANCE_COMPLETE session={id} artifacts={}",

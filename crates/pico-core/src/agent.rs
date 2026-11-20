@@ -195,7 +195,7 @@ pub struct Harness {
 impl Harness {
     pub fn new(store: Store, sessions: Vec<SessionSummary>) -> Result<Arc<Self>> {
         let auth = Auth::new(store.clone())?;
-        let provider = Provider::new(auth, store.clone())?;
+        let provider = Provider::new(auth)?;
         Self::with_provider(store, sessions, provider)
     }
     fn with_provider(
@@ -369,7 +369,6 @@ impl Harness {
             let web = {
                 let target = weak.clone();
                 Arc::new(crate::web_search::WebSearch::new(
-                    self.store.clone(),
                     self.auth.clone(),
                     id.clone(),
                     Arc::new(move || {

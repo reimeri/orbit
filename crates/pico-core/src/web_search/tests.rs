@@ -1,13 +1,13 @@
 use super::*;
 use crate::{
     auth::Credentials,
-    store::{Session, Settings},
+    store::{Session, Settings, Store},
     test_support::server,
 };
 use std::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn fixture() -> (tempfile::TempDir, WebSearch, Arc<Mutex<String>>) {
+fn fixture() -> (tempfile::TempDir, Store, WebSearch, Arc<Mutex<String>>) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().into()).unwrap();
     store
@@ -25,20 +25,13 @@ fn fixture() -> (tempfile::TempDir, WebSearch, Arc<Mutex<String>>) {
     let model = Arc::new(Mutex::new("fixture-selected-model".to_owned()));
     let selected = model.clone();
     let web = WebSearch::new(
-        store.clone(),
-        Auth::new(store).unwrap(),
+        Auth::new(store.clone()).unwrap(),
         "fixture-session".into(),
         Arc::new(move || Ok(selected.lock().unwrap().clone())),
         WebSearch::client().unwrap(),
     );
-    (dir, web, model)
+    (dir, store, web, model)
 }
-fn mode(web: &WebSearch, mode: Mode) {
-    let mut catalog = Catalog::default();
-    catalog.settings.web_search = mode;
-    web.store.save_catalog(&catalog).unwrap();
-}
-
 #[test]
 fn commands_match_all_ten_operations_and_reject_invalid_arguments() {
     let args = json!({
@@ -79,8 +72,8 @@ fn commands_match_all_ten_operations_and_reject_invalid_arguments() {
 }
 
 #[tokio::test]
-async fn transport_preserves_metadata_and_snapshots_mode_model_without_conversation_context() {
-    let (_dir, mut web, model) = fixture();
+async fn transport_preserves_metadata_and_snapshots_model_without_conversation_context() {
+    let (_dir, _, mut web, model) = fixture();
     let result = json!({"type":"text_result","ref_id":"turn0search0","title":"Manual","url":"https://example.org/manual","future_field":{"private_ui":"metadata-only"}});
     let reply = json!({"output":"Read https://example.org/manual (turn0search0)","encrypted_output":"not-agent-output","results":[result.clone()]}).to_string();
     let (url, mut requests, server) = server(vec![
@@ -143,7 +136,6 @@ async fn transport_preserves_metadata_and_snapshots_mode_model_without_conversat
     );
     assert!(first["max_output_tokens"].as_u64().unwrap() > 0);
     assert!(first.get("input").is_none());
-    mode(&web, Mode::Cached);
     *model.lock().unwrap() = crate::models::LUNA.id.into();
     let second = web
         .call(
@@ -152,36 +144,25 @@ async fn transport_preserves_metadata_and_snapshots_mode_model_without_conversat
         )
         .await
         .unwrap();
-    assert_eq!(second.metadata.mode, Mode::Cached);
+    assert_eq!(second.metadata.mode, Mode::Live);
     assert_eq!(second.metadata.details, "[]");
     let request = requests.recv().await.unwrap();
     let request: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(request["id"], first["id"]);
     assert_eq!(request["model"], crate::models::LUNA.id);
-    assert_eq!(request["settings"]["external_web_access"], false);
+    assert_eq!(request["settings"]["external_web_access"], true);
     assert_eq!(request["commands"]["open"][0]["ref_id"], "turn0search0");
     assert!(request.get("input").is_none());
     server.await.unwrap();
 }
 
 #[tokio::test]
-async fn invalid_disabled_and_cancelled_calls_never_dispatch() {
-    let (_dir, mut web, _) = fixture();
+async fn invalid_and_cancelled_calls_never_dispatch() {
+    let (_dir, _, mut web, _) = fixture();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     web.endpoint = format!("http://{}", listener.local_addr().unwrap());
     let args = r#"{"time":[{"utc_offset":"+00:00"}]}"#;
     assert!(web.call("{}", &CancellationToken::new()).await.is_err());
-    mode(&web, Mode::Disabled);
-    assert!(!web.enabled().unwrap());
-    assert!(
-        web.call(args, &CancellationToken::new())
-            .await
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("disabled")
-    );
-    mode(&web, Mode::Live);
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(
@@ -201,7 +182,7 @@ async fn invalid_disabled_and_cancelled_calls_never_dispatch() {
 
 #[tokio::test]
 async fn http_and_malformed_failures_preserve_details_without_replay() {
-    let (_dir, mut web, _) = fixture();
+    let (_dir, _, mut web, _) = fixture();
     let large_error = "service λ\n".repeat(1000);
     let (url, _requests, server) = server(vec![
         (429, large_error.clone()),
@@ -237,7 +218,7 @@ async fn http_and_malformed_failures_preserve_details_without_replay() {
 
 #[tokio::test]
 async fn cancellation_drops_an_inflight_request() {
-    let (_dir, mut web, _) = fixture();
+    let (_dir, _, mut web, _) = fixture();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     web.endpoint = format!("http://{}", listener.local_addr().unwrap());
     let cancel = CancellationToken::new();
@@ -267,7 +248,7 @@ fn large_metadata_is_durable_and_does_not_make_unsafe_links_clickable() {
         json!({"url":"https://user:pass@example.org","title":"credentials"}),
         json!({"url":"https://example.org","title":"safe","new_kind":"retained λ".repeat(10000)}),
     ];
-    let metadata = Metadata::new(Mode::Cached, 123, results.clone()).unwrap();
+    let metadata = Metadata::new(123, results.clone()).unwrap();
     assert_eq!(metadata.sources.len(), 1);
     assert_eq!(metadata.sources[0].title, "safe");
     let dir = tempfile::tempdir().unwrap();
@@ -308,16 +289,15 @@ fn large_metadata_is_durable_and_does_not_make_unsafe_links_clickable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_returns_text_only_persists_metadata_and_respects_disabled_changes() {
+async fn code_mode_returns_text_only_persists_metadata() {
     use crate::{
         code_mode::{CodeMode, Event},
         shell::Shell,
         store::{Entry, EntryKind},
     };
-    let (dir, mut web, _) = fixture();
+    let (dir, store, mut web, _) = fixture();
     let (url, mut requests, server) = server(vec![(200,json!({"output":"Visible result","results":[{"type":"new_kind","secret_marker":"ui-only"}]}).to_string()),(200,json!({"output":"valid text","results":"malformed-ui-only-marker"}).to_string())]).await;
     web.endpoint = url;
-    let store = web.store.clone();
     let mut session = Session::new(dir.path().into(), &Settings::default());
     let session_id = session.id.clone();
     let state = Arc::new(Mutex::new(session.clone()));
@@ -368,7 +348,7 @@ async fn code_mode_returns_text_only_persists_metadata_and_respects_disabled_cha
             Ok(())
         }),
     )
-    .with_web(web.clone());
+    .with_web(web);
     let code = Arc::new(code);
     let exec = code.clone();
     let result = tokio::task::spawn_blocking(move || exec.exec(r#"const r = await tools.web__run({time:[{utc_offset:'+00:00'}]}); text(typeof r); text(r);"#,"outer",&CancellationToken::new())).await.unwrap().unwrap();
@@ -388,16 +368,12 @@ async fn code_mode_returns_text_only_persists_metadata_and_respects_disabled_cha
     assert!(
         matches!(&session.entries[0].kind,EntryKind::Tool{web:Some(metadata),complete:true,..} if metadata.details.contains("ui-only"))
     );
-    mode(&web, Mode::Disabled);
-    let result = tokio::task::spawn_blocking(move || code.exec(r#"text(ALL_TOOLS.some(t=>t.name==='web__run')); try { __call('web__run','{}'); } catch(e) { text(String(e)); }"#,"blocked",&CancellationToken::new())).await.unwrap().unwrap();
-    assert!(result.contains("false"));
-    assert!(result.contains("Unknown nested tool"));
     assert_eq!(store.load_session(&session_id).unwrap().entries.len(), 2);
 }
 
 #[tokio::test]
 async fn redirects_do_not_forward_authentication() {
-    let (_dir, mut web, _) = fixture();
+    let (_dir, _, mut web, _) = fixture();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     web.endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -427,9 +403,9 @@ async fn redirects_do_not_forward_authentication() {
 
 #[tokio::test]
 async fn definite_unauthorized_refreshes_once_and_preserves_request_identity() {
-    let (_dir, mut web, _) = fixture();
+    let (_dir, store, mut web, _) = fixture();
     let (issuer, mut refreshes, refresh_server)=server(vec![(200,json!({"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}).to_string())]).await;
-    web.auth = Auth::fixture(web.store.clone(), issuer);
+    web.auth = Auth::fixture(store.clone(), issuer);
     let (url, mut requests, server) = server(vec![
         (401, "expired".into()),
         (401, "still unauthorized".into()),
@@ -466,7 +442,7 @@ async fn definite_unauthorized_refreshes_once_and_preserves_request_identity() {
             .unwrap()
             .contains("refresh_token=fixture-refresh")
     );
-    let saved: Credentials = web.store.read_optional("auth.json").unwrap().unwrap();
+    let saved: Credentials = store.read_optional("auth.json").unwrap().unwrap();
     assert_eq!(saved.refresh_token, "rotated-refresh");
     server.await.unwrap();
     refresh_server.await.unwrap();
@@ -474,7 +450,7 @@ async fn definite_unauthorized_refreshes_once_and_preserves_request_identity() {
 
 #[tokio::test]
 async fn malformed_response_keeps_metadata_out_of_agent_errors() {
-    let (_dir, mut web, _) = fixture();
+    let (_dir, _, mut web, _) = fixture();
     let body = json!({"output":123,"results":[{"private_ui":"metadata-only-marker"}]}).to_string();
     let (url, _requests, server) = server(vec![(200, body.clone())]).await;
     web.endpoint = url;
@@ -497,7 +473,7 @@ async fn malformed_response_keeps_metadata_out_of_agent_errors() {
 
 #[tokio::test]
 async fn truncated_response_preserves_received_bytes_only_in_ui_diagnostics() {
-    let (_dir, mut web, _) = fixture();
+    let (_dir, _, mut web, _) = fixture();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     web.endpoint = format!("http://{}", listener.local_addr().unwrap());
     let partial = r#"{"output":"incomplete","results":[{"private":"partial-ui-only"}"#;

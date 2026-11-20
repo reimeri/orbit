@@ -23,8 +23,7 @@ cannot delegate.
 
 Only `exec` and `wait` are top-level Responses tools. Main conversations have
 three additional delegation tools on `tools`; children have shell tools, `view_image`,
-and `web__run` when web access is enabled, but cannot generate images.
-The global Live/Cached/Disabled web policy applies to both profiles. Children use
+and live web search (`web__run`), but cannot generate images. Children use
 their own web conversation identity and profile model; pass source URLs, not
 conversation-scoped web reference IDs, between agents.
 Nested tools return strings. Subagent results are JSON text unless an output

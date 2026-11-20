@@ -60,7 +60,7 @@ changing the draft or transcript. Access, priority availability and usage limits
   the block with `\]` or `$$` respectively. Click an equation to copy the LaTeX.
   Inline math and unsupported equations remain source text.
 - [Code mode](docs/code-mode.md) runs JavaScript over shell and other built-in
-  tools. [Web access](docs/web-search.md) can be live, cached or disabled.
+  tools. [Web access](docs/web-search.md) is always live for main agents and subagents.
   [Image generation](docs/images.md#generate-and-edit) can use your subscription
   or a separately billed API key.
 - Open **Agents** to inspect [Review and Explore subagents](docs/subagents.md).

@@ -99,20 +99,18 @@ pub struct Provider {
     upgrade_client: reqwest::Client,
     pub auth: Arc<Auth>,
     endpoint: String,
-    store: crate::store::Store,
 }
 impl Provider {
     #[cfg(test)]
     pub(crate) fn fixture(store: crate::store::Store, endpoint: String) -> Self {
-        let mut provider = Self::new(Auth::new(store.clone()).unwrap(), store).unwrap();
+        let mut provider = Self::new(Auth::new(store).unwrap()).unwrap();
         provider.endpoint = endpoint;
         provider
     }
 
-    pub fn new(auth: Arc<Auth>, store: crate::store::Store) -> Result<Self> {
+    pub fn new(auth: Arc<Auth>) -> Result<Self> {
         Ok(Self {
             auth,
-            store,
             sockets: Default::default(),
             upgrade_client: reqwest::Client::builder()
                 .http1_only()
@@ -122,12 +120,11 @@ impl Provider {
             endpoint: "wss://chatgpt.com/backend-api/codex/responses".into(),
         })
     }
-    fn turn_request(&self, session: &Session, instructions: &str) -> Result<Value> {
-        let web = crate::web_search::saved_mode(&self.store)? != crate::web_search::Mode::Disabled;
+    fn turn_request(session: &Session, instructions: &str) -> Value {
         let mut body = request_base(session, instructions);
-        body["tools"] = code_mode::tools(session.child.is_some(), web);
+        body["tools"] = code_mode::tools(session.child.is_some());
         body["parallel_tool_calls"] = json!(true);
-        Ok(body)
+        body
     }
     pub async fn respond(
         &self,
@@ -136,7 +133,7 @@ impl Provider {
         cancel: &CancellationToken,
         emit: &(dyn Fn(Delta) + Send + Sync),
     ) -> Result<Response> {
-        let body = self.turn_request(session, instructions)?;
+        let body = Self::turn_request(session, instructions);
         tokio::select! { biased; _ = cancel.cancelled() => bail!("Turn cancelled"), r = self.websocket_request(&session.id, body, Some(&session.input), emit) => r }
     }
     /// A separate, tools-disabled request: never add naming context to the conversation.
@@ -181,7 +178,7 @@ impl Provider {
         cancel: &CancellationToken,
         account: &(dyn Fn(&Response) + Send + Sync),
     ) -> Result<Compaction> {
-        let mut body = self.turn_request(session, instructions)?;
+        let mut body = Self::turn_request(session, instructions);
         let input = body["input"].as_array_mut().expect("request input");
         input.extend(session.input.iter().map(crate::project_guidance::wire_item));
         input.push(json!({"type":"compaction_trigger"}));
@@ -572,6 +569,7 @@ mod tests {
         replies: impl IntoIterator<Item = (u16, String), IntoIter: Send + 'static>,
     ) -> (
         tempfile::TempDir,
+        crate::store::Store,
         Provider,
         tokio::sync::mpsc::UnboundedReceiver<String>,
         tokio::task::JoinHandle<()>,
@@ -590,16 +588,16 @@ mod tests {
                 },
             )
             .unwrap();
-        let mut provider = Provider::new(Auth::new(store.clone()).unwrap(), store).unwrap();
+        let mut provider = Provider::new(Auth::new(store.clone()).unwrap()).unwrap();
         let (url, requests, task) = crate::test_support::ws_server(replies).await;
         provider.endpoint = url;
-        (dir, provider, requests, task)
+        (dir, store, provider, requests, task)
     }
     #[tokio::test]
     async fn unauthorized_has_one_refresh_independent_of_transient_retries() {
         use crate::test_support::{completed, header, server};
         for final_status in [200, 401] {
-            let (dir, mut provider, mut requests, responses) = fixture([
+            let (dir, store, mut provider, mut requests, responses) = fixture([
                 (503, "busy".into()),
                 (401, "expired".into()),
                 (
@@ -615,7 +613,7 @@ mod tests {
             let (issuer, mut refreshes, refresh_server) = server([(200,
                 json!({"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}).to_string()
             )]).await;
-            provider.auth = Auth::fixture(provider.store.clone(), issuer);
+            provider.auth = Auth::fixture(store, issuer);
             let session = Session::new(dir.path().into(), &crate::store::Settings::default());
             let result = provider
                 .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
@@ -664,7 +662,7 @@ mod tests {
     #[tokio::test]
     async fn fast_tier_and_routing_hint_match_across_retries_and_toggle_off() {
         let reply = crate::test_support::completed(json!([]));
-        let (dir, provider, mut requests, server) = fixture(vec![
+        let (dir, _, provider, mut requests, server) = fixture(vec![
             (503, "busy".into()),
             (200, reply.clone()),
             (200, reply),
@@ -716,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn responses_roundtrip_exec_output_and_retry_only_before_streaming() {
         let call = json!({"type":"custom_tool_call","id":"item-1","call_id":"call-1","name":"exec","input":"text(await tools.exec_command({cmd:'printf asymmetric',login:false}));","status":"completed"});
-        let (dir,provider,mut requests,server)=fixture(vec![(503,"{}".into()),(200,crate::test_support::completed(json!([call]))),(200,crate::test_support::completed(json!([{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"Done."}]}])))]).await;
+        let (dir,_,provider,mut requests,server)=fixture(vec![(503,"{}".into()),(200,crate::test_support::completed(json!([call]))),(200,crate::test_support::completed(json!([{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"Done."}]}])))]).await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.accept("Inspect the project".into());
         session.consume_pending();
@@ -779,7 +777,7 @@ mod tests {
         let reply = crate::test_support::completed(
             json!([{"type":"message","content":[{"type":"output_text","text":"summary"}]}]),
         );
-        let (dir, provider, mut requests, server) =
+        let (dir, _, provider, mut requests, server) =
             fixture(vec![(200, reply.clone()), (200, reply)]).await;
         let store = crate::store::Store::open(dir.path().join("media-state")).unwrap();
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
@@ -836,7 +834,7 @@ mod tests {
         let overloaded = json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later."}}});
         let failure = format!("{overloaded}\n\n");
         let call = json!({"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","call_id":"c","name":"exec","input":"text(1)"}});
-        let (dir, provider, mut requests, server) = fixture([
+        let (dir, _, provider, mut requests, server) = fixture([
             (200, failure.clone()),
             (200, crate::test_support::completed(json!([]))),
             (200, format!("{call}\n\n{failure}")),
@@ -867,7 +865,7 @@ mod tests {
     async fn truncated_stream_reports_failure_without_retrying() {
         let partial =
             "{\"type\":\"response.output_text.delta\",\"item_id\":\"a\",\"delta\":\"partial\"}\n\n";
-        let (dir, provider, mut requests, server) =
+        let (dir, _, provider, mut requests, server) =
             fixture([(200, partial.into()), (400, "unexpected retry".into())]).await;
         let session = Session::new(dir.path().into(), &crate::store::Settings::default());
         let error = provider
@@ -887,7 +885,8 @@ mod tests {
         let reply = crate::test_support::completed(
             json!([{"type":"message","id":"summary","content":[{"type":"output_text","text":"Preserve goal: fix buffer; test boundary sizes."}]}]),
         );
-        let (dir, provider, mut requests, server) = fixture(std::iter::repeat((200, reply))).await;
+        let (dir, _, provider, mut requests, server) =
+            fixture(std::iter::repeat((200, reply))).await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.fast = true;
         session.accept("λ".repeat(5000).into());
@@ -969,7 +968,7 @@ mod tests {
                 {"type":"message", "content":[{"type":"output_text", "text":text}]}
             ]))
         };
-        let (dir, provider, mut requests, server) = fixture(
+        let (dir, _, provider, mut requests, server) = fixture(
             std::iter::once((200, reply(&oversized)))
                 .chain(std::iter::repeat((200, reply("latest chunk")))),
         )
@@ -1032,12 +1031,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_policy_and_ui_metadata_stay_out_of_provider_context() {
+    async fn web_ui_metadata_stays_out_of_provider_context() {
         use crate::web_search::{Metadata, Mode};
         let reply = crate::test_support::completed(
             json!([{"type":"message","content":[{"type":"output_text","text":"summary"}]}]),
         );
-        let (dir, provider, mut requests, server) = fixture(std::iter::repeat((200, reply))).await;
+        let (dir, _, provider, mut requests, server) =
+            fixture(std::iter::repeat((200, reply))).await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.accept("search".into());
         session.consume_pending();
@@ -1068,15 +1068,6 @@ mod tests {
         let live = requests.recv().await.unwrap();
         assert!(live.contains("web__run"));
         assert!(!live.contains("ui-metadata-marker"));
-        let mut catalog = crate::store::Catalog::default();
-        catalog.settings.web_search = Mode::Disabled;
-        provider.store.save_catalog(&catalog).unwrap();
-        provider
-            .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
-            .await
-            .unwrap();
-        let disabled = requests.recv().await.unwrap();
-        assert!(!disabled.contains("web__run"));
         session.input[0]["content"] = json!("x".repeat(30_000));
         let summary = provider
             .compact(
@@ -1116,7 +1107,7 @@ mod tests {
         let reply = crate::test_support::completed(json!([
             {"type":"message", "content":[{"type":"output_text", "text":generated}]}
         ]));
-        let (dir, provider, _requests, server) = fixture(vec![(200, reply)]).await;
+        let (dir, _, provider, _requests, server) = fixture(vec![(200, reply)]).await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.accept("remember nested output".into());
         session.consume_pending();
@@ -1177,7 +1168,7 @@ mod tests {
     #[tokio::test]
     async fn non_json_service_error_preserves_full_response_body() {
         let diagnostic = format!("proxy error {} diagnostic tail", "λ".repeat(20000));
-        let (dir, provider, _requests, server) = fixture(vec![(400, diagnostic.clone())]).await;
+        let (dir, _, provider, _requests, server) = fixture(vec![(400, diagnostic.clone())]).await;
         let session = Session::new(dir.path().into(), &crate::store::Settings::default());
         let error = provider
             .respond(&session, "fixture", &CancellationToken::new(), &|_| {})
@@ -1198,7 +1189,7 @@ mod tests {
         let reply = crate::test_support::completed(
             json!([{"type":"message","id":"s","content":[{"type":"output_text","text":"checkpoint summary"}]}]),
         );
-        let (dir, provider, mut requests, server) =
+        let (dir, _, provider, mut requests, server) =
             fixture(vec![(200, reply.clone()), (200, reply)]).await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
         session.accept("OLD_HISTORY_MARKER".into());

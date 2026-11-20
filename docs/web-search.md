@@ -81,20 +81,11 @@ structured screenshot result**. As in the inspected Codex standalone handler,
 Pico does not turn these into model-visible images or claim the model saw pixels.
 This tool is not an interactive browser and does not use browser sessions/cookies.
 
-## Settings, request identity and privacy
+## Request identity and privacy
 
-**Settings → General → Web access · all agents**:
-
-- **Live** (default): `external_web_access: true`.
-- **Cached**: `external_web_access: false`. Cached does not guarantee freshness;
-  navigation and specialized operations may have backend restrictions.
-- **Disabled**: omit the tool from model/JS catalogs and reject native invocations.
-
-Save applies the global policy to main agents and subagents; Cancel discards the
-draft. Each invocation snapshots policy and the calling conversation's selected model before authentication. A change
-does not alter a call already underway, including one waiting for authentication.
-Calls made later in an existing cell recheck the saved policy; a stale catalog cannot
-bypass Disabled. Stop cancels an in-flight call if it must not proceed.
+Web search is always live for main agents and subagents. Every search requests
+`external_web_access: true`, including in existing sessions that previously used
+Cached or Disabled. Each invocation uses the calling conversation's selected model.
 
 Requests use existing Pico V2 ChatGPT OAuth and account routing, a stable calling
 conversation ID, the selected model, explicit commands, and access/output settings.

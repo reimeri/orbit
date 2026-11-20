@@ -1,11 +1,7 @@
 //! Built-in Codex standalone web access. Only result text enters code mode.
 mod commands;
 mod schema;
-use crate::{
-    auth::Auth,
-    output,
-    store::{Catalog, Store, now},
-};
+use crate::{auth::Auth, output, store::now};
 use anyhow::{Context, Result, bail};
 pub(crate) use schema::{DESCRIPTION, input_schema};
 use serde::{Deserialize, Serialize};
@@ -19,25 +15,15 @@ pub enum Mode {
     #[default]
     Live,
     Cached,
-    Disabled,
 }
 impl std::fmt::Display for Mode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Live => "Live",
             Self::Cached => "Cached",
-            Self::Disabled => "Disabled",
         })
     }
 }
-pub(crate) fn saved_mode(store: &Store) -> Result<Mode> {
-    Ok(store
-        .read_optional::<Catalog>("settings.json")?
-        .unwrap_or_default()
-        .settings
-        .web_search)
-}
-
 /// Display-only links. Complete backend metadata is retained in `Metadata::details`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Source {
@@ -53,7 +39,7 @@ pub struct Metadata {
     pub details: String,
 }
 impl Metadata {
-    fn new(mode: Mode, searched_at: u64, results: Vec<Value>) -> Result<Self> {
+    fn new(searched_at: u64, results: Vec<Value>) -> Result<Self> {
         let sources = results
             .iter()
             .filter_map(|result| {
@@ -78,7 +64,7 @@ impl Metadata {
             .take(20)
             .collect();
         Ok(Self {
-            mode,
+            mode: Mode::Live,
             searched_at,
             sources,
             details: serde_json::to_string_pretty(&results)?,
@@ -108,7 +94,7 @@ impl std::fmt::Display for Failure {
 }
 impl std::error::Error for Failure {}
 impl Failure {
-    fn response(message: String, mode: Mode, searched_at: u64, bytes: &[u8]) -> Self {
+    fn response(message: String, searched_at: u64, bytes: &[u8]) -> Self {
         use base64::{Engine, engine::general_purpose::STANDARD};
         let diagnostic = match std::str::from_utf8(bytes) {
             Ok(body) => json!({"response_body":body}),
@@ -117,7 +103,7 @@ impl Failure {
         Self {
             message,
             metadata: Metadata {
-                mode,
+                mode: Mode::Live,
                 searched_at,
                 sources: vec![],
                 details: diagnostic.to_string(),
@@ -127,7 +113,6 @@ impl Failure {
 }
 pub(crate) type Model = Arc<dyn Fn() -> Result<String> + Send + Sync>;
 pub struct WebSearch {
-    store: Store,
     auth: Arc<Auth>,
     session: String,
     model: Model,
@@ -144,14 +129,12 @@ impl WebSearch {
             .build()?)
     }
     pub(crate) fn new(
-        store: Store,
         auth: Arc<Auth>,
         session: String,
         model: Model,
         client: reqwest::Client,
     ) -> Self {
         Self {
-            store,
             auth,
             session,
             model,
@@ -159,32 +142,25 @@ impl WebSearch {
             endpoint: "https://chatgpt.com/backend-api/codex/alpha/search".into(),
         }
     }
-    pub(crate) fn enabled(&self) -> Result<bool> {
-        Ok(saved_mode(&self.store)? != Mode::Disabled)
-    }
     pub(crate) async fn call(
         &self,
         arguments: &str,
         cancel: &CancellationToken,
     ) -> Result<ToolResult> {
         let commands = commands::SearchCommands::parse(arguments)?;
-        let mode = saved_mode(&self.store)?;
-        if mode == Mode::Disabled {
-            bail!("Web access is disabled in Settings → General. No request was sent");
-        }
         let model = (self.model)()?;
         let body = json!({
             "id": self.session, "model": model, "commands": commands,
-            "settings": {"external_web_access": mode == Mode::Live, "allowed_callers": ["direct"]},
+            "settings": {"external_web_access": true, "allowed_callers": ["direct"]},
             "max_output_tokens": 10000
         });
         tokio::select! {
             biased;
             _ = cancel.cancelled() => bail!("Web request cancelled; remote work may already have consumed subscription usage. No automatic retry was made"),
-            result = self.request(body, mode) => result,
+            result = self.request(body) => result,
         }
     }
-    async fn request(&self, body: Value, mode: Mode) -> Result<ToolResult> {
+    async fn request(&self, body: Value) -> Result<ToolResult> {
         let mut credentials = self.auth.token(None).await?;
         let searched_at = now();
         for attempt in 0..2 {
@@ -210,23 +186,23 @@ impl WebSearch {
                     Ok(None) => break,
                     Err(error) => return Err(Failure::response(
                         format!("Web response was interrupted: {error}. No automatic replay was made. Received bytes are preserved in the tool's transcript details."),
-                        mode, searched_at, &bytes,
+                        searched_at, &bytes,
                     ).into()),
                 }
             }
             if !status.is_success() {
                 return Err(Failure::response(
                     format!("Web request failed ({status}). Check ChatGPT sign-in and account access, or retry later for rate limits/service failures. No backend fallback or retry of uncertain work was used. Complete diagnostics are in the tool's transcript details."),
-                    mode, searched_at, &bytes,
+                    searched_at, &bytes,
                 ).into());
             }
             let response: Response = serde_json::from_slice(&bytes).map_err(|_| Failure::response(
                 "Invalid web response: expected output text and optional result metadata. No automatic replay was made. Complete diagnostics are in the tool's transcript details.".into(),
-                mode, searched_at, &bytes,
+                searched_at, &bytes,
             ))?;
             return Ok(ToolResult {
                 text: output::preserve_text(&response.output, 40_000),
-                metadata: Metadata::new(mode, searched_at, response.results.unwrap_or_default())?,
+                metadata: Metadata::new(searched_at, response.results.unwrap_or_default())?,
             });
         }
         unreachable!("second authentication rejection returns an HTTP error")

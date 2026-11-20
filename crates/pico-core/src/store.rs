@@ -114,8 +114,6 @@ pub struct Settings {
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default)]
-    pub web_search: crate::web_search::Mode,
-    #[serde(default)]
     pub images: crate::image_tools::Settings,
     #[serde(default)]
     pub spellcheck: SpellcheckSettings,
@@ -138,7 +136,6 @@ impl Default for Settings {
             theme: default_theme(),
             images: crate::image_tools::Settings::default(),
             spellcheck: SpellcheckSettings::default(),
-            web_search: crate::web_search::Mode::Live,
             model: DEFAULT_MODEL.into(),
             models: model_defaults(),
             subagents: subagent_defaults(),

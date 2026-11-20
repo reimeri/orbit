@@ -9,7 +9,6 @@ use iced::{
 use pico_core::{
     image_tools::{Backend, DEFAULT_API_MODEL, QUALITIES},
     models::{MODELS, model},
-    web_search::Mode,
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -191,11 +190,6 @@ impl App {
             .spacing(8)
             .align_y(Center)
         };
-        let web_help = match self.settings.web_search {
-            Mode::Live => "Live uses the web through your ChatGPT subscription.",
-            Mode::Cached => "Cached requests stored results; some operations may be limited.",
-            Mode::Disabled => "Disabled prevents new web calls.",
-        };
         column![
             section("SESSION DEFAULTS"),
             self.preference_row(
@@ -219,17 +213,6 @@ impl App {
                 "Restore last session",
                 theme::switch(appearance.resume_last).on_toggle(Message::Resume)
             ),
-            space().height(8),
-            section("WEB ACCESS"),
-            self.preference_row(
-                "Search mode",
-                theme::dropdown(
-                    [Mode::Live, Mode::Cached, Mode::Disabled],
-                    Some(self.settings.web_search),
-                    Message::WebMode
-                )
-            ),
-            container(text(web_help).size(12).style(theme::muted)).padding([3, 4]),
             space().height(8),
             section("APPEARANCE"),
             self.preference_row(

@@ -23,8 +23,8 @@ pub const GRAMMAR: &str = "\nstart: pragma_source | plain_source\npragma_source:
 mod catalog;
 use catalog::Capabilities;
 
-pub fn tools(child: bool, web: bool) -> Value {
-    let definitions = catalog::definitions(Capabilities::conversation(child, web));
+pub fn tools(child: bool) -> Value {
+    let definitions = catalog::definitions(Capabilities::conversation(child));
     let description = catalog::description(DESCRIPTION, &definitions);
     json!([
         {"type":"custom","name":"exec","description":description,"format":{"type":"grammar","syntax":"lark","definition":GRAMMAR}},
@@ -501,7 +501,7 @@ fn run_cell(
             .map_err(js_error)?;
         let definitions = catalog::definitions(Capabilities {
             delegation: delegation.is_some(),
-            web: web.as_ref().map(|web| web.enabled()).transpose()?.unwrap_or(false),
+            web: web.is_some(),
             questionnaires: questionnaires.is_some(),
             images: images.is_some(),
             image_generation: images.as_ref().is_some_and(|i| i.generation),

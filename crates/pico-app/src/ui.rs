@@ -259,7 +259,6 @@ pub enum Message {
     OpenMarkdownImage(String),
     RetryMarkdownImage(String),
     ImageBackend(pico_core::image_tools::Backend),
-    WebMode(pico_core::web_search::Mode),
     Spellcheck(spellcheck::Message),
     SpellcheckEnabled(bool),
     SpellcheckLanguage(String),
@@ -1339,7 +1338,6 @@ impl App {
                     | Message::SubagentFast(_, _)
                     | Message::Context(_)
                     | Message::Threshold(_)
-                    | Message::WebMode(_)
                     | Message::SpellcheckEnabled(_)
                     | Message::SpellcheckLanguage(_)
                     | Message::ImageBackend(_)
@@ -1500,7 +1498,6 @@ impl App {
                 self.modal = Some(Modal::Image(media));
                 return task;
             }
-            Message::WebMode(mode) => self.settings.web_search = mode,
             Message::SpellcheckEnabled(enabled) => self.settings.spellcheck.enabled = enabled,
             Message::SpellcheckLanguage(language) => self.settings.spellcheck.language = language,
             Message::Spellcheck(spellcheck::Message::Due(revision)) => {
@@ -6005,7 +6002,7 @@ impl App {
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar/file-tag completion, web access settings/source links/details, Markdown display equations/images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, compact project picker/stash/context menu/delete confirmation, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar/file-tag completion, web source links/details, Markdown display equations/images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, compact project picker/stash/context menu/delete confirmation, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }
@@ -7387,29 +7384,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_settings_and_transcript_details_survive_save_cancel_and_reopen() {
+    async fn web_transcript_details_survive_reopen() {
         use pico_core::web_search::{Metadata, Mode, Source};
         let mut app = app();
-        dispatch(&mut app, Message::ToggleSettings).await;
-        dispatch(&mut app, Message::SettingsTab(SettingsTab::General)).await;
-        assert_eq!(app.settings.web_search, Mode::Live);
-        dispatch(&mut app, Message::WebMode(Mode::Cached)).await;
-        dispatch(&mut app, Message::ApplySettings).await;
-        assert_eq!(
-            app.harness
-                .as_ref()
-                .unwrap()
-                .store
-                .load()
-                .unwrap()
-                .0
-                .settings
-                .web_search,
-            Mode::Cached
-        );
-        dispatch(&mut app, Message::WebMode(Mode::Disabled)).await;
-        dispatch(&mut app, Message::CancelSettings).await;
-        assert_eq!(app.settings.web_search, Mode::Cached);
         let root = app.smoke_dir.clone().unwrap();
         stored_session(&mut app, root).await;
         let id = app.selected.clone().unwrap();

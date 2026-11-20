@@ -11,10 +11,10 @@ pub(super) struct Capabilities {
     pub image_generation: bool,
 }
 impl Capabilities {
-    pub fn conversation(child: bool, web: bool) -> Self {
+    pub fn conversation(child: bool) -> Self {
         Self {
             delegation: !child,
-            web,
+            web: true,
             questionnaires: !child,
             images: true,
             image_generation: !child,
@@ -269,7 +269,7 @@ mod tests {
                 || declaration.contains("mode:\"careful\"|\"fast\"")
         );
 
-        let tools = definitions(Capabilities::conversation(false, true));
+        let tools = definitions(Capabilities::conversation(false));
         let rendered = description("", &tools);
         // Text tools return strings, not the objects sometimes encoded in them.
         for name in [
