@@ -161,7 +161,6 @@ shell/PTYS, steering, Stop, restart persistence and compaction.
 - `flake.nix` / `flake.lock`: pinned development shell and runnable package.
 - `docs/development.md`: incremental builds, verification and troubleshooting.
 - `docs/code-mode.md`: tool contract, runtime limits and upstream references.
-- `pico-reference/`: ignored V1 reference; not a dependency or packaging input.
 
 ### Image tools
 
