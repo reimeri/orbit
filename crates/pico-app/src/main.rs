@@ -3,6 +3,7 @@ mod agent_icon;
 mod attachments;
 mod chat_selection;
 mod chevron_icon;
+mod editor_history;
 mod ellipsized_text;
 mod equations;
 mod file_completion;

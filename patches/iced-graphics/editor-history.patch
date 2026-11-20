@@ -1,0 +1,42 @@
+--- a/src/text/editor.rs
++++ b/src/text/editor.rs
+@@ -54,6 +54,39 @@
+             internal.editor.set_scroll(cosmic_text::Scroll::new(
+                 line, height * fraction.clamp(0.0, 1.0), 0.0,
+             ));
++        });
++    }
++
++    /// Native caret and selection, including affinity and word/line selection mode.
++    pub fn selection_state(&self) -> (cosmic_text::Cursor, cosmic_text::Selection) {
++        let editor = &self.internal().editor;
++        (editor.cursor(), editor.selection())
++    }
++
++    /// Begin collecting native edits in a single reversible change.
++    pub fn start_change(&mut self) {
++        self.with_internal_mut(|internal| internal.editor.start_change());
++    }
++
++    /// Finish collecting native edits.
++    pub fn finish_change(&mut self) -> cosmic_text::Change {
++        self.with_internal_mut(|internal| internal.editor.finish_change().expect("started change"))
++    }
++
++    /// Replay a completed change and restore both ends of the selection.
++    pub fn replay_change(
++        &mut self,
++        change: &cosmic_text::Change,
++        (cursor, selection): (cosmic_text::Cursor, cosmic_text::Selection),
++    ) {
++        self.with_internal_mut(|internal| {
++            assert!(internal.editor.apply_change(change), "unfinished editor change");
++            internal.editor.set_cursor(cursor);
++            internal.editor.set_selection(selection);
++            if let Some(first) = change.items.iter().map(|item| item.start.line).min() {
++                internal.topmost_line_changed =
++                    Some(internal.topmost_line_changed.map_or(first, |line| line.min(first)));
++            }
+         });
+     }
+ 

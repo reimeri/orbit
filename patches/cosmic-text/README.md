@@ -63,3 +63,13 @@ including combining marks, mixed/changed bidi direction, isolates, tabs, repeate
 edits before layout, same-range replacement, split/join attributes and explicit
 invalidations. The benchmark now includes repeated tail insertion and backspace;
 see `docs/editor-performance.md` for the diagnostic breakdown and remaining costs.
+
+## Composer history replay
+
+`replay-caret.patch` requests caret reveal on replay even if the final cursor
+has the same coordinates; it also resets the remembered vertical-motion column.
+`history-delete.patch` preserves separately authored CR and LF boundaries
+when a deletion is reversed (re-parsing the flattened text could otherwise
+coalesce lines, invalidating later byte offsets). It collects removed text only
+while recording and drains removed lines together rather than repeatedly moving
+the suffix when undoing a large paste. See the app's `editor_history` tests.

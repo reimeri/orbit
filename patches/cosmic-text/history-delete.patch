@@ -1,0 +1,128 @@
+--- a/src/edit/editor.rs
++++ b/src/edit/editor.rs
+@@ -294,81 +294,51 @@
+     }
+ 
+     fn delete_range(&mut self, start: Cursor, end: Cursor) {
+-        let change_item = self.with_buffer_mut(|buffer| {
+-            // Collect removed data for change tracking
+-            let mut change_lines = Vec::new();
+-
+-            // Delete the selection from the last line
+-            let end_line_opt = if end.line > start.line {
+-                // Get part of line after selection
+-                let after = buffer.lines[end.line].split_off(end.index);
+-
+-                // Remove end line
+-                let removed = buffer.lines.remove(end.line);
+-                change_lines.insert(0, removed);
+-
+-                Some(after)
+-            } else {
+-                None
+-            };
+-
+-            // Delete interior lines (in reverse for safety)
+-            for line_i in (start.line + 1..end.line).rev() {
+-                let removed = buffer.lines.remove(line_i);
+-                change_lines.insert(0, removed);
+-            }
+-
+-            // Delete the selection from the first line
+-            {
+-                let line = &mut buffer.lines[start.line];
+-
+-                // Get part after selection if start line is also end line
+-                let after_opt = if start.line == end.line {
+-                    Some(line.split_off(end.index))
+-                } else {
+-                    None
+-                };
+-
+-                // Delete selected part of line
+-                let removed = line.split_off(start.index);
+-                change_lines.insert(0, removed);
+-
+-                // Re-add part of line after selection
+-                if let Some(after) = after_opt {
+-                    line.append(&after);
+-                }
+-
+-                // Re-add valid parts of end line
+-                if let Some(mut end_line) = end_line_opt {
+-                    // Preserve line ending of original line
+-                    if end_line.ending() == LineEnding::None {
+-                        end_line.set_ending(line.ending());
+-                    }
+-                    line.append(&end_line);
+-                }
+-            }
+-
+-            let mut text = String::new();
+-            let mut last_ending: Option<LineEnding> = None;
+-            for line in change_lines {
+-                if let Some(ending) = last_ending {
+-                    text.push_str(ending.as_str());
+-                }
+-                text.push_str(line.text());
+-                last_ending = Some(line.ending());
+-            }
+-
+-            ChangeItem {
+-                start,
+-                end,
+-                text,
+-                insert: false,
+-            }
++        // Store logical ranges separately when adjacent CR and LF endings
++        // would be parsed as a single line break on replay.
++        if self.change.is_some() {
++            let items = self.with_buffer(|buffer| {
++                let mut items = Vec::new();
++                let mut from = start;
++                let mut text = String::new();
++                for i in start.line..=end.line {
++                    let line = &buffer.lines[i];
++                    let lo = if i == start.line { start.index } else { 0 };
++                    let hi = if i == end.line { end.index } else { line.text().len() };
++                    text.push_str(&line.text()[lo..hi]);
++                    if i != end.line {
++                        let ending = line.ending().as_str();
++                        if i > start.line && line.text().is_empty() {
++                            let previous = buffer.lines[i - 1].ending();
++                            if (previous == LineEnding::Cr && ending.starts_with('\n'))
++                                || (previous == LineEnding::Lf && ending.starts_with('\r'))
++                            {
++                                let boundary = Cursor::new(i, 0);
++                                items.push(ChangeItem { start: from, end: boundary,
++                                    text: core::mem::take(&mut text), insert: false });
++                                from = boundary;
++                            }
++                        }
++                        text.push_str(ending);
++                    }
++                }
++                items.push(ChangeItem { start: from, end, text, insert: false });
++                items
++            });
++            // Delete right-to-left so each item still addresses its original range.
++            self.change.as_mut().unwrap().items.extend(items.into_iter().rev());
++        }
++
++        // Keep the surviving suffix, moving the rest of the buffer only once.
++        self.with_buffer_mut(|buffer| {
++            let after = buffer.lines[end.line].split_off(end.index);
++            if end.line != start.line {
++                buffer.lines.drain(start.line + 1..=end.line);
++            }
++            let line = &mut buffer.lines[start.line];
++            let _ = line.split_off(start.index);
++            line.append(&after);
+         });
+-
+-        if let Some(ref mut change) = self.change {
+-            change.items.push(change_item);
+-        }
+     }
+ 
+     fn insert_at(

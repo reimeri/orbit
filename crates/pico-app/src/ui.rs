@@ -2,6 +2,7 @@ mod forks;
 mod settings;
 
 use crate::activity::{self, Row as ActivityRow};
+use crate::editor_history::{Direction, Draft as DraftKey, DraftHistories};
 use crate::scrollbar::scroll;
 use crate::session_wave::{self, Status as SessionStatus};
 use crate::theme::{self, card, footer_surface, panel, right_panel, secondary, sidebar_control};
@@ -155,6 +156,7 @@ pub struct App {
     search: String,
     search_active: bool,
     editor: text_editor::Content,
+    histories: DraftHistories,
     spellcheck: spellcheck::State,
     file_completion: crate::file_completion::Completion,
     attachments: Vec<pico_core::media::Media>,
@@ -316,6 +318,7 @@ pub enum Message {
     Editor(text_editor::Action),
     EditorScroll(crate::growing_editor::ScrollTo),
     DeletePreviousWord,
+    ComposerHistory(Direction),
     Questionnaire(String, questionnaire::Message),
     Send,
     ToggleSettings,
@@ -472,6 +475,7 @@ impl App {
             search: String::new(),
             search_active: false,
             editor: text_editor::Content::new(),
+            histories: DraftHistories::default(),
             spellcheck: spellcheck::State::new(),
             file_completion: Default::default(),
             questionnaires: HashMap::new(),
@@ -1031,11 +1035,18 @@ impl App {
         if let Err(error) = self.file_completion.workspace(workspace, cache) {
             self.error = Some(format!("Could not start file search: {error:#}"));
         }
-        self.editor = text_editor::Content::with_text(if self.draft_session.is_some() {
+        let editor = text_editor::Content::with_text(if self.draft_session.is_some() {
             &self.new_draft.message
         } else {
             self.current_session.as_ref().map_or("", |s| &s.draft)
         });
+        let owner = if self.draft_session.is_some() {
+            Some(DraftKey::New)
+        } else {
+            self.selected.clone().map(DraftKey::Session)
+        };
+        self.histories.switch(&self.editor, owner, &editor);
+        self.editor = editor;
         self.attachments = if self.draft_session.is_some() {
             self.new_draft.images.clone()
         } else {
@@ -1263,6 +1274,7 @@ impl App {
             || self.context_menu.is_some()
             || self.active_questionnaire.is_some()
         {
+            self.histories.active.separate();
             self.footer_menu_open = false;
         }
         let close = if self.close_requested
@@ -1287,6 +1299,7 @@ impl App {
                 Message::Editor(_)
                     | Message::EditorScroll(_)
                     | Message::Questionnaire(_, _)
+                    | Message::ComposerHistory(_)
                     | Message::DeletePreviousWord
                     | Message::Send
                     | Message::Select(_)
@@ -1342,6 +1355,7 @@ impl App {
                 Message::Editor(_)
                     | Message::EditorScroll(_)
                     | Message::Questionnaire(_, _)
+                    | Message::ComposerHistory(_)
                     | Message::DeletePreviousWord
                     | Message::Send
                     | Message::SessionModel(_)
@@ -1406,10 +1420,10 @@ impl App {
                     }
                     Ok(crate::attachments::Input::Text(text)) => {
                         let before = spellcheck::BeforeEdit::replacement(&self.editor, text.len());
-                        self.editor
-                            .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
-                                Arc::new(text),
-                            )));
+                        self.histories.active.perform(
+                            &mut self.editor,
+                            text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(text))),
+                        );
                         self.file_completion.edited(&self.editor);
                         self.composer_edited(before, false);
                     }
@@ -1645,6 +1659,7 @@ impl App {
                         }
                         self.submissions.remove(&id);
                         if self.selected.as_ref() == Some(&id) && self.composer_message() == text {
+                            self.histories.reset(Some(DraftKey::Session(id.clone())));
                             self.editor = text_editor::Content::new();
                             self.spellcheck.clear();
                             self.file_completion.edited(&self.editor);
@@ -1667,6 +1682,8 @@ impl App {
                 let deleted =
                     result.is_ok() || self.harness.as_ref().is_some_and(|h| h.get(&id).is_none());
                 if deleted {
+                    self.histories
+                        .retain(|key| !matches!(key, DraftKey::Session(s) if s == &id));
                     let selected = self.parent_id() == Some(id.as_str());
                     if selected {
                         self.draft_dirty = false;
@@ -1779,6 +1796,12 @@ impl App {
                     self.modal = None;
                 }
                 self.refresh();
+                if result.is_ok() {
+                    self.histories.retain(|key| match key {
+                        DraftKey::New => true,
+                        DraftKey::Session(id) => self.sessions.iter().any(|s| &s.id == id),
+                    });
+                }
                 if selected_deleted {
                     self.restore_draft();
                 }
@@ -1847,6 +1870,7 @@ impl App {
                 return widget::operation::snap_to("sessions", scrollable::RelativeOffset::START);
             }
             Message::ToggleSearch => {
+                self.histories.active.separate();
                 self.search_active = !self.search_active;
                 if self.search_active {
                     return widget::operation::focus("session-search");
@@ -1901,7 +1925,16 @@ impl App {
                         | crate::file_completion::Message::Ignored
                 );
                 let before = spellcheck::BeforeEdit::capture(&self.editor);
-                if self.file_completion.update(message, &mut self.editor) {
+                let edited = if matches!(message, crate::file_completion::Message::Accept { .. }) {
+                    self.histories
+                        .active
+                        .transaction(&mut self.editor, |editor| {
+                            self.file_completion.update(message, editor)
+                        })
+                } else {
+                    self.file_completion.update(message, &mut self.editor)
+                };
+                if edited {
                     self.composer_edited(before, false);
                 }
                 if refocus {
@@ -1909,7 +1942,10 @@ impl App {
                 }
             }
             Message::FocusComposer => return widget::operation::focus("composer"),
-            Message::Editor(_) | Message::EditorScroll(_) | Message::DeletePreviousWord => {
+            Message::Editor(_)
+            | Message::EditorScroll(_)
+            | Message::DeletePreviousWord
+            | Message::ComposerHistory(_) => {
                 if self.active_questionnaire.is_some()
                     || self.io_busy
                     || self.modal.is_some()
@@ -1929,7 +1965,7 @@ impl App {
                             text_editor::Action::Edit(text_editor::Edit::Insert(c))
                             if matches!(c, '\'' | '’') || (!c.is_whitespace() && !c.is_ascii_punctuation())
                         );
-                        self.editor.perform(action);
+                        self.histories.active.perform(&mut self.editor, action);
                         (before, typing)
                     }
                     Message::EditorScroll(scroll) => {
@@ -1938,7 +1974,19 @@ impl App {
                     }
                     Message::DeletePreviousWord => {
                         let before = spellcheck::BeforeEdit::replacement(&self.editor, 0);
-                        questionnaire::delete_previous_word(&mut self.editor);
+                        self.histories
+                            .active
+                            .transaction(&mut self.editor, questionnaire::delete_previous_word);
+                        (Some(before), false)
+                    }
+                    Message::ComposerHistory(direction) => {
+                        let before = spellcheck::BeforeEdit::capture(&self.editor);
+                        if !self.histories.active.replay(&mut self.editor, direction) {
+                            return Task::none();
+                        }
+                        // The edit may be far from the current caret, and may span
+                        // multiple ranges (e.g. indent). Recheck the restored text.
+                        self.spellcheck.marks.clear();
                         (Some(before), false)
                     }
                     _ => unreachable!("editor message"),
@@ -2537,7 +2585,10 @@ impl App {
                     self.window_focused = true;
                     self.acknowledge_focused_completion();
                 }
-                iced::Event::Window(window::Event::Unfocused) => self.window_focused = false,
+                iced::Event::Window(window::Event::Unfocused) => {
+                    self.window_focused = false;
+                    self.histories.active.separate();
+                }
                 iced::Event::Window(window::Event::FileDropped(path)) => self.import_file(path),
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     if let Some((right, start, width)) = self.drag {
@@ -2586,6 +2637,7 @@ impl App {
                         return Task::none();
                     }
                     if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                        self.histories.active.separate();
                         // One central Escape handler preserves modal/search shortcuts
                         // even when their native text inputs capture the key.
                         if self.file_completion_enabled() && self.file_completion.is_open() {
@@ -6232,6 +6284,18 @@ fn updates(data: &Updates) -> iced::futures::stream::BoxStream<'static, Message>
 
 fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     if matches!(event.status, text_editor::Status::Focused { .. }) {
+        if event.modifiers == keyboard::Modifiers::CTRL {
+            let direction = match event.key.as_ref() {
+                keyboard::Key::Character("z") => Some(Direction::Undo),
+                keyboard::Key::Character("y") => Some(Direction::Redo),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                return Some(text_editor::Binding::Custom(Message::ComposerHistory(
+                    direction,
+                )));
+            }
+        }
         if (event.modifiers.command() && event.key.as_ref() == keyboard::Key::Character("v"))
             || (event.modifiers.shift()
                 && event.key == keyboard::Key::Named(keyboard::key::Named::Insert))
@@ -9043,6 +9107,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn composer_history_shortcuts_require_focused_editor_and_control_only() {
+        for (key, direction) in [("z", Direction::Undo), ("y", Direction::Redo)] {
+            for (modifiers, status, expected) in [
+                (
+                    keyboard::Modifiers::CTRL,
+                    text_editor::Status::Active,
+                    false,
+                ),
+                (
+                    keyboard::Modifiers::CTRL,
+                    text_editor::Status::Focused { is_hovered: false },
+                    true,
+                ),
+                (
+                    keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT,
+                    text_editor::Status::Focused { is_hovered: true },
+                    false,
+                ),
+            ] {
+                let binding = composer_key_binding(text_editor::KeyPress {
+                    key: keyboard::Key::Character(key.into()),
+                    modified_key: keyboard::Key::Character(key.into()),
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyZ),
+                    modifiers,
+                    text: None,
+                    status,
+                });
+                assert_eq!(
+                    matches!(binding, Some(text_editor::Binding::Custom(Message::ComposerHistory(actual))) if actual == direction),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn composer_history_follows_drafts_and_survives_failed_send() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        let insert = |c| Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert(c)));
+        dispatch(&mut app, insert('λ')).await;
+        stored_session(&mut app, root.clone()).await;
+        let id = app.selected.clone().unwrap();
+        dispatch(&mut app, insert('界')).await;
+        dispatch(&mut app, Message::Create(root.join("other"))).await;
+        assert_eq!(app.editor.text(), "λ");
+        dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
+        assert!(app.editor.is_empty());
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        assert_eq!(app.editor.text(), "界");
+        let sent = app.composer_message();
+        dispatch(
+            &mut app,
+            Message::Sent(id, sent, Err("fixture error".into())),
+        )
+        .await;
+        dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
+        assert!(app.editor.is_empty());
+        dispatch(&mut app, Message::Create(root)).await;
+        dispatch(&mut app, Message::ComposerHistory(Direction::Redo)).await;
+        assert_eq!(app.editor.text(), "λ");
+        assert_eq!(app.new_draft.message, "λ");
+    }
+
     #[tokio::test]
     async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
         use iced::futures::{StreamExt, stream};
@@ -9130,6 +9260,11 @@ mod tests {
         );
         assert_eq!(app.editor.text(), "Compare @\"source notes.md\"");
         assert!(!app.file_completion.is_open());
+        dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
+        assert_eq!(app.editor.text(), "Compare @source");
+        assert!(app.file_completion.is_open());
+        dispatch(&mut app, Message::ComposerHistory(Direction::Redo)).await;
+        assert_eq!(app.editor.text(), "Compare @\"source notes.md\"");
         for message in messages {
             dispatch(&mut app, message).await;
         }
@@ -9137,6 +9272,7 @@ mod tests {
         let draft = app.editor.text();
         std::fs::remove_file(root.join("source notes.md")).unwrap();
         dispatch(&mut app, Message::Send).await;
+        dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
         assert!(app.editor.text().is_empty());
         let saved = app
             .harness

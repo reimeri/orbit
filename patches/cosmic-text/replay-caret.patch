@@ -1,0 +1,13 @@
+--- a/src/edit/editor.rs
++++ b/src/edit/editor.rs
+@@ -572,6 +572,10 @@
+                 self.delete_range(item.start, item.end);
+             }
+         }
++        // Replay may leave the caret at the same logical position but offscreen.
++        self.cursor_moved = true;
++        self.cursor_x_opt = None;
++        self.with_buffer_mut(|buffer| buffer.set_redraw(true));
+         true
+     }
+ 

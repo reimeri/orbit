@@ -78,3 +78,10 @@ preserved. A focused draw regression covers the edit/seek/reflow sequence.
 shaped cluster so Pico can underline spelling ranges with the same cluster and
 bidirectional geometry. The overlay reads visible native layout runs after
 the editor draws; it does not change shaping, layout, scroll, or selection.
+
+## Composer history
+
+`editor-history.patch` exposes native change recording and replay through the
+existing Content editor callbacks. Replaying invalidates the selection/highlight
+caches and restores the exact native caret and selection (including affinity and
+word/line mode). Grouping, memory bounds and draft ownership live in pico-app.

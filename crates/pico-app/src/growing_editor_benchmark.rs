@@ -74,6 +74,7 @@ fn editor_stage_benchmark() {
         .map(|value| value.parse::<usize>().expect("positive sample count"))
         .unwrap_or(3);
     assert!(samples > 0);
+    let history_enabled = std::env::var_os("PICO_EDITOR_BENCH_HISTORY").is_some();
     let filter = std::env::var("PICO_EDITOR_BENCH_CASE").ok();
     let unicode = "Long answer with Unicode λ界 and preserved newlines.\n";
     let ascii = "Long answer with Unicode ab and preserved newlines.\n";
@@ -128,6 +129,7 @@ fn editor_stage_benchmark() {
     println!(
         "case,initial_state,sample,bytes,lines,phase,edit_ms,native_ms,scrollbar_ms,native_cached_lines"
     );
+    println!("history recording: {history_enabled}");
     for (name, value) in cases {
         if filter.as_ref().is_some_and(|filter| name != filter) {
             continue;
@@ -141,6 +143,7 @@ fn editor_stage_benchmark() {
                 if mounted {
                     fixture.layout(WIDTH);
                 }
+                let mut history = crate::editor_history::History::default();
                 for phase in [
                     "paste",
                     "unchanged",
@@ -151,17 +154,22 @@ fn editor_stage_benchmark() {
                     "type-start",
                 ] {
                     let start = Instant::now();
+                    let mut perform = |action| {
+                        if history_enabled {
+                            history.perform(&mut fixture.content, action);
+                        } else {
+                            fixture.content.perform(action);
+                        }
+                    };
                     match phase {
-                        "paste" => fixture
-                            .content
-                            .perform(Action::Edit(Edit::Paste(payload.clone()))),
-                        "type" => fixture.content.perform(Action::Edit(Edit::Insert('x'))),
-                        "type-again" => fixture.content.perform(Action::Edit(Edit::Insert('z'))),
-                        "backspace" => fixture.content.perform(Action::Edit(Edit::Backspace)),
+                        "paste" => perform(Action::Edit(Edit::Paste(payload.clone()))),
+                        "type" => perform(Action::Edit(Edit::Insert('x'))),
+                        "type-again" => perform(Action::Edit(Edit::Insert('z'))),
+                        "backspace" => perform(Action::Edit(Edit::Backspace)),
                         // Includes navigation to the start as well as insertion.
                         "type-start" => {
-                            fixture.content.perform(Action::Move(Motion::DocumentStart));
-                            fixture.content.perform(Action::Edit(Edit::Insert('y')));
+                            perform(Action::Move(Motion::DocumentStart));
+                            perform(Action::Edit(Edit::Insert('y')));
                         }
                         _ => {}
                     }

@@ -216,3 +216,7 @@ explicit invalidation, and multiple unlaid edits replacing a word with another
 word at the **same byte range**. The last case detects incorrectly advancing the
 reusable prefix after a later append. Existing UI selection/caret/IME tests remain
 in the suite; benchmark timings are not hard-coded test assertions.
+
+Set `PICO_EDITOR_BENCH_HISTORY=1` to run the same edit phases through composer
+undo recording instead of bare Content. The edit column then includes collecting
+and grouping native changes; layout and scrollbar measurements are unchanged.
