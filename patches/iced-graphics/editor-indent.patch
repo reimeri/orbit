@@ -1,0 +1,95 @@
+--- a/src/text/editor.rs
++++ b/src/text/editor.rs
+@@ -136,6 +136,71 @@
+     }
+ }
+ 
++// Soft tabs are fixed-width edits, independent of the display width of a literal tab.
++fn indent(editor: &mut cosmic_text::Editor<'_>, increase: bool) {
++    use cosmic_text::{Cursor, Selection};
++
++    const UNIT: &str = "    ";
++    let mut cursor = editor.cursor();
++    let mut selection = editor.selection();
++    let (start, end) = editor.selection_bounds().unwrap_or((cursor, cursor));
++    let empty = (start.line, start.index) == (end.line, end.index);
++    if increase && empty {
++        editor.insert_string(UNIT, None);
++        return;
++    }
++
++    // A range ending at the next line's start does not touch its text.
++    // A native line selection, however, includes the entire final line even if empty.
++    let exclude_end = end.line > start.line && end.index == 0
++        && !matches!(selection, Selection::Line(_));
++    for line in start.line..=end.line - usize::from(exclude_end) {
++        let at = Cursor::new(line, 0);
++        let shift = if increase {
++            let _ = editor.insert_at(at, UNIT, None);
++            UNIT.len() as isize
++        } else {
++            let count = editor.with_buffer(|buffer| {
++                let text = buffer.lines[line].text();
++                if text.starts_with('\t') {
++                    1
++                } else {
++                    text.bytes()
++                        .take(UNIT.len())
++                        .take_while(|&b| b == b' ')
++                        .count()
++                }
++            });
++            if count == 0 {
++                continue;
++            }
++            editor.delete_range(at, Cursor::new(line, count));
++            -(count as isize)
++        };
++
++        let adjust = |c: &mut Cursor| {
++            if c.line == line {
++                c.index = c.index.saturating_add_signed(shift);
++            }
++        };
++        editor.with_buffer_mut(|buffer| buffer.set_redraw(true));
++        adjust(&mut cursor);
++        match &mut selection {
++            Selection::Normal(anchor) | Selection::Word(anchor) | Selection::Line(anchor) => {
++                adjust(anchor);
++            }
++            Selection::None => {}
++        }
++    }
++    if let Selection::Normal(anchor) = selection
++        && (anchor.line, anchor.index) == (cursor.line, cursor.index)
++    {
++        selection = Selection::None;
++    }
++    editor.set_cursor(cursor);
++    editor.set_selection(selection);
++}
++
+ impl editor::Editor for Editor {
+     type Font = Font;
+ 
+@@ -472,18 +537,8 @@
+                         Edit::Paste(text) => {
+                             editor.insert_string(&text, None);
+                         }
+-                        Edit::Indent => {
+-                            editor.action(
+-                                font_system.raw(),
+-                                cosmic_text::Action::Indent,
+-                            );
+-                        }
+-                        Edit::Unindent => {
+-                            editor.action(
+-                                font_system.raw(),
+-                                cosmic_text::Action::Unindent,
+-                            );
+-                        }
++                        Edit::Indent => indent(editor, true),
++                        Edit::Unindent => indent(editor, false),
+                         Edit::Enter => {
+                             editor.action(
+                                 font_system.raw(),

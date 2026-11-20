@@ -85,3 +85,8 @@ the editor draws; it does not change shaping, layout, scroll, or selection.
 existing Content editor callbacks. Replaying invalidates the selection/highlight
 caches and restores the exact native caret and selection (including affinity and
 word/line mode). Grouping, memory bounds and draft ownership live in pico-app.
+
+`editor-indent.patch` implements the composer's four-space soft tabs using
+native range edits, so block indentation preserves logical lines, selection
+direction and undo history without replacing the whole draft. It does not
+change how literal tabs are rendered.

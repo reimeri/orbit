@@ -6302,6 +6302,21 @@ fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Bin
         )));
     }
     if matches!(event.status, text_editor::Status::Focused { .. }) {
+        if event.key == keyboard::Key::Named(keyboard::key::Named::Tab)
+            && matches!(
+                event.modifiers,
+                keyboard::Modifiers::NONE | keyboard::Modifiers::SHIFT
+            )
+        {
+            let edit = if event.modifiers.shift() {
+                text_editor::Edit::Unindent
+            } else {
+                text_editor::Edit::Indent
+            };
+            return Some(text_editor::Binding::Custom(Message::Editor(
+                text_editor::Action::Edit(edit),
+            )));
+        }
         if (event.modifiers.command() && event.key.as_ref() == keyboard::Key::Character("v"))
             || (event.modifiers.shift()
                 && event.key == keyboard::Key::Named(keyboard::key::Named::Insert))
@@ -9119,6 +9134,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn composer_tabs_indent_at_caret_or_across_selection_as_one_edit() {
+        use text_editor::{Cursor, Position};
+
+        let tab = |modifiers| {
+            let key = keyboard::Key::Named(keyboard::key::Named::Tab);
+            let Some(text_editor::Binding::Custom(message)) =
+                composer_key_binding(text_editor::KeyPress {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Tab),
+                    modifiers,
+                    text: None,
+                    status: text_editor::Status::Focused { is_hovered: false },
+                })
+            else {
+                panic!("expected composer Tab binding")
+            };
+            message
+        };
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(root)).await;
+        let original = "  λ z\r\n\t界\n\nlast";
+        app.editor = text_editor::Content::with_text(original);
+        let pos = |line, column| Position { line, column };
+        app.editor.move_to(Cursor {
+            position: pos(0, "  λ ".len()),
+            selection: None,
+        });
+        dispatch(&mut app, tab(keyboard::Modifiers::NONE)).await;
+        assert_eq!(app.new_draft.message, "  λ     z\r\n\t界\n\nlast");
+        assert_eq!(app.editor.cursor().position, pos(0, "  λ     ".len()));
+        dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
+
+        // Backward selection starts inside a partial indent and ends at column zero.
+        let selected = Cursor {
+            position: pos(0, 1),
+            selection: Some(pos(3, 0)),
+        };
+        app.editor.move_to(selected);
+        dispatch(&mut app, tab(keyboard::Modifiers::NONE)).await;
+        assert_eq!(app.editor.text(), "      λ z\r\n    \t界\n    \nlast");
+        assert_eq!(
+            app.editor.cursor(),
+            Cursor {
+                position: pos(0, 5),
+                ..selected
+            }
+        );
+        dispatch(&mut app, tab(keyboard::Modifiers::SHIFT)).await;
+        assert_eq!(app.editor.text(), original);
+        assert_eq!(app.editor.cursor(), selected);
+        dispatch(&mut app, tab(keyboard::Modifiers::SHIFT)).await;
+        assert_eq!(app.editor.text(), "λ z\r\n界\n\nlast");
+        assert_eq!(
+            app.editor.cursor(),
+            Cursor {
+                position: pos(0, 0),
+                ..selected
+            }
+        );
+        dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
+        assert_eq!(app.editor.text(), original);
+        assert_eq!(app.editor.cursor(), selected);
     }
 
     #[tokio::test]

@@ -17,6 +17,9 @@ just run
    open, use **Copy login URL**.
 2. Choose **Add project**, browse to a folder or enter its absolute path.
 3. Select the project and send a request. Enter sends; Shift+Enter adds a newline.
+   Tab inserts four spaces at the caret or indents the selected lines. Shift+Tab
+   removes one leading indent from the current or selected lines. When file
+   suggestions are open, Tab accepts the highlighted suggestion instead.
    In the focused composer, Ctrl+Z undoes a text edit and Ctrl+Y redoes it.
    History follows recent drafts while Pico is open; sending clears it. These
    shortcuts do not change image attachments or undo a sent message.
