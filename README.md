@@ -59,7 +59,7 @@ research and replace these families with newer versions.
   the first message is sent. Its text follows project changes and survives restarts.
   Switching projects resets model/effort/Fast to defaults; existing sessions retain
   their own separate unsent messages.
-- Theme chooser in **Settings → General → Appearance**: Pico Dark (default) plus all 22 Iced palettes. The choice applies immediately and persists across restarts.
+- Theme chooser in **Settings → General → Appearance**: all 22 Iced palettes, with Moonfly as the default. The choice applies immediately and persists across restarts.
 - Three-column layout, resizable sidebar/settings panes, animated activity,
   Markdown and code blocks, link confirmation, copy actions, expandable reasoning,
   tool groups and individual tool inputs/results. Large tool details are virtualized: only

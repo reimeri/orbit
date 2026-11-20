@@ -514,7 +514,7 @@ mod tests {
             &mut renderer,
             &crate::theme::app(),
             &renderer::Style {
-                text_color: crate::theme::PICO.text,
+                text_color: crate::theme::default_colors().text,
             },
             Layout::new(&node),
             mouse::Cursor::Unavailable,

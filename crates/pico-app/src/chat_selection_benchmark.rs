@@ -251,7 +251,7 @@ fn selection_scroll_benchmark() {
                 &mut renderer,
                 &crate::theme::app(),
                 &renderer::Style {
-                    text_color: crate::theme::PICO.text,
+                    text_color: crate::theme::default_colors().text,
                 },
                 mouse::Cursor::Unavailable,
             );

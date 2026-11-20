@@ -4,8 +4,6 @@ mod settings;
 use crate::activity::{self, Row as ActivityRow};
 use crate::scrollbar::scroll;
 use crate::session_wave::{self, Status as SessionStatus};
-#[cfg(test)]
-use crate::theme::PICO;
 use crate::theme::{self, card, footer_surface, panel, right_panel, secondary, sidebar_control};
 use crate::{
     chat_selection::{self, Position},
@@ -6622,7 +6620,7 @@ mod tests {
                                 &mut renderer,
                                 &theme::app(),
                                 &iced::advanced::renderer::Style {
-                                    text_color: theme::PICO.text,
+                                    text_color: theme::default_colors().text,
                                 },
                                 cursor,
                             );
@@ -6630,7 +6628,7 @@ mod tests {
                                 &mut renderer,
                                 iced::Size::new(width as u32, size.height as u32),
                                 1.,
-                                theme::PICO.background,
+                                theme::default_colors().background,
                             );
                             icons.push(
                                 pixels
@@ -6681,33 +6679,41 @@ mod tests {
         use iced_runtime::{UserInterface, user_interface::Cache};
         let app = app();
         let mut renderer = header_renderer();
+        let colors = theme::default_colors();
         for (name, status, complete, failed, color, label) in [
             (
                 "image_gen__imagegen",
                 None,
                 false,
                 false,
-                PICO.warning,
+                colors.warning,
                 "running",
             ),
-            ("image_gen__imagegen", None, true, false, PICO.success, ""),
+            ("image_gen__imagegen", None, true, false, colors.success, ""),
             (
                 "image_gen__imagegen",
                 None,
                 true,
                 true,
-                PICO.danger,
+                colors.danger,
                 "failed",
             ),
-            ("web__run", None, false, false, PICO.warning, "running"),
-            ("exec", None, false, false, PICO.warning, "running"),
-            ("exec_command", None, false, false, PICO.warning, "running"),
+            ("web__run", None, false, false, colors.warning, "running"),
+            ("exec", None, false, false, colors.warning, "running"),
+            (
+                "exec_command",
+                None,
+                false,
+                false,
+                colors.warning,
+                "running",
+            ),
             (
                 "exec_command",
                 Some(CommandStatus::Running),
                 true,
                 false,
-                PICO.warning,
+                colors.warning,
                 "running",
             ),
             (
@@ -6715,7 +6721,7 @@ mod tests {
                 Some(CommandStatus::Succeeded),
                 true,
                 false,
-                PICO.success,
+                colors.success,
                 "",
             ),
             (
@@ -6723,7 +6729,7 @@ mod tests {
                 Some(CommandStatus::Failed),
                 true,
                 false,
-                PICO.danger,
+                colors.danger,
                 "failed",
             ),
             (
@@ -6731,7 +6737,7 @@ mod tests {
                 Some(CommandStatus::Interrupted),
                 true,
                 false,
-                PICO.danger,
+                colors.danger,
                 "interrupted",
             ),
         ] {
@@ -6765,7 +6771,7 @@ mod tests {
                 &mut renderer,
                 &theme::app(),
                 &iced::advanced::renderer::Style {
-                    text_color: theme::PICO.text,
+                    text_color: colors.text,
                 },
                 mouse::Cursor::Unavailable,
             );
@@ -6773,7 +6779,7 @@ mod tests {
                 &mut renderer,
                 iced::Size::new(400, 80),
                 1.,
-                theme::PICO.background,
+                colors.background,
             );
             let expected = color.into_rgba8();
             assert!(
@@ -7633,7 +7639,7 @@ mod tests {
                     &mut renderer,
                     &theme::app(),
                     &iced::advanced::renderer::Style {
-                        text_color: theme::PICO.text,
+                        text_color: theme::default_colors().text,
                     },
                     cursor,
                 );
@@ -7641,13 +7647,13 @@ mod tests {
                     &mut renderer,
                     iced::Size::new(size.width as u32, size.height as u32),
                     1.,
-                    theme::PICO.background,
+                    theme::default_colors().background,
                 );
                 if !settled && matches!(phase, 1 | 2) {
                     let expected = if phase == 1 {
-                        PICO.muted
+                        theme::default_colors().muted
                     } else {
-                        theme::PICO.text
+                        theme::default_colors().text
                     }
                     .into_rgba8();
                     let icon_right = bounds.label("Settle").x.floor() as usize;
@@ -7722,7 +7728,7 @@ mod tests {
                     &mut renderer,
                     &theme::app(),
                     &iced::advanced::renderer::Style {
-                        text_color: theme::PICO.text,
+                        text_color: theme::default_colors().text,
                     },
                     mouse::Cursor::Available(point),
                 );
@@ -7730,7 +7736,7 @@ mod tests {
                     &mut renderer,
                     iced::Size::new(size.width as u32, size.height as u32),
                     1.,
-                    theme::PICO.background,
+                    theme::default_colors().background,
                 );
                 // Tooltips do not expose text operations. Compare the painted
                 // area above the slot, excluding the button's hover-color change.
@@ -10022,7 +10028,7 @@ Then implement the fix.";
                     &mut renderer,
                     &theme::app(),
                     &iced::advanced::renderer::Style {
-                        text_color: theme::PICO.text,
+                        text_color: theme::default_colors().text,
                     },
                     mouse::Cursor::Unavailable,
                 );
@@ -10030,7 +10036,7 @@ Then implement the fix.";
                     &mut renderer,
                     iced::Size::new(width as u32, height as u32),
                     1.,
-                    theme::PICO.background,
+                    theme::default_colors().background,
                 );
                 let rename = bounds.label("Rename");
                 for label in ["Rename", middle, "Delete"] {
@@ -12112,7 +12118,7 @@ Then implement the fix.";
                 &mut renderer,
                 &theme::app(),
                 &iced::advanced::renderer::Style {
-                    text_color: theme::PICO.text,
+                    text_color: theme::default_colors().text,
                 },
                 mouse::Cursor::Unavailable,
             );

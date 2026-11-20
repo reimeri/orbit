@@ -354,7 +354,7 @@ mod tests {
                 &mut renderer,
                 &crate::theme::app(),
                 &renderer::Style {
-                    text_color: crate::theme::PICO.text,
+                    text_color: crate::theme::default_colors().text,
                 },
                 Layout::new(&node),
                 mouse::Cursor::Unavailable,
@@ -364,7 +364,7 @@ mod tests {
                 &mut renderer,
                 Size::new(320, 80),
                 1.,
-                crate::theme::PICO.background,
+                crate::theme::default_colors().background,
             ));
         }
         assert_ne!(frames[0], frames[1], "working wave moves");

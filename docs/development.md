@@ -405,9 +405,10 @@ rendered smoke includes collapsed/live groups and expanded/narrow activity detai
 
 ### Shared UI theme
 
-`crates/pico-app/src/theme.rs` defines Pico Dark and maps Iced’s shipped palettes
-to semantic colors. Widgets and Markdown use the active preset; geometry stays
-the same across themes. Avoid hard-coded colors or `Theme::Dark` in production views.
+`crates/pico-app/src/theme.rs` maps Iced’s shipped palettes to semantic colors.
+Moonfly is the default and the fallback for unrecognized saved theme names.
+Widgets and Markdown use the active preset; geometry stays the same across themes.
+Avoid hard-coded colors or `Theme::Dark` in production views.
 
 Use `theme::button` for buttons (including those with no explicit style), and the
 shared style functions for inputs, editors, pick lists and their menus, checkboxes,

@@ -1203,7 +1203,7 @@ mod tests {
             &mut editor.renderer,
             &theme::app(),
             &renderer::Style {
-                text_color: theme::PICO.text,
+                text_color: theme::default_colors().text,
             },
             Layout::new(&node),
             mouse::Cursor::Unavailable,
@@ -1242,7 +1242,7 @@ mod tests {
             &mut editor.renderer,
             Size::new(bounds.width.ceil() as u32, bounds.height.ceil() as u32),
             1.,
-            theme::PICO.background,
+            theme::default_colors().background,
         );
         assert!(
             pixels

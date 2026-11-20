@@ -30,17 +30,6 @@ pub const SCROLLBAR_THUMB_WIDTH: f32 = 3.;
 pub const SCROLLBAR_ALPHA: f32 = 0.25;
 pub const SCROLLBAR_ACTIVE_ALPHA: f32 = 0.4;
 
-fn pico_palette() -> iced::theme::Palette {
-    iced::theme::Palette {
-        background: PICO.background,
-        text: PICO.text,
-        primary: PICO.accent,
-        success: PICO.success,
-        danger: PICO.danger,
-        warning: PICO.warning,
-    }
-}
-
 /// Derived once per preset; view construction and draw callbacks share these roles.
 pub struct Colors {
     pub background: Color,
@@ -61,26 +50,6 @@ pub struct Colors {
     pub selection: Color,
     pub code: Color,
 }
-
-pub const PICO: Colors = Colors {
-    background: Color::from_rgb8(24, 26, 30),
-    text: Color::from_rgb8(225, 228, 234),
-    success: Color::from_rgb8(125, 192, 154),
-    danger: Color::from_rgb8(224, 130, 130),
-    warning: Color::from_rgb8(224, 186, 120),
-    muted: Color::from_rgb8(141, 149, 164),
-    panel: Color::from_rgb8(29, 32, 37),
-    border: Color::from_rgb8(48, 53, 61),
-    accent: Color::from_rgb8(137, 175, 210),
-    right_panel: Color::from_rgb8(24, 27, 31),
-    secondary: Color::from_rgb8(43, 49, 58),
-    secondary_hover: Color::from_rgb8(55, 62, 74),
-    popover: Color::from_rgb8(30, 30, 36),
-    search: Color::from_rgb8(39, 42, 48),
-    error_surface: Color::from_rgb8(66, 39, 43),
-    selection: Color::from_rgba8(100, 160, 230, 0.35),
-    code: Color::from_rgb8(17, 17, 17),
-};
 
 /// Keep the hue of a foreground (notably project badges and status text) as
 /// close to its original color as the surface allows.
@@ -136,22 +105,18 @@ pub struct Preset {
     pub colors: Colors,
 }
 pub static PRESETS: LazyLock<Vec<Preset>> = LazyLock::new(|| {
-    let mut presets = vec![Preset {
-        theme: Theme::custom(DEFAULT_THEME, pico_palette()),
-        colors: PICO,
-    }];
-    presets.extend(Theme::ALL.iter().map(|theme| Preset {
-        theme: theme.clone(),
-        colors: Colors::from_iced(theme),
-    }));
-    presets
+    Theme::ALL
+        .iter()
+        .map(|theme| Preset {
+            theme: theme.clone(),
+            colors: Colors::from_iced(theme),
+        })
+        .collect()
 });
 
 pub fn preset(name: &str) -> &'static Preset {
-    PRESETS
-        .iter()
-        .find(|p| p.theme.name() == name)
-        .unwrap_or(&PRESETS[0])
+    let find = |name| PRESETS.iter().find(|p| p.theme.name() == name);
+    find(name).unwrap_or_else(|| find(DEFAULT_THEME).expect("default theme must be shipped"))
 }
 
 pub fn colors(theme: &Theme) -> &'static Colors {
@@ -165,8 +130,14 @@ pub fn muted(theme: &Theme) -> widget::text::Style {
 
 #[cfg(test)]
 pub fn app() -> Theme {
-    PRESETS[0].theme.clone()
+    preset(DEFAULT_THEME).theme.clone()
 }
+
+#[cfg(test)]
+pub fn default_colors() -> &'static Colors {
+    &preset(DEFAULT_THEME).colors
+}
+
 /// Use this constructor so buttons without an explicit variant get our radius too.
 pub fn button<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
@@ -195,19 +166,7 @@ pub fn cancel<'a, Message: 'a>(label: &'a str) -> widget::Button<'a, Message> {
 }
 
 pub fn primary(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
-    let c = colors(theme);
     let mut style = button_widget::primary(theme, status);
-    if theme.name() == DEFAULT_THEME && !matches!(status, button_widget::Status::Disabled) {
-        style.background = Some(
-            match status {
-                button_widget::Status::Hovered => Color::from_rgb8(183, 211, 235),
-                button_widget::Status::Pressed => c.accent,
-                _ => Color::from_rgb8(167, 201, 232),
-            }
-            .into(),
-        );
-        style.text_color = c.background;
-    }
     style.border.radius = RADIUS_CONTROL.into();
     style
 }
@@ -361,10 +320,6 @@ pub fn pick_list_menu(theme: &Theme) -> menu::Style {
     let c = colors(theme);
     let mut style = menu::default(theme);
     style.background = c.popover.into();
-    if theme.name() == DEFAULT_THEME {
-        style.selected_background = Color::from_rgb8(52, 73, 91).into();
-        style.selected_text_color = c.text;
-    }
     style.border = iced::border::rounded(RADIUS_CONTROL)
         .color(c.secondary_hover)
         .width(BORDER_WIDTH);
@@ -412,11 +367,7 @@ pub fn markdown_style(theme: &Theme) -> markdown::Style {
 
 pub fn code_block(theme: &Theme) -> container::Style {
     let c = colors(theme);
-    let mut style = if theme.name() == DEFAULT_THEME {
-        container::dark(theme)
-    } else {
-        container::background(c.code).color(c.text)
-    };
+    let mut style = container::background(c.code).color(c.text);
     style.border.radius = RADIUS_SURFACE.into();
     style
 }

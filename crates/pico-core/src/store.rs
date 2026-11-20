@@ -87,7 +87,7 @@ fn subagent_defaults() -> BTreeMap<Profile, SubagentSettings> {
         .collect()
 }
 
-pub const DEFAULT_THEME: &str = "Pico Dark";
+pub const DEFAULT_THEME: &str = "Moonfly";
 
 fn default_theme() -> String {
     DEFAULT_THEME.to_owned()

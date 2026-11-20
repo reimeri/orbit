@@ -846,8 +846,6 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
 }
 
 #[cfg(test)]
-use crate::theme::PICO;
-#[cfg(test)]
 mod tests {
     use super::*;
     use iced::advanced::widget::operation::focusable;
@@ -952,6 +950,7 @@ mod tests {
         let label = iced::Point::new(bounds.x + 60., bounds.center_y());
         let edit = iced::Point::new(bounds.x + bounds.width - 20., bounds.center_y());
         let theme = theme::app();
+        let colors = theme::default_colors();
         let hover_background = theme::secondary(&theme, widget::button::Status::Hovered)
             .background
             .unwrap();
@@ -959,18 +958,18 @@ mod tests {
         for (cursor, background, edit_color) in [
             (
                 mouse::Cursor::Unavailable,
-                theme::PICO.background.into(),
-                PICO.muted,
+                colors.background.into(),
+                colors.muted,
             ),
             (
                 mouse::Cursor::Available(label),
                 hover_background,
-                PICO.muted,
+                colors.muted,
             ),
             (
                 mouse::Cursor::Available(edit),
                 hover_background,
-                theme::PICO.text,
+                colors.text,
             ),
         ] {
             let mut messages = vec![];
@@ -988,7 +987,7 @@ mod tests {
                 &mut renderer,
                 &theme,
                 &renderer::Style {
-                    text_color: theme::PICO.text,
+                    text_color: colors.text,
                 },
                 cursor,
             );
@@ -1169,7 +1168,7 @@ mod tests {
                     &mut renderer,
                     &theme,
                     &renderer::Style {
-                        text_color: theme::PICO.text,
+                        text_color: theme::default_colors().text,
                     },
                     mouse::Cursor::Unavailable,
                 );
@@ -1177,7 +1176,7 @@ mod tests {
                     &mut renderer,
                     Size::new(600, 700),
                     1.,
-                    theme::PICO.background,
+                    theme::default_colors().background,
                 );
                 let mut editor = EditorBounds {
                     id: draft.editor_id(),
@@ -1255,7 +1254,7 @@ mod tests {
             &mut renderer,
             &theme::app(),
             &iced::advanced::renderer::Style {
-                text_color: theme::PICO.text,
+                text_color: theme::default_colors().text,
             },
             mouse::Cursor::Unavailable,
         );
@@ -1269,9 +1268,9 @@ mod tests {
             &mut renderer,
             Size::new(600, 500),
             1.,
-            theme::PICO.background,
+            theme::default_colors().background,
         );
-        let foreground = theme::PICO.text.into_rgba8();
+        let foreground = theme::default_colors().text.into_rgba8();
         let padding = crate::growing_editor::PADDING;
         let columns: Vec<_> = ((bounds.x + padding).ceil() as usize
             ..(bounds.x + bounds.width - padding).floor() as usize)
