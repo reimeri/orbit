@@ -21,6 +21,7 @@ pub(crate) struct Point {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ContextState {
+    effort_baseline: Option<EffortBaseline>,
     summary: String,
     summarized_entries: usize,
     account: Option<String>,
@@ -42,6 +43,7 @@ impl Session {
                 entries: boundary.entries,
                 input: boundary.input,
                 context: ContextState {
+                    effort_baseline: self.effort_baseline.clone(),
                     summary: self.summary.clone(),
                     summarized_entries: self.summarized_entries,
                     account: self.context_account.clone(),
@@ -86,6 +88,8 @@ impl Session {
         fork.fast = self.fast;
         fork.entries = point.entries.clone();
         fork.input = point.input.clone();
+        fork.effort_baseline
+            .clone_from(&point.context.effort_baseline);
         fork.summary.clone_from(&point.context.summary);
         fork.summarized_entries = point.context.summarized_entries;
         fork.context_account.clone_from(&point.context.account);

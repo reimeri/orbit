@@ -947,6 +947,7 @@ impl Harness {
             if s.context_account != account && s.context_account.is_some() {
                 s.consume_pending();
                 s.input = plaintext_context(&s).into();
+                s.effort_baseline = None;
                 s.usage.input = 0;
                 s.entries.push(Entry::new(EntryKind::Notice, "ChatGPT account changed. Rebuilt context from the preserved transcript; encrypted provider context was not sent to the new account."));
             }
@@ -964,6 +965,7 @@ impl Harness {
         let project_guidance = crate::project_guidance::read(&cwd)?;
         {
             let mut s = conversation.state.lock().expect("session lock");
+            s.prepare_effort();
             crate::project_guidance::apply(&mut s.input, project_guidance.as_deref());
         }
         let mut instructions = format!(
@@ -1108,6 +1110,9 @@ impl Harness {
         let size = {
             let mut session = conversation.state.lock().expect("session lock");
             session.input = input.input.into();
+            if let Some(update) = snapshot.latest_effort_update() {
+                session.input.push(update.clone());
+            }
             // Both native compaction and fallback summaries start a new context window.
             if let Some(guidance) = crate::project_guidance::latest(&snapshot.input) {
                 session.input.push(guidance.clone());
@@ -1409,6 +1414,91 @@ mod tests {
             h.evict_inactive(None).unwrap();
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn effort_changes_chain_and_survive_replay_and_compaction() -> Result<()> {
+        use crate::test_support::{authenticated_store, completed, streaming_server, until};
+        let dir = tempfile::tempdir()?;
+        let store = authenticated_store(dir.path().join("state"));
+        let (url, mut requests, server) = streaming_server().await;
+        let h = Harness::with_provider(store.clone(), vec![], Provider::fixture(store, url))?;
+        let settings = Settings::default();
+        let mut s = Session::new(dir.path().into(), &settings);
+        s.rename("Effort fixture".into());
+        s.model = crate::models::LUNA.id.into();
+        s.effort = "low".into();
+        let id = h.insert(s).id.clone();
+        let update = json!({"type":"configuration_update","reasoning":{"effort":"none"}});
+        let compact = json!({"type":"compaction","encrypted_content":"opaque"});
+        for turn in 0..4 {
+            let msg = format!("turn {turn}");
+            if turn == 1 {
+                h.edit(&id, |s| s.effort = "none".into())?;
+            } else if turn == 2 {
+                h.evict_inactive(None)?;
+                h.edit(&id, |s| s.usage.input = settings.context_limit)?;
+            } else if turn == 3 {
+                h.edit(&id, |s| {
+                    s.model = crate::models::SOL.id.into();
+                    s.effort = "high".into();
+                })?;
+            }
+            h.send(&id, &msg, msg.clone().into(), settings.clone())?;
+            let req = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                .await?
+                .unwrap();
+            let input = req.body["input"].as_array().unwrap();
+            assert_eq!(
+                req.body["reasoning"]["effort"],
+                if turn == 3 { "high" } else { "low" }
+            );
+            match turn {
+                0 => {
+                    assert_eq!(input.len(), 2);
+                    assert_eq!(input[1]["content"], msg);
+                    req.reply.send(json!({"type":"response.completed","response":{"status":"completed","id":"first","output":[]}}).to_string())?;
+                }
+                1 => {
+                    assert_eq!(req.body["previous_response_id"], "first");
+                    assert_eq!(
+                        input,
+                        &[
+                            update.clone(),
+                            json!({"type":"message","role":"user","content":msg})
+                        ]
+                    );
+                    req.reply.send(completed(json!([])))?;
+                }
+                2 => {
+                    assert!(req.body.get("previous_response_id").is_none());
+                    assert_eq!(input.len(), 6);
+                    assert_eq!(input[1]["content"], "turn 0");
+                    assert_eq!(input[2], update);
+                    assert_eq!(input[3]["content"], "turn 1");
+                    assert_eq!(input[4]["content"], msg);
+                    assert_eq!(input[5]["type"], "compaction_trigger");
+                    req.reply.send(completed(json!([compact])))?;
+                    let next = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                        .await?
+                        .unwrap();
+                    assert_eq!(next.body["reasoning"]["effort"], "low");
+                    assert_eq!(next.body["input"], json!([input[0], compact, update]));
+                    next.reply.send(completed(json!([])))?;
+                }
+                _ => {
+                    // Luna's "none" cannot be sent to Sol, but its conversation is retained.
+                    assert_eq!(
+                        req.body["input"],
+                        json!([input[0],compact,{"type":"message","role":"user","content":msg}])
+                    );
+                    req.reply.send(completed(json!([])))?;
+                }
+            }
+            until(|| !h.get(&id).unwrap().is_turn_active()).await;
+        }
+        server.abort();
+        Ok(())
     }
 
     #[tokio::test]

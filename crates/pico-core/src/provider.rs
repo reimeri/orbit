@@ -122,6 +122,9 @@ impl Provider {
     }
     fn turn_request(session: &Session, instructions: &str) -> Value {
         let mut body = request_base(session, instructions);
+        if let Some(base) = &session.effort_baseline {
+            body["reasoning"]["effort"] = json!(base.effort);
+        }
         body["tools"] = code_mode::tools(session.child.is_some());
         body["parallel_tool_calls"] = json!(true);
         body

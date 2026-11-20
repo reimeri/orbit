@@ -377,6 +377,13 @@ pub struct InProgressResponse {
     pub results: im::OrdMap<usize, Value>,
 }
 
+/// Request-level effort for this model's context. Later changes live in ordered input.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct EffortBaseline {
+    model: String,
+    pub(crate) effort: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
@@ -399,6 +406,7 @@ pub struct Session {
     pub updated: u64,
     pub model: String,
     pub effort: String,
+    pub(crate) effort_baseline: Option<EffortBaseline>,
     #[serde(default)]
     pub fast: bool,
     #[serde(skip)]
@@ -440,6 +448,7 @@ impl Session {
             updated: now(),
             model: settings.model.clone(),
             effort: settings.models[&settings.model].effort.clone(),
+            effort_baseline: None,
             fast: settings.models[&settings.model].fast,
             entries: History::default(),
             input: History::default(),
@@ -459,6 +468,45 @@ impl Session {
             context_account: None,
         }
     }
+    pub(crate) fn latest_effort_update(&self) -> Option<&Value> {
+        self.input
+            .iter()
+            .rev()
+            .find(|item| item["type"] == "configuration_update")
+    }
+
+    /// Run at the turn boundary, before appending project guidance or the user's message.
+    pub(crate) fn prepare_effort(&mut self) {
+        let Some(base) = self
+            .effort_baseline
+            .as_ref()
+            .filter(|base| base.model == self.model)
+        else {
+            // Switching models already starts a full request. Don't replay settings from a
+            // different model (e.g. Luna's "none"); leave all conversational items in order.
+            if self.latest_effort_update().is_some() {
+                self.input = self
+                    .input
+                    .iter()
+                    .filter(|item| item["type"] != "configuration_update")
+                    .cloned()
+                    .collect();
+            }
+            self.effort_baseline = Some(EffortBaseline {
+                model: self.model.clone(),
+                effort: self.effort.clone(),
+            });
+            return;
+        };
+        let effective = self
+            .latest_effort_update()
+            .map(|item| item["reasoning"]["effort"].as_str().expect("effort update"))
+            .unwrap_or(&base.effort);
+        if effective != self.effort {
+            self.input.push(serde_json::json!({"type":"configuration_update","reasoning":{"effort":self.effort}}));
+        }
+    }
+
     pub fn select_model(&mut self, id: &str, settings: &Settings) {
         let defaults = &settings.models[id];
         self.model = id.into();

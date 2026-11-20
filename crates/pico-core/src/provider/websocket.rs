@@ -536,3 +536,79 @@ mod tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+mod effort_acceptance {
+    use super::*;
+
+    /// Exercise the actual upgrade, on one socket, without fallback or replay.
+    #[tokio::test]
+    #[ignore = "uses ChatGPT subscription; requires PICO_EFFORT_ACCEPTANCE_AUTH"]
+    async fn live_configuration_update() -> Result<()> {
+        let path = std::env::var_os("PICO_EFFORT_ACCEPTANCE_AUTH")
+            .context("Supply the path to an authorized Pico login")?;
+        let mut credentials: crate::auth::Credentials =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        if credentials.expires_at < crate::store::now() + 300 {
+            bail!("Refresh the login in Pico before running this check");
+        }
+        credentials.refresh_token.clear();
+        let root = tempfile::tempdir()?;
+        let provider = Provider::new(Auth::new(crate::store::Store::open(root.path().into())?)?)?;
+        let mut failures = Vec::new();
+        for model in crate::models::MODELS {
+            let result = async {
+                let id = crate::store::id();
+                let mut socket = provider.connect(&id, &format!("model={}", model.id), &mut credentials, &mut Attempts::default(), &|_| {}).await?;
+                let base = json!({"type":"response.create","model":model.id,"reasoning":{"effort":"low","summary":"auto"},"tools":[],"stream":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":id});
+                let mut first = base.clone();
+                first["input"] = json!([developer_message("Answer briefly."),{"role":"user","content":"Reply with just the number 3."}]);
+                let first = completion(&mut socket, first).await.context("baseline")?;
+                let mut next = base;
+                next["previous_response_id"] = json!(first["id"].as_str().context("missing baseline response ID")?);
+                next["input"] = json!([{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":"Add one to that number. Reply with just the number."}]);
+                let response = completion(&mut socket, next).await.context("chained update")?;
+                let text = response["output"].as_array().context("missing output")?.iter()
+                    .filter_map(|item| item["content"].as_array()).flatten().filter_map(|part| part["text"].as_str()).collect::<String>();
+                anyhow::ensure!(text.trim()=="4", "lost prior context");
+                println!("{}: chained update completed; response.reasoning.effort={}",model.id,response["reasoning"]["effort"]);
+                Ok::<_, anyhow::Error>(())
+            }.await;
+            if let Err(e) = result {
+                println!("{}: {e:#}", model.id);
+                failures.push(model.id);
+            }
+        }
+        anyhow::ensure!(failures.is_empty(), "failed for: {}", failures.join(", "));
+        Ok(())
+    }
+
+    async fn completion(socket: &mut Socket, frame: Value) -> Result<Value> {
+        send_create(socket, serde_json::to_string(&frame)?).await?;
+        timeout(Duration::from_secs(120), async {
+            loop {
+                match socket.next().await.context("socket ended")?? {
+                    Message::Text(raw) => {
+                        let event: Value = serde_json::from_str(&raw)?;
+                        match event["type"].as_str() {
+                            Some("response.completed")
+                                if event["response"]["status"] == "completed" =>
+                            {
+                                return Ok(event["response"].clone());
+                            }
+                            Some("error" | "response.failed" | "response.incomplete") => {
+                                let error =
+                                    event.get("error").unwrap_or(&event["response"]["error"]);
+                                bail!("{}: {}", error["code"], error["message"]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Message::Ping(_) | Message::Pong(_) => (),
+                    _ => bail!("socket closed or unexpected non-text message"),
+                }
+            }
+        })
+        .await?
+    }
+}
