@@ -151,9 +151,9 @@ nix develop --command cargo test --locked --release -p pico-core \
 AMD Ryzen 7 5800X3D, pinned Nix tooling. V1 `-O3`, V2 Cargo release; no concurrent
 benchmarks/builds. Both use `d{i % 137}/file{i:07}.rs`, identical queries and the
 production result limit. The table uses medians of three runs; each query sample
-is itself a median of seven repetitions. The V2 table uses `v2-optimized.log`; `v2.log` preserves the initial implementation
-measurements. Complete logs are in
-[`benchmarks/file-tags-2026-11-17/`](benchmarks/file-tags-2026-11-17/).
+is itself a median of seven repetitions. Raw results:
+[V1 baseline](benchmarks/file-tags-2026-11-17/v1.log) and
+[optimized V2](benchmarks/file-tags-2026-11-17/v2-optimized.log).
 
 | One million paths | V1 | V2 |
 |---|---:|---:|
@@ -191,6 +191,6 @@ bytes, rather than relying on short names to fit the index budget. One optimized
 sample built in 3.30 seconds; its basename-prefix batch appeared in 0.016 ms,
 complete backfill took 80.1 ms, and a no-match scan took 75.3 ms. Before adding
 SIMD first-byte candidate filtering (`memchr`), the same long-path searches took
-about 258 ms and 256 ms respectively. These are single-sample diagnostic figures,
+about [258 ms and 256 ms](benchmarks/file-tags-2026-11-17/v2-deep-initial.log) respectively. These are single-sample diagnostic figures,
 not cross-machine guarantees. They illustrate why backfill stays cancellable and
 off the UI thread even after optimization.

@@ -90,9 +90,10 @@ for the optional folder chooser. Manual path entry needs no portal.
 
 - [Code mode](code-mode.md) documents execution, resource limits and recovery.
   [Responses transport](responses-websocket.md) covers connection reuse and fallback
-  to full input; [Codex comparison](codex-comparison.md) identifies upstream differences.
+  to full input.
 - [Session and rendering performance](performance.md) covers storage boundaries,
-  viewport and selection caches, and benchmark commands. See also the
+  recovery, and viewport caches. For measurements, see the
+  [session and rendering benchmarks](benchmarks/session-and-rendering.md),
   [editor benchmarks](editor-performance.md) and [file-index benchmarks](file-tags.md#verification-and-benchmarks).
 - Use `theme::button` and the shared styles in `crates/pico-app/src/theme.rs`
   rather than hard-coded colors. For vertical scrolls use `scrollbar::scroll`:
