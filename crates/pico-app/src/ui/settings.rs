@@ -232,21 +232,17 @@ impl App {
             container(text(web_help).size(12).style(theme::muted)).padding([3, 4]),
             space().height(8),
             section("APPEARANCE"),
-            row![
-                text("Theme").size(14).width(Fill),
-                container(theme::dropdown(
+            self.preference_row(
+                "Theme",
+                theme::dropdown(
                     theme::PRESETS
                         .iter()
                         .map(|p| p.theme.name())
                         .collect::<Vec<_>>(),
                     Some(self.preset().theme.name()),
                     Message::Theme
-                ))
-                .width(180)
-            ]
-            .padding([7, 4])
-            .spacing(8)
-            .align_y(Center),
+                )
+            ),
             rule::horizontal(1),
             measure(
                 "Chat text",
