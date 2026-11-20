@@ -3864,15 +3864,30 @@ impl App {
             );
         let mut contents = row![ellipsized_text(&label, 12., None)]
             .spacing(4)
+            .height(Fill)
             .align_y(iced::Center);
         if session.fast {
             contents = contents.push(Icon::Zap.view(12.));
         }
-        theme::button(contents.push(Icon::ChevronDown.view(12.)))
+        let chevron = if self.footer_menu_open {
+            Icon::ChevronUp
+        } else {
+            Icon::ChevronDown
+        };
+        theme::button(contents.push(chevron.view(12.)))
             .width(width)
             .height(TOOLBAR_BUTTON_HEIGHT)
             .padding([4, 6])
-            .style(secondary)
+            .style(|theme, status| {
+                let mut style = secondary(theme, status);
+                if matches!(
+                    status,
+                    widget::button::Status::Active | widget::button::Status::Disabled
+                ) {
+                    style.background = None;
+                }
+                style
+            })
             // The dismiss layer handles a second press; don't reopen on release.
             .on_press_maybe(
                 (!self.footer_menu_open && !running).then_some(Message::ToggleFooterMenu),
@@ -10623,6 +10638,29 @@ Then implement the fix.";
             );
         }
         assert_eq!(counts, (0..=5).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn model_selector_centers_chevron_in_button() {
+        use iced::advanced::{Layout, layout, widget::Tree};
+
+        let mut app = app();
+        dispatch(&mut app, Message::Create(PathBuf::from("/toolbar-project"))).await;
+        let renderer = header_renderer();
+        for open in [false, true] {
+            app.footer_menu_open = open;
+            let mut button = app.model_selector(app.current().unwrap(), false);
+            let mut tree = Tree::new(button.as_widget());
+            let node = button.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::INFINITE),
+            );
+            let button = Layout::new(&node);
+            let row = button.children().next().unwrap();
+            let chevron = row.children().last().unwrap();
+            assert_eq!(chevron.bounds().center_y(), button.bounds().center_y());
+        }
     }
 
     #[tokio::test]
