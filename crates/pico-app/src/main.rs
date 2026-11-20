@@ -4,6 +4,7 @@ mod attachments;
 mod chat_selection;
 mod chevron_icon;
 mod ellipsized_text;
+mod equations;
 mod file_completion;
 mod git;
 mod growing_editor;

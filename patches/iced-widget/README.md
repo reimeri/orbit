@@ -56,3 +56,7 @@ from the Nix environment after patch changes.
 The existing input-method fallback anchors empty paint geometry at the text
 viewport origin while keeping the focused editor enabled. This lets IME commits
 reveal an offscreen caret without requiring offscreen measurement.
+
+display-math.patch carries a block equation as one source-preserving item
+through incremental parsing, rendering and copy. Its parser option comes from
+the [pulldown-cmark block extension](../pulldown-cmark/README.md).

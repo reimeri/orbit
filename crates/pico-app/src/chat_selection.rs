@@ -304,6 +304,7 @@ pub fn copy_blocks(
 
 pub struct Viewer<'a> {
     images: Option<&'a crate::markdown_images::Cache>,
+    equations: Option<(&'a crate::equations::Cache, &'a str)>,
     selection: Shared,
     entry: usize,
     next: Cell<usize>,
@@ -313,11 +314,20 @@ impl<'a> Viewer<'a> {
     pub fn new(selection: Shared, entry: usize) -> Self {
         Self {
             images: None,
+            equations: None,
             selection,
             entry,
             next: Cell::new(0),
             blocks: RefCell::new(Vec::new()),
         }
+    }
+    pub fn with_equations(
+        mut self,
+        equations: &'a crate::equations::Cache,
+        entry_id: &'a str,
+    ) -> Self {
+        self.equations = Some((equations, entry_id));
+        self
     }
     pub fn with_images(mut self, images: &'a crate::markdown_images::Cache) -> Self {
         self.images = Some(images);
@@ -365,6 +375,22 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
             Font::DEFAULT,
             "\n\n",
         )
+    }
+    fn display_math(&self, settings: markdown::Settings, source: &'a str) -> Element<'a, Message> {
+        // The source occupies exactly one selection/copy block in every state.
+        let block = self.next.get();
+        let literal = self.block(
+            Arc::from([Span::new(source.to_owned())]),
+            settings.text_size,
+            Font::MONOSPACE,
+            "\n\n",
+        );
+        match self.equations {
+            Some((cache, entry_id)) => {
+                cache.view((entry_id, block), source, settings.text_size, literal)
+            }
+            None => literal,
+        }
     }
     fn heading(
         &self,

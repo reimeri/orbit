@@ -142,6 +142,7 @@ pub struct App {
     recent_previews: crate::recent_previews::RecentPreviews,
     image_view: crate::image_view::Viewer,
     markdown_images: crate::markdown_images::Cache,
+    equations: crate::equations::Cache,
     api_key_draft: String,
     api_key_configured: bool,
     forks: forks::Index,
@@ -248,6 +249,14 @@ pub enum Message {
     OpenImage(pico_core::media::Media),
     OpenImageFrom(Box<Message>, crate::image_transition::Source),
     MarkdownImage(crate::markdown_images::Message),
+    RequestEquation(String),
+    CopyEquation {
+        entry_id: String,
+        block: usize,
+        source: String,
+    },
+    ClearEquationCopy(std::time::Instant),
+    EquationRendered(crate::equations::Rendered),
     OpenMarkdownImage(String),
     RetryMarkdownImage(String),
     ImageBackend(pico_core::image_tools::Backend),
@@ -453,6 +462,7 @@ impl App {
             recent_previews: Default::default(),
             image_view: Default::default(),
             markdown_images: Default::default(),
+            equations: Default::default(),
             api_key_draft: String::new(),
             api_key_configured: false,
             forks: Default::default(),
@@ -1426,6 +1436,15 @@ impl App {
                 if skipped {
                     self.prepare_visible();
                 }
+            }
+            Message::RequestEquation(source) => {
+                return self
+                    .equations
+                    .request(source)
+                    .map(Message::EquationRendered);
+            }
+            Message::EquationRendered(result) => {
+                return self.equations.update(result).map(Message::EquationRendered);
             }
             Message::MarkdownImage(message) => self.markdown_images.update(message),
             Message::RetryMarkdownImage(url) => {
@@ -2422,6 +2441,22 @@ impl App {
                     return iced::clipboard::write(value);
                 }
             }
+            Message::CopyEquation {
+                entry_id,
+                block,
+                source,
+            } => {
+                let until = std::time::Instant::now() + Duration::from_secs(2);
+                self.equations.mark_copied(entry_id, block, until);
+                return Task::batch([
+                    iced::clipboard::write(source),
+                    Task::perform(
+                        async move { tokio::time::sleep_until(until.into()).await },
+                        move |_| Message::ClearEquationCopy(until),
+                    ),
+                ]);
+            }
+            Message::ClearEquationCopy(until) => self.equations.clear_copied(until),
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::Login => {
                 if self.login_cancel.is_none()
@@ -4300,7 +4335,8 @@ impl App {
                                 theme::markdown_style(&self.preset().theme),
                             ),
                             &chat_selection::Viewer::new(self.chat_selection.clone(), index)
-                                .with_images(&self.markdown_images),
+                                .with_images(&self.markdown_images)
+                                .with_equations(&self.equations, &entry.id),
                         )
                     } else {
                         chat_selection::plain(
@@ -4358,7 +4394,8 @@ impl App {
                             theme::markdown_style(&self.preset().theme),
                         ),
                         &chat_selection::Viewer::new(self.chat_selection.clone(), index)
-                            .with_images(&self.markdown_images),
+                            .with_images(&self.markdown_images)
+                            .with_equations(&self.equations, &entry.id),
                     ));
                 } else {
                     content = content.push(chat_selection::plain(
@@ -5880,10 +5917,33 @@ impl App {
                 self.prepare_visible();
             }
 
+            53 => {
+                let mut session =
+                    Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
+                session.entries.push(Entry::new(
+                    EntryKind::Assistant,
+                    include_str!("fixtures/search-chance.md"),
+                ));
+                self.selected = Some(session.id.clone());
+                self.current_session = Some(session);
+                self.restore_draft();
+                self.rebuild_transcript();
+                self.prepare_visible();
+                return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
+            }
+            54 if self
+                .equations
+                .get(include_str!("fixtures/search-chance.md").trim_end())
+                .is_none() =>
+            {
+                self.smoke_stage -= 1;
+                return delayed_capture();
+            }
+
             _ => {
                 self.smoke_passed.store(true, Ordering::Relaxed);
                 println!(
-                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar/file-tag completion, web access settings/source links/details, Markdown images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, compact project picker/stash/context menu/delete confirmation, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
+                    "SMOKE_OK: native Wayland rendered formatted tool panels/raw input, compact activity groups/thinking/execution details/failures, composer attachments/overflow scrollbar/file-tag completion, web access settings/source links/details, Markdown display equations/images/error fallbacks/GIF modal, image thumbnails/modal/GIF play-pause/Images settings, compact project picker/stash/context menu/delete confirmation, sidebar status waves/unchecked completion/favorites/search/reflow animations/compact settled sessions (top/end), chat, settings, modal, session/footer menus, Agents panel, read-only child navigation, questionnaires (select/edit/confirmation/collapse/large text/narrow scrolling), virtualized large output and 20,000-entry/10,000-session lists (middle/end/reflow/identity)"
                 );
                 return iced::exit();
             }

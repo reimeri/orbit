@@ -20,6 +20,7 @@
       '';
       patchedQuickjs = import ./patches/quickjs { inherit pkgs; };
       patchedWinit = import ./patches/winit { inherit pkgs; };
+      patchedCmark = import ./patches/pulldown-cmark { inherit pkgs; };
       patchedCosmicText = import ./patches/cosmic-text { inherit pkgs; };
       patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
       patchedIcedWinit = import ./patches/iced-winit { inherit pkgs; };
@@ -38,6 +39,7 @@
         chmod u+w "$out"
         mkdir "$out/.build-deps"
         ln -s ${patchedWinit} "$out/.build-deps/winit"
+        ln -s ${patchedCmark} "$out/.build-deps/pulldown-cmark"
         ln -s ${patchedIcedWinit} "$out/.build-deps/iced-winit"
         ln -s ${patchedIcedWidget} "$out/.build-deps/iced-widget"
         ln -s ${patchedCosmicText} "$out/.build-deps/cosmic-text"
@@ -86,6 +88,7 @@
         doInstallCheck = true;
         nativeInstallCheckInputs = [ pkgs.weston ];
         postInstall = ''
+          install -Dm644 -t "$out/share/licenses/pico-evo/katex" ${./docs/licenses/katex}/*.txt
           mkdir -p "$out/share/applications" "$out/share/pico-evo/dictionaries"
           cp -r ${spellingData}/. "$out/share/pico-evo/dictionaries/"
           cp ${desktopItem}/share/applications/* "$out/share/applications/"
@@ -152,6 +155,7 @@
           done
           mkdir -p "$root/.build-deps" &&
             ln -sfnT ${patchedWinit} "$root/.build-deps/winit" &&
+            ln -sfnT ${patchedCmark} "$root/.build-deps/pulldown-cmark" &&
             ln -sfnT ${patchedIcedWinit} "$root/.build-deps/iced-winit" &&
             ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" &&
             ln -sfnT ${patchedCosmicText} "$root/.build-deps/cosmic-text" &&

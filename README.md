@@ -64,6 +64,12 @@ research and replace these families with newer versions.
   Markdown and code blocks, link confirmation, copy actions, expandable reasoning,
   tool groups and individual tool inputs/results. Large tool details are virtualized: only
   visible rows are shaped, while scrolling and Copy retain access to the complete output.
+- Assistant and reasoning messages render display equations locally with RaTeX.
+  Start a line with `\[` or `$$` and end the block with `\]` or `$$`, respectively.
+  For example, `$$E = mc^2$$` on its own line renders immediately in a saved
+  reply. Click a rendered equation to copy its LaTeX, delimiters included.
+  Wide equations scroll horizontally. Incomplete, unsupported and oversized
+  equations stay readable as source; inline math is not typeset.
 - The send arrow points up when idle and right while the selected session is running.
   Its tooltip reads “Send message” or “Steer agent”, respectively. Beneath the composer, the single-row footer shows
   project, Git info, and right-aligned context, throughput and cache metrics. Hover the project for

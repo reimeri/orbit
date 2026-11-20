@@ -1,0 +1,104 @@
+--- a/src/firstpass.rs
++++ b/src/firstpass.rs
+@@ -377,6 +377,13 @@
+             return self.parse_atx_heading(ix, atx_size);
+         }
+ 
++        if self.options.contains(Options::ENABLE_DISPLAY_BLOCKS) {
++            if let Some(close) = display_closer(&bytes[ix..]) {
++                self.finish_list(start_ix);
++                return self.parse_display_block(ix, close);
++            }
++        }
++
+         if let Some((n, fence_ch)) = scan_code_fence(&bytes[ix..]) {
+             self.finish_list(start_ix);
+             return self.parse_fenced_code_block(ix, indent, fence_ch, n);
+@@ -1388,6 +1395,49 @@
+         ix
+     }
+ 
++    // Like fenced code, math is opaque to inline Markdown and respects containers.
++    // Keep unfinished blocks verbatim so incremental reparsing can finish them.
++    fn parse_display_block(&mut self, start: usize, close: &str) -> usize {
++        let bytes = self.text.as_bytes();
++        let mut ix = start + 2;
++        let mut body = String::new();
++        loop {
++            let end = ix + scan_nextline(&bytes[ix..]);
++            let line = &self.text[ix..end];
++            if let Some(last) = line.trim_end().strip_suffix(close) {
++                if last.bytes().rev().take_while(|&c| c == b'\\').count() % 2 == 0 {
++                    body.push_str(last);
++                    self.tree.append(Item {
++                        start,
++                        end,
++                        body: ItemBody::Math(self.allocs.allocate_cow(body.into()), true),
++                    });
++                    return end;
++                }
++            }
++            body.push_str(line);
++            let mut ls = LineStart::new(&bytes[end..]);
++            if end == bytes.len()
++                || end - start >= 8192
++                || scan_containers(&self.tree, &mut ls, self.options.has_gfm_footnotes())
++                    < self.tree.spine_len()
++                || scan_blank_line(&bytes[end + ls.bytes_scanned()..]).is_some()
++            {
++                body.insert_str(0, &self.text[start..start + 2]);
++                self.tree.append(Item { start, end, body: ItemBody::Paragraph });
++                self.tree.push();
++                self.tree.append(Item {
++                    start,
++                    end,
++                    body: ItemBody::SynthesizeText(self.allocs.allocate_cow(body.trim_end_matches(['\r', '\n']).to_owned().into())),
++                });
++                self.pop(end);
++                return end;
++            }
++            ix = end + ls.bytes_scanned();
++        }
++    }
++
+     fn parse_fenced_code_block(
+         &mut self,
+         start_ix: usize,
+@@ -2003,6 +2053,9 @@
+ 
+     /// Checks whether we should break a paragraph on the given input.
+     fn scan_paragraph_interrupt(&self, bytes: &[u8], current_container: bool) -> bool {
++        if self.options.contains(Options::ENABLE_DISPLAY_BLOCKS) && display_closer(bytes).is_some() {
++            return true;
++        }
+         if scan_paragraph_interrupt_no_table(
+             bytes,
+             current_container,
+@@ -2157,6 +2210,16 @@
+     }
+ }
+ 
++fn display_closer(bytes: &[u8]) -> Option<&'static str> {
++    if bytes.starts_with(b"$$") {
++        Some("$$")
++    } else if bytes.starts_with(br"\[") {
++        Some(r"\]")
++    } else {
++        None
++    }
++}
++
+ /// Checks whether we should break a paragraph on the given input.
+ ///
+ /// Use `FirstPass::scan_paragraph_interrupt` in any context that allows
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -584,6 +584,8 @@
+         /// With this feature enabled, two events `Event::InlineMath` and `Event::DisplayMath`
+         /// are emitted that conventionally contain TeX formulas.
+         const ENABLE_MATH = 1 << 10;
++        /// Line-delimited display equations, without enabling inline dollar math.
++        const ENABLE_DISPLAY_BLOCKS = 1 << 13;
+         /// Misc GitHub Flavored Markdown features not supported in CommonMark.
+         /// The following features are currently behind this tag:
+         /// - Blockquote tags ([!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]).

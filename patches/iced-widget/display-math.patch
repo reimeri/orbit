@@ -1,0 +1,57 @@
+--- a/src/markdown.rs
++++ b/src/markdown.rs
+@@ -194,6 +194,8 @@
+     Heading(pulldown_cmark::HeadingLevel, Text),
+     /// A paragraph.
+     Paragraph(Text),
++    /// A line-delimited display equation, with its original TeX delimiters.
++    DisplayMath(String),
+     /// A code block.
+     ///
+     /// You can enable the `highlighter` feature for syntax highlighting.
+@@ -563,7 +565,8 @@
+             | pulldown_cmark::Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
+             | pulldown_cmark::Options::ENABLE_TABLES
+             | pulldown_cmark::Options::ENABLE_STRIKETHROUGH
+-            | pulldown_cmark::Options::ENABLE_TASKLISTS,
++            | pulldown_cmark::Options::ENABLE_TASKLISTS
++            | pulldown_cmark::Options::ENABLE_DISPLAY_BLOCKS,
+         {
+             let references = state.borrow().references.clone();
+             let broken_links = broken_links.clone();
+@@ -973,6 +976,15 @@
+ 
+             None
+         }
++        pulldown_cmark::Event::DisplayMath(body) => {
++            let (open, close) = if markdown[source.clone()].starts_with("$$") {
++                ("$$", "$$")
++            } else {
++                (r"\[", r"\]")
++            };
++            produce(state.borrow_mut(), &mut stack,
++                Item::DisplayMath(format!("{open}{body}{close}")), source)
++        }
+         pulldown_cmark::Event::Code(code) if !metadata => {
+             let span = Span::Standard {
+                 text: code.into_string(),
+@@ -1249,6 +1261,7 @@
+         Item::Heading(level, text) => {
+             viewer.heading(settings, level, text, index)
+         }
++        Item::DisplayMath(source) => viewer.display_math(settings, source),
+         Item::Paragraph(text) => viewer.paragraph(settings, text),
+         Item::CodeBlock {
+             language,
+@@ -1623,6 +1636,11 @@
+         paragraph(settings, text, Self::on_link_click)
+     }
+ 
++    /// Displays a block equation. Viewers without math support preserve its source.
++    fn display_math(&self, settings: Settings, source: &'a str) -> Element<'a, Message, Theme, Renderer> {
++        text(source).size(settings.text_size).into()
++    }
++
+     /// Displays a code block.
+     ///
+     /// By default, it calls [`code_block`].

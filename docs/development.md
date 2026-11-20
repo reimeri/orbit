@@ -28,6 +28,8 @@ Screenshot requests use a checksum-pinned iced window-shell patch to draw the
 current UI before capture without waiting for compositor presentation; see
 [the capture contract and regression check](../patches/iced-winit/README.md).
 The shell prepares `.build-deps/iced-winit` for this patch too.
+Block TeX uses a pinned [pulldown-cmark parser extension](../patches/pulldown-cmark/README.md)
+and a matching iced-widget item. Re-enter the dev shell after changing either patch.
 The composer also uses a checksum-pinned iced widget patch to read native editor
 scroll metrics; see [its maintenance notes](../patches/iced-widget/README.md).
 The shell prepares `.build-deps/iced-widget` alongside winit.
