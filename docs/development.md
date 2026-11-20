@@ -54,16 +54,16 @@ working tree. See [patch maintenance](../patches/winit/README.md).
 
 Run these from the repository root inside `nix develop`:
 
-| Situation | Command |
-| --- | --- |
-| Most edits | `cargo check --locked -p pico-evo` or `just check` |
-| Core logic | `cargo test --locked -p pico-core` |
-| One test | `cargo test --locked -p pico-core <test-name>` |
-| Need to see the UI | `just run` |
-| Renderer/Wayland changes | `just smoke` and `just smoke-gpu` |
-| Before handing off a change | `just verify` |
-| Packaging/toolchain changes | `nix flake check` and `nix run` |
-| Actual performance measurements | `cargo run --locked --release` |
+| Situation                       | Command                                            |
+| ------------------------------- | -------------------------------------------------- |
+| Most edits                      | `cargo check --locked -p pico-evo` or `just check` |
+| Core logic                      | `cargo test --locked -p pico-core`                 |
+| One test                        | `cargo test --locked -p pico-core <test-name>`     |
+| Need to see the UI              | `just run`                                         |
+| Renderer/Wayland changes        | `just smoke` and `just smoke-gpu`                  |
+| Before handing off a change     | `just verify`                                      |
+| Packaging/toolchain changes     | `nix flake check` and `nix run`                    |
+| Actual performance measurements | `cargo run --locked --release`                     |
 
 `cargo check` skips code generation and linking. It does not replace tests or
 actually opening the UI. Core-only tests compile networking, storage and QuickJS dependencies but do not compile iced. `just verify` runs format checking, Clippy
@@ -111,13 +111,13 @@ Observed during Phase 0 on an AMD Ryzen 7 5800X3D (16 logical CPUs), 32 GiB RAM,
 NixOS, pinned Rust 1.99.1, before the wgpu-only conversion. These historical
 measurements included both application renderers:
 
-| Operation | Wall time |
-| --- | ---: |
-| First dev build, empty project `target/` | 35.15 s |
-| Unchanged dev build | ~0.10 s |
-| App-only edit, codegen and relink | 1.16 s |
-| Warm workspace/all-targets check | 0.27 s |
-| Core test build and run | 0.27 s |
+| Operation                                | Wall time |
+| ---------------------------------------- | --------: |
+| First dev build, empty project `target/` |   35.15 s |
+| Unchanged dev build                      |   ~0.10 s |
+| App-only edit, codegen and relink        |    1.16 s |
+| Warm workspace/all-targets check         |    0.27 s |
+| Core test build and run                  |    0.27 s |
 
 These are individual observations, not performance guarantees or a before/after
 benchmark. Downloads and Nix shell provisioning are excluded; crate sources
@@ -160,8 +160,7 @@ behavior. The Nix package runs the same automated tests, then runs the headless 
 against its **wrapped installed binary**, without needing GPU device access.
 
 The window smoke complements the offscreen wgpu pixel and widget tests, but is
-**not** an automated click/keyboard/layout test. For manual verification, run `just run` and follow
-[the Phase 1 acceptance checklist](phase-1-testing.md). Smoke mode uses private
+**not** an automated click/keyboard/layout test. Smoke mode uses private
 temporary application state, no credentials and no provider calls. Its rendered views exercise the project picker, Markdown/tool details, settings,
 modal and session popover, plus scrolling a ~1 MiB tool result to the middle/end
 and reflowing it with Settings open. Normal mode persists configuration and sessions under `pico-evo`.
@@ -381,7 +380,6 @@ handshake and appended both images in order. Restart retained all three images;
 ordinary text pasted exactly once; thumbnail clicks opened the GIF modal, and
 the hover remove button removed just its attachment. This used separate clipboard and
 configuration state, without touching the desktop clipboard or real sessions.
-
 
 ### Growing message composer
 
