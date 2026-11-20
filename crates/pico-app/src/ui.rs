@@ -92,6 +92,9 @@ const SETTLED_ROW_HEIGHT: f32 = crate::session_action::HEIGHT + 2. * crate::sess
 const SETTLED_ROW_GAP: f32 = 3.;
 const SETTLED_VISIBLE_ROWS: usize = 10;
 const RIGHT_PANEL_PADDING: f32 = 18.;
+const TOOLBAR_BUTTON_HEIGHT: f32 = 26.;
+const TOOLBAR_INSET: f32 = 6.;
+const FOOTER_HEIGHT: f32 = 36.;
 const FOOTER_MENU_TEXT_SIZE: f32 = 12.;
 const CHAT_OVERSCAN: f32 = 120.;
 const COMPOSER_LINE_HEIGHT_FACTOR: f32 = 1.3;
@@ -940,7 +943,7 @@ impl App {
         ));
     }
     fn edit_session_settings(&mut self, edit: impl FnOnce(&mut Session) + Send + 'static) {
-        if self.io_busy || self.running() {
+        if self.io_busy || self.running() || self.active_questionnaire.is_some() {
             return;
         }
         if let Some(draft) = &mut self.draft_session {
@@ -1251,7 +1254,10 @@ impl App {
         if !matches!(self.modal, Some(Modal::Image(_) | Modal::MarkdownImage(_))) {
             self.image_view.close();
         }
-        if self.modal.is_some() || self.context_menu.is_some() {
+        if self.modal.is_some()
+            || self.context_menu.is_some()
+            || self.active_questionnaire.is_some()
+        {
             self.footer_menu_open = false;
         }
         let close = if self.close_requested
@@ -1779,7 +1785,10 @@ impl App {
             Message::ToggleFooterMenu => {
                 if self.footer_menu_open {
                     self.footer_menu_open = false;
-                } else if !self.running() && self.current().is_some() {
+                } else if !self.running()
+                    && self.active_questionnaire.is_none()
+                    && self.current().is_some()
+                {
                     self.footer_menu_open = true;
                 }
             }
@@ -2851,9 +2860,9 @@ impl App {
         if let Some(check) = &self.screenshot_check {
             return check.view();
         }
-        let mut center = column![self.center()].width(Fill).height(Fill);
+        let mut notices = column![];
         if let Some((notice, _)) = &self.notice {
-            center = center.push(
+            notices = notices.push(
                 container(
                     row![
                         Icon::Info.colored(16., colors.accent),
@@ -2873,7 +2882,7 @@ impl App {
             );
         }
         if let Some(error) = &self.error {
-            center = center.push(
+            notices = notices.push(
                 container(
                     row![
                         Icon::CircleAlert.colored(16., colors.danger),
@@ -2893,7 +2902,9 @@ impl App {
         let mut body = row![
             self.sidebar(),
             self.divider(false),
-            center.push(self.footer())
+            column![notices, self.center(), self.footer()]
+                .width(Fill)
+                .height(Fill)
         ]
         .height(Fill);
         if self.settings_open {
@@ -3050,29 +3061,18 @@ impl App {
             layers.push(dismiss).push(positioned).into()
         } else if self.footer_menu_open {
             let dismiss = dismiss_layer(Message::CloseFooterMenu);
-            let right = 50.
-                + if self.right_panel_open() {
-                    self.panel_width() + 5.
-                } else {
-                    0.
-                };
-            // Anchor at the chat's right edge, but let a popup extend over the
-            // left sidebar when the center is too narrow to read its choices.
-            let positioned = row![
-                container(column![
-                    space().height(Fill),
-                    self.footer_popup(self.window_width - right - 28.)
-                ])
-                .align_right(Fill)
-                .padding(iced::Padding {
-                    top: 0.,
-                    right: 14.,
-                    bottom: 42.,
-                    left: 14.
-                }),
-                space().width(right),
-            ]
-            .height(Fill);
+            let (left, center) = self.center_dimensions();
+            let inset = self.composer_inset();
+            let width = (center - 2. * inset).min(self.catalog.settings.chat_width);
+            let menu_width = 480_f32.min(self.window_width - 16.);
+            // Follow the toolbar chip, shifting left only if needed to keep all choices on screen.
+            let x = (left + (center - width) / 2. + TOOLBAR_INSET)
+                .min(self.window_width - menu_width - 8.);
+            let positioned = column![
+                space().height(Fill),
+                row![space().width(x), self.footer_popup(menu_width)],
+                space().height(FOOTER_HEIGHT + TOOLBAR_INSET + TOOLBAR_BUTTON_HEIGHT + 4.),
+            ];
             layers.push(dismiss).push(positioned).into()
         } else {
             layers.into()
@@ -3783,21 +3783,103 @@ impl App {
                 self.file_completion.view().map(Message::FileCompletion),
             );
         }
-        compose = compose.push("editor", self.composer_editor(running));
-        column![
-            chat,
-            container(
-                container(compose)
-                    .max_width(self.catalog.settings.chat_width)
-                    .width(Fill)
-            )
-            .center_x(Fill)
-            .padding([14, 24])
+        let toolbar = row![
+            self.model_selector(session, running),
+            space().width(Fill),
+            icon_tip(
+                theme::button(Icon::ArrowUp.view(16.))
+                    .width(TOOLBAR_BUTTON_HEIGHT)
+                    .height(TOOLBAR_BUTTON_HEIGHT)
+                    .padding(5)
+                    .style(secondary)
+                    .on_press_maybe(
+                        (!self.io_busy
+                            && (!self.editor.is_empty() || !self.attachments.is_empty()))
+                        .then_some(Message::Send)
+                    ),
+                if running {
+                    "Steer agent"
+                } else {
+                    "Send message"
+                },
+            ),
         ]
-        .width(Fill)
-        .height(Fill)
+        .align_y(iced::Center)
+        .padding(iced::Padding::new(TOOLBAR_INSET).top(0.));
+        let editor = container(column![self.composer_editor(running), toolbar]).style(card);
+        compose = compose.push("editor", editor);
+        column![chat, self.composer_lane(compose)]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
+    fn center_dimensions(&self) -> (f32, f32) {
+        let left = self
+            .catalog
+            .settings
+            .sidebar_width
+            .min(self.window_width * 0.4)
+            + 5.;
+        let right = 50.
+            + if self.right_panel_open() {
+                self.panel_width() + 5.
+            } else {
+                0.
+            };
+        (left, self.window_width - left - right)
+    }
+
+    fn composer_inset(&self) -> f32 {
+        if self.center_dimensions().1 < 240. {
+            4.
+        } else {
+            24.
+        }
+    }
+
+    fn composer_lane<'a>(&self, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+        container(
+            container(content)
+                .max_width(self.catalog.settings.chat_width)
+                .width(Fill),
+        )
+        .center_x(Fill)
+        .padding([0., self.composer_inset()])
         .into()
     }
+
+    fn model_selector(&self, session: &Session, running: bool) -> Element<'_, Message> {
+        let label = format!(
+            "{} {}",
+            model(&session.model).expect("catalog model").name,
+            effort_name(&session.effort)
+        );
+        let width = (text_width(&label, 12.).ceil() + 28. + if session.fast { 16. } else { 0. })
+            .min(
+                self.center_dimensions().1
+                    - 2. * self.composer_inset()
+                    - 2. * TOOLBAR_INSET
+                    - TOOLBAR_BUTTON_HEIGHT,
+            );
+        let mut contents = row![ellipsized_text(&label, 12., None)]
+            .spacing(4)
+            .align_y(iced::Center);
+        if session.fast {
+            contents = contents.push(Icon::Zap.view(12.));
+        }
+        theme::button(contents.push(Icon::ChevronDown.view(12.)))
+            .width(width)
+            .height(TOOLBAR_BUTTON_HEIGHT)
+            .padding([4, 6])
+            .style(secondary)
+            // The dismiss layer handles a second press; don't reopen on release.
+            .on_press_maybe(
+                (!self.footer_menu_open && !running).then_some(Message::ToggleFooterMenu),
+            )
+            .into()
+    }
+
     fn file_completion_enabled(&self) -> bool {
         !self.io_busy
             && !self.closing
@@ -3812,7 +3894,7 @@ impl App {
         let line_height = self.catalog.settings.font_size * COMPOSER_LINE_HEIGHT_FACTOR;
         let editor = text_editor(&self.editor)
             .id("composer")
-            .style(theme::editor)
+            .style(theme::inline_answer_editor)
             .placeholder(if running {
                 "Steer the agent after its current tool batch…"
             } else {
@@ -4588,9 +4670,13 @@ impl App {
         self.panel_container(panel_content)
     }
     fn footer(&self) -> Element<'_, Message> {
-        widget::responsive(|size| self.footer_content(size.width))
-            .height(36)
-            .into()
+        let footer =
+            widget::responsive(|size| self.footer_content(size.width)).height(FOOTER_HEIGHT);
+        if self.current().is_some() {
+            self.composer_lane(footer)
+        } else {
+            footer.into()
+        }
     }
 
     fn footer_content(&self, width: f32) -> Element<'_, Message> {
@@ -4660,191 +4746,89 @@ impl App {
             compact_tokens(session.usage.total_cached),
             compact_tokens(session.usage.total_input),
         );
-        let model_label = model(&session.model).expect("catalog model").name;
-        let effort_label = effort_name(&session.effort);
-        let selector_label = format!("{model_label} {effort_label}");
-        let layout = FooterLayout::new(width, &selector_label, session.fast);
-        let mut hidden = Vec::new();
-        if !layout.git
-            && let Some(git) = self.git_info()
-        {
-            hidden.push(git.to_string());
-        }
-        if !layout.usage {
-            hidden.push(token_details.clone());
-        }
-        if !layout.rate {
-            hidden.push(format!("TPS: {rate:.1}\n{rate_details}"));
-        }
-        if !layout.cache {
-            hidden.push(format!("Cache: {cache:.0}%\n{cache_details}"));
-        }
-        let control = |width| {
-            let open = self.footer_menu_open;
-            let mut label = row![ellipsized_text(&selector_label, 11., None)]
-                .spacing(4)
-                .align_y(iced::Center);
-            if session.fast {
-                label = label.push(Icon::Zap.view(12.));
-            }
-            let chip = theme::button(label)
-                .width(width)
-                .padding([3, 4])
-                // While open, the dismiss layer handles this press. Do not arm
-                // the button to reopen the popup on release after a view rebuild.
-                .on_press_maybe(
-                    (!open && !running && session.child.is_none())
-                        .then_some(Message::ToggleFooterMenu),
-                )
-                .style(move |theme, status| {
-                    let mut style = sidebar_control(theme, status);
-                    if open {
-                        style.text_color = theme.palette().text;
-                    }
-                    style
-                });
-            let details = if running {
-                "Stop the current turn before changing model or effort.".into()
-            } else {
-                format!(
-                    "{selector_label} · {}",
-                    if session.fast { "Fast" } else { "Standard" }
-                )
-            };
-            footer_tip(chip, details)
-        };
-        let mut info = row![footer_tip(
-            crate::status_circle::status_circle(running, self.tick),
-            status.clone(),
-        )]
-        .spacing(4)
-        .align_y(iced::Center);
-
-        let path = session.project.display().to_string();
-        let display_path = std::env::var_os("HOME")
-            .and_then(|home| {
-                session.project.strip_prefix(home).ok().map(|suffix| {
-                    if suffix.as_os_str().is_empty() {
-                        "~".into()
-                    } else {
-                        format!("~/{}", suffix.display())
-                    }
-                })
-            })
-            .unwrap_or_else(|| path.clone());
-        if width < 240. {
-            // At the minimum window size, two maximized sidebars leave only 112px.
-            // Collapse all metadata into the status target instead of losing controls.
-            let details = format!("{status}\n{path}\n\n{}", hidden.join("\n\n"));
-            let controls_width = (width - 24.).max(0.);
-            return container(
-                row![
-                    footer_tip(
-                        crate::status_circle::status_circle(running, self.tick),
-                        details
-                    ),
-                    control(controls_width),
-                ]
-                .spacing(2)
-                .align_y(iced::Center),
-            )
-            .padding([6, 4])
-            .height(36)
-            .width(Fill)
-            .into();
-        }
-        let full_path_width = text_width(&display_path, 11.).ceil();
-        let path_width = layout.path_width.min(240.).min(full_path_width);
-        let path_label = if full_path_width <= path_width {
-            display_path
-        } else {
-            shorten(&display_path, (path_width / 7.).max(1.) as usize)
-        };
-        let path_view = container(crate::ellipsized_text::shrinking_ellipsized_text(
-            &path_label,
-            11.,
-            Some(colors.muted),
-        ))
-        .max_width(path_width);
-        info = info.push(
-            if path_label != path || text_width(&path_label, 11.) > path_width {
-                footer_tip(path_view, path)
-            } else {
-                path_view.into()
-            },
-        );
-        if layout.git
-            && let Some(git) = self.git_info()
-        {
-            let view: Element<'_, Message> = match git {
-                crate::git::Info::Changes {
-                    branch,
-                    added: 0,
-                    removed: 0,
-                } => container(ellipsized_text(branch, 11., Some(colors.muted)))
-                    .width(text_width(branch, 11.).ceil().min(126.))
-                    .into(),
+        let name = self.project_name(&session.project);
+        let name_width = text_width(&name, 11.).ceil().min(160.);
+        let rate_label = format!("TPS: {rate:.0}");
+        let cache_label = format!("{cache:.0}% cache");
+        let git = self.git_info().map(|git| {
+            let (label, counts) = match git {
                 crate::git::Info::Changes {
                     branch,
                     added,
                     removed,
-                } => {
-                    let additions = format!("+{added}");
-                    let deletions = format!("−{removed}");
-                    let counts_width =
-                        text_width(&additions, 11.) + text_width(&deletions, 11.) + 8.;
-                    row![
-                        ellipsized_text(branch, 11., Some(colors.muted)),
-                        text(additions).size(11).color(colors.success),
-                        text(deletions).size(11).color(colors.danger),
-                    ]
-                    .spacing(4)
-                    .align_y(iced::Center)
-                    .width((text_width(branch, 11.).ceil() + counts_width.ceil() + 2.).min(126.))
-                    .into()
-                }
-                crate::git::Info::Unavailable(message) => {
-                    container(ellipsized_text(message, 11., Some(colors.muted)))
-                        .width(126.)
-                        .into()
-                }
+                } => (
+                    branch,
+                    (*added != 0 || *removed != 0)
+                        .then(|| (format!("+{added}"), format!("−{removed}"))),
+                ),
+                crate::git::Info::Unavailable(message) => (message, None),
             };
+            let mut group = row![ellipsized_text(label, 11., Some(colors.muted))]
+                .spacing(4)
+                .align_y(iced::Center);
+            let mut width = text_width(label, 11.).ceil().min(126.);
+            if let Some((added, removed)) = counts {
+                width += 8. + text_width(&added, 11.).ceil() + text_width(&removed, 11.).ceil();
+                group = group
+                    .push(text(added).size(11).color(colors.success))
+                    .push(text(removed).size(11).color(colors.danger));
+            }
+            (width, footer_tip(group.width(width), git.to_string()))
+        });
+
+        // Reserve from most to least important. Once an item doesn't fit, no
+        // lower-priority item may reappear in the remaining gap.
+        let mut remaining = width - crate::status_circle::WIDTH;
+        let mut reserve = |cost| {
+            remaining -= cost;
+            remaining >= 0.
+        };
+        let context = reserve(10. + text_width(&tokens, 11.).ceil());
+        let show_git = git.as_ref().is_none_or(|(width, _)| reserve(10. + width));
+        let project = reserve(10. + 16. + 4. + name_width);
+        let cache = reserve(16. + text_width(&cache_label, 11.).ceil());
+        let tps = reserve(16. + text_width(&rate_label, 11.).ceil());
+
+        let mut info = row![footer_tip(
+            crate::status_circle::status_circle(running, self.tick),
+            status
+        )]
+        .align_y(iced::Center);
+        if project {
+            let badge = row![
+                project_badge_named(&session.project, &name),
+                container(ellipsized_text(&name, 11., Some(colors.muted))).width(name_width),
+            ]
+            .spacing(4)
+            .align_y(iced::Center);
             info = info
-                .push(footer_separator())
-                .push(footer_tip(view, git.to_string()));
+                .push(space().width(10))
+                .push(footer_tip(badge, session.project.display().to_string()));
         }
-        if layout.usage {
-            info = info.push(footer_separator()).push(footer_tip(
+        if show_git && let Some((_, git)) = git {
+            info = info.push(space().width(10)).push(git);
+        }
+        info = info.push(space().width(Fill));
+        if context {
+            info = info.push(footer_tip(
                 text(tokens).size(11).style(theme::muted),
                 token_details,
             ));
         }
-        if layout.rate {
-            info = info.push(footer_separator()).push(footer_tip(
-                text(format!("TPS: {rate:.0}")).size(11).style(theme::muted),
-                rate_details,
-            ));
+        for (visible, label, details) in [
+            (tps, rate_label, rate_details),
+            (cache, cache_label, cache_details),
+        ] {
+            if visible {
+                info = info.push(footer_separator()).push(footer_tip(
+                    text(label).size(11).style(theme::muted),
+                    details,
+                ));
+            }
         }
-        if layout.cache {
-            info = info.push(footer_separator()).push(footer_tip(
-                text(format!("{cache:.0}% cache"))
-                    .size(11)
-                    .style(theme::muted),
-                cache_details,
-            ));
-        }
-        if !hidden.is_empty() {
-            info = info.push(footer_separator()).push(footer_tip(
-                text("…").size(13).style(theme::muted),
-                hidden.join("\n\n"),
-            ));
-        }
-        info = info
-            .push(space().width(Fill))
-            .push(control(layout.selector_width));
         container(info)
-            .padding([6, 14])
-            .height(36)
+            .center_y(FOOTER_HEIGHT)
+            .padding(iced::Padding::ZERO.bottom(4))
             .width(Fill)
             .into()
     }
@@ -5911,39 +5895,6 @@ impl Drop for App {
         }
     }
 }
-// Budget against the center column, not the window (both sidebars can resize).
-struct FooterLayout {
-    selector_width: f32,
-    path_width: f32,
-    git: bool,
-    usage: bool,
-    rate: bool,
-    cache: bool,
-}
-impl FooterLayout {
-    fn new(width: f32, label: &str, fast: bool) -> Self {
-        let selector_width =
-            (text_width(label, 11.).ceil() + 8. + if fast { 16. } else { 0. }).min(width * 0.5);
-        let available = width - selector_width - 88.;
-        let usage = available >= 260.;
-        let git = available >= 420.;
-        let rate = available >= 500.;
-        let cache = available >= 580.;
-        let path_width = available
-            - if usage { 158. } else { 0. }
-            - if git { 142. } else { 0. }
-            - if rate { 76. } else { 0. }
-            - if cache { 76. } else { 0. };
-        Self {
-            selector_width,
-            path_width,
-            git,
-            usage,
-            rate,
-            cache,
-        }
-    }
-}
 /// Format token counts with at most three digits, rounding half up.
 fn compact_tokens(tokens: u64) -> String {
     const SUFFIXES: [&str; 7] = ["", "k", "M", "B", "T", "Q", "Qi"];
@@ -6005,7 +5956,7 @@ fn footer_separator() -> Element<'static, Message> {
     text("·")
         .size(11)
         .style(theme::muted)
-        .width(8)
+        .width(16)
         .center()
         .into()
 }
@@ -6188,26 +6139,6 @@ fn effort_name(effort: &str) -> &'static str {
         "max" => "Max",
         _ => unreachable!("catalog effort"),
     }
-}
-
-fn shorten(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
-        return value.into();
-    }
-    let prefix = limit / 3;
-    let suffix = limit.saturating_sub(prefix + 1);
-    format!(
-        "{}…{}",
-        value.chars().take(prefix).collect::<String>(),
-        value
-            .chars()
-            .rev()
-            .take(suffix)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<String>()
-    )
 }
 
 #[derive(Clone)]
@@ -10640,6 +10571,61 @@ Then implement the fix.";
     }
 
     #[tokio::test]
+    async fn footer_hides_whole_items_in_priority_order_without_wrapping() {
+        let mut app = app();
+        let path = PathBuf::from("/footer-project");
+        dispatch(&mut app, Message::Create(path.clone())).await;
+        app.git.insert(
+            path,
+            crate::git::Info::Changes {
+                branch: "main".into(),
+                added: 0,
+                removed: 0,
+            },
+        );
+        let mut renderer = header_renderer();
+        let mut counts = Vec::new();
+        for width in (20..700).step_by(7) {
+            let width = width as f32;
+            let mut ui = iced_runtime::UserInterface::build(
+                app.footer_content(width),
+                iced::Size::new(width, 100.),
+                Default::default(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let has = |suffix: &str| bounds.labels.iter().any(|(s, _)| s.ends_with(suffix));
+            let visible = [
+                has(" tokens"),
+                has("main"),
+                has("footer-project"),
+                has("% cache"),
+                has("TPS: 0"),
+            ];
+            assert_eq!(
+                has("FP"),
+                visible[2],
+                "project badge/name must hide together"
+            );
+            let count = visible.iter().take_while(|&&v| v).count();
+            assert!(visible[count..].iter().all(|v| !v));
+            if counts.last() != Some(&count) {
+                counts.push(count);
+            }
+            let dot = bounds.label("●");
+            assert!(
+                bounds
+                    .labels
+                    .iter()
+                    .all(|(_, b)| (b.center_y() - dot.center_y()).abs() < 1.
+                        && b.x + b.width <= width + 1.)
+            );
+        }
+        assert_eq!(counts, (0..=5).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
     async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
         let mut app = app();
         dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
@@ -10678,28 +10664,41 @@ Then implement the fix.";
                 model(&session.model).unwrap().name,
                 effort_name(&session.effort)
             ));
+            let dot = bounds
+                .labels
+                .iter()
+                .find(|(text, b)| text == "●" && b.y > label.y && b.x > left)
+                .unwrap()
+                .1;
             let footer = bounds
                 .containers
                 .iter()
-                .filter(|b| b.y > 0. && b.y + b.height == height && b.contains(label.center()))
-                .min_by(|a, b| a.height.total_cmp(&b.height))
-                .expect("bottom-anchored footer containing the unified selector");
-            assert!(
-                footer.height < height / 4.,
-                "footer must not take a fill-height share"
-            );
+                .filter(|b| b.y + b.height == height && b.contains(dot.center()))
+                .min_by(|a, b| {
+                    a.height
+                        .total_cmp(&b.height)
+                        .then(a.width.total_cmp(&b.width))
+                })
+                .expect("bottom-anchored status row");
+            assert!(footer.height < height / 4.);
             assert!(footer.x > left && footer.x + footer.width < width - right);
             let settled = bounds.label("Settled");
             assert!(
-                (settled.center_y() - label.center_y()).abs() < 1.,
-                "collapsed Settled header must align with the footer text: {settled:?}, {label:?}"
+                (settled.center_y() - dot.center_y()).abs() < 1.,
+                "settled={settled:?} dot={dot:?} footer={footer:?}"
             );
-            assert!(
-                label.width > 0. && label.height > 0.,
-                "selector must remain clickable"
-            );
-            assert!(label.x >= footer.x && label.x + label.width <= footer.x + footer.width);
-            assert!(label.y >= footer.y && label.y + label.height <= height);
+            assert!(label.width > 0. && label.height > 0.);
+            let composer = bounds
+                .containers
+                .iter()
+                .find(|b| {
+                    b.contains(label.center())
+                        && b.x == footer.x
+                        && b.width == footer.width
+                        && b.y + b.height == footer.y
+                })
+                .expect("selector inside composer aligned with the footer");
+            assert!(composer.y < label.y && label.y + label.height <= footer.y);
             assert!(
                 bounds
                     .containers
@@ -10725,6 +10724,8 @@ Then implement the fix.";
                 "metrics collapse using the available center width"
             );
             if width == 1600. {
+                let cache = bounds.label("0% cache");
+                assert!((cache.x + cache.width - (composer.x + composer.width)).abs() < 1.);
                 let added = bounds.label("+12345");
                 let removed = bounds.label("−678");
                 assert!(added.y >= footer.y && removed.y >= footer.y);
@@ -10761,7 +10762,7 @@ Then implement the fix.";
                 for text in ["Pico V2", status] {
                     let idle_label = picker_bounds.label(text);
                     assert!(
-                        (idle_label.center_y() - label.center_y()).abs() < 0.5,
+                        (idle_label.center_y() - dot.center_y()).abs() < 1.,
                         "no-session footer must align with session footer: {idle_label:?}, {label:?}"
                     );
                 }
@@ -10956,8 +10957,11 @@ Then implement the fix.";
         let [editor] = bounds.0.as_slice() else {
             panic!("expected only the composer to be focusable: {:?}", bounds.0);
         };
-        // The right-anchored popup overlaps the editor's right side.
-        let point = iced::Point::new(editor.x + crate::growing_editor::PADDING, editor.center_y());
+        // Click the editor on the side opposite the toolbar's model picker.
+        let point = iced::Point::new(
+            editor.x + editor.width - crate::growing_editor::PADDING,
+            editor.center_y(),
+        );
         let messages = click_at(&mut ui, &mut renderer, point);
         let cache = ui.into_cache();
         assert!(

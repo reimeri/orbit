@@ -162,18 +162,20 @@ lose details; the original transcript remains the source of truth.
 
 ## UI regression checks
 
-- Open the footer model picker and leave it open: ordering must stay fixed across
+- Open the composer model picker and leave it open: ordering must stay fixed across
   redraws and status updates; Astra, Sol, Terra, and Luna appear once each, without version IDs.
 - There is no chat header, bottom-sidebar New session/shortcut label, composer
-  hint, Send, Continue, Latest or Stop buttons. Enter still sends; Shift+Enter adds
+  hint, Continue, Latest or Stop buttons. The toolbar arrow and Enter send; Shift+Enter adds
   a line. Esc dismisses an open menu, dialog or Settings first; with those closed,
   it stops only the selected session's running agent, including while the composer
   is focused. Check that a running agent in another session is unaffected. New
   session is available from the left-sidebar top plus and Ctrl+N. The right
   sidebar has no plus button.
-- The footer stays one row at narrow widths. The project path replaces the project
-  name; hover a shortened path for the full value. Hover the info indicator for
-  usage details omitted due to limited width. The right-rail gear is centered.
+- The status dot has no inline label; hover it for session status. Hover the
+  project badge or name for the full path. Resize the window or either sidebar:
+  the footer shares the composer's edges and never wraps. TPS, cache, project
+  badge/name, Git info, and finally context usage disappear in that order.
+  Remaining metrics stay flush right. The right-rail gear is centered.
 - Expand a tool with a large output, scroll to its end, resize/open Settings, then
   scroll again. The tail must remain accessible, without blank viewport gaps.
   Copy output must copy the entire original result, not just the visible rows.
@@ -188,22 +190,22 @@ lose details; the original transcript remains the source of truth.
   context/compaction settings and appearance; Models owns the per-family defaults.
 - Set Astra to Max/Fast on and Luna to None/Fast off, then Save. Choose
   Astra as the default in General and apply. A new session starts with Astra,
-  Max and Fast. Switch to Luna in the footer: effort becomes None, Fast turns off.
-- Click anywhere on the combined model/reasoning footer button. The popup has
+  Max and Fast. Switch to Luna in the composer toolbar: effort becomes None, Fast turns off.
+- Click anywhere on the combined model/reasoning toolbar button. The popup has
   models on the left, supported reasoning levels on the right, and Standard/Fast
   along the bottom. Astra/Sol/Terra have Low, Medium, High, Extra High, Max; Luna also
   has None. Changing model refreshes these choices and applies its saved defaults.
 - Changes leave the popup open. Selections are mouse-only: Tab, arrows, Enter and
   Space do not navigate, select, or type/send in the composer behind the popup.
-  Escape, clicking outside, or clicking the footer button dismisses it without
+  Escape, clicking outside, or clicking the toolbar button dismisses it without
   changing the composer or closing Settings.
 - Select Standard/Fast with the mouse. Selecting an already-active
   speed is a no-op, not a toggle. Fast uses the Lucide lightning icon; the combined
-  footer button shows that icon only when Fast is enabled. Model/effort/Fast changes
+  toolbar button shows that icon only when Fast is enabled. Model/effort/Fast changes
   are unavailable during an active turn or while a setting is being saved.
-- With both sidebars expanded, check that the unified footer target stays contained
+- With both sidebars expanded, check that the toolbar model selector stays contained
   and the popup's two columns remain readable and within the window. The popup may
-  extend over the left sidebar when the center is narrow.
+  extend over a sidebar when the center is narrow.
 - Save an existing session with non-default effort/Fast, restart, and reopen it:
   its selections persist. Changing model defaults does not overwrite it.
 - In isolated test state, open a saved session with a retired model. Expect the

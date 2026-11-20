@@ -4,6 +4,8 @@ use iced::{
     widget::{container, text},
 };
 
+pub const WIDTH: f32 = 12.;
+
 pub fn status_circle<'a, Message: 'a>(running: bool, tick: u64) -> Element<'a, Message> {
     let dot = if running {
         ["◦", "○", "●", "○"][(tick as usize / 2) % 4]
@@ -21,6 +23,6 @@ pub fn status_circle<'a, Message: 'a>(running: bool, tick: u64) -> Element<'a, M
                 }),
             }),
     )
-    .width(12)
+    .width(WIDTH)
     .into()
 }
