@@ -21,6 +21,7 @@ mod screenshot_check;
 mod scrollbar;
 mod session_action;
 mod session_wave;
+mod spellcheck;
 mod status_circle;
 #[cfg(test)]
 mod test_renderer;

@@ -93,6 +93,22 @@ fn default_theme() -> String {
     DEFAULT_THEME.to_owned()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpellcheckSettings {
+    pub enabled: bool,
+    pub language: String,
+}
+
+impl Default for SpellcheckSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            language: "en_US".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_theme")]
@@ -101,6 +117,8 @@ pub struct Settings {
     pub web_search: crate::web_search::Mode,
     #[serde(default)]
     pub images: crate::image_tools::Settings,
+    #[serde(default)]
+    pub spellcheck: SpellcheckSettings,
     pub model: String,
     #[serde(default = "model_defaults")]
     pub models: BTreeMap<String, ModelDefaults>,
@@ -119,6 +137,7 @@ impl Default for Settings {
         Self {
             theme: default_theme(),
             images: crate::image_tools::Settings::default(),
+            spellcheck: SpellcheckSettings::default(),
             web_search: crate::web_search::Mode::Live,
             model: DEFAULT_MODEL.into(),
             models: model_defaults(),

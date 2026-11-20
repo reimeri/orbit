@@ -248,24 +248,32 @@ pub fn active(text: &str, cursor: usize) -> Option<Token> {
     }
     None
 }
-pub fn mentions(text: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+/// Lexical spans of file references, including unfinished ones. A caller
+/// masking prose doesn't need to decode or validate the referenced path.
+pub fn mention_ranges(
+    text: &str,
+    include: impl Fn(usize) -> bool,
+) -> impl Iterator<Item = Range<usize>> {
     let mut i = 0;
-    while i < text.len() {
-        if text.as_bytes()[i] == b'@' && boundary(text, i) {
-            let stop = end(text, i);
-            if let Ok(bytes) = decode(&text[i + 1..stop], false)
-                && !bytes.is_empty()
-                && !bytes.contains(&0)
-            {
-                paths.push(PathBuf::from(std::ffi::OsString::from_vec(bytes)));
+    std::iter::from_fn(move || {
+        while i < text.len() {
+            if text.as_bytes()[i] == b'@' && boundary(text, i) && include(i) {
+                let start = i;
+                i = end(text, start);
+                return Some(start..i);
             }
-            i = stop;
-        } else {
             i += text[i..].chars().next().expect("character").len_utf8();
         }
-    }
-    paths
+        None
+    })
+}
+
+pub fn mentions(text: &str) -> Vec<PathBuf> {
+    mention_ranges(text, |_| true)
+        .filter_map(|range| decode(&text[range.start + 1..range.end], false).ok())
+        .filter(|bytes| !bytes.is_empty() && !bytes.contains(&0))
+        .map(|bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+        .collect()
 }
 /// An unresolvable, inaccessible or out-of-workspace path is just literal text.
 fn resolve_path(

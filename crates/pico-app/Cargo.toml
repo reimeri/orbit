@@ -18,6 +18,8 @@ zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 url = "2"
 unicode-width = "0.2"
 unicode-segmentation = "1"
+pulldown-cmark = { version = "0.12", default-features = false }
+spellbook = "0.4.2"
 serde_json = "1"
 tokio = { version = "1", features = ["time", "process", "sync"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }

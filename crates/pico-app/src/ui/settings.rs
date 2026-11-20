@@ -12,6 +12,22 @@ use pico_core::{
     web_search::Mode,
 };
 
+#[derive(Clone, Copy, PartialEq)]
+struct DictionaryChoice<'a> {
+    language: &'a str,
+    missing: bool,
+}
+
+impl std::fmt::Display for DictionaryChoice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.language)?;
+        if self.missing {
+            f.write_str(" (not found)")?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn caption(label: &'static str) -> iced::widget::Text<'static> {
     text(label)
         .size(10)
@@ -246,9 +262,46 @@ impl App {
                     .step(20_f32)
                     .into(),
                 appearance.chat_width
-            )
+            ),
+            space().height(8),
+            section("SPELL CHECK"),
+            self.preference_row(
+                "Check composer",
+                theme::switch(self.settings.spellcheck.enabled)
+                    .on_toggle(Message::SpellcheckEnabled)
+            ),
+            self.preference_row("Dictionary", self.dictionary_picker())
         ]
         .spacing(3)
+    }
+
+    fn dictionary_picker(&self) -> Element<'_, Message> {
+        let inventory = self.spellcheck.languages.as_deref();
+        let language = &self.settings.spellcheck.language;
+        let selected = DictionaryChoice {
+            language,
+            missing: inventory.is_some_and(|known| !known.contains(language)),
+        };
+        let options: Vec<_> = inventory
+            .into_iter()
+            .flatten()
+            .map(|language| DictionaryChoice {
+                language,
+                missing: false,
+            })
+            .chain(selected.missing.then_some(selected))
+            .collect();
+        let picker = theme::dropdown(options, Some(selected), |choice| {
+            Message::SpellcheckLanguage(choice.language.to_owned())
+        });
+        if self.settings.spellcheck.enabled
+            && *language == self.catalog.settings.spellcheck.language
+            && let Some(error) = self.spellcheck.unavailable.as_deref()
+        {
+            crate::icons::tip(picker, error)
+        } else {
+            picker.into()
+        }
     }
 
     pub(super) fn image_settings(&self) -> Column<'_, Message> {

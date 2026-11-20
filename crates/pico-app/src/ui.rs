@@ -13,7 +13,7 @@ use crate::{
     ellipsized_text::ellipsized_text,
     icons::{Icon, tip as icon_tip},
     pointer_input::{Press, dismiss_layer, pointer_input},
-    tool_output,
+    spellcheck, tool_output,
 };
 use iced::Theme;
 use iced::futures::SinkExt;
@@ -153,6 +153,7 @@ pub struct App {
     search: String,
     search_active: bool,
     editor: text_editor::Content,
+    spellcheck: spellcheck::State,
     file_completion: crate::file_completion::Completion,
     attachments: Vec<pico_core::media::Media>,
     importing: usize,
@@ -250,6 +251,9 @@ pub enum Message {
     RetryMarkdownImage(String),
     ImageBackend(pico_core::image_tools::Backend),
     WebMode(pico_core::web_search::Mode),
+    Spellcheck(spellcheck::Message),
+    SpellcheckEnabled(bool),
+    SpellcheckLanguage(String),
     ImageModel(String),
     ImageQuality(String),
     ResetImageModel,
@@ -460,6 +464,7 @@ impl App {
             search: String::new(),
             search_active: false,
             editor: text_editor::Content::new(),
+            spellcheck: spellcheck::State::new(),
             file_completion: Default::default(),
             questionnaires: HashMap::new(),
             active_questionnaire: None,
@@ -1031,7 +1036,36 @@ impl App {
                 .map_or_else(Vec::new, |s| s.draft_images.clone())
         };
         self.draft_dirty = false;
+        self.spellcheck.clear();
+        self.check_draft(false);
         self.prepare_visible();
+    }
+    fn queue_spellcheck(&mut self, debounce: bool) {
+        self.tasks
+            .push(self.spellcheck.schedule(debounce).map(Message::Spellcheck));
+    }
+    fn check_draft(&mut self, debounce: bool) {
+        if self.catalog.settings.spellcheck.enabled && !self.editor.is_empty() {
+            self.queue_spellcheck(debounce);
+        } else {
+            self.spellcheck.clear();
+        }
+    }
+    fn discover_dictionaries(&mut self) {
+        if self.spellcheck.languages.is_none() {
+            self.queue_spellcheck(false);
+        }
+    }
+    fn composer_edited(&mut self, before: spellcheck::BeforeEdit, typing: bool) {
+        before.retain_untouched(&mut self.spellcheck.marks, &self.editor);
+        self.spellcheck.typing_at = typing.then(|| self.editor.cursor().position);
+        self.check_draft(true);
+        if self.draft_session.is_some() {
+            self.new_draft.message = self.editor.text();
+            self.new_draft_dirty = true;
+        } else {
+            self.draft_dirty = true;
+        }
     }
     fn composer_message(&self) -> UserMessage {
         UserMessage {
@@ -1275,6 +1309,8 @@ impl App {
                     | Message::Context(_)
                     | Message::Threshold(_)
                     | Message::WebMode(_)
+                    | Message::SpellcheckEnabled(_)
+                    | Message::SpellcheckLanguage(_)
                     | Message::ImageBackend(_)
                     | Message::ImageModel(_)
                     | Message::ImageQuality(_)
@@ -1358,17 +1394,13 @@ impl App {
                         self.attachment_changed();
                     }
                     Ok(crate::attachments::Input::Text(text)) => {
+                        let before = spellcheck::BeforeEdit::capture(&self.editor);
                         self.editor
                             .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
                                 Arc::new(text),
                             )));
                         self.file_completion.edited(&self.editor);
-                        if self.draft_session.is_some() {
-                            self.new_draft.message = self.editor.text();
-                            self.new_draft_dirty = true;
-                        } else {
-                            self.draft_dirty = true;
-                        }
+                        self.composer_edited(before, false);
                     }
                     Ok(crate::attachments::Input::Empty) => {}
                     Err(error) => self.error = Some(format!("Could not attach image: {error}")),
@@ -1428,6 +1460,22 @@ impl App {
                 return task;
             }
             Message::WebMode(mode) => self.settings.web_search = mode,
+            Message::SpellcheckEnabled(enabled) => self.settings.spellcheck.enabled = enabled,
+            Message::SpellcheckLanguage(language) => self.settings.spellcheck.language = language,
+            Message::Spellcheck(spellcheck::Message::Due(revision)) => {
+                let config = &self.catalog.settings.spellcheck;
+                return self
+                    .spellcheck
+                    .check(
+                        revision,
+                        &self.editor,
+                        config.enabled.then(|| config.language.clone()),
+                    )
+                    .map(Message::Spellcheck);
+            }
+            Message::Spellcheck(spellcheck::Message::Checked(revision, report)) => {
+                self.spellcheck.complete(revision, report);
+            }
             Message::ImageBackend(backend) => self.settings.images.backend = backend,
             Message::ImageModel(model) => self.settings.images.model = model,
             Message::ImageQuality(quality) => self.settings.images.quality = quality,
@@ -1578,6 +1626,7 @@ impl App {
                         self.submissions.remove(&id);
                         if self.selected.as_ref() == Some(&id) && self.composer_message() == text {
                             self.editor = text_editor::Content::new();
+                            self.spellcheck.clear();
                             self.file_completion.edited(&self.editor);
                             self.attachments.clear();
                             self.draft_dirty = false;
@@ -1834,13 +1883,9 @@ impl App {
                         | crate::file_completion::Message::Refresh
                         | crate::file_completion::Message::Ignored
                 );
+                let before = spellcheck::BeforeEdit::capture(&self.editor);
                 if self.file_completion.update(message, &mut self.editor) {
-                    if self.draft_session.is_some() {
-                        self.new_draft.message = self.editor.text();
-                        self.new_draft_dirty = true;
-                    } else {
-                        self.draft_dirty = true;
-                    }
+                    self.composer_edited(before, false);
                 }
                 if refocus {
                     return widget::operation::focus("composer");
@@ -1854,28 +1899,35 @@ impl App {
                 {
                     return Task::none();
                 }
-                let edit = match message {
+                let before = spellcheck::BeforeEdit::capture(&self.editor);
+                let (edit, typing) = match message {
                     Message::Editor(action) => {
                         let edit = action.is_edit();
+                        let typing = matches!(&action,
+                            text_editor::Action::Edit(text_editor::Edit::Insert(c))
+                            if matches!(c, '\'' | '’') || (!c.is_whitespace() && !c.is_ascii_punctuation())
+                        );
                         self.editor.perform(action);
-                        edit
+                        (edit, typing)
                     }
                     Message::EditorScroll(scroll) => {
                         scroll.apply(&mut self.editor);
-                        false
+                        (false, false)
                     }
                     Message::DeletePreviousWord => {
                         questionnaire::delete_previous_word(&mut self.editor);
-                        true
+                        (true, false)
                     }
                     _ => unreachable!("editor message"),
                 };
                 self.file_completion.edited(&self.editor);
-                if edit && self.draft_session.is_some() {
-                    self.new_draft.message = self.editor.text();
-                    self.new_draft_dirty = true;
-                } else {
-                    self.draft_dirty |= edit;
+                if edit {
+                    self.composer_edited(before, typing);
+                } else if self.spellcheck.typing_at.is_some_and(|at| {
+                    let cursor = self.editor.cursor();
+                    cursor.position != at || cursor.selection.is_some()
+                }) {
+                    self.spellcheck.typing_at = None;
                 }
             }
             Message::Send => {
@@ -1938,6 +1990,9 @@ impl App {
                 self.settings_open = true;
                 self.agents_open = false;
                 self.fork_panel = None;
+                if self.settings_tab == SettingsTab::General {
+                    self.discover_dictionaries();
+                }
             }
             Message::ApplySettings => {
                 if self.pending_settings.is_some() {
@@ -1980,10 +2035,19 @@ impl App {
                     .take()
                     .expect("one Settings save in flight");
                 if !matches!(result, SettingsSave::NotSaved(_)) {
+                    let spellcheck_changed =
+                        pending.submitted.spellcheck != self.catalog.settings.spellcheck;
                     self.catalog.settings = crate::io_worker::with_live_controls(
                         &pending.submitted,
                         &self.catalog.settings,
                     );
+                    if spellcheck_changed {
+                        self.spellcheck.clear();
+                        self.spellcheck.unavailable = None;
+                        if self.catalog.settings.spellcheck.enabled {
+                            self.queue_spellcheck(false);
+                        }
+                    }
                 }
                 match result {
                     SettingsSave::Saved if pending.close_on_success && self.settings_open => {
@@ -2001,7 +2065,12 @@ impl App {
                 }
             }
             Message::Model(value) => self.settings.model = value,
-            Message::SettingsTab(tab) => self.settings_tab = tab,
+            Message::SettingsTab(tab) => {
+                if tab == SettingsTab::General && self.settings_tab != tab {
+                    self.discover_dictionaries();
+                }
+                self.settings_tab = tab;
+            }
             Message::ModelEffort(id, effort) => {
                 self.settings
                     .models
@@ -3771,6 +3840,8 @@ impl App {
         crate::growing_editor::growing_editor(
             editor,
             &self.editor,
+            &self.spellcheck.marks,
+            self.spellcheck.typing_at,
             COMPOSER_MAX_LINES as f32 * line_height + 2. * crate::growing_editor::PADDING,
             Message::EditorScroll,
             |message| match message {

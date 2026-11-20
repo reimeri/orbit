@@ -12,6 +12,12 @@
       runtimePath = lib.makeLibraryPath runtimeLibraries;
       testVulkanIcd = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
       fontConfig = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
+      enDictionary = pkgs.hunspellDicts.en_US;
+      spellingData = pkgs.runCommand "pico-evo-dictionaries" { } ''
+        mkdir -p "$out"
+        cp ${enDictionary}/share/hunspell/en_US.{aff,dic} "$out/"
+        cp ${enDictionary}/share/doc/*.txt "$out/"
+      '';
       patchedQuickjs = import ./patches/quickjs { inherit pkgs; };
       patchedWinit = import ./patches/winit { inherit pkgs; };
       patchedCosmicText = import ./patches/cosmic-text { inherit pkgs; };
@@ -62,6 +68,8 @@
         doCheck = true;
         nativeCheckInputs = [ pkgs.git pkgs.valgrind pkgs.dbus pkgs.mesa ];
         PICO_TEST_VULKAN_ICD = testVulkanIcd;
+        PICO_DICTIONARY_DIR = spellingData;
+        PICO_TEST_DICTIONARY_DIR = spellingData;
         preCheck = ''
           export VK_DRIVER_FILES="$PICO_TEST_VULKAN_ICD"
           unset VK_ICD_FILENAMES
@@ -78,7 +86,8 @@
         doInstallCheck = true;
         nativeInstallCheckInputs = [ pkgs.weston ];
         postInstall = ''
-          mkdir -p "$out/share/applications"
+          mkdir -p "$out/share/applications" "$out/share/pico-evo/dictionaries"
+          cp -r ${spellingData}/. "$out/share/pico-evo/dictionaries/"
           cp ${desktopItem}/share/applications/* "$out/share/applications/"
           install -Dm644 ${./assets/icon/pico-evo.svg} "$out/share/icons/hicolor/scalable/apps/pico-evo.svg"
           install -Dm644 ${./assets/icon/pico-evo-48.png} "$out/share/icons/hicolor/48x48/apps/pico-evo.png"
@@ -87,6 +96,7 @@
           wrapProgram "$out/bin/pico-evo" \
             --prefix LD_LIBRARY_PATH : ${runtimePath} \
             --prefix PATH : ${lib.makeBinPath [ pkgs.git pkgs.xdg-utils ]} \
+            --set-default PICO_DICTIONARY_DIR "$out/share/pico-evo/dictionaries" \
             --set-default FONTCONFIG_FILE ${fontConfig}
         '';
         installCheckPhase = ''
@@ -127,6 +137,8 @@
         FONTCONFIG_FILE = fontConfig;
         # Expose the test driver path, but do not select it for cargo run/the app.
         PICO_TEST_VULKAN_ICD = testVulkanIcd;
+        PICO_DICTIONARY_DIR = spellingData;
+        PICO_TEST_DICTIONARY_DIR = spellingData;
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         shellHook = ''
           # Locate this checkout even when entering from a package subdirectory.

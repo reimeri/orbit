@@ -454,6 +454,8 @@ Shift+Tab goes back · Shift+Enter adds a line";
                 let editor = crate::growing_editor::growing_editor(
                     editor,
                     &a.editor,
+                    &[],
+                    None,
                     editor_height,
                     move |scroll| message(Action::Scroll(scroll)),
                     |message| match &message.action {

@@ -1,9 +1,11 @@
 //! A growing editor with native viewport measurements and estimated offscreen heights.
-use crate::{scrollbar, theme};
+use crate::{scrollbar, spellcheck::Mark, theme};
 use iced::{
     Element, Event, Length, Rectangle, Size, Theme,
     advanced::{
-        Clipboard, Layout, Renderer as _, Shell, Widget, layout, renderer,
+        Clipboard, Layout, Renderer as _, Shell, Widget,
+        graphics::text::editor::cluster_x,
+        layout, renderer,
         text::highlighter::PlainText,
         widget::{Operation, Tree, tree},
     },
@@ -16,18 +18,20 @@ pub(crate) const PADDING: f32 = 12.;
 pub fn growing_editor<'a, Message: Clone + 'a>(
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
+    marks: &'a [Mark],
+    typing_at: Option<text_editor::Position>,
     max_height: f32,
     on_scroll: impl Fn(ScrollTo) -> Message + 'a,
     scroll_lines: fn(&Message) -> Option<i32>,
 ) -> Element<'a, Message> {
     Element::new(GrowingEditor {
         editor: editor
-            .padding(
-                iced::Padding::new(PADDING).right(scrollbar::GUTTER + theme::SCROLLBAR_EDGE_INSET),
-            )
+            .padding(editor_padding())
             .height(Length::Shrink)
             .max_height(max_height),
         content,
+        marks,
+        typing_at,
         max_height,
         on_scroll: Box::new(on_scroll),
         scroll_lines,
@@ -37,9 +41,79 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
 struct GrowingEditor<'a, Message> {
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
+    marks: &'a [Mark],
+    typing_at: Option<text_editor::Position>,
     max_height: f32,
     on_scroll: Box<dyn Fn(ScrollTo) -> Message + 'a>,
     scroll_lines: fn(&Message) -> Option<i32>,
+}
+
+fn editor_padding() -> iced::Padding {
+    iced::Padding::new(PADDING).right(scrollbar::GUTTER + theme::SCROLLBAR_EDGE_INSET)
+}
+
+fn underline_spans(
+    editor: &iced::advanced::graphics::text::Editor,
+    marks: &[Mark],
+    typing_at: Option<text_editor::Position>,
+    clip: std::ops::Range<f32>,
+    mut draw: impl FnMut(f32, f32, f32),
+) {
+    let mut spans = Vec::new();
+    for row in editor.buffer().layout_runs() {
+        let first = marks.partition_point(|mark| mark.line < row.line_i);
+        let marks = &marks[first..];
+        let marks = &marks[..marks.partition_point(|mark| mark.line == row.line_i)];
+        if marks.is_empty() {
+            continue;
+        }
+
+        // A word-wrapped row can extend far past the viewport. Visit its
+        // clusters once, and only look up marks for visible ones. Byte
+        // indices need not increase in visual order (bidirectional text).
+        for cluster in row
+            .glyphs
+            .chunk_by(|a, b| a.start == b.start && a.end == b.end)
+        {
+            if !cluster
+                .iter()
+                .any(|g| g.x < clip.end && g.x + g.w > clip.start)
+            {
+                continue;
+            }
+            let glyph = &cluster[0];
+            let first = marks.partition_point(|mark| mark.bytes.end <= glyph.start);
+            for mark in marks[first..]
+                .iter()
+                .take_while(|mark| mark.bytes.start < glyph.end)
+            {
+                if typing_at.is_some_and(|at| {
+                    at.line == row.line_i
+                        && mark.bytes.start < at.column
+                        && at.column <= mark.bytes.end
+                }) {
+                    continue;
+                }
+                let a = cluster_x(cluster, row.text, mark.bytes.start.max(glyph.start));
+                let b = cluster_x(cluster, row.text, mark.bytes.end.min(glyph.end));
+                let left = a.min(b).max(clip.start);
+                let right = a.max(b).min(clip.end);
+                if left < right {
+                    spans.push((left, right));
+                }
+            }
+        }
+
+        spans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let y = (row.line_y + 2.).min(row.line_top + row.line_height - 2.);
+        let mut spans = spans.drain(..).peekable();
+        while let Some((left, mut right)) = spans.next() {
+            while let Some((_, next)) = spans.next_if(|(x, _)| *x <= right) {
+                right = right.max(next);
+            }
+            draw(left, y, right - left);
+        }
+    }
 }
 
 /// An absolute native scroll request, applied in message order alongside edits
@@ -348,6 +422,45 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
             cursor,
             viewport,
         );
+        if !self.marks.is_empty() {
+            let text_bounds = layout.bounds().shrink(editor_padding());
+            if let Some(clip) = text_bounds.intersection(viewport) {
+                let color = theme::colors(theme).danger;
+                renderer.with_layer(clip, |renderer| {
+                    self.content.with_editor(|editor| {
+                        let left = clip.x - text_bounds.x;
+                        underline_spans(
+                            editor,
+                            self.marks,
+                            self.typing_at,
+                            left..left + clip.width,
+                            |x, y, width| {
+                                let mut offset = 0.;
+                                let mut high = true;
+                                while offset < width {
+                                    let step = (width - offset).min(2.);
+                                    renderer.fill_quad(
+                                        renderer::Quad {
+                                            bounds: Rectangle {
+                                                x: text_bounds.x + x + offset,
+                                                y: text_bounds.y + y + if high { 0. } else { 1. },
+                                                width: step,
+                                                height: 1.,
+                                            },
+                                            ..Default::default()
+                                        },
+                                        color,
+                                    );
+                                    offset += step;
+                                    high = !high;
+                                }
+                            },
+                        );
+                    });
+                });
+            }
+        }
+
         let state = tree.state.downcast_ref::<State>();
         if let Some(bar) = state.scrollbar(layout.bounds())
             && let Some(clip) = layout.bounds().intersection(viewport)
@@ -391,6 +504,8 @@ mod tests {
                 .min_height(2. * LINE_HEIGHT)
                 .on_action(Message::Editor),
             content,
+            &[],
+            None,
             VISIBLE_ROWS as f32 * LINE_HEIGHT + 2. * PADDING,
             Message::Scroll,
             |action| match action {
@@ -507,6 +622,85 @@ mod tests {
             panic!("expected an unselected caret");
         };
         point
+    }
+
+    #[test]
+    fn spelling_spans_follow_wrapped_shaped_rows_and_scroll() {
+        let value = "mispelt misstep\nsecond";
+        let marks = [
+            Mark {
+                line: 0,
+                bytes: 0..7,
+            },
+            Mark {
+                line: 0,
+                bytes: 8..15,
+            },
+            Mark {
+                line: 1,
+                bytes: 0..6,
+            },
+        ];
+        let mut editor = shaped_editor(value, 62., 2. * LINE_HEIGHT);
+        let spans = |editor: &graphics_text::Editor, marks: &[Mark], typing_at| {
+            let mut spans = Vec::new();
+            underline_spans(editor, marks, typing_at, 0.0..62.0, |x, y, width| {
+                spans.push((x, y, width))
+            });
+            spans
+        };
+
+        let wrapped = spans(&editor, &marks[..2], None);
+        assert_eq!(wrapped.len(), 2, "both words should paint");
+        assert!(
+            wrapped[1].1 - wrapped[0].1 >= LINE_HEIGHT - 0.1,
+            "different wrapped rows"
+        );
+        for ((x, y, _), row) in wrapped.iter().zip(editor.buffer().layout_runs()) {
+            assert_eq!(row.line_i, 0);
+            assert!(x.abs() < 0.1 && *y > row.line_y && *y < row.line_top + row.line_height);
+        }
+        assert_eq!(
+            spans(
+                &editor,
+                &marks[..2],
+                Some(text_editor::Position {
+                    line: 0,
+                    column: 15
+                })
+            ),
+            wrapped[..1],
+            "suppress only the word being typed",
+        );
+
+        editor.scroll_to(1, 0.);
+        let scrolled = spans(&editor, &marks, None);
+        let plain = shaped_editor("second", 62., 2. * LINE_HEIGHT);
+        let row = plain.buffer().layout_runs().next().unwrap();
+        assert_eq!(scrolled.len(), 1);
+        assert!((scrolled[0].2 - row.line_w).abs() < 0.1);
+        assert!(scrolled[0].1 > row.line_y && scrolled[0].1 < LINE_HEIGHT);
+    }
+
+    #[test]
+    fn spelling_only_emits_visible_parts_of_an_oversized_row() {
+        let text = "mispelt,".repeat(2_000);
+        let editor = shaped_editor(&text, 120., LINE_HEIGHT);
+        let marks: Vec<_> = (0..text.len())
+            .step_by(8)
+            .map(|at| Mark {
+                line: 0,
+                bytes: at..at + 7,
+            })
+            .collect();
+        let row = editor.buffer().layout_runs().next().unwrap();
+        assert!(row.line_w > 1_000.);
+        let mut count = 0;
+        underline_spans(&editor, &marks, None, 10.0..90.0, |x, _, width| {
+            assert!(x >= 10. && x + width <= 90.);
+            count += 1;
+        });
+        assert!((1..marks.len()).contains(&count));
     }
 
     #[test]

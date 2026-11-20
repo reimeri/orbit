@@ -1,0 +1,12 @@
+--- a/src/text/editor.rs
++++ b/src/text/editor.rs
+@@ -821,7 +821,8 @@
+ 
+ // Shared by the caret and selection endpoints, so both use the same grapheme
+ // boundaries even when a shaping cluster contains several glyphs.
+-fn cluster_x(
++/// X position of a byte boundary within a nonempty shaped glyph cluster.
++pub fn cluster_x(
+     cluster: &[cosmic_text::LayoutGlyph],
+     text: &str,
+     index: usize,

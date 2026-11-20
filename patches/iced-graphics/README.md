@@ -77,3 +77,10 @@ An edit followed by a seek before the next layout can leave the caret's logical
 line unshaped and offscreen. Selection geometry returns no paint regions for that
 case instead of forcing layout or panicking; existing cached caret geometry is
 preserved. A focused draw regression covers the edit/seek/reflow sequence.
+
+## Composer spelling underline patch
+
+`editor-range-spans.patch` exposes the existing caret calculation for a single
+shaped cluster so Pico can underline spelling ranges with the same cluster and
+bidirectional geometry. The overlay reads visible native layout runs after
+the editor draws; it does not change shaping, layout, scroll, or selection.

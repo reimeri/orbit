@@ -4,7 +4,7 @@ A native Wayland coding harness written in Rust with iced. **Phase 1 is implemen
 project/session management, streaming Markdown chat, ChatGPT subscription login,
 an agent loop, and JavaScript code mode over interactive shell tools. Phase 2 now
 also includes asynchronous Review/Explore subagents, questionnaires, image
-viewing/generation, and multimodal code-mode helpers.
+viewing/generation, multimodal code-mode helpers, and [local composer spell check](docs/spellcheck.md).
 
 ## Run
 
