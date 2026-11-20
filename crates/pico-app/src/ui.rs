@@ -1400,7 +1400,7 @@ impl App {
                         self.attachment_changed();
                     }
                     Ok(crate::attachments::Input::Text(text)) => {
-                        let before = spellcheck::BeforeEdit::capture(&self.editor);
+                        let before = spellcheck::BeforeEdit::replacement(&self.editor, text.len());
                         self.editor
                             .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
                                 Arc::new(text),
@@ -1908,29 +1908,34 @@ impl App {
                 {
                     return Task::none();
                 }
-                let before = spellcheck::BeforeEdit::capture(&self.editor);
-                let (edit, typing) = match message {
+                let (before, typing) = match message {
                     Message::Editor(action) => {
-                        let edit = action.is_edit();
+                        let before = match &action {
+                            text_editor::Action::Edit(edit) => {
+                                Some(spellcheck::BeforeEdit::for_edit(&self.editor, edit))
+                            }
+                            _ => None,
+                        };
                         let typing = matches!(&action,
                             text_editor::Action::Edit(text_editor::Edit::Insert(c))
                             if matches!(c, '\'' | '’') || (!c.is_whitespace() && !c.is_ascii_punctuation())
                         );
                         self.editor.perform(action);
-                        (edit, typing)
+                        (before, typing)
                     }
                     Message::EditorScroll(scroll) => {
                         scroll.apply(&mut self.editor);
-                        (false, false)
+                        (None, false)
                     }
                     Message::DeletePreviousWord => {
+                        let before = spellcheck::BeforeEdit::replacement(&self.editor, 0);
                         questionnaire::delete_previous_word(&mut self.editor);
-                        (true, false)
+                        (Some(before), false)
                     }
                     _ => unreachable!("editor message"),
                 };
                 self.file_completion.edited(&self.editor);
-                if edit {
+                if let Some(before) = before {
                     self.composer_edited(before, typing);
                 } else if self.spellcheck.typing_at.is_some_and(|at| {
                     let cursor = self.editor.cursor();

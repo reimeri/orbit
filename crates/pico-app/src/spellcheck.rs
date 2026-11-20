@@ -4,7 +4,7 @@ use iced::{
     Task,
     advanced::graphics::text::cosmic_text::LineIter,
     task,
-    widget::text_editor::{Content, Cursor, Position},
+    widget::text_editor::{Content, Cursor, Edit, Position},
 };
 use pulldown_cmark::{Event, LinkType, Parser, Tag};
 use std::{
@@ -186,6 +186,7 @@ fn snapshot(editor: &Content) -> String {
 pub struct BeforeEdit {
     cursor: Cursor,
     lines: usize,
+    replacement: Option<(usize, usize)>,
 }
 
 impl BeforeEdit {
@@ -193,13 +194,36 @@ impl BeforeEdit {
         Self {
             cursor: editor.cursor(),
             lines: editor.line_count(),
+            replacement: None,
         }
+    }
+
+    pub fn for_edit(editor: &Content, edit: &Edit) -> Self {
+        match edit {
+            Edit::Insert(c) if !c.is_control() || *c == '\t' => {
+                Self::replacement(editor, c.len_utf8())
+            }
+            Edit::Paste(text) => Self::replacement(editor, text.len()),
+            Edit::Backspace | Edit::Delete => Self::replacement(editor, 0),
+            _ => Self::capture(editor),
+        }
+    }
+
+    /// For a contiguous replacement the new caret is at the end of the
+    /// inserted bytes, and everything after it is unchanged.
+    pub fn replacement(editor: &Content, inserted: usize) -> Self {
+        let mut before = Self::capture(editor);
+        let len =
+            editor.with_editor(|e| e.buffer().lines[before.cursor.position.line].text().len());
+        before.replacement = Some((len, inserted));
+        before
     }
 
     pub fn retain_untouched(self, marks: &mut Vec<Mark>, editor: &Content) {
         let caret = self.cursor.position.line;
         let anchor = self.cursor.selection.unwrap_or(self.cursor.position).line;
-        let after = editor.cursor().position.line;
+        let position = editor.cursor().position;
+        let after = position.line;
         let new_lines = editor.line_count();
         // Account for both selection replacement and Delete/Backspace joining
         // adjacent lines. Only the unchanged suffix needs its indices shifted.
@@ -207,6 +231,37 @@ impl BeforeEdit {
         let suffix = (self.lines - 1 - caret.max(anchor)).min(new_lines - 1 - after);
         let first = marks.partition_point(|m| m.line < prefix);
         let end = marks.partition_point(|m| m.line < self.lines - suffix);
+        if first == end && new_lines == self.lines {
+            return;
+        }
+        if let Some((old_len, inserted)) = self.replacement
+            && new_lines == self.lines
+            && caret == anchor
+            && caret == after
+        {
+            editor.with_editor(|e| {
+                let line = e.buffer().lines[after].text();
+                let start = position.column - inserted;
+                let old_end = old_len - (line.len() - position.column);
+                if inserted == 0 && start == old_end {
+                    return;
+                }
+
+                // Expand to whole words: inserting at a word's edge may
+                // extend it, and deleting a separator can join two words.
+                let left = crossing_word(line, start).start;
+                let right = old_end + (crossing_word(line, position.column).end - position.column);
+                let row = &mut marks[first..end];
+                let keep = row.partition_point(|m| m.bytes.end <= left);
+                let shift = row.partition_point(|m| m.bytes.start < right);
+                for m in &mut row[shift..] {
+                    m.bytes = (m.bytes.start - old_end + position.column)
+                        ..(m.bytes.end - old_end + position.column);
+                }
+                marks.drain(first + keep..first + shift);
+            });
+            return;
+        }
         marks.drain(first..end);
         if new_lines != self.lines {
             for mark in &mut marks[first..] {
@@ -214,6 +269,27 @@ impl BeforeEdit {
             }
         }
     }
+}
+
+/// Unicode word span straddling a byte offset, or an empty range at a boundary.
+/// Only the adjacent non-whitespace token needs segmenting, not the entire line.
+fn crossing_word(line: &str, at: usize) -> Range<usize> {
+    let (left, right) = line.split_at(at);
+    let token_char = |c: char| !c.is_whitespace();
+    if left.ends_with(token_char) && right.starts_with(token_char) {
+        let start = left.trim_end_matches(token_char).len();
+        let end = line.len() - right.trim_start_matches(token_char).len();
+        for (i, word) in line[start..end].split_word_bound_indices() {
+            let span = start + i..start + i + word.len();
+            if span.end > at {
+                if span.start < at {
+                    return span;
+                }
+                break;
+            }
+        }
+    }
+    at..at
 }
 
 #[derive(Default)]
@@ -458,6 +534,56 @@ mod tests {
     }
 
     #[test]
+    fn same_line_edits_keep_unaffected_underlines_before_recheck() {
+        use iced::widget::text_editor::Action;
+
+        for (text, column, anchor, edit, expected) in [
+            // Insert several bytes inside one word. Its punctuation-separated
+            // neighbour and the word after it must still have exact byte spans.
+            (
+                "wrng,mispelt othr",
+                7,
+                None,
+                Edit::Insert('界'),
+                &["wrng", "othr"][..],
+            ),
+            // Deleting only the separator changes both neighbouring words.
+            ("wrng café othr", 4, None, Edit::Delete, &["othr"]),
+            // Splitting a word must not leave either half underlined.
+            (
+                "wrng café othr",
+                7,
+                None,
+                Edit::Insert(' '),
+                &["wrng", "othr"],
+            ),
+            // A separator after a marked word does not change it.
+            ("wrng othr", 4, None, Edit::Insert(' '), &["wrng", "othr"]),
+            // Replace a backward selection, leaving a shorter UTF-8 line.
+            (
+                "wrng café othr",
+                5,
+                Some(10),
+                Edit::Paste(Arc::new("ok".into())),
+                &["wrng", "othr"],
+            ),
+        ] {
+            let mut editor = Content::with_text(text);
+            let mut marks = check_words(text, || true, |_| false);
+            editor.move_to(Cursor {
+                position: Position { line: 0, column },
+                selection: anchor.map(|column| Position { line: 0, column }),
+            });
+            let before = BeforeEdit::for_edit(&editor, &edit);
+            editor.perform(Action::Edit(edit));
+            before.retain_untouched(&mut marks, &editor);
+            let line = snapshot(&editor);
+            let retained: Vec<_> = marks.iter().map(|m| &line[m.bytes.clone()]).collect();
+            assert_eq!(retained, expected, "{text} -> {line}");
+        }
+    }
+
+    #[test]
     fn local_edits_preserve_unaffected_marks_and_native_line_numbers() {
         use iced::widget::text_editor::{Action, Edit};
         let mut editor = Content::with_text("first\rsecond\nthird");
@@ -469,7 +595,7 @@ mod tests {
             });
         };
         move_to(&mut editor, 0, 5);
-        let before = BeforeEdit::capture(&editor);
+        let before = BeforeEdit::for_edit(&editor, &Edit::Enter);
         editor.perform(Action::Edit(Edit::Enter));
         before.retain_untouched(&mut marks, &editor);
         assert_eq!(snapshot(&editor), "first\n\nsecond\nthird");
@@ -484,7 +610,7 @@ mod tests {
             position: Position { line: 1, column: 0 },
             selection: Some(Position { line: 2, column: 3 }),
         });
-        let before = BeforeEdit::capture(&editor);
+        let before = BeforeEdit::for_edit(&editor, &Edit::Insert('x'));
         editor.perform(Action::Edit(Edit::Insert('x')));
         before.retain_untouched(&mut marks, &editor);
         assert_eq!(snapshot(&editor), "first\nxond\nthird");
