@@ -124,8 +124,11 @@ impl Operation for SessionListPress {
         _: &mut dyn operation::Scrollable,
     ) {
         self.over_list |= self.cursor.is_over(bounds)
-            && id
-                .is_some_and(|id| *id == Id::new("sessions") || *id == Id::new("settled-sessions"));
+            && id.is_some_and(|id| {
+                ["sessions", "deferred-sessions", "settled-sessions"]
+                    .into_iter()
+                    .any(|name| *id == Id::new(name))
+            });
     }
 
     fn focusable(&mut self, id: Option<&Id>, _: Rectangle, state: &mut dyn operation::Focusable) {

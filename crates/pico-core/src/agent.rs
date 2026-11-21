@@ -8,7 +8,7 @@ use crate::{
     code_mode::{CodeMode, Event as CodeEvent},
     provider::{Provider, is_tool_call},
     shell::Shell,
-    store::{Entry, EntryKind, Session, SessionSummary, Settings, Store},
+    store::{Entry, EntryKind, Filing, FilingKind, Session, SessionSummary, Settings, Store},
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -60,17 +60,17 @@ impl std::fmt::Display for ConversationStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettlementAction {
-    Settle,
-    StopCommandsAndSettle,
+pub enum FilingAction {
+    File(FilingKind),
+    StopCommandsAndFile(FilingKind),
     Undo,
 }
 
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettlementOutcome {
+pub enum FilingOutcome {
     Applied,
-    RunningCommands,
+    RunningCommands(FilingKind),
 }
 
 pub struct Conversation {
@@ -612,63 +612,72 @@ impl Harness {
         result
     }
     /// Serialize filing with submissions, turn starts, child starts and eviction.
-    pub fn set_settled(&self, id: &str, action: SettlementAction) -> Result<SettlementOutcome> {
+    pub fn file_session(&self, id: &str, action: FilingAction) -> Result<FilingOutcome> {
         let mut coordinator = self.subagents.lock().expect("subagent lock");
         let conversation = self.load(id)?;
         let state = conversation.snapshot();
         if state.child.is_some() {
-            bail!("Only main sessions can be settled");
+            bail!("Only main sessions can be filed away");
         }
-        if action != SettlementAction::Undo {
-            let children = coordinator.latest_runs(id);
-            if conversation.is_turn_active()
-                || conversation.code.cells_executing()
-                || conversation
-                    .questionnaires
-                    .as_ref()
-                    .is_some_and(|q| q.has_pending())
-                || children.iter().any(|r| {
-                    r.status == subagents::RunStatus::Running
-                        || self.get(&r.session_id).is_some_and(|c| c.is_executing())
-                        || (r.status.needs_attention() && !r.attention_acknowledged)
-                })
-                || state.interrupted
-                || state.needs_attention
-                || state.unchecked_completion
-                || conversation.status() == ConversationStatus::NeedsAttention
-            {
-                bail!(
-                    "This session is no longer idle. Open it and finish or review its work before settling it."
-                );
-            }
-            let shell = conversation.code.shell();
-            if shell.has_running_commands() {
-                if action == SettlementAction::Settle {
-                    return Ok(SettlementOutcome::RunningCommands);
+        let destination = match action {
+            FilingAction::Undo => None,
+            FilingAction::File(kind) | FilingAction::StopCommandsAndFile(kind) => {
+                let children = coordinator.latest_runs(id);
+                if conversation.is_turn_active()
+                    || conversation.code.cells_executing()
+                    || conversation
+                        .questionnaires
+                        .as_ref()
+                        .is_some_and(|q| q.has_pending())
+                    || children.iter().any(|r| {
+                        r.status == subagents::RunStatus::Running
+                            || self.get(&r.session_id).is_some_and(|c| c.is_executing())
+                            || (r.status.needs_attention() && !r.attention_acknowledged)
+                    })
+                    || state.interrupted
+                    || state.needs_attention
+                    || state.unchecked_completion
+                    || conversation.status() == ConversationStatus::NeedsAttention
+                {
+                    bail!(
+                        "This session is no longer idle. Open it and finish or review its work before filing it away."
+                    );
                 }
-                // Signal under the start guard, then release it before waiting for
-                // exit/pipe EOF. Recheck all guards before committing settlement.
-                let stopped = shell.stop_running_commands();
-                drop(coordinator);
-                shell.runtime().block_on(stopped)?;
-                return self.set_settled(id, SettlementAction::Settle);
+                let shell = conversation.code.shell();
+                if shell.has_running_commands() {
+                    if action == FilingAction::File(kind) {
+                        return Ok(FilingOutcome::RunningCommands(kind));
+                    }
+                    // Signal under the start guard, then release it before waiting for
+                    // exit/pipe EOF. Recheck all guards before filing.
+                    let stopped = shell.stop_running_commands();
+                    drop(coordinator);
+                    shell.runtime().block_on(stopped).context(match kind {
+                        FilingKind::Deferred => {
+                            "Session not deferred. Check its activity and retry Defer."
+                        }
+                        FilingKind::Settled => {
+                            "Session not settled. Check its activity and retry Settle."
+                        }
+                    })?;
+                    return self.file_session(id, FilingAction::File(kind));
+                }
+                // Finish outstanding durable delivery before filing. Stopped turns may
+                // retain queued input/notices; filing preserves them without resuming.
+                if coordinator.runs(id).any(|r| !r.notified) {
+                    self.retry_results(&mut coordinator, id)
+                        .and_then(|()| self.deliver_notices(&mut coordinator, id))
+                        .context("Could not finish saving child results before filing the session. Keep Pico open, check disk space and permissions, then retry")?;
+                }
+                Some(kind)
             }
-            // Finish outstanding durable delivery before filing. Stopped turns may
-            // retain queued input/notices; settling preserves them without resuming.
-            if coordinator.runs(id).any(|r| !r.notified) {
-                self.retry_results(&mut coordinator, id)
-                    .and_then(|()| self.deliver_notices(&mut coordinator, id))
-                    .context("Could not finish saving child results before settling. Keep Pico open, check disk space and permissions, then retry")?;
-            }
-        }
+        };
         self.edit(id, |s| {
-            if action != SettlementAction::Undo {
-                s.settled_at.get_or_insert_with(crate::store::now);
-            } else {
-                s.settled_at = None;
+            if s.filing.map(|f| f.kind) != destination {
+                s.filing = destination.map(|kind| Filing { kind, at: crate::store::now() });
             }
-        }).context("Could not save the settlement change. It is retained in memory for the next save attempt; check available disk space and permissions, then retry")?;
-        Ok(SettlementOutcome::Applied)
+        }).context("Could not save the filing change. It is retained in memory for the next save attempt; check available disk space and permissions, then retry")?;
+        Ok(FilingOutcome::Applied)
     }
     /// Forking publishes a new, idle main conversation only after the complete
     /// independently restorable session has committed.
@@ -831,7 +840,7 @@ impl Harness {
             state.unchecked_completion = false;
             // All starts, including automatic child-completion wakeups, return
             // the conversation to the main list before publishing active work.
-            state.settled_at = None;
+            state.filing = None;
             conversation.running.store(true, Ordering::Release);
             conversation.notifications.clear_terminal(&conversation.id);
             cancel
@@ -1661,89 +1670,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settlement_persists_retries_and_only_accepted_messages_unsettle() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().into()).unwrap();
-        let h = Harness::new(store.clone(), vec![]).unwrap();
-        let mut session = Session::new(dir.path().into(), &Settings::default());
-        session.updated = 77;
-        session.draft = "Unsent draft λ".into();
-        let c = h.insert(session);
-        c.save().unwrap();
-        let revision = h.catalog_revision();
-        assert_eq!(
-            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
-            SettlementOutcome::Applied
-        );
-        let settled_at = c.snapshot().settled_at.unwrap();
-        assert!(h.catalog_revision() > revision);
-        assert_eq!(store.load().unwrap().1[0].settled_at, Some(settled_at));
-        assert_eq!(store.load_session(&c.id).unwrap().updated, 77);
-        // Repeated clicks/retries must not restart the settlement clock.
-        h.edit(&c.id, |s| s.settled_at = Some(123)).unwrap();
-        assert_eq!(
-            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
-            SettlementOutcome::Applied
-        );
-        h.evict_inactive(None).unwrap();
-        let c = h.load(&c.id).unwrap();
-        assert_eq!(c.snapshot().settled_at, Some(123));
-        assert_eq!(c.snapshot().draft, "Unsent draft λ");
-
-        assert_eq!(
-            h.set_settled(&c.id, SettlementAction::Undo).unwrap(),
-            SettlementOutcome::Applied
-        );
-        assert_eq!(store.load().unwrap().1[0].settled_at, None);
-        assert_eq!(c.snapshot().updated, 77);
-        assert_eq!(
-            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
-            SettlementOutcome::Applied
-        );
-        assert!(c.snapshot().settled_at.unwrap() >= settled_at);
-
-        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_settlement BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
-        assert!(h.set_settled(&c.id, SettlementAction::Undo).is_err());
-        assert!(
-            c.snapshot().settled_at.is_none(),
-            "retain the edit for save retry"
-        );
-        assert!(store.load_session(&c.id).unwrap().settled_at.is_some());
-        db.execute_batch("DROP TRIGGER fail_settlement;").unwrap();
-        h.flush().unwrap();
-        assert!(store.load_session(&c.id).unwrap().settled_at.is_none());
-        assert_eq!(
-            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
-            SettlementOutcome::Applied
-        );
-
-        assert!(
-            h.send(&c.id, "empty", "".into(), Settings::default())
-                .is_err()
-        );
-        assert!(c.snapshot().settled_at.is_some());
-        db.execute_batch("CREATE TRIGGER fail_send BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
-        assert!(
-            h.send(&c.id, "retry", "Continue".into(), Settings::default())
-                .is_err()
-        );
-        assert!(
-            c.snapshot().settled_at.is_some(),
-            "failed acceptance must not unsettle"
-        );
-        db.execute_batch("DROP TRIGGER fail_send;").unwrap();
-        // No credentials: acceptance is local, then the provider fails offline.
-        h.send(&c.id, "retry", "Continue".into(), Settings::default())
-            .unwrap();
-        assert!(c.snapshot().settled_at.is_none());
-        assert!(store.load_session(&c.id).unwrap().settled_at.is_none());
-        let mut changes = h.subscribe();
-        while c.is_executing() {
-            tokio::time::timeout(Duration::from_secs(3), changes.changed())
-                .await
-                .unwrap()
+    async fn filing_persists_retries_and_only_accepted_messages_restore() {
+        for kind in [FilingKind::Settled, FilingKind::Deferred] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().into()).unwrap();
+            let h = Harness::new(store.clone(), vec![]).unwrap();
+            let mut session = Session::new(dir.path().into(), &Settings::default());
+            session.updated = 77;
+            session.draft = "Unsent draft λ".into();
+            let c = h.insert(session);
+            c.save().unwrap();
+            let revision = h.catalog_revision();
+            assert_eq!(
+                h.file_session(&c.id, FilingAction::File(kind)).unwrap(),
+                FilingOutcome::Applied
+            );
+            let filed = c.snapshot().filing.unwrap();
+            assert_eq!(filed.kind, kind);
+            assert!(h.catalog_revision() > revision);
+            assert_eq!(store.load().unwrap().1[0].filing, Some(filed));
+            assert_eq!(store.load_session(&c.id).unwrap().updated, 77);
+            // Repeated clicks/retries must not restart the filing clock.
+            h.edit(&c.id, |s| s.filing = Some(Filing { kind, at: 123 }))
                 .unwrap();
+            assert_eq!(
+                h.file_session(&c.id, FilingAction::File(kind)).unwrap(),
+                FilingOutcome::Applied
+            );
+            h.evict_inactive(None).unwrap();
+            let c = h.load(&c.id).unwrap();
+            assert_eq!(c.snapshot().filing, Some(Filing { kind, at: 123 }));
+            assert_eq!(c.snapshot().draft, "Unsent draft λ");
+
+            assert_eq!(
+                h.file_session(&c.id, FilingAction::Undo).unwrap(),
+                FilingOutcome::Applied
+            );
+            assert_eq!(store.load().unwrap().1[0].filing, None);
+            assert_eq!(c.snapshot().updated, 77);
+            assert_eq!(
+                h.file_session(&c.id, FilingAction::File(kind)).unwrap(),
+                FilingOutcome::Applied
+            );
+            assert!(c.snapshot().filing.unwrap().at >= filed.at);
+
+            let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+            db.execute_batch("CREATE TRIGGER fail_settlement BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+            assert!(h.file_session(&c.id, FilingAction::Undo).is_err());
+            assert!(
+                c.snapshot().filing.is_none(),
+                "retain the edit for save retry"
+            );
+            assert!(store.load_session(&c.id).unwrap().filing.is_some());
+            db.execute_batch("DROP TRIGGER fail_settlement;").unwrap();
+            h.flush().unwrap();
+            assert!(store.load_session(&c.id).unwrap().filing.is_none());
+            assert_eq!(
+                h.file_session(&c.id, FilingAction::File(kind)).unwrap(),
+                FilingOutcome::Applied
+            );
+
+            assert!(
+                h.send(&c.id, "empty", "".into(), Settings::default())
+                    .is_err()
+            );
+            assert!(c.snapshot().filing.is_some());
+            db.execute_batch("CREATE TRIGGER fail_send BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
+            assert!(
+                h.send(&c.id, "retry", "Continue".into(), Settings::default())
+                    .is_err()
+            );
+            assert!(
+                c.snapshot().filing.is_some(),
+                "failed acceptance must not unsettle"
+            );
+            db.execute_batch("DROP TRIGGER fail_send;").unwrap();
+            // No credentials: acceptance is local, then the provider fails offline.
+            h.send(&c.id, "retry", "Continue".into(), Settings::default())
+                .unwrap();
+            assert!(c.snapshot().filing.is_none());
+            assert!(store.load_session(&c.id).unwrap().filing.is_none());
+            let mut changes = h.subscribe();
+            while c.is_executing() {
+                tokio::time::timeout(Duration::from_secs(3), changes.changed())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
         }
     }
 
@@ -1763,10 +1776,11 @@ mod tests {
             c.running.store(flag == 3, Ordering::Release);
             c.finishing.store(flag == 4, Ordering::Release);
             assert!(
-                h.set_settled(&c.id, SettlementAction::Settle).is_err(),
+                h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
+                    .is_err(),
                 "blocked state {flag}"
             );
-            assert!(c.snapshot().settled_at.is_none());
+            assert!(c.snapshot().filing.is_none());
         }
         c.finishing.store(false, Ordering::Release);
         let q = c.questionnaires.as_ref().unwrap().clone();
@@ -1787,7 +1801,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        assert!(h.set_settled(&c.id, SettlementAction::Settle).is_err());
+        assert!(
+            h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
+                .is_err()
+        );
         cancel.cancel();
         assert!(pending.await.unwrap().is_err());
 
@@ -1813,75 +1830,90 @@ mod tests {
             attention_acknowledged: false,
         };
         h.subagents.lock().unwrap().record(run.clone());
-        assert!(h.set_settled(&c.id, SettlementAction::Settle).is_err());
+        assert!(
+            h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
+                .is_err()
+        );
         run.status = subagents::RunStatus::Failed;
         h.subagents.lock().unwrap().record(run.clone());
-        assert!(h.set_settled(&c.id, SettlementAction::Settle).is_err());
+        assert!(
+            h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
+                .is_err()
+        );
         run.attention_acknowledged = true;
         h.subagents.lock().unwrap().record(run);
         child.finishing.store(true, Ordering::Release);
         assert!(
-            h.set_settled(&c.id, SettlementAction::Settle).is_err(),
+            h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
+                .is_err(),
             "terminal assignment still finalizing"
         );
         child.finishing.store(false, Ordering::Release);
         assert_eq!(
-            h.set_settled(&c.id, SettlementAction::Settle).unwrap(),
-            SettlementOutcome::Applied
+            h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
+                .unwrap(),
+            FilingOutcome::Applied
         );
-        assert!(c.snapshot().settled_at.is_some());
-        assert!(h.set_settled(&child.id, SettlementAction::Settle).is_err());
+        assert!(c.snapshot().filing.is_some());
+        assert!(
+            h.file_session(&child.id, FilingAction::File(FilingKind::Settled))
+                .is_err()
+        );
     }
 
     #[test]
-    fn settlement_confirms_only_lingering_commands_in_the_clicked_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().into()).unwrap();
-        let h = Harness::new(store.clone(), vec![]).unwrap();
-        let start_session = || {
-            let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
-            let output = c.code.exec(
+    fn filing_confirms_only_lingering_commands_in_the_clicked_session() {
+        for kind in [FilingKind::Settled, FilingKind::Deferred] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().into()).unwrap();
+            let h = Harness::new(store.clone(), vec![]).unwrap();
+            let start_session = || {
+                let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+                let output = c.code.exec(
                 r#"text(await tools.exec_command({cmd:"sleep 60 & wait", login:false, yield_time_ms:0}));"#,
                 "outer", &CancellationToken::new(),
             ).unwrap();
-            assert!(output.contains("Process running with session ID"));
-            c
-        };
-        let clicked = start_session();
-        let other = start_session();
-        assert_eq!(
-            h.set_settled(&clicked.id, SettlementAction::Settle)
-                .unwrap(),
-            SettlementOutcome::RunningCommands
-        );
-        assert!(clicked.snapshot().settled_at.is_none());
-        assert!(clicked.code.shell().has_running_commands());
+                assert!(output.contains("Process running with session ID"));
+                c
+            };
+            let clicked = start_session();
+            let other = start_session();
+            assert_eq!(
+                h.file_session(&clicked.id, FilingAction::File(kind))
+                    .unwrap(),
+                FilingOutcome::RunningCommands(kind)
+            );
+            assert!(clicked.snapshot().filing.is_none());
+            assert!(clicked.code.shell().has_running_commands());
 
-        // Confirmation cannot override activity that appeared with the dialog open.
-        h.edit(&clicked.id, |s| s.unchecked_completion = true)
-            .unwrap();
-        assert!(
-            h.set_settled(&clicked.id, SettlementAction::StopCommandsAndSettle)
-                .is_err()
-        );
-        assert!(clicked.code.shell().has_running_commands());
-        h.edit(&clicked.id, |s| s.unchecked_completion = false)
-            .unwrap();
-        assert_eq!(
-            h.set_settled(&clicked.id, SettlementAction::StopCommandsAndSettle)
-                .unwrap(),
-            SettlementOutcome::Applied
-        );
-        assert!(
-            store
-                .load_session(&clicked.id)
-                .unwrap()
-                .settled_at
-                .is_some()
-        );
-        assert!(!clicked.code.shell().has_running_commands());
-        assert!(other.code.shell().has_running_commands());
-        assert!(other.snapshot().settled_at.is_none());
+            // Confirmation cannot override activity that appeared with the dialog open.
+            h.edit(&clicked.id, |s| s.unchecked_completion = true)
+                .unwrap();
+            assert!(
+                h.file_session(&clicked.id, FilingAction::StopCommandsAndFile(kind))
+                    .is_err()
+            );
+            assert!(clicked.code.shell().has_running_commands());
+            h.edit(&clicked.id, |s| s.unchecked_completion = false)
+                .unwrap();
+            assert_eq!(
+                h.file_session(&clicked.id, FilingAction::StopCommandsAndFile(kind))
+                    .unwrap(),
+                FilingOutcome::Applied
+            );
+            assert_eq!(
+                store
+                    .load_session(&clicked.id)
+                    .unwrap()
+                    .filing
+                    .unwrap()
+                    .kind,
+                kind
+            );
+            assert!(!clicked.code.shell().has_running_commands());
+            assert!(other.code.shell().has_running_commands());
+            assert!(other.snapshot().filing.is_none());
+        }
     }
 
     #[test]

@@ -539,7 +539,9 @@ impl Shell {
                 for process in running {
                     process.wait_for_exit().await;
                 }
-            }).await.context("Commands have not finished stopping. The session was not settled; check its activity and retry Settle.")
+            })
+            .await
+            .context("Commands have not finished stopping.")
         }
     }
     pub fn has_work(&self) -> bool {

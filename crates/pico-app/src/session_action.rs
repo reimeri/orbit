@@ -11,7 +11,8 @@ use iced::{
 
 use crate::theme;
 
-pub const WIDTH: f32 = 64.;
+pub const GAP: f32 = 4.;
+pub const WIDTH: f32 = 64. + HEIGHT + GAP;
 pub const AGE_SIZE: f32 = 10.;
 pub const UNDO_SIZE: f32 = 16.;
 pub const HEIGHT: f32 = 18.;
@@ -22,31 +23,30 @@ pub fn slot<'a, Message: 'a>(width: f32) -> Element<'a, Message> {
     space().width(width).height(HEIGHT).into()
 }
 
+pub fn control<'a, Message: Clone + 'a>(
+    label: impl Into<Element<'a, Message>>,
+    on_press: Message,
+    tip: &'static str,
+) -> Element<'a, Message> {
+    let button = theme::button(label)
+        .padding(0)
+        .on_press(on_press)
+        .style(theme::sidebar_control);
+    tooltip(button, text(tip).size(12), tooltip::Position::Top)
+        .style(theme::footer_surface)
+        .into()
+}
+
 pub fn row<'a, Message: Clone + 'a>(
     content: impl Into<Element<'a, Message>>,
     age: String,
     width: f32,
-    label: impl Into<Element<'a, Message>>,
-    tip: &'static str,
-    on_press: Message,
+    action: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let age = container(text(age).size(AGE_SIZE).style(theme::muted))
         .align_right(width)
         .center_y(HEIGHT);
-    // Only the button owns the tooltip, not the surrounding alignment space.
-    let action = container(
-        tooltip(
-            theme::button(label)
-                .padding(0)
-                .on_press(on_press)
-                .style(theme::sidebar_control),
-            text(tip).size(12),
-            tooltip::Position::Top,
-        )
-        .style(theme::footer_surface),
-    )
-    .align_right(width)
-    .center_y(HEIGHT);
+    let action = container(action).align_right(width).center_y(HEIGHT);
     Element::new(SessionAction {
         content: content.into(),
         age: age.into(),

@@ -27,15 +27,15 @@ use iced::{
 use pico_core::CancellationToken;
 use pico_core::{
     agent::{
-        ConversationStatus, Harness, SettlementAction, SettlementOutcome,
+        ConversationStatus, FilingAction, FilingOutcome, Harness,
         subagents::{ChildStatus, Profile},
     },
     auth::Login,
     models::{MODELS, model},
     shell::CommandStatus,
     store::{
-        Catalog, Entry, EntryKind, NewSessionDraft, Project, Session, SessionSummary, Settings,
-        Store, UserMessage,
+        Catalog, Entry, EntryKind, Filing, FilingKind, NewSessionDraft, Project, Session,
+        SessionSummary, Settings, Store, UserMessage,
     },
 };
 use std::{
@@ -71,6 +71,33 @@ enum SidebarRow {
     Session(usize, SessionStatus),
 }
 
+const FILED_KINDS: [FilingKind; 2] = [FilingKind::Deferred, FilingKind::Settled];
+
+struct FiledSection {
+    rows: Vec<usize>,
+    list: crate::virtual_list::List,
+    open: bool,
+    search_open: bool,
+}
+
+impl FiledSection {
+    fn new() -> Self {
+        Self {
+            rows: vec![],
+            list: crate::virtual_list::List::with_overscan(FILED_ROW_HEIGHT),
+            open: false,
+            search_open: true,
+        }
+    }
+}
+
+fn filed_scroll_id(kind: FilingKind) -> &'static str {
+    match kind {
+        FilingKind::Deferred => "deferred-sessions",
+        FilingKind::Settled => "settled-sessions",
+    }
+}
+
 struct PendingSettings {
     submitted: Settings,
     close_on_success: bool,
@@ -86,10 +113,11 @@ pub enum SettingsSave {
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
 const SETTLE_FONT_SIZE: f32 = 12.;
+const SIDEBAR_VERTICAL_INSET: f32 = 4.;
 const SIDEBAR_CONTENT_PADDING: f32 = crate::session_action::RIGHT;
-const SETTLED_ROW_HEIGHT: f32 = crate::session_action::HEIGHT + 2. * crate::session_action::PADDING;
-const SETTLED_ROW_GAP: f32 = 3.;
-const SETTLED_VISIBLE_ROWS: usize = 10;
+const FILED_ROW_HEIGHT: f32 = crate::session_action::HEIGHT + 2. * crate::session_action::PADDING;
+const FILED_ROW_GAP: f32 = 3.;
+const FILED_VISIBLE_ROWS: usize = 10;
 const RIGHT_PANEL_PADDING: f32 = 18.;
 const TOOLBAR_BUTTON_HEIGHT: f32 = 26.;
 const TOOLBAR_INSET: f32 = 6.;
@@ -122,10 +150,7 @@ pub struct App {
     sidebar_rows: Vec<SidebarRow>,
     child_statuses: HashMap<String, ChildStatus>,
     sidebar_list: crate::virtual_list::List,
-    settled_rows: Vec<usize>,
-    settled_list: crate::virtual_list::List,
-    settled_open: bool,
-    settled_search_open: bool,
+    filed: [FiledSection; 2],
     catalog_revision: u64,
     view_epoch: u64,
     sidebar_epoch: u64,
@@ -229,7 +254,7 @@ enum Modal {
     DeleteProject(PathBuf),
     Rename(String),
     Delete(String),
-    StopCommandsAndSettle(String),
+    StopCommandsAndFile(String, FilingKind),
     Logout,
     Quit,
     Link(String),
@@ -305,10 +330,10 @@ pub enum Message {
     CopySelection,
     New,
     Select(String),
-    SetSettled(String, bool),
-    RunningCommandsAtSettle(String),
-    ToggleSettled,
-    SettledScroll(u64, f32, f32),
+    FileSession(String, FilingAction),
+    RunningCommandsAtFile(String, FilingKind),
+    ToggleFiled(FilingKind),
+    FiledScroll(FilingKind, u64, f32, f32),
     Create(PathBuf),
     Search(String),
     ToggleSearch,
@@ -438,10 +463,7 @@ impl App {
             sidebar_rows: vec![],
             child_statuses: HashMap::new(),
             sidebar_list: crate::virtual_list::List::default(),
-            settled_rows: vec![],
-            settled_list: crate::virtual_list::List::with_overscan(SETTLED_ROW_HEIGHT),
-            settled_open: false,
-            settled_search_open: true,
+            filed: std::array::from_fn(|_| FiledSection::new()),
             catalog_revision: u64::MAX,
             view_epoch: 0,
             sidebar_epoch: 0,
@@ -867,7 +889,9 @@ impl App {
     fn prepare_sidebar(&mut self) {
         let needle = self.search.to_lowercase();
         let mut sections = [vec![], vec![], vec![]];
-        self.settled_rows.clear();
+        for section in &mut self.filed {
+            section.rows.clear();
+        }
         for (index, s) in self.sessions.iter().enumerate() {
             if s.child.is_some() {
                 continue;
@@ -878,8 +902,8 @@ impl App {
             {
                 continue;
             }
-            if s.settled_at.is_some() {
-                self.settled_rows.push(index);
+            if let Some(filing) = s.filing {
+                self.filed[filing.kind as usize].rows.push(index);
                 continue;
             }
             let status = self.session_status(s);
@@ -896,32 +920,32 @@ impl App {
                 self.sidebar_rows.extend(section);
             }
         }
-        self.settled_rows.sort_by(|&a, &b| {
-            self.sessions[b]
-                .settled_at
-                .cmp(&self.sessions[a].settled_at)
-                .then_with(|| self.sessions[a].id.cmp(&self.sessions[b].id))
-        });
-        let follow_top = self.settled_list.offset <= 1.;
-        self.settled_list
-            .reset(self.settled_rows.iter().map(|&index| {
+        for kind in FILED_KINDS {
+            let section = &mut self.filed[kind as usize];
+            section.rows.sort_unstable_by_key(|&i| {
+                let s = &self.sessions[i];
+                (std::cmp::Reverse(s.filing.expect("filed row").at), &s.id)
+            });
+            let follow_top = section.list.offset <= 1.;
+            section.list.reset(section.rows.iter().map(|&index| {
                 let next = self.sidebar_keys.len() + 3;
                 let key = *self
                     .sidebar_keys
                     .entry(self.sessions[index].id.clone())
                     .or_insert(next);
-                (key, SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP)
+                (key, FILED_ROW_HEIGHT + FILED_ROW_GAP)
             }));
-        if follow_top {
-            self.settled_list.offset = 0.;
+            if follow_top {
+                section.list.offset = 0.;
+            }
+            self.tasks.push(widget::operation::scroll_to(
+                filed_scroll_id(kind),
+                scrollable::AbsoluteOffset {
+                    x: 0.,
+                    y: section.list.offset,
+                },
+            ));
         }
-        self.tasks.push(widget::operation::scroll_to(
-            "settled-sessions",
-            scrollable::AbsoluteOffset {
-                x: 0.,
-                y: self.settled_list.offset,
-            },
-        ));
         self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
         self.sidebar_list
             .reset(self.sidebar_rows.iter().map(|row| match row {
@@ -1835,42 +1859,37 @@ impl App {
             }
             Message::New => self.select(Selection::Picker),
             Message::Select(id) => self.select(Selection::Session(id)),
-            Message::SetSettled(id, settled) => {
-                self.change_settlement(
-                    id,
-                    if settled {
-                        SettlementAction::Settle
-                    } else {
-                        SettlementAction::Undo
-                    },
-                );
-            }
-            Message::RunningCommandsAtSettle(id) => {
+            Message::FileSession(id, action) => self.change_filing(id, action),
+            Message::RunningCommandsAtFile(id, kind) => {
                 if self.modal.is_none() && !self.closing && !self.close_requested {
-                    self.modal = Some(Modal::StopCommandsAndSettle(id));
+                    self.modal = Some(Modal::StopCommandsAndFile(id, kind));
                 }
             }
-            Message::ToggleSettled => {
+            Message::ToggleFiled(kind) => {
+                let section = &mut self.filed[kind as usize];
                 if self.search.is_empty() {
-                    self.settled_open = !self.settled_open;
+                    section.open = !section.open;
                 } else {
-                    self.settled_search_open = !self.settled_search_open;
+                    section.search_open = !section.search_open;
                 }
-                self.settled_list.offset = 0.;
+                section.list.offset = 0.;
             }
-            Message::SettledScroll(epoch, offset, height) => {
+            Message::FiledScroll(kind, epoch, offset, height) => {
                 if epoch == self.sidebar_epoch {
-                    self.settled_list.offset = offset;
-                    self.settled_list.viewport = height;
+                    let list = &mut self.filed[kind as usize].list;
+                    list.offset = offset;
+                    list.viewport = height;
                 }
             }
             Message::Create(path) => self.select(Selection::Draft(path)),
             Message::Search(search) => {
                 self.search = search;
-                self.settled_search_open = true;
+                for section in &mut self.filed {
+                    section.search_open = true;
+                    section.list.offset = 0.;
+                }
                 self.sidebar_follow_top = true;
                 self.sidebar_list.offset = 0.;
-                self.settled_list.offset = 0.;
                 self.prepare_sidebar();
                 return widget::operation::snap_to("sessions", scrollable::RelativeOffset::START);
             }
@@ -2740,12 +2759,14 @@ impl App {
         }
         Task::none()
     }
-    fn change_settlement(&mut self, id: String, action: SettlementAction) {
+    fn change_filing(&mut self, id: String, action: FilingAction) {
         if let Some(h) = self.harness.clone() {
             self.tasks
-                .push(self.io.run(move || match h.set_settled(&id, action) {
-                    Ok(SettlementOutcome::RunningCommands) => Message::RunningCommandsAtSettle(id),
-                    Ok(SettlementOutcome::Applied) => Message::Edited(Ok(())),
+                .push(self.io.run(move || match h.file_session(&id, action) {
+                    Ok(FilingOutcome::RunningCommands(kind)) => {
+                        Message::RunningCommandsAtFile(id, kind)
+                    }
+                    Ok(FilingOutcome::Applied) => Message::Edited(Ok(())),
                     Err(error) => Message::Edited(Err(format!("{error:#}"))),
                 }));
         }
@@ -2855,9 +2876,9 @@ impl App {
                 }
             }
             Some(Modal::Image(_) | Modal::MarkdownImage(_)) => {}
-            Some(Modal::StopCommandsAndSettle(id)) => {
+            Some(Modal::StopCommandsAndFile(id, kind)) => {
                 self.modal = None;
-                self.change_settlement(id, SettlementAction::StopCommandsAndSettle);
+                self.change_filing(id, FilingAction::StopCommandsAndFile(kind));
             }
             Some(Modal::Quit) => return self.quit(),
             Some(Modal::Link(url)) => {
@@ -3468,13 +3489,32 @@ impl App {
                             age,
                             crate::session_action::WIDTH,
                             row![
-                                Icon::Check.view(SETTLE_FONT_SIZE),
-                                text("Settle").size(SETTLE_FONT_SIZE),
+                                crate::session_action::control(
+                                    container(Icon::Clock.view(SETTLE_FONT_SIZE))
+                                        .center_x(crate::session_action::HEIGHT)
+                                        .center_y(crate::session_action::HEIGHT),
+                                    Message::FileSession(
+                                        session.id.clone(),
+                                        FilingAction::File(FilingKind::Deferred)
+                                    ),
+                                    "Defer session",
+                                ),
+                                crate::session_action::control(
+                                    row![
+                                        Icon::Check.view(SETTLE_FONT_SIZE),
+                                        text("Settle").size(SETTLE_FONT_SIZE)
+                                    ]
+                                    .spacing(4)
+                                    .align_y(iced::Center),
+                                    Message::FileSession(
+                                        session.id.clone(),
+                                        FilingAction::File(FilingKind::Settled)
+                                    ),
+                                    "Settle session",
+                                )
                             ]
-                            .spacing(4)
+                            .spacing(crate::session_action::GAP)
                             .align_y(iced::Center),
-                            "Settle session",
-                            Message::SetSettled(session.id.clone(), true),
                         )
                     } else {
                         content.into()
@@ -3523,12 +3563,28 @@ impl App {
                     Message::SidebarScroll(epoch, v.absolute_offset().y, v.bounds().height)
                 }),
         );
-        list = list.push(self.settled_section());
-        container(list)
+        // Keep the close spacing between adjacent labels without changing
+        // Settled's header or hit target when Deferred opens above it.
+        let adjacent_headers = !self.filed_list_visible(FilingKind::Deferred);
+        let filed_sections = column(FILED_KINDS.map(|kind| {
+            let padding = iced::Padding::from([8., SIDEBAR_CONTENT_PADDING]);
+            let padding = match (adjacent_headers, kind) {
+                (true, FilingKind::Deferred) => padding.bottom(SIDEBAR_VERTICAL_INSET),
+                (_, FilingKind::Settled) => padding.top(SIDEBAR_VERTICAL_INSET),
+                (false, FilingKind::Deferred) => padding,
+            };
+            self.filed_section(kind, padding)
+        }))
+        .spacing(if adjacent_headers {
+            0.
+        } else {
+            SIDEBAR_VERTICAL_INSET
+        });
+        container(list.push(filed_sections))
             .padding(iced::Padding {
-                top: 4.,
+                top: SIDEBAR_VERTICAL_INSET,
                 right: theme::SCROLLBAR_EDGE_INSET,
-                bottom: 4.,
+                bottom: SIDEBAR_VERTICAL_INSET,
                 left: 8.,
             })
             .width(
@@ -3541,40 +3597,65 @@ impl App {
             .style(panel)
             .into()
     }
-    fn settled_expanded(&self) -> bool {
+    fn filed_expanded(&self, kind: FilingKind) -> bool {
         if self.search.is_empty() {
-            self.settled_open
+            self.filed[kind as usize].open
         } else {
-            self.settled_search_open
+            self.filed[kind as usize].search_open
         }
     }
 
-    fn settled_section(&self) -> Element<'_, Message> {
-        let expanded = self.settled_expanded();
+    fn filed_list_visible(&self, kind: FilingKind) -> bool {
+        self.filed_expanded(kind) && !self.filed[kind as usize].rows.is_empty()
+    }
+
+    fn filed_list_height(&self, kind: FilingKind) -> f32 {
+        // Each list gets the same cap whether or not the other is expanded.
+        // Unused space belongs to the main list, not to the sibling section.
+        let cap = self.window_height * 0.45 / FILED_KINDS.len() as f32;
+        self.filed[kind as usize]
+            .list
+            .total()
+            .min((FILED_ROW_HEIGHT + FILED_ROW_GAP) * FILED_VISIBLE_ROWS as f32)
+            .min(cap)
+    }
+
+    fn filed_section(
+        &self,
+        kind: FilingKind,
+        header_padding: iced::Padding,
+    ) -> Element<'_, Message> {
+        let filed = &self.filed[kind as usize];
+        let expanded = self.filed_expanded(kind);
         let header = theme::button(
             row![
-                text("Settled").size(12).width(Fill),
-                text(self.settled_rows.len().to_string()).size(11),
+                text(match kind {
+                    FilingKind::Deferred => "Deferred",
+                    FilingKind::Settled => "Settled",
+                })
+                .size(12)
+                .width(Fill),
+                text(filed.rows.len().to_string()).size(11),
                 crate::chevron_icon::chevron_icon(expanded),
             ]
             .spacing(10)
             .align_y(iced::Center),
         )
         .width(Fill)
-        .padding([8., SIDEBAR_CONTENT_PADDING])
+        .padding(header_padding)
         .style(sidebar_control)
-        .on_press(Message::ToggleSettled);
+        .on_press(Message::ToggleFiled(kind));
         let mut section = column![header];
-        if expanded && !self.settled_rows.is_empty() {
-            let range = self.settled_list.visible();
+        if self.filed_list_visible(kind) {
+            let range = filed.list.visible();
             let mut rows = vec![(
                 usize::MAX,
-                space().height(self.settled_list.prefix(range.start)).into(),
+                space().height(filed.list.prefix(range.start)).into(),
             )];
             for index in range.clone() {
-                let session = &self.sessions[self.settled_rows[index]];
+                let session = &self.sessions[filed.rows[index]];
                 let active = self.parent_id() == Some(session.id.as_str());
-                let age = age(session.settled_at.expect("settled row"));
+                let age = age(session.filing.expect("filed row").at);
                 let trailing_width = text_width(&age, crate::session_action::AGE_SIZE)
                     .ceil()
                     .max(crate::session_action::UNDO_SIZE);
@@ -3593,7 +3674,7 @@ impl App {
                     )
                     .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
                     .width(Fill)
-                    .height(SETTLED_ROW_HEIGHT)
+                    .height(FILED_ROW_HEIGHT)
                     .style(if active {
                         secondary
                     } else {
@@ -3606,35 +3687,33 @@ impl App {
                     content,
                     age,
                     trailing_width,
-                    Icon::Undo2.view(crate::session_action::UNDO_SIZE),
-                    "Unsettle session",
-                    Message::SetSettled(session.id.clone(), false),
+                    crate::session_action::control(
+                        Icon::Undo2.view(crate::session_action::UNDO_SIZE),
+                        Message::FileSession(session.id.clone(), FilingAction::Undo),
+                        match kind {
+                            FilingKind::Deferred => "Undo deferral",
+                            FilingKind::Settled => "Unsettle session",
+                        },
+                    ),
                 );
                 rows.push((
-                    self.settled_list.order[index],
-                    column![row, space().height(SETTLED_ROW_GAP)].into(),
+                    filed.list.order[index],
+                    column![row, space().height(FILED_ROW_GAP)].into(),
                 ));
             }
             rows.push((
                 usize::MAX - 1,
                 space()
-                    .height(
-                        (self.settled_list.total() - self.settled_list.prefix(range.end)).max(0.),
-                    )
+                    .height((filed.list.total() - filed.list.prefix(range.end)).max(0.))
                     .into(),
             ));
             let epoch = self.sidebar_epoch;
-            let height = self
-                .settled_list
-                .total()
-                .min((SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP) * SETTLED_VISIBLE_ROWS as f32)
-                .min(self.window_height * 0.45);
             section = section.push(
                 scroll(crate::keyed_column::keyed_column(rows))
-                    .id("settled-sessions")
-                    .height(height)
+                    .id(filed_scroll_id(kind))
+                    .height(self.filed_list_height(kind))
                     .on_scroll(move |v| {
-                        Message::SettledScroll(epoch, v.absolute_offset().y, v.bounds().height)
+                        Message::FiledScroll(kind, epoch, v.absolute_offset().y, v.bounds().height)
                     }),
             );
         }
@@ -5100,10 +5179,16 @@ impl App {
                 "Remove saved ChatGPT credentials from this Pico V2 installation. Your sessions are kept.",
                 "Sign out",
             ),
-            Modal::StopCommandsAndSettle(_) => (
-                "Stop running commands and settle?",
+            Modal::StopCommandsAndFile(_, kind) => (
+                match kind {
+                    FilingKind::Settled => "Stop running commands and settle?",
+                    FilingKind::Deferred => "Stop running commands and defer?",
+                },
                 "Commands are still running in this session. Stopping them won’t undo changes they’ve already made. Other sessions won’t be affected.",
-                "Stop commands and settle",
+                match kind {
+                    FilingKind::Settled => "Stop commands and settle",
+                    FilingKind::Deferred => "Stop commands and defer",
+                },
             ),
             Modal::Quit => (
                 "Stop work and quit?",
@@ -5149,7 +5234,7 @@ impl App {
                         .style(theme::muted),
                 );
             }
-            Modal::StopCommandsAndSettle(id) => {
+            Modal::StopCommandsAndFile(id, _) => {
                 if let Some(session) = self.sessions.iter().find(|s| s.id == *id) {
                     content = content.push(text(session.title.clone()).size(16));
                 }
@@ -5384,7 +5469,7 @@ impl App {
                         interrupted: false,
                         needs_attention: false,
                         unchecked_completion: false,
-                        settled_at: None,
+                        filing: None,
                     });
                 }
                 self.prepare_sidebar();
@@ -5904,30 +5989,34 @@ impl App {
 
             47 => {
                 self.sessions.clear();
-                for i in 0..(SETTLED_VISIBLE_ROWS * 3) {
+                for i in 0..(FILED_VISIBLE_ROWS * 3) {
                     let mut session =
                         Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
                     session.title = format!("Settled session {i} — a long title fits on one row");
-                    session.settled_at = Some(pico_core::store::now() - i as u64 * 86400);
+                    session.filing = Some(Filing {
+                        kind: FilingKind::Settled,
+                        at: pico_core::store::now() - i as u64 * 86400,
+                    });
                     self.sessions.push(SessionSummary::from(&session));
                 }
                 let mut idle =
                     Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
                 idle.title = "Idle session — hover to settle".into();
                 self.sessions.push(SessionSummary::from(&idle));
-                self.settled_open = true;
+                self.filed[FilingKind::Settled as usize].open = true;
                 self.prepare_sidebar();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
             48 => {
-                self.settled_list.offset = self.settled_list.total()
-                    - (SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP) * SETTLED_VISIBLE_ROWS as f32;
+                self.filed[FilingKind::Settled as usize].list.offset =
+                    self.filed[FilingKind::Settled as usize].list.total()
+                        - self.filed_list_height(FilingKind::Settled);
                 return Task::batch([
                     widget::operation::scroll_to(
                         "settled-sessions",
                         scrollable::AbsoluteOffset {
                             x: 0.,
-                            y: self.settled_list.offset,
+                            y: self.filed[FilingKind::Settled as usize].list.offset,
                         },
                     ),
                     delayed_capture(),
@@ -5966,7 +6055,7 @@ impl App {
                 self.modal = None;
                 self.context_menu = None;
                 self.stashed_open = false;
-                self.settled_open = false;
+                self.filed[FilingKind::Settled as usize].open = false;
                 self.settings_open = false;
                 self.agents_open = false;
                 self.sessions.clear();
@@ -7737,7 +7826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settling_keeps_selection_and_draft_and_requires_opening_unread_completion() {
+    async fn deferring_keeps_selection_and_draft_and_requires_opening_unread_completion() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
         stored_session(&mut app, path.clone()).await;
@@ -7747,9 +7836,13 @@ mod tests {
         let h = app.harness.as_ref().unwrap().clone();
         h.edit(&id, |s| s.unchecked_completion = true).unwrap();
         dispatch(&mut app, Message::Changed).await;
-        dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
+        dispatch(
+            &mut app,
+            Message::FileSession(id.clone(), FilingAction::File(FilingKind::Deferred)),
+        )
+        .await;
         assert!(app.error.is_some());
-        assert!(app.settled_rows.is_empty());
+        assert!(app.filed[FilingKind::Deferred as usize].rows.is_empty());
         assert_eq!(app.selected, other);
         app.error = None;
 
@@ -7758,27 +7851,43 @@ mod tests {
         app.editor = text_editor::Content::with_text("Keep my draft λ");
         app.draft_dirty = true;
         let updated = app.current().unwrap().updated;
-        dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
+        dispatch(
+            &mut app,
+            Message::FileSession(id.clone(), FilingAction::File(FilingKind::Deferred)),
+        )
+        .await;
         assert_eq!(app.selected.as_deref(), Some(id.as_str()));
         assert_eq!(app.editor.text(), "Keep my draft λ");
         assert_eq!(app.current().unwrap().updated, updated);
-        assert!(app.current().unwrap().settled_at.is_some());
-        assert!(!app.settled_expanded());
-        assert_eq!(app.settled_rows.len(), 1);
+        assert_eq!(
+            app.current().unwrap().filing.unwrap().kind,
+            FilingKind::Deferred
+        );
+        assert!(app.filed[FilingKind::Settled as usize].rows.is_empty());
+        assert!(!app.filed_expanded(FilingKind::Deferred));
+        assert_eq!(app.filed[FilingKind::Deferred as usize].rows.len(), 1);
         assert!(!app.sidebar_rows.iter().any(|row| {
             matches!(row, SidebarRow::Session(index, _) if app.sessions[*index].id == id)
         }));
-        dispatch(&mut app, Message::ToggleSettled).await;
-        assert!(app.settled_expanded());
-        dispatch(&mut app, Message::SetSettled(id.clone(), false)).await;
-        assert!(app.settled_rows.is_empty());
+        dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
+        assert!(app.filed_expanded(FilingKind::Deferred));
+        dispatch(
+            &mut app,
+            Message::FileSession(id.clone(), FilingAction::Undo),
+        )
+        .await;
+        assert!(app.filed[FilingKind::Deferred as usize].rows.is_empty());
         assert_eq!(app.current().unwrap().updated, updated);
         assert_eq!(app.selected.as_deref(), Some(id.as_str()));
 
-        dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
+        dispatch(
+            &mut app,
+            Message::FileSession(id.clone(), FilingAction::File(FilingKind::Deferred)),
+        )
+        .await;
         dispatch(&mut app, Message::Send).await;
-        assert!(app.current().unwrap().settled_at.is_none());
-        assert!(app.settled_rows.is_empty());
+        assert!(app.current().unwrap().filing.is_none());
+        assert!(app.filed[FilingKind::Deferred as usize].rows.is_empty());
         assert_eq!(app.selected.as_deref(), Some(id.as_str()));
         let c = h.get(&id).unwrap();
         let mut changes = h.subscribe();
@@ -7791,7 +7900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settle_confirmation_uses_clicked_row_not_selected_session() {
+    async fn defer_confirmation_uses_clicked_row_not_selected_session() {
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
         stored_session(&mut app, path.clone()).await;
@@ -7799,17 +7908,30 @@ mod tests {
         stored_session(&mut app, path).await;
         let selected = app.selected.clone();
         let h = app.harness.clone().unwrap();
-        dispatch(&mut app, Message::RunningCommandsAtSettle(clicked.clone())).await;
-        assert!(matches!(&app.modal, Some(Modal::StopCommandsAndSettle(id)) if *id == clicked));
+        dispatch(
+            &mut app,
+            Message::RunningCommandsAtFile(clicked.clone(), FilingKind::Deferred),
+        )
+        .await;
+        assert!(
+            matches!(&app.modal, Some(Modal::StopCommandsAndFile(id, FilingKind::Deferred)) if *id == clicked)
+        );
         dispatch(&mut app, Message::Dismiss).await;
-        assert!(h.load(&clicked).unwrap().snapshot().settled_at.is_none());
+        assert!(h.load(&clicked).unwrap().snapshot().filing.is_none());
         // The command may already be gone by the time the user confirms.
-        dispatch(&mut app, Message::RunningCommandsAtSettle(clicked.clone())).await;
+        dispatch(
+            &mut app,
+            Message::RunningCommandsAtFile(clicked.clone(), FilingKind::Deferred),
+        )
+        .await;
         dispatch(&mut app, Message::Confirm).await;
         assert!(app.modal.is_none());
-        assert!(h.load(&clicked).unwrap().snapshot().settled_at.is_some());
+        assert_eq!(
+            h.load(&clicked).unwrap().snapshot().filing.unwrap().kind,
+            FilingKind::Deferred
+        );
         assert_eq!(app.selected, selected);
-        assert!(app.current().unwrap().settled_at.is_none());
+        assert!(app.current().unwrap().filing.is_none());
     }
 
     #[tokio::test]
@@ -7824,8 +7946,12 @@ mod tests {
         let size = iced::Size::new(180., 600.);
         for settled in [false, true] {
             if settled {
-                dispatch(&mut app, Message::SetSettled(id.clone(), true)).await;
-                dispatch(&mut app, Message::ToggleSettled).await;
+                dispatch(
+                    &mut app,
+                    Message::FileSession(id.clone(), FilingAction::File(FilingKind::Settled)),
+                )
+                .await;
+                dispatch(&mut app, Message::ToggleFiled(FilingKind::Settled)).await;
             }
             let title = app.current().unwrap().title.clone();
             let mut ui = UserInterface::build(app.sidebar(), size, Cache::new(), &mut renderer);
@@ -7961,13 +8087,26 @@ mod tests {
                 action.x
             };
             let beside = iced::Point::new(button_left - 1., action.center_y());
+            let defer = (!settled).then(|| {
+                // The nearest control to the left of Settle on the same line.
+                bounds
+                    .containers
+                    .iter()
+                    .filter(|b| b.center_y() == action.center_y() && b.x + b.width < action.x)
+                    .max_by(|a, b| (a.x + a.width).total_cmp(&(b.x + b.width)))
+                    .expect("defer icon button")
+                    .center()
+            });
             let mut no_tip = None;
             for (point, show_tip) in [
                 (label.center(), false),
                 (beside, false),
                 (action.center(), true),
                 (beside, false),
-            ] {
+            ]
+            .into_iter()
+            .chain(defer.map(|point| (point, true)))
+            {
                 let mut messages = vec![];
                 ui.update(
                     &[
@@ -8011,56 +8150,97 @@ mod tests {
             }
             let messages = click_at(&mut ui, &mut renderer, action.center());
             assert!(
-                matches!(messages.as_slice(), [Message::SetSettled(clicked, value)] if clicked == &id && *value != settled),
+                matches!(messages.as_slice(), [Message::FileSession(clicked, action)] if clicked == &id && *action == if settled {FilingAction::Undo} else {FilingAction::File(FilingKind::Settled)}),
                 "action must not select the row: {messages:?}"
             );
+            if let Some(clock) = defer {
+                let messages = click_at(&mut ui, &mut renderer, clock);
+                assert!(
+                    matches!(messages.as_slice(), [Message::FileSession(clicked, FilingAction::File(FilingKind::Deferred))] if clicked == &id)
+                );
+            }
             let messages = click_at(&mut ui, &mut renderer, label.center());
             assert!(matches!(messages.as_slice(), [Message::Select(clicked)] if clicked == &id));
         }
     }
 
     #[tokio::test]
-    async fn settled_list_caps_height_scrolls_and_search_reveals_matches_temporarily() {
+    async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily() {
         use iced_runtime::{UserInterface, user_interface::Cache};
         let mut app = app();
         let mut renderer = header_renderer();
-        let count = SETTLED_VISIBLE_ROWS * 30;
-        let pitch = SETTLED_ROW_HEIGHT + SETTLED_ROW_GAP;
+        let count = FILED_VISIBLE_ROWS * 30;
+        let pitch = FILED_ROW_HEIGHT + FILED_ROW_GAP;
         let now = pico_core::store::now();
         app.sessions = (0..count)
             .map(|i| {
                 let mut session = Session::new(PathBuf::from("/project"), &app.catalog.settings);
                 session.title = format!("Filed session {i}");
                 session.updated = now;
-                session.settled_at = Some(now - i as u64 * 86400);
+                session.filing = Some(Filing {
+                    kind: FilingKind::Settled,
+                    at: now - i as u64 * 86400,
+                });
                 SessionSummary::from(&session)
             })
             .collect();
+        for i in (0..count / 2).rev() {
+            let mut session = Session::new(PathBuf::from("/later"), &app.catalog.settings);
+            session.title = format!("Later session {i}");
+            session.filing = Some(Filing {
+                kind: FilingKind::Deferred,
+                at: now - i as u64 * 3600,
+            });
+            app.sessions.push(SessionSummary::from(&session));
+        }
         app.prepare_sidebar();
-        assert_eq!(app.settled_rows, (0..count).collect::<Vec<_>>());
-        assert!(app.sidebar_rows.is_empty());
-        assert!(!app.settled_expanded());
-        dispatch(&mut app, Message::Search("Filed session 17".into())).await;
-        assert!(app.settled_expanded());
-        assert!(!app.settled_rows.is_empty());
-        assert!(
-            app.settled_rows
-                .iter()
-                .all(|&i| app.sessions[i].title.contains("Filed session 17"))
+        assert_eq!(
+            app.filed[FilingKind::Settled as usize].rows,
+            (0..count).collect::<Vec<_>>()
         );
-        dispatch(&mut app, Message::ToggleSettled).await;
-        assert!(!app.settled_expanded());
+        assert!(app.sidebar_rows.is_empty());
+        assert!(!app.filed_expanded(FilingKind::Settled));
+        assert!(!app.filed_expanded(FilingKind::Deferred));
+        dispatch(&mut app, Message::Search("session 1".into())).await;
+        for (kind, first) in [
+            (FilingKind::Deferred, "Later session 1"),
+            (FilingKind::Settled, "Filed session 1"),
+        ] {
+            assert!(app.filed_expanded(kind));
+            let rows = &app.filed[kind as usize].rows;
+            assert_eq!(app.sessions[rows[0]].title, first);
+            assert!(
+                rows.iter()
+                    .all(|&i| app.sessions[i].title.contains("session 1"))
+            );
+        }
+        dispatch(&mut app, Message::ToggleFiled(FilingKind::Settled)).await;
+        assert!(!app.filed_expanded(FilingKind::Settled));
+        assert!(app.filed_expanded(FilingKind::Deferred));
         dispatch(&mut app, Message::Search(String::new())).await;
+        assert!(!app.filed_expanded(FilingKind::Deferred));
+        dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
         assert!(
-            !app.settled_expanded(),
+            !app.filed_expanded(FilingKind::Settled),
             "search must not change the normal expansion preference"
         );
-        dispatch(&mut app, Message::ToggleSettled).await;
+        dispatch(&mut app, Message::ToggleFiled(FilingKind::Settled)).await;
 
         let mut cache = Cache::new();
         for height in [800., 560.] {
             app.window_height = height;
-            app.settled_list.offset = 0.;
+            app.filed[FilingKind::Settled as usize].list.offset = 0.;
+            dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
+            let mut ui = UserInterface::build(
+                app.sidebar(),
+                iced::Size::new(300., height),
+                cache,
+                &mut renderer,
+            );
+            let mut before = UiBounds::default();
+            ui.operate(&renderer, &mut before);
+            cache = ui.into_cache();
+            dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
             let mut ui = UserInterface::build(
                 app.sidebar(),
                 iced::Size::new(300., height),
@@ -8079,26 +8259,44 @@ mod tests {
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
-            let viewport = bounds
-                .scrolls
-                .iter()
-                .find(|(id, _)| id == &iced::advanced::widget::Id::new("settled-sessions"))
-                .unwrap()
-                .1;
-            let main = bounds
-                .scrolls
-                .iter()
-                .find(|(id, _)| id == &iced::advanced::widget::Id::new("sessions"))
-                .unwrap()
-                .1;
-            assert!(viewport.height <= pitch * SETTLED_VISIBLE_ROWS as f32);
+            let viewport = bounds.scroll("settled-sessions");
+            let previous_viewport = before.scroll("settled-sessions");
+            assert_eq!(
+                viewport.height, previous_viewport.height,
+                "opening Deferred resized Settled"
+            );
+            // Flex layout can differ by a few f32 rounding bits.
+            assert!((viewport.y - previous_viewport.y).abs() < 0.01);
+            assert!((bounds.label("Settled").y - before.label("Settled").y).abs() < 0.01);
+            assert!(bounds.label("Deferred").y < before.label("Deferred").y);
+            let main = bounds.scroll("sessions");
+            assert!(viewport.height <= pitch * FILED_VISIBLE_ROWS as f32);
             assert!(viewport.height > pitch && main.height > pitch);
-            assert!(main.y + main.height <= viewport.y);
+            let deferred = bounds.scroll("deferred-sessions");
+            assert!(main.y + main.height <= bounds.label("Deferred").y);
+            assert!(
+                deferred.height > pitch && deferred.intersects(&bounds.label("Later session 0"))
+            );
+            assert!(deferred.y + deferred.height <= bounds.label("Settled").y);
             assert!(viewport.y + viewport.height <= height);
+            let settled_section = bounds
+                .containers
+                .iter()
+                .filter(|b| {
+                    b.contains(bounds.label("Settled").center()) && b.contains(viewport.center())
+                })
+                .min_by(|a, b| a.height.total_cmp(&b.height))
+                .expect("Settled header and list");
+            let gap = settled_section.y - (deferred.y + deferred.height);
+            let bottom_inset = height - (settled_section.y + settled_section.height);
+            assert!(
+                (gap - bottom_inset).abs() < 1.,
+                "gap={gap}, bottom inset={bottom_inset}"
+            );
             assert!(viewport.intersects(&bounds.label("Filed session 0")));
             assert!(bounds.labels.iter().any(|(label, _)| label == "now"));
             assert!(
-                app.settled_list.visible().len() < count / 2,
+                app.filed[FilingKind::Settled as usize].list.visible().len() < count / 2,
                 "virtualization must bound mounted work"
             );
             let mut messages = vec![];
@@ -8125,7 +8323,7 @@ mod tests {
             assert!(
                 messages
                     .iter()
-                    .any(|m| matches!(m, Message::SettledScroll(_, offset, _) if *offset > 0.))
+                    .any(|m| matches!(m, Message::FiledScroll(FilingKind::Settled, _, offset, _) if *offset > 0.))
             );
             assert!(
                 !messages
@@ -8135,11 +8333,11 @@ mod tests {
             );
             cache = ui.into_cache();
 
-            let offset = app.settled_list.total() - viewport.height;
+            let offset = app.filed[FilingKind::Settled as usize].list.total() - viewport.height;
             let epoch = app.sidebar_epoch;
             dispatch(
                 &mut app,
-                Message::SettledScroll(epoch, offset, viewport.height),
+                Message::FiledScroll(FilingKind::Settled, epoch, offset, viewport.height),
             )
             .await;
             let mut ui = UserInterface::build(
@@ -8167,7 +8365,7 @@ mod tests {
                     .labels
                     .iter()
                     .any(|(label, _)| label == &format!("{}d", count - 1)),
-                "age must use settled_at, not the last submission"
+                "age must use the filing time, not the last submission"
             );
             cache = ui.into_cache();
         }
@@ -8182,12 +8380,7 @@ mod tests {
         );
         let mut bounds = UiBounds::default();
         ui.operate(&renderer, &mut bounds);
-        let viewport = bounds
-            .scrolls
-            .iter()
-            .find(|(id, _)| id == &iced::advanced::widget::Id::new("settled-sessions"))
-            .unwrap()
-            .1;
+        let viewport = bounds.scroll("settled-sessions");
         assert!((viewport.height - 2. * pitch).abs() < 1.);
     }
 
@@ -10365,6 +10558,14 @@ Then implement the fix.";
                 })
                 .expect("control at row center")
         }
+        fn scroll(&self, name: &'static str) -> iced::Rectangle {
+            let id = iced::advanced::widget::Id::new(name);
+            self.scrolls
+                .iter()
+                .find(|(key, _)| *key == id)
+                .unwrap_or_else(|| panic!("missing scrollable {name}"))
+                .1
+        }
         fn label(&self, value: &str) -> iced::Rectangle {
             self.labels
                 .iter()
@@ -11126,6 +11327,13 @@ Then implement the fix.";
             assert!(footer.height < height / 4.);
             assert!(footer.x > left && footer.x + footer.width < width - right);
             let settled = bounds.label("Settled");
+            let deferred = bounds.label("Deferred");
+            let label_gap = settled.y - (deferred.y + deferred.height);
+            let bottom_gap = height - (settled.y + settled.height);
+            assert!(
+                label_gap > 0. && label_gap <= bottom_gap,
+                "label gap {label_gap} vs bottom gap {bottom_gap}"
+            );
             assert!(
                 (settled.center_y() - context.center_y()).abs() < 1.,
                 "settled={settled:?} context={context:?} footer={footer:?}"
@@ -11975,7 +12183,7 @@ Then implement the fix.";
                 interrupted: false,
                 needs_attention: false,
                 unchecked_completion: false,
-                settled_at: None,
+                filing: None,
             })
             .collect();
         app.prepare_sidebar();
@@ -13056,7 +13264,7 @@ Then implement the fix.";
                 interrupted: false,
                 needs_attention: false,
                 unchecked_completion: false,
-                settled_at: None,
+                filing: None,
             });
         }
         app.selected = Some(session.id.clone());

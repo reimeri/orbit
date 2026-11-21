@@ -39,9 +39,11 @@ access. Use a disposable project for initial testing.
   does not undo changes. Send another message to continue from saved context.
   A [fork](docs/session-forks.md) starts a separate conversation at an earlier
   prompt, not a separate copy of the working directory.
-- Hover over an idle, checked session to **Settle** it. If it still has running
-  shell commands, Pico asks before stopping them. Find it in search or expand
-  **Settled** and choose **Undo** to return it to the main list.
+- Hover over an idle, checked session and choose the **clock** to defer it for
+  later, or **Settle** when the work is complete. If shell commands are still
+  running, Pico asks before stopping them. Search or expand **Deferred** or
+  **Settled** to find the session. Opening it keeps it there; choose **Undo**
+  or send another message to return it to the main list.
 - Right-click a project to rename, stash or delete it. Stashing hides the project
   in the picker but keeps its conversations. Deleting it removes its sessions,
   **not** the project folder.

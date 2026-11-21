@@ -393,6 +393,19 @@ pub(crate) struct EffortBaseline {
     pub(crate) effort: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilingKind {
+    Deferred,
+    Settled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Filing {
+    pub kind: FilingKind,
+    pub at: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
@@ -437,9 +450,8 @@ pub struct Session {
     /// A successful main turn completed since the session was last opened.
     #[serde(default)]
     pub unchecked_completion: bool,
-    /// Filed away by the user; also the origin for the settlement age.
-    #[serde(default)]
-    pub settled_at: Option<u64>,
+    /// Sidebar category and filing time; absent for active sessions.
+    pub filing: Option<Filing>,
     pub context_account: Option<String>,
 }
 impl Session {
@@ -473,7 +485,7 @@ impl Session {
             interrupted: false,
             needs_attention: false,
             unchecked_completion: false,
-            settled_at: None,
+            filing: None,
             context_account: None,
         }
     }
@@ -574,7 +586,7 @@ impl Session {
         }
         self.updated = accepted_at;
         self.unchecked_completion = false;
-        self.settled_at = None;
+        self.filing = None;
         self.pending_submissions.push(submission.clone());
         self.entries.push(Entry {
             id: submission,
@@ -635,9 +647,8 @@ pub struct SessionSummary {
     /// A successful main turn completed since the session was last opened.
     #[serde(default)]
     pub unchecked_completion: bool,
-    /// Filed away by the user; also the origin for the settlement age.
-    #[serde(default)]
-    pub settled_at: Option<u64>,
+    /// Sidebar category and filing time; absent for active sessions.
+    pub filing: Option<Filing>,
     pub id: String,
     pub project: PathBuf,
     pub title: String,
@@ -651,7 +662,7 @@ impl From<&Session> for SessionSummary {
             origin: s.origin.clone(),
             needs_attention: s.needs_attention,
             unchecked_completion: s.unchecked_completion,
-            settled_at: s.settled_at,
+            filing: s.filing,
             id: s.id.clone(),
             project: s.project.clone(),
             title: s.title.clone(),
