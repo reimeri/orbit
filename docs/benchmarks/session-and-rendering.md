@@ -507,3 +507,33 @@ In an optimized local probe with a single unchanged 64 MiB untracked text log
 35.18 ms to 7.98 ms over 21 refreshes per version. This measures background
 refresh latency, not UI frame time. The Git regression test also monitors real
 file accesses, so it detects repeated reads even with a warm OS page cache.
+
+### Polling past the line-count cache capacity
+
+A sequential scan used to evict the next file it would need, so even **one**
+file over capacity could turn every subsequent poll into a full reread. Now a
+miss can replace an LRU entry only if that entry was last used before the
+current scan began. Once the full cache has been touched, the worker still
+counts overflow files exactly but does not admit them. This protects a stable
+set during repeated scans without pinning stale versions or growing the cache.
+Each resident count carries one monotonic last-use timestamp. Membership churn
+and switches between large projects can still cause cold misses.
+
+Same release fixture before and after, one committed repository of unchanged
+8 KiB text files. Each row is the median of the three polls **after** the
+initial poll at that size. `rchar` is logical read-call bytes, including Git
+overhead, not physical disk traffic or file-content bytes alone.
+
+| Untracked files | Logical bytes/poll, before → after | Refresh time, before → after |
+| ---: | ---: | ---: |
+| 8,192 | 205,183 → 205,183 | 22.33 → 22.71 ms |
+| 8,193 | 67,322,260 → 213,395 | 86.12 → 22.75 ms |
+
+The remaining content read at 8,193 files is one 8 KiB file per warm poll.
+Git enumeration and per-file metadata checks still run every time. Reproduce
+inside `nix develop`:
+
+```sh
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null XDG_CONFIG_HOME="$(mktemp -d)" \
+  cargo test --locked --release -p orbit untracked_poll_benchmark -- --ignored --nocapture --test-threads=1
+```

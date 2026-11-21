@@ -68,6 +68,7 @@
 </section>
 <section id="git"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 04</div><h2>An unchanged workspace can stay busy</h2>
 <h3>Git status: one extra file defeats the warm cache</h3>
+<p class="call"><strong>Follow-up: fixed.</strong> At 8,193 files the three warm polls now read 213,395 logical bytes each, rather than about 64 MiB. The original audit measurements below are preserved. See the <a href="session-and-rendering.md#polling-past-the-line-count-cache-capacity">paired before/after benchmark and cache policy</a>.</p>
 <p>We exercised the real <code>git::info</code> path, including subprocesses and line counts, in one fresh committed repository. Each untracked file contained 8 KiB of ASCII text. We filled the current cache, polled four times, then added exactly one file at the end of the enumeration and polled four more times. The Git total was checked on every poll. No files changed during either series.</p>
 <div class="tablewrap"><table>
 <caption>One continuous cache; process read-call bytes from /proc/self/io (rchar), not physical SSD reads.</caption>

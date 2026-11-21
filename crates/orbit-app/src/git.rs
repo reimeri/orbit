@@ -62,7 +62,12 @@ impl From<&std::fs::Metadata> for FileVersion {
     }
 }
 
-pub struct LineCounts(Mutex<lru::LruCache<FileVersion, u64>>);
+struct CachedCount {
+    lines: u64,
+    last_used: Instant,
+}
+
+pub struct LineCounts(Mutex<lru::LruCache<FileVersion, CachedCount>>);
 
 impl Default for LineCounts {
     fn default() -> Self {
@@ -204,6 +209,7 @@ fn untracked_lines(
     deadline: Instant,
     counts: &LineCounts,
 ) -> Result<u64, String> {
+    let scan_start = Instant::now();
     let mut total = 0;
     for name in paths.split(|b| *b == 0).filter(|name| !name.is_empty()) {
         if Instant::now() >= deadline {
@@ -219,15 +225,32 @@ fn untracked_lines(
                 return Ok(0);
             }
             let version = FileVersion::from(&metadata);
-            if let Some(lines) = counts.0.lock().expect("line counts").get(&version).copied() {
-                return Ok(lines);
+            if let Some(hit) = counts.0.lock().expect("line counts").get_mut(&version) {
+                hit.last_used = Instant::now();
+                return Ok(hit.lines);
             }
             let file = std::fs::File::open(&path)?;
             let lines = count_lines(&file, deadline)?;
             // Never memoize a partial scan or a file replaced/edited while we
             // read it. Check the open descriptor, not a new lookup by pathname.
             if FileVersion::from(&file.metadata()?) == version {
-                counts.0.lock().expect("line counts").put(version, lines);
+                let mut cache = counts.0.lock().expect("line counts");
+                // Once even the oldest resident has been used during this scan,
+                // the working set fills the cache. Count overflow without
+                // displacing the entries the next poll is about to need.
+                if cache.len() < cache.cap().get()
+                    || cache
+                        .peek_lru()
+                        .is_some_and(|(_, oldest)| oldest.last_used < scan_start)
+                {
+                    cache.put(
+                        version,
+                        CachedCount {
+                            lines,
+                            last_used: Instant::now(),
+                        },
+                    );
+                }
             }
             Ok(lines)
         };
@@ -408,6 +431,52 @@ mod tests {
             refresh().await,
             Some(Info::Changes { added: 2, .. })
         ));
+    }
+
+    #[test]
+    fn repeated_overflow_scans_read_only_excess_files_and_reuse_vacated_slots() {
+        use inotify::{Inotify, WatchMask};
+        use std::collections::HashSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in [("a", "1"), ("b", "1\n2"), ("c", "1\n2\n3"), ("d", "four\n")] {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let counts = LineCounts(Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(3).unwrap(),
+        )));
+        let mut watcher = Inotify::init().unwrap();
+        watcher
+            .watches()
+            .add(dir.path(), WatchMask::ACCESS)
+            .unwrap();
+        let mut scan = |paths: &[u8], expected| {
+            let total = untracked_lines(
+                dir.path(),
+                paths,
+                Instant::now() + Duration::from_secs(15),
+                &counts,
+            )
+            .unwrap();
+            assert_eq!(total, expected);
+            let mut buf = [0; 4096];
+            match watcher.read_events(&mut buf) {
+                Ok(events) => events.filter_map(|e| e.name).collect::<HashSet<_>>().len(),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
+                Err(e) => panic!("Could not observe fixture reads: {e}"),
+            }
+        };
+        assert_eq!(scan(b"a\0b\0c\0", 6), 3);
+        for _ in 0..3 {
+            assert_eq!(
+                scan(b"a\0b\0c\0d\0", 7),
+                1,
+                "one overflow file, not a full reread"
+            );
+        }
+        // Drop one member. The now-fitting working set should become entirely warm.
+        scan(b"b\0c\0d\0", 6);
+        assert_eq!(scan(b"b\0c\0d\0", 6), 0);
     }
 
     #[tokio::test]
