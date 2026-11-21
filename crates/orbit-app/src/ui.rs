@@ -1408,6 +1408,15 @@ impl App {
             }));
         }
     }
+    fn stop_agent(&mut self, id: String) {
+        if let Some(h) = self.harness.clone() {
+            // Queue with Send and File: waiting for the lifecycle lock must not stall input.
+            self.tasks.push(self.io.run(move || {
+                h.stop(&id);
+                Message::Changed
+            }));
+        }
+    }
     fn acknowledge_selected_attention(&mut self) {
         if let (Some(h), Some(id)) = (&self.harness, &self.selected)
             && let Some(attention) = h.attention(id)
@@ -2208,11 +2217,7 @@ impl App {
                     }));
                 }
             }
-            Message::StopAgent(id) => {
-                if let Some(h) = &self.harness {
-                    h.stop(&id);
-                }
-            }
+            Message::StopAgent(id) => self.stop_agent(id),
             Message::ToggleAgents => {
                 self.fork_panel = None;
                 self.agents_open = !self.agents_open;
@@ -2855,7 +2860,7 @@ impl App {
                                 && (h.get(id).is_some_and(|s| s.is_executing())
                                     || h.active_children(id) > 0)
                             {
-                                h.stop(id);
+                                self.stop_agent(id.clone());
                             }
                             self.acknowledge_selected_attention();
                         }
@@ -12835,19 +12840,9 @@ Then implement the fix.";
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
         stored_session(&mut app, path.clone()).await;
-        let other = app
-            .harness
-            .as_ref()
-            .unwrap()
-            .get(app.selected.as_ref().unwrap())
-            .unwrap();
-        stored_session(&mut app, path).await;
-        let selected = app
-            .harness
-            .as_ref()
-            .unwrap()
-            .get(app.selected.as_ref().unwrap())
-            .unwrap();
+        let h = app.harness.as_ref().unwrap();
+        let selected = h.get(app.selected.as_ref().unwrap()).unwrap();
+        let other = h.insert(Session::new(path, &app.catalog.settings));
         let escape = Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
             modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -12890,9 +12885,31 @@ Then implement the fix.";
         assert!(!app.settings_open);
         assert_eq!(selected.status(), idle_status);
         let other_status = other.status();
-        dispatch(&mut app, escape).await;
-        assert_eq!(selected.status(), ConversationStatus::Stopping);
-        assert_eq!(other.status(), other_status);
+        // Hold an earlier session job open. Both stop controls must return to
+        // the event loop without overtaking it or disabling unrelated input.
+        for (message, target) in [
+            (escape, &selected),
+            (Message::StopAgent(other.id.clone()), &other),
+        ] {
+            let (release, gate) = std::sync::mpsc::channel();
+            let barrier = app.io.run(move || {
+                gate.recv_timeout(Duration::from_secs(5))
+                    .expect("UI stayed responsive");
+                Message::External(Ok(()))
+            });
+            let status = target.status();
+            let stop = app.update(message);
+            let was_open = app.search_active;
+            dispatch(&mut app, Message::ToggleSearch).await;
+            assert_ne!(app.search_active, was_open);
+            assert_eq!(target.status(), status, "Stop overtook an earlier job");
+            release.send(()).unwrap();
+            drain(&mut app, Task::batch([barrier, stop])).await;
+            assert_eq!(target.status(), ConversationStatus::Stopping);
+            if target.id == selected.id {
+                assert_eq!(other.status(), other_status);
+            }
+        }
         selected.running.store(false, Ordering::Release);
         other.running.store(false, Ordering::Release);
     }

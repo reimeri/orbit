@@ -11,7 +11,9 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   `synchronous=FULL`). Persistent tree diffs update only changed records. A draft
   update does not serialize or rewrite historical entries or provider input.
 - A serialized UI I/O worker performs loading, editing, deletion and catalog/draft
-  saving. Conversation persistence has its own ordering lock; it snapshots state
+  saving. Stop requests (including Escape) use the same queue: cancellation may
+  wait for an earlier filing or send, but the window remains interactive.
+  Conversation persistence has its own ordering lock; it snapshots state
   before writing and does not hold the conversation state lock across disk I/O.
   Agent async tasks offload saves to blocking workers. Message acceptance commits
   before it is published; tool-start boundaries commit before commands launch.
