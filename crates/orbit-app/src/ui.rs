@@ -1,4 +1,5 @@
 mod forks;
+mod imports;
 mod marketing;
 mod settings;
 
@@ -234,7 +235,7 @@ pub struct App {
     spellcheck: spellcheck::State,
     file_completion: crate::file_completion::Completion,
     attachments: Vec<orbit_core::media::Media>,
-    importing: usize,
+    imports: imports::Imports,
     questionnaires: HashMap<String, questionnaire::Draft>,
     active_questionnaire: Option<String>,
     chat_selection: chat_selection::Shared,
@@ -352,8 +353,9 @@ pub enum Message {
     Sent(String, UserMessage, Result<(), String>),
     DraftSaved(String, Result<(), String>),
     Paste,
-    ClipboardText(Option<String>),
     AttachmentLoaded(Result<crate::attachments::Input, String>),
+    AttachmentPublished(Result<(), String>),
+    AttachmentSaveFailed(String, Option<crate::attachments::Input>),
     RemoveAttachment(usize),
     Deleted(String, Result<(), String>),
     Edited(Result<(), String>),
@@ -533,7 +535,7 @@ impl App {
             close_requested: false,
             submissions: HashMap::new(),
             attachments: vec![],
-            importing: 0,
+            imports: Default::default(),
             current_revision: 0,
             outputs: HashMap::new(),
             raw_tool_inputs: HashSet::new(),
@@ -1213,11 +1215,7 @@ impl App {
         } else {
             self.current_session.as_ref().map_or("", |s| &s.draft)
         });
-        let owner = if self.draft_session.is_some() {
-            Some(DraftKey::New)
-        } else {
-            self.selected.clone().map(DraftKey::Session)
-        };
+        let owner = self.draft_key();
         self.histories.switch(&self.editor, owner, &editor);
         self.editor = editor;
         self.attachments = if self.draft_session.is_some() {
@@ -1280,29 +1278,11 @@ impl App {
         self.current().is_some_and(|s| s.child.is_none())
             && !self.closing
             && !self.close_requested
-            && (!self.io_busy || self.importing > 0)
+            && !self.io_busy
             && self.modal.is_none()
             && self.active_questionnaire.is_none()
             && self.context_menu.is_none()
             && !self.footer_menu_open
-    }
-    fn import_file(&mut self, path: PathBuf) {
-        if !self.can_attach() {
-            return;
-        }
-        let root = self
-            .harness
-            .as_ref()
-            .expect("active harness")
-            .store
-            .root()
-            .join("attachments");
-        self.importing += 1;
-        self.io_busy = true;
-        self.tasks.push(
-            self.io
-                .run(move || Message::AttachmentLoaded(crate::attachments::file(&root, &path))),
-        );
     }
     fn select(&mut self, selection: Selection) {
         self.select_with_fork(selection, None);
@@ -1409,6 +1389,7 @@ impl App {
             self.transcript.total(),
         );
         let task = self.update_inner(message);
+        self.advance_imports();
         if self
             .fork_panel
             .as_ref()
@@ -1452,6 +1433,7 @@ impl App {
             self.footer_menu_open = false;
         }
         let close = if self.close_requested
+            && self.imports.is_empty()
             && !self.io_busy
             && self.pending_settings.is_none()
             && !self.closing
@@ -1563,49 +1545,14 @@ impl App {
             Message::Notification(crate::notifications::Message::Unavailable(error)) => {
                 self.notice = Some((error, std::time::Instant::now()));
             }
-            Message::Paste => {
-                if !self.can_attach() {
-                    return Task::none();
-                }
-                self.importing += 1;
-                self.io_busy = true;
-                return iced::clipboard::read().map(Message::ClipboardText);
-            }
-            Message::ClipboardText(text) => {
-                let root = self
-                    .harness
-                    .as_ref()
-                    .expect("active harness")
-                    .store
-                    .root()
-                    .join("attachments");
-                self.tasks.push(self.io.run(move || {
-                    Message::AttachmentLoaded(crate::attachments::clipboard(&root, text))
-                }));
-            }
-            Message::AttachmentLoaded(result) => {
-                self.importing -= 1;
-                self.io_busy = self.importing > 0;
-                match result {
-                    Ok(crate::attachments::Input::Image(media)) => {
-                        self.attachments.push(media);
-                        self.attachment_changed();
-                    }
-                    Ok(crate::attachments::Input::Text(text)) => {
-                        let before = spellcheck::BeforeEdit::replacement(&self.editor, text.len());
-                        self.histories.active.perform(
-                            &mut self.editor,
-                            text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(text))),
-                        );
-                        self.file_completion.edited(&self.editor);
-                        self.composer_edited(before, false);
-                    }
-                    Ok(crate::attachments::Input::Empty) => {}
-                    Err(error) => self.error = Some(format!("Could not attach image: {error}")),
-                }
+            Message::Paste => self.import(None),
+            Message::AttachmentLoaded(result) => self.import_loaded(result),
+            Message::AttachmentPublished(released) => self.import_published(released),
+            Message::AttachmentSaveFailed(error, pending) => {
+                self.import_save_failed(error, pending)
             }
             Message::RemoveAttachment(index) => {
-                if !self.can_attach() || self.io_busy {
+                if !self.can_attach() {
                     return Task::none();
                 }
                 self.attachments.remove(index);
@@ -1741,6 +1688,7 @@ impl App {
                         if let Some(notice) = notice {
                             self.notice = Some((notice, std::time::Instant::now()));
                         }
+                        self.imports.left_composer();
                         self.draft_session = None;
                         self.selected = None;
                         match selection {
@@ -1885,7 +1833,10 @@ impl App {
             },
             Message::Tick => self.tick += 1,
             Message::AgeTick => {}
-            Message::SaveDraft => self.save_draft(),
+            Message::SaveDraft => {
+                self.imports.retry_on_save = false;
+                self.save_draft();
+            }
             Message::Changed => {
                 let before = self.catalog_revision;
                 let changed = self.refresh();
@@ -2118,6 +2069,7 @@ impl App {
             | Message::DeletePreviousWord
             | Message::ComposerHistory(_) => {
                 if self.active_questionnaire.is_some()
+                    || self.imports.holds_paste_cursor()
                     || self.io_busy
                     || self.modal.is_some()
                     || self.context_menu.is_some()
@@ -2185,7 +2137,7 @@ impl App {
                     if message.is_empty() {
                         return Task::none();
                     }
-                    if self.io_busy {
+                    if self.io_busy || self.composer_importing() {
                         return Task::none();
                     }
                     let h = h.clone();
@@ -2770,7 +2722,7 @@ impl App {
                         draft.separate_edits();
                     }
                 }
-                iced::Event::Window(window::Event::FileDropped(path)) => self.import_file(path),
+                iced::Event::Window(window::Event::FileDropped(path)) => self.import(Some(path)),
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     if let Some((right, start, width)) = self.drag {
                         self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -3046,7 +2998,8 @@ impl App {
         if self.closing {
             return Task::none();
         }
-        if self.io_busy || self.pending_settings.is_some() {
+        self.imports.retry_on_save = false;
+        if self.io_busy || !self.imports.is_empty() || self.pending_settings.is_some() {
             self.close_requested = true;
             return Task::none();
         }
@@ -3102,7 +3055,7 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::NoticeTick));
         }
-        if self.draft_dirty || self.new_draft_dirty {
+        if self.draft_dirty || self.new_draft_dirty || self.imports.retry_on_save {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveDraft));
         }
@@ -4139,6 +4092,7 @@ impl App {
                     .style(secondary)
                     .on_press_maybe(
                         (!self.io_busy
+                            && !self.composer_importing()
                             && (!self.editor.is_empty() || !self.attachments.is_empty()))
                         .then_some(Message::Send)
                     ),
@@ -4250,7 +4204,8 @@ impl App {
     }
 
     fn file_completion_enabled(&self) -> bool {
-        !self.io_busy
+        !self.imports.holds_paste_cursor()
+            && !self.io_busy
             && !self.closing
             && !self.close_requested
             && self.modal.is_none()
@@ -6655,6 +6610,7 @@ fn window_events() -> Subscription<Message> {
 
 #[cfg(test)]
 mod tests {
+    mod import_probe;
     mod long_reply;
     use super::*;
     use orbit_core::models::{ASTRA, LUNA};
@@ -7019,8 +6975,7 @@ mod tests {
         )
         .await;
         // Deliver text through the native clipboard completion path.
-        app.importing = 1;
-        app.io_busy = true;
+        let _ = app.update(Message::Paste);
         dispatch(
             &mut app,
             Message::AttachmentLoaded(Ok(crate::attachments::Input::Text(
@@ -9360,8 +9315,7 @@ mod tests {
         for (change, keys) in ["@x ", "y", "z", "w"].into_iter().enumerate() {
             match change {
                 0 | 1 => {
-                    app.importing = 1;
-                    app.io_busy = true;
+                    let _ = app.update(Message::Paste);
                     dispatch(
                         &mut app,
                         Message::AttachmentLoaded(Ok(crate::attachments::Input::Image(
@@ -9776,8 +9730,7 @@ mod tests {
         dispatch(&mut app, Message::Create(root.clone())).await;
         assert_eq!(app.attachments, images);
         // Import completion follows the same path for clipboard image bytes.
-        app.importing = 1;
-        app.io_busy = true;
+        let _ = app.update(Message::Paste);
         dispatch(
             &mut app,
             Message::AttachmentLoaded(Ok(crate::attachments::Input::Image(images[0].clone()))),
@@ -9814,8 +9767,7 @@ mod tests {
         );
         assert!(h.store.load_new_draft().unwrap().images.is_empty());
         dispatch(&mut app, Message::Select(existing.clone())).await;
-        app.importing = 1;
-        app.io_busy = true;
+        let _ = app.update(Message::Paste);
         dispatch(
             &mut app,
             Message::AttachmentLoaded(Ok(crate::attachments::Input::Image(images[0].clone()))),
@@ -9855,21 +9807,32 @@ mod tests {
         let second = app.update(Message::Event(iced::Event::Window(
             window::Event::FileDropped(gif),
         )));
-        assert_eq!(app.importing, 2);
-        dispatch(&mut app, Message::Create(root.clone())).await;
+        // Autosave and navigation complete even with both results outstanding.
+        type_message(&mut app, "owner draft").await;
+        dispatch(&mut app, Message::SaveDraft).await;
+        let store = app.harness.as_ref().unwrap().store.clone();
+        let id = id.unwrap();
+        assert_eq!(store.load_session(&id).unwrap().draft, "owner draft");
         dispatch(&mut app, Message::Send).await;
-        assert_eq!(app.selected, id);
+        assert!(store.load_session(&id).unwrap().entries.is_empty());
+        let switch = app.update(Message::Create(root.clone()));
+        // Deliver the first result during the switch; the queued drop must follow it.
         drain(&mut app, first).await;
-        assert!(app.io_busy);
+        drain(&mut app, switch).await;
+        assert!(app.draft_session.is_some());
         drain(&mut app, second).await;
-        assert!(!app.io_busy);
+        assert!(app.attachments.is_empty());
         assert_eq!(
-            app.attachments
+            store
+                .load_session(&id)
+                .unwrap()
+                .draft_images
                 .iter()
                 .map(|m| m.mime.as_str())
                 .collect::<Vec<_>>(),
             ["image/png", "image/gif"]
         );
+        dispatch(&mut app, Message::Select(id)).await;
         let invalid = root.join("not-an-image.png");
         std::fs::write(&invalid, b"invalid image bytes").unwrap();
         dispatch(
@@ -9885,6 +9848,74 @@ mod tests {
         );
         assert_eq!(app.attachments.len(), 2);
         assert!(!app.io_busy);
+    }
+
+    #[tokio::test]
+    async fn offscreen_paste_retries_save_without_appending_twice_or_quitting_early() {
+        use crate::attachments::Input;
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root.clone()).await;
+        let id = app.selected.clone().unwrap();
+        let store = app.harness.as_ref().unwrap().store.clone();
+        type_message(&mut app, "original").await;
+        let _ = app.update(Message::Paste);
+        dispatch(&mut app, Message::Create(root)).await;
+        type_message(&mut app, "unrelated").await;
+        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+        sqlite::fail_writes(&db, "sessions", "offline draft fault");
+        let _ = app.quit();
+        assert!(app.close_requested);
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Ok(Input::Text(" + paste".into()))),
+        )
+        .await;
+        assert!(app.error.as_ref().unwrap().contains("offline draft fault"));
+        assert!(!app.closing && !app.close_requested);
+        assert_eq!(app.editor.text(), "unrelated");
+        assert_eq!(store.load_session(&id).unwrap().draft, "original");
+        // Loading the owner's in-memory draft must not turn a failed write into
+        // a successful no-op. The next autosave retries persistence, not append.
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        assert_eq!(app.editor.text(), "original + paste");
+        sqlite::allow_writes(&db, "sessions");
+        dispatch(&mut app, Message::SaveDraft).await;
+        assert_eq!(store.load_session(&id).unwrap().draft, "original + paste");
+        assert_eq!(store.load_new_draft().unwrap().message, "unrelated");
+    }
+
+    #[tokio::test]
+    async fn late_inputs_follow_the_shared_new_draft_but_not_a_deleted_session() {
+        use crate::attachments::Input;
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root.clone()).await;
+        let id = app.selected.clone().unwrap();
+        let store = app.harness.as_ref().unwrap().store.clone();
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        type_message(&mut app, "shared").await;
+        let _ = app.update(Message::Paste);
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Ok(Input::Text(" draft".into()))),
+        )
+        .await;
+        assert!(app.editor.is_empty());
+        let _ = app.update(Message::Paste);
+        dispatch(&mut app, Message::Delete(id.clone())).await;
+        dispatch(&mut app, Message::Confirm).await;
+        dispatch(&mut app, Message::Create(root)).await;
+        let _ = app.quit();
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Ok(Input::Text("wrong owner".into()))),
+        )
+        .await;
+        assert!(app.closing);
+        assert_eq!(store.load_new_draft().unwrap().message, "shared draft");
+        assert!(store.load_session(&id).is_err());
     }
 
     #[tokio::test]

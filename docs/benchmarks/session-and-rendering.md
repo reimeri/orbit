@@ -577,3 +577,30 @@ Reproduce inside `nix develop`:
 ```sh
 scripts/test-renderer.sh cargo test --locked --release -p orbit long_reply_layout_benchmark -- --ignored --nocapture --test-threads=1
 ```
+
+## Selection during image import
+
+Follow-up to finding 3 of the [whole-app audit](app-performance.html). The probe
+drops two distinct noisy 3840 × 2160 JPEGs into a stored session, starts the
+first import, and immediately selects another stored session. It drives the
+production UI update, media preparation and SQLite publication paths. Creating
+the JPEGs is not timed. Selection ends when the destination composer is ready,
+not when a frame is presented.
+
+Five local release runs on ext4, each in a fresh test process:
+
+| Elapsed time or process memory | Median | Range |
+| --- | ---: | ---: |
+| Selection request → destination composer ready | 4.7 ms | 4.1–5.4 ms |
+| First drop → first image prepared | 337 ms | 333–375 ms |
+| First drop → both images persisted in the originating draft | 654 ms | 646–689 ms |
+| Sampled peak process PSS (41 MiB baseline) | 174 MiB | 171–176 MiB |
+
+Selection finished before the first import in every run. PSS is sampled from
+`/proc/self/smaps_rollup` roughly every 5 ms; it includes the UI test harness
+and is not an allocation limit. This exercises file drops, not a live Wayland
+clipboard. Reproduce inside `nix develop`:
+
+```sh
+scripts/test-renderer.sh cargo test --locked --release -p orbit two_4k_import_probe -- --ignored --nocapture --test-threads=1
+```

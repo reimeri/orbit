@@ -86,6 +86,14 @@ For file locations, backup and format compatibility, see
 
 ## Background work
 
+- Composer imports queue file paths and prepare one image at a time on a blocking
+  worker, outside the session I/O queue. Decode limits and atomic media writes
+  are unchanged. A switch or autosave need not wait for PNG encoding. Results
+  publish in input order to the originating draft; Send waits for that draft’s
+  imports, and Quit waits for pending publication. Up to two clipboard offers
+  are admitted at once because, unlike file paths, they can already hold bytes.
+  See the [two-import selection probe](benchmarks/session-and-rendering.md#selection-during-image-import).
+
 - Shell output uses a bounded ring/deque instead of shifting its 1 MiB tail.
   Non-PTY pipes/waiters and PTY readiness use the shared Tokio executor; a PTY
   child still has a blocking wait thread. QuickJS cells and nested host calls
