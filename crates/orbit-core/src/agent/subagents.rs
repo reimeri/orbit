@@ -93,8 +93,39 @@ pub struct RunInfo {
     #[serde(default)]
     pub attention_acknowledged: bool,
 }
+// Use the same expressions in the indexes and their readers. Invalid JSON must
+// not prevent opening a database or preserving a damaged row for repair.
+pub(crate) const ORDINAL: &str =
+    "CASE WHEN json_valid(metadata) THEN metadata ->> '$.assignment' END";
+pub(crate) const PENDING: &str = "CASE WHEN json_valid(metadata) THEN
+    metadata ->> '$.status' = 'running' OR metadata ->> '$.notified' = 0 ELSE 1 END";
+pub(crate) const UNACKNOWLEDGED: &str = "CASE WHEN json_valid(metadata) THEN
+    metadata ->> '$.status' IN ('failed','interrupted')
+    AND coalesce(metadata ->> '$.attention_acknowledged', 0) = 0 END";
+pub(super) const RUN_COLUMNS: &str =
+    "rowid,id,parent,session,request,metadata,result IS NOT NULL AS has_result";
+
+#[derive(Clone, Copy)]
+pub enum RunKey<'a> {
+    Id(&'a str),
+    Request(&'a str),
+}
+
 impl RunInfo {
-    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self> {
+    fn stored(store: &Store, parent: &str, key: RunKey<'_>) -> Result<Option<Self>> {
+        let (column, value) = match key {
+            RunKey::Id(id) => ("id", id),
+            RunKey::Request(request) => ("request", request),
+        };
+        let db = store.db.lock().expect("database lock");
+        let mut query = db.prepare_cached(&format!(
+            "SELECT {RUN_COLUMNS} FROM subagent_runs WHERE parent=?1 AND {column}=?2"
+        ))?;
+        query.query([parent, value])?.next()?.map(RunInfo::from_row).transpose()
+            .with_context(|| format!("Could not read subagent assignment with {column} {value}; database row preserved. Repair it or restore a backup"))
+    }
+
+    pub(super) fn from_row(row: &rusqlite::Row<'_>) -> Result<Self> {
         let run: Self = serde_json::from_str(row.get_ref("metadata")?.as_str()?)?;
         anyhow::ensure!(
             run.run_id == row.get_ref("id")?.as_str()?
@@ -143,12 +174,22 @@ struct Family {
     latest: HashMap<String, String>,
     running: usize,
     attention: usize,
+    // An inclusive acknowledgement cutoff per child with outstanding failures. Metadata stays
+    // in SQLite until a user action acknowledges this captured range.
+    unacknowledged: HashMap<String, usize>,
     // Retain complete terminal text on storage failure, without rerunning work.
     unsaved: HashMap<String, (Option<String>, Option<String>)>,
 }
 
 impl Family {
     fn record(&mut self, run: RunInfo) {
+        if run.status.needs_attention() && !run.attention_acknowledged {
+            let through = self
+                .unacknowledged
+                .entry(run.session_id.clone())
+                .or_default();
+            *through = (*through).max(run.assignment);
+        }
         let previous = self.latest.get(&run.session_id).map(|id| &self.runs[id]);
         if previous.is_none_or(|old| old.assignment <= run.assignment) {
             let counts = |r: &RunInfo| {
@@ -161,8 +202,18 @@ impl Family {
             let (running, attention) = counts(&run);
             self.running = self.running - old_running + running;
             self.attention = self.attention - old_attention + attention;
-            self.latest
-                .insert(run.session_id.clone(), run.run_id.clone());
+            // A notified result is already durable; unsaved results are never notified.
+            if let Some(id) = self
+                .latest
+                .insert(run.session_id.clone(), run.run_id.clone())
+                && id != run.run_id
+                && self.runs[&id].notified
+            {
+                self.runs.remove(&id);
+            }
+        } else if run.notified {
+            self.runs.remove(&run.run_id);
+            return;
         }
         self.runs.insert(run.run_id.clone(), run);
     }
@@ -222,32 +273,103 @@ impl Coordinator {
         });
         runs
     }
+    fn resident(&self, parent: &str, key: RunKey<'_>) -> Option<&RunInfo> {
+        match key {
+            RunKey::Id(id) => self.run(parent, id),
+            RunKey::Request(request) => self.runs(parent).find(|run| run.request_id == request),
+        }
+    }
+
+    pub(super) fn attention_ranges(&self, parent: &str, session: &str) -> Vec<(String, usize)> {
+        self.families
+            .get(parent)
+            .into_iter()
+            .flat_map(|f| &f.unacknowledged)
+            .filter(|(child, _)| session == parent || *child == session)
+            .map(|(child, through)| (child.clone(), *through))
+            .collect()
+    }
+
+    pub(super) fn acknowledged(&mut self, parent: &str, ranges: &[(String, usize)]) {
+        if let Some(family) = self.families.get_mut(parent) {
+            for (child, through) in ranges {
+                if family
+                    .unacknowledged
+                    .get(child)
+                    .is_some_and(|high| high <= through)
+                {
+                    family.unacknowledged.remove(child);
+                }
+            }
+        }
+    }
+
     pub fn load(store: &Store) -> Result<(Self, Vec<String>)> {
         let mut coordinator = Self::default();
         let mut warnings = Vec::new();
         let db = store.db.lock().expect("database lock");
-        let mut query = db.prepare(
-            "SELECT rowid,id,parent,session,request,metadata,result IS NOT NULL AS has_result FROM subagent_runs",
-        )?;
-        let mut rows = query.query([])?;
-        while let Some(row) = rows.next()? {
-            let mut run = match RunInfo::from_row(row) {
-                Ok(run) => run,
+        let mut skipped = HashSet::new();
+        let mut decode = |row: &rusqlite::Row<'_>| -> Result<Option<RunInfo>> {
+            match RunInfo::from_row(row) {
+                Ok(run) => Ok(Some(run)),
                 Err(error) => {
-                    let id = match row.get::<_, String>("id") {
-                        Ok(id) => id,
-                        Err(_) => format!("at row {}", row.get::<_, i64>("rowid")?),
-                    };
-                    warnings.push(format!("Skipped subagent assignment {id}: {error}. Other assignments and conversations remain available. The database row was preserved; repair it or restore a backup and restart to recover this assignment."));
-                    continue;
+                    let rowid = row.get::<_, i64>("rowid")?;
+                    if skipped.insert(rowid) {
+                        let id = row
+                            .get::<_, String>("id")
+                            .unwrap_or_else(|_| format!("at row {rowid}"));
+                        warnings.push(format!("Skipped subagent assignment {id}: {error}. Other assignments and conversations remain available. The database row was preserved; repair it or restore a backup and restart to recover this assignment."));
+                    }
+                    Ok(None)
                 }
-            };
-            if run.status == RunStatus::Running {
-                run.status = RunStatus::Interrupted;
-                run.finished = Some(now());
-                db.execute("UPDATE subagent_runs SET metadata=?2,error=?3 WHERE id=?1", params![run.run_id, serde_json::to_string(&run)?, "Orbit exited before this assignment finished. Commands are not replayed; continue through the parent after inspecting the workspace."])?;
             }
-            coordinator.record(run);
+        };
+        // Walk the ordinal index only until the newest readable assignment.
+        let mut children = db.prepare(&format!(
+            "SELECT id, EXISTS(
+            SELECT 1 FROM subagent_runs WHERE session=sessions.id AND {UNACKNOWLEDGED})
+            FROM sessions WHERE EXISTS(SELECT 1 FROM subagent_runs WHERE session=sessions.id)"
+        ))?;
+        let mut latest = db.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM subagent_runs WHERE session=?1 ORDER BY {ORDINAL} DESC"
+        ))?;
+        let mut children = children.query([])?;
+        while let Some(child) = children.next()? {
+            let mut rows = latest.query([child.get_ref(0)?.as_str()?])?;
+            while let Some(row) = rows.next()? {
+                if let Some(run) = decode(row)? {
+                    let family = coordinator
+                        .families
+                        .entry(run.parent_id.clone())
+                        .or_default();
+                    if child.get::<_, bool>(1)? {
+                        family
+                            .unacknowledged
+                            .insert(run.session_id.clone(), run.assignment);
+                    }
+                    family.record(run);
+                    break;
+                }
+            }
+        }
+        let mut pending = db.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM subagent_runs WHERE {PENDING}"
+        ))?;
+        let mut rows = pending.query([])?;
+        let mut interrupted = Vec::new();
+        while let Some(row) = rows.next()? {
+            if let Some(mut run) = decode(row)? {
+                if run.status == RunStatus::Running {
+                    run.status = RunStatus::Interrupted;
+                    run.finished = Some(now());
+                    interrupted.push((run.run_id.clone(), serde_json::to_string(&run)?));
+                }
+                coordinator.record(run);
+            }
+        }
+        // Updating indexed metadata while traversing the pending index can skip rows.
+        for (id, metadata) in interrupted {
+            db.execute("UPDATE subagent_runs SET metadata=?2,error=?3 WHERE id=?1", params![id, metadata, "Orbit exited before this assignment finished. Commands are not replayed; continue through the parent after inspecting the workspace."])?;
         }
         Ok((coordinator, warnings))
     }
@@ -274,20 +396,19 @@ impl Harness {
             .status(parent)
             .running
     }
-    pub fn subagent_run(&self, parent: &str, run_id: &str) -> Option<RunInfo> {
+    /// Memory-only path for rendering current activity.
+    pub fn resident_subagent(&self, parent: &str, key: RunKey<'_>) -> Option<RunInfo> {
         self.subagents
             .lock()
             .expect("subagent lock")
-            .run(parent, run_id)
+            .resident(parent, key)
             .cloned()
     }
-    pub fn subagent_for_request(&self, parent: &str, request: &str) -> Option<RunInfo> {
-        self.subagents
-            .lock()
-            .expect("subagent lock")
-            .runs(parent)
-            .find(|r| r.request_id == request)
-            .cloned()
+    pub fn subagent_run(&self, parent: &str, key: RunKey<'_>) -> Result<Option<RunInfo>> {
+        match self.resident_subagent(parent, key) {
+            Some(run) => Ok(Some(run)),
+            None => RunInfo::stored(&self.store, parent, key),
+        }
     }
     pub(super) fn subagent_tool(
         self: &Arc<Self>,
@@ -322,8 +443,12 @@ impl Harness {
             bail!("Provide a complete, nonempty task briefing");
         }
         let mut coordinator = self.subagents.lock().expect("subagent lock");
-        if let Some(run) = coordinator.runs(parent).find(|r| r.request_id == request) {
+        let key = RunKey::Request(request);
+        if let Some(run) = coordinator.resident(parent, key) {
             return Ok(run.clone());
+        }
+        if let Some(run) = RunInfo::stored(&self.store, parent, key)? {
+            return Ok(run);
         }
         if cancel.is_cancelled() || coordinator.closing || coordinator.stopped.contains(parent) {
             bail!("Parent stopped; no child was started");
@@ -453,17 +578,14 @@ impl Harness {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(args.timeout_ms.unwrap_or(10_000).min(300_000));
             loop {
                 changes.borrow_and_update();
-                let runs = {
-                    let coordinator = self.subagents.lock().expect("subagent lock");
-                    args.run_ids.iter().map(|id| coordinator.run(parent, id).cloned().with_context(|| format!("Unknown run_id {id} for this parent"))).collect::<Result<Vec<_>>>()?
-                };
+                let runs = args.run_ids.iter().map(|id| self.subagent_run(parent, RunKey::Id(id))?.with_context(|| format!("Unknown run_id {id} for this parent"))).collect::<Result<Vec<_>>>()?;
                 if runs.iter().any(|r| r.status != RunStatus::Running) || tokio::time::Instant::now() >= deadline {
                     let mut results = vec![];
                     for run in runs {
                         let mut result = json!({"run_id":run.run_id,"session_id":run.session_id,"status":run.status});
                         if run.status != RunStatus::Running {
-                            let coordinator = self.subagents.lock().expect("subagent lock");
-                            let (text,error) = if let Some((text,error)) = coordinator.families.get(parent).and_then(|f| f.unsaved.get(&run.run_id)) { (text.clone(),error.clone()) } else {
+                            let unsaved = self.subagents.lock().expect("subagent lock").families.get(parent).and_then(|f| f.unsaved.get(&run.run_id)).cloned();
+                            let (text,error) = if let Some(result) = unsaved { result } else {
                                 self.store.db.lock().expect("database lock").query_row("SELECT result,error FROM subagent_runs WHERE id=?1",[&run.run_id],|r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?)))?
                             };
                             if run.status == RunStatus::Completed { result["final_response"] = json!(text.context("Completed assignment result is missing; database preserved. Restore it from a backup or repair it before retrying")?); }
@@ -1810,12 +1932,14 @@ await new Promise(r => setTimeout(r, 60000));"#,
         until(|| f.h.all().iter().all(|c| !c.is_executing())).await;
         f.h.acknowledge_attention(seen).unwrap();
         assert!(
-            f.h.subagent_run(&f.parent, &first.run_id)
+            f.h.subagent_run(&f.parent, RunKey::Id(&first.run_id))
+                .unwrap()
                 .unwrap()
                 .attention_acknowledged
         );
         assert!(
-            !f.h.subagent_run(&f.parent, &second.run_id)
+            !f.h.subagent_run(&f.parent, RunKey::Id(&second.run_id))
+                .unwrap()
                 .unwrap()
                 .attention_acknowledged
         );
@@ -1916,6 +2040,142 @@ await new Promise(r => setTimeout(r, 60000));"#,
     }
 
     #[test]
+    fn restart_keeps_history_cold_but_addressable_and_acknowledgeable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let parent = Session::new(dir.path().into(), &Settings::default());
+        let mut child = Session::new(dir.path().into(), &Settings::default());
+        child.child = Some(Child {
+            parent_id: parent.id.clone(),
+            profile: Profile::Review,
+        });
+        for session in [&parent, &child] {
+            store.save_session(session).unwrap();
+        }
+        // Insert in reverse order: neither rowid nor timestamps identify the latest.
+        // The newest row lacks its required result; the previous readable one wins.
+        for n in (1..=32).rev() {
+            let status = match n {
+                2 => RunStatus::Running, // recovery is required even though superseded
+                3 | 4 => RunStatus::Failed,
+                _ => RunStatus::Completed,
+            };
+            let run = RunInfo {
+                run_id: format!("run-{n}"),
+                session_id: child.id.clone(),
+                parent_id: parent.id.clone(),
+                request_id: format!("request-{n}"),
+                profile: Profile::Review,
+                configuration: None,
+                title: format!("Task {n}"),
+                status,
+                assignment: n,
+                started: 0,
+                finished: (n != 2).then_some(1),
+                notified: n != 2,
+                attention_acknowledged: false,
+            };
+            store
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO subagent_runs
+                (id,parent,session,request,metadata,result) VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![
+                        run.run_id,
+                        parent.id,
+                        child.id,
+                        run.request_id,
+                        serde_json::to_string(&run).unwrap(),
+                        (status == RunStatus::Completed && n != 32).then(|| format!("Finding {n}"))
+                    ],
+                )
+                .unwrap();
+        }
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE subagent_runs SET request='damaged' WHERE id='run-4'",
+                [],
+            )
+            .unwrap();
+        let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        assert!(h.startup_warnings.iter().any(|w| w.contains("run-32")));
+        assert_eq!(h.subagent_runs(&parent.id)[0].run_id, "run-31");
+        assert_eq!(h.child_statuses()[&parent.id], ChildStatus::default());
+        let lookup = |key| h.subagent_run(&parent.id, key).unwrap().unwrap();
+        assert_eq!(lookup(RunKey::Id("run-2")).status, RunStatus::Interrupted);
+        assert!(
+            h.resident_subagent(&parent.id, RunKey::Id("run-3"))
+                .is_none()
+        );
+        let results = h
+            .wait_subagent(
+                &parent.id,
+                Wait {
+                    run_ids: vec!["run-1".into(), "run-2".into()],
+                    timeout_ms: Some(0),
+                    max_output_tokens: None,
+                },
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let results: Value = serde_json::from_str(&results).unwrap();
+        assert_eq!(results["runs"][0]["final_response"], "Finding 1");
+        assert_eq!(results["runs"][1]["status"], "interrupted");
+        let replay = h
+            .subagent_tool(
+                &parent.id,
+                "spawn_subagent",
+                r#"{"type":"review","task":"Do not run twice"}"#,
+                "request-1",
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<RunInfo>(&replay).unwrap().run_id,
+            "run-1"
+        );
+        for key in [RunKey::Id("run-1"), RunKey::Request("request-1")] {
+            assert!(h.subagent_run(&child.id, key).unwrap().is_none());
+            assert!(h.resident_subagent(&parent.id, key).is_none());
+        }
+        let seen = h.attention(&child.id).unwrap();
+        // A failure from a subsequent assignment of the *same* child commits
+        // while that acknowledgement is queued on the UI storage worker.
+        let later = RunInfo {
+            run_id: "later".into(),
+            request_id: "later".into(),
+            assignment: 33,
+            status: RunStatus::Failed,
+            ..lookup(RunKey::Id("run-31"))
+        };
+        store
+            .save_session_transaction(Some(&child), &child, false, Some(&later))
+            .unwrap();
+        h.subagents.lock().unwrap().record(later);
+        let error = h.acknowledge_attention(seen).unwrap_err();
+        assert!(error.to_string().contains("identity mismatch"));
+        assert!(lookup(RunKey::Id("run-3")).attention_acknowledged);
+        assert!(!lookup(RunKey::Id("later")).attention_acknowledged);
+        assert!(h.attention(&parent.id).is_some());
+        assert!(h.child_statuses()[&parent.id].needs_attention);
+        h.flush().unwrap();
+        h.flush().unwrap();
+        let notices = store.load_session(&parent.id).unwrap().subagent_notices;
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("run-2"));
+        assert!(lookup(RunKey::Id("run-2")).notified);
+        assert!(
+            h.resident_subagent(&parent.id, RunKey::Id("run-2"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn restart_skips_only_malformed_assignments_and_preserves_their_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
@@ -1979,7 +2239,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
         assert_eq!(h.startup_warnings.len(), 3);
         for (_, run) in &children[..3] {
             assert!(h.startup_warnings.iter().any(|w| w.contains(&run.run_id)));
-            assert!(h.subagent_run(&parent.id, &run.run_id).is_none());
+            assert!(h.subagent_run(&parent.id, RunKey::Id(&run.run_id)).is_err());
         }
         let runs = h.subagent_runs(&parent.id);
         assert_eq!(runs.len(), 1);

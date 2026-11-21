@@ -49,6 +49,41 @@ Storage timings are particularly variable: an earlier run measured approximately
 cache state remain relevant. Do not treat the table as a cross-machine guarantee
 or infer application frame rates from these microbenchmarks.
 
+## Historical subagent assignments
+
+Follow-up to [whole-app audit finding 4](app-performance.html). Two release builds
+(before: `9f86c9d`; after: indexed restoration) launched against copies of the
+same audit databases on ext4. Both have 10,000 main sessions, 500 children and
+one large unselected transcript. Only the history case has the 50,000 runs:
+all notices delivered, half the runs failed and not acknowledged.
+
+| Renderer / build | Sessions only (ms) | With history (ms) | Extra ms | Sessions only (MiB) | With history (MiB) | Extra MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| RADV / Weston GL · before | 110.8 | 197.8 | 87.0 | 50.8 | 81.4 | 30.6 |
+| RADV / Weston GL · after | 108.9 | 122.8 | 13.9 | 49.2 | 55.4 | 6.1 |
+| Lavapipe / Weston Pixman · before | 300.7 | 549.2 | 248.5 | 129.6 | 180.3 | 50.7 |
+| Lavapipe / Weston Pixman · after | 300.4 | 485.3 | 185.0 | 129.9 | 156.1 | 26.3 |
+
+The [launch probe](app-performance/launch.py) measures process start to the first
+buffer-backed Wayland surface commit and samples process PSS after six seconds.
+The two cases report medians of three fresh processes after a warm-up, with
+fixture order rotated; “extra” is the difference of those medians. These are
+whole-window costs: the sessions-only control has no child assignment statuses.
+
+To separate older history from latest status, a second run compared all 50,000
+assignments to the same fixture with only assignment 100 of each child retained
+(500 runs; database repacked). With the same latest statuses visible, adding
+the 49,500 older rows took **4.3 ms** on RADV (118.5 → 122.8 ms) and **3.6 ms**
+on Lavapipe (476.7 → 480.3 ms). Median PSS differed by less than **0.1 MiB** on
+both paths. Most of the remaining gap versus zero runs is thus already present
+with just the latest assignments.
+
+Opening a pre-index database builds the indexes once; **that launch is not
+represented by the medians**. The first launch on the existing history fixture,
+including index creation and other warm-up costs, took 394 ms on RADV and
+651 ms on Lavapipe. The `performance` example also checks that an old run
+is not resident and can be resolved by ID in the 50,000-run library.
+
 ## Text-layout cache reuse
 
 A local isolated measurement used a real ~33 KiB tool result, a 700px-wide tool

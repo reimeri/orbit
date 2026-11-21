@@ -4,7 +4,7 @@ use anyhow::Result;
 use orbit_core::{
     agent::{
         Harness,
-        subagents::{Child, Profile, RunInfo, RunStatus},
+        subagents::{Child, Profile, RunInfo, RunKey, RunStatus},
     },
     store::{Entry, EntryKind, Session, SessionSummary, Settings, Store, atomic_write},
 };
@@ -177,6 +177,13 @@ fn main() -> Result<()> {
     }
     let harness = Harness::new(store.clone(), store.load()?.1)?;
     assert!(harness.all().is_empty());
+    let key = RunKey::Id("run-0-1");
+    assert!(harness.resident_subagent(&parents[0], key).is_none());
+    let old = harness
+        .subagent_run(&parents[0], key)?
+        .expect("first fixture assignment");
+    assert_eq!(old.status, RunStatus::Completed);
+    assert_eq!(old.request_id, "request-1");
     timed(
         "Child status snapshot + 10,000 sidebar lookups (50,000 assignments)",
         200,

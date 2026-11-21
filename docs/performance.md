@@ -20,6 +20,13 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   released; runtime stubs retain unread cell/process results and JS store values
   so changing sessions does not invalidate runtime IDs. Attention status is
   persistent metadata, independent of loaded conversation objects.
+- Subagent startup restores the newest readable assignment per child and any
+  work that needs interruption repair or notice delivery. Older failures remain
+  acknowledgeable without retaining their metadata: selection captures a cutoff
+  per child so a later failure stays unread. Historical waits and retried spawn
+  requests use parent-scoped SQLite lookups. The transcript fetches visible
+  historical assignment details on the storage worker, not while drawing.
+  See the [launch comparison](benchmarks/session-and-rendering.md#historical-subagent-assignments).
 - Indexed, structurally shared histories make snapshots cheap and edits by ID
   logarithmic/hashed rather than full-transcript searches. Tree differences skip
   unchanged shared subtrees. Provider input is shared, not deeply copied into each

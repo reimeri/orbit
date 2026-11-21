@@ -6,7 +6,7 @@ use super::*;
 pub struct Attention {
     conversation: Option<(Arc<Conversation>, u64)>,
     parent: String,
-    runs: Vec<String>,
+    ranges: Vec<(String, usize)>,
 }
 
 impl Harness {
@@ -30,57 +30,75 @@ impl Harness {
             .and_then(|s| s.child.as_ref())
             .map(|c| c.parent_id.clone())
             .unwrap_or_else(|| session.to_owned());
-        let runs: Vec<_> = coordinator
-            .runs(&parent)
-            .filter(|r| {
-                (parent == session || r.session_id == session)
-                    && r.status.needs_attention()
-                    && !r.attention_acknowledged
-            })
-            .map(|r| r.run_id.clone())
-            .collect();
-        (conversation.is_some() || !runs.is_empty()).then_some(Attention {
+        let ranges = coordinator.attention_ranges(&parent, session);
+        (conversation.is_some() || !ranges.is_empty()).then_some(Attention {
             conversation,
             parent,
-            runs,
+            ranges,
         })
     }
 
     /// Called on the serialized storage worker, never the UI thread.
     pub fn acknowledge_attention(&self, attention: Attention) -> Result<()> {
+        use subagents::{ORDINAL, RUN_COLUMNS, RunInfo, UNACKNOWLEDGED};
         let mut coordinator = self.subagents.lock().expect("subagent lock");
-        if !attention.runs.is_empty() {
-            // Persist retained terminal results first: an acknowledgement must never
-            // replace unsaved result metadata or be undone by its subsequent retry.
+        let mut skipped = Vec::new();
+        if !attention.ranges.is_empty() {
+            // Unsaved terminal results must become durable before this query.
             self.retry_results(&mut coordinator, &attention.parent)?;
-            let runs: Vec<_> = attention
-                .runs
-                .iter()
-                .filter_map(|id| coordinator.run(&attention.parent, id))
-                .filter(|r| !r.attention_acknowledged)
-                .map(|r| {
-                    let mut r = r.clone();
-                    r.attention_acknowledged = true;
-                    r
-                })
-                .collect();
+            let mut resident = Vec::new();
             {
                 let mut db = self.store.db.lock().expect("database lock");
-                let transaction = db.transaction()?;
-                for run in &runs {
-                    transaction.execute(
-                        "UPDATE subagent_runs SET metadata=?2 WHERE id=?1",
-                        rusqlite::params![run.run_id, serde_json::to_string(run)?],
-                    )?;
+                let tx = db.transaction()?;
+                let mut query = tx.prepare(&format!(
+                    "SELECT {RUN_COLUMNS} FROM subagent_runs
+                    WHERE parent=?1 AND session=?2 AND {UNACKNOWLEDGED} AND {ORDINAL} <= ?3"
+                ))?;
+                for (child, through) in &attention.ranges {
+                    let mut rows = query.query(rusqlite::params![
+                        attention.parent,
+                        child,
+                        i64::try_from(*through)?
+                    ])?;
+                    // Validate before touching metadata. Keep only rowids for cold
+                    // history, and don't mutate the index while walking its cursor.
+                    let mut rowids = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        let rowid: i64 = row.get("rowid")?;
+                        match RunInfo::from_row(row) {
+                            Ok(mut run) => {
+                                rowids.push(rowid);
+                                if coordinator.run(&attention.parent, &run.run_id).is_some() {
+                                    run.attention_acknowledged = true;
+                                    resident.push(run);
+                                }
+                            }
+                            Err(error) => skipped.push(format!("row {rowid}: {error}")),
+                        }
+                    }
+                    let mut update = tx.prepare_cached("UPDATE subagent_runs SET metadata=json_set(metadata,'$.attention_acknowledged',json('true')) WHERE rowid=?1")?;
+                    for rowid in rowids {
+                        update.execute([rowid])?;
+                    }
                 }
-                transaction.commit()?;
+                drop(query);
+                tx.commit()?;
             }
-            for run in runs {
+            for run in resident {
                 coordinator.record(run);
             }
+            coordinator.acknowledged(&attention.parent, &attention.ranges);
             self.catalog_revision.fetch_add(1, Ordering::Release);
             self.changes.send_replace(());
         }
+        let result = if skipped.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Readable assignments acknowledged. Skipped damaged subagent assignments ({}); rows preserved. Repair them or restore a backup and restart.",
+                skipped.join("; ")
+            ))
+        };
         if let Some((c, generation)) = attention.conversation {
             let mut saved = c.persisted.lock().expect("persistence lock");
             {
@@ -91,7 +109,7 @@ impl Harness {
                     || !c.loaded.load(Ordering::Acquire)
                     || c.deleted.load(Ordering::Acquire)
                 {
-                    return Ok(());
+                    return result;
                 }
                 state.needs_attention = false;
                 state.interrupted = false;
@@ -102,7 +120,7 @@ impl Harness {
             // As with edits, retain unsaved changes in memory if storage fails.
             c.save_locked(&mut saved)?;
         }
-        Ok(())
+        result
     }
 }
 

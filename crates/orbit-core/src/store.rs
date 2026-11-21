@@ -705,6 +705,12 @@ impl Store {
             CREATE INDEX IF NOT EXISTS fork_media_owner ON fork_media(owner);
             CREATE TABLE IF NOT EXISTS fork_points (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, state TEXT NOT NULL, entries TEXT NOT NULL, input TEXT NOT NULL, PRIMARY KEY(session,position));
             CREATE TABLE IF NOT EXISTS context (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));")?;
+        use crate::agent::subagents::{ORDINAL, PENDING, UNACKNOWLEDGED};
+        db.execute_batch(&format!("
+            CREATE INDEX IF NOT EXISTS subagent_child_assignment ON subagent_runs(session, {ORDINAL} DESC);
+            CREATE INDEX IF NOT EXISTS subagent_pending ON subagent_runs(session) WHERE {PENDING};
+            CREATE INDEX IF NOT EXISTS subagent_attention ON subagent_runs(session, {ORDINAL}) WHERE {UNACKNOWLEDGED};
+        "))?;
         Ok(Self {
             root,
             db: Arc::new(Mutex::new(db)),

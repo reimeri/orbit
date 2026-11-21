@@ -30,7 +30,7 @@ use orbit_core::CancellationToken;
 use orbit_core::{
     agent::{
         ConversationStatus, FilingAction, FilingOutcome, Harness,
-        subagents::{ChildStatus, Profile},
+        subagents::{ChildStatus, Profile, RunInfo, RunKey},
     },
     auth::Login,
     models::{MODELS, model},
@@ -186,6 +186,16 @@ impl Markdown {
     }
 }
 
+fn transcript_run_key(entry: &Entry) -> Option<RunKey<'_>> {
+    if let Some(id) = activity::subagent_notice(entry) {
+        Some(RunKey::Id(id))
+    } else if matches!(&entry.kind, EntryKind::Tool { name, .. } if name == "spawn_subagent") {
+        Some(RunKey::Request(&entry.id))
+    } else {
+        None
+    }
+}
+
 pub struct App {
     harness: Option<Arc<Harness>>,
     catalog: Catalog,
@@ -214,6 +224,8 @@ pub struct App {
     submissions: HashMap<String, (UserMessage, String)>,
     current_revision: u64,
     outputs: HashMap<String, tool_output::Output>,
+    historical_runs: HashMap<String, Option<RunInfo>>,
+    historical_read_pending: bool,
     raw_tool_inputs: HashSet<String>,
     recent_previews: crate::recent_previews::RecentPreviews,
     image_view: crate::image_view::Viewer,
@@ -433,6 +445,7 @@ pub enum Message {
     Rename(String),
     Delete(String),
     ToggleEntry(String),
+    HistoricalRun(String, String, Result<Option<RunInfo>, String>),
     ToggleToolRaw(String),
     ToggleGroup(String),
     ToggleExecution(String),
@@ -539,6 +552,8 @@ impl App {
             imports: Default::default(),
             current_revision: 0,
             outputs: HashMap::new(),
+            historical_runs: HashMap::new(),
+            historical_read_pending: false,
             raw_tool_inputs: HashSet::new(),
             recent_previews: Default::default(),
             image_view: Default::default(),
@@ -745,6 +760,7 @@ impl App {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
             }
             self.outputs.clear();
+            self.historical_runs.clear();
             self.markdown.clear();
             self.markdown_heights.clear();
             self.chat_selection.borrow_mut().clear();
@@ -763,6 +779,7 @@ impl App {
         let snapshot = conversation.snapshot();
         if previous.is_none() {
             self.outputs.clear();
+            self.historical_runs.clear();
             self.markdown.clear();
             self.markdown_heights.clear();
             self.chat_selection.borrow_mut().clear();
@@ -941,8 +958,34 @@ impl App {
             }
             self.outputs
                 .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
+            self.historical_runs
+                .retain(|id, _| ids.contains(id.as_str()));
             for &(position, index) in &visible {
                 let entry = &session.entries[index];
+                if !self.historical_read_pending
+                    && (matches!(entry.kind, EntryKind::Notice)
+                        || (self.expanded.contains(&entry.id)
+                            && matches!(entry.kind, EntryKind::Tool { complete: true, .. })))
+                    && let Some(key) = transcript_run_key(entry)
+                    && let Some(h) = &self.harness
+                    && !self.historical_runs.contains_key(&entry.id)
+                    && h.resident_subagent(&session.id, key).is_none()
+                {
+                    // One lookup at a time: scrolling cannot queue obsolete reads ahead of saves.
+                    self.historical_read_pending = true;
+                    let parent = session.id.clone();
+                    let entry = session.entries.shared(index);
+                    let h = h.clone();
+                    self.tasks.push(self.io.run(move || {
+                        let result = h
+                            .subagent_run(
+                                &parent,
+                                transcript_run_key(&entry).expect("assignment row"),
+                            )
+                            .map_err(|e| format!("{e:#}"));
+                        Message::HistoricalRun(parent, entry.id.clone(), result)
+                    }));
+                }
                 if let EntryKind::User { images, files, .. } = &entry.kind {
                     visible_media.extend(images.iter().cloned());
                     visible_media.extend(files.iter().filter_map(|file| file.image.clone()));
@@ -2407,6 +2450,22 @@ impl App {
                     format!("tool-output-{id}"),
                     scrollable::RelativeOffset::START,
                 );
+            }
+            Message::HistoricalRun(parent, id, result) => {
+                self.historical_read_pending = false;
+                if self.current().is_some_and(|s| s.id == parent) {
+                    let run = match result {
+                        Ok(run) => run,
+                        Err(error) => {
+                            self.error = Some(error);
+                            None
+                        }
+                    };
+                    self.historical_runs.insert(id, run);
+                    self.view_epoch = self.view_epoch.wrapping_add(1);
+                }
+                // Re-evaluate the current viewport, not the viewport that requested the read.
+                self.prepare_visible();
             }
             Message::ToggleEntry(id) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -4364,15 +4423,16 @@ impl App {
             }
         }
     }
-    fn subagent_notice_run(&self, entry: &Entry) -> Option<orbit_core::agent::subagents::RunInfo> {
+    fn transcript_run(&self, entry: &Entry) -> Option<RunInfo> {
         self.harness
             .as_ref()?
-            .subagent_run(&self.current()?.id, activity::subagent_notice(entry)?)
+            .resident_subagent(&self.current()?.id, transcript_run_key(entry)?)
+            .or_else(|| self.historical_runs.get(&entry.id)?.clone())
     }
     fn subagent_notice_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
         let colors = &self.preset().colors;
         let open = self.expanded.contains(&entry.id);
-        let run = self.subagent_notice_run(entry);
+        let run = self.transcript_run(entry);
         let (label, color) = match &run {
             Some(run) => (
                 format!(
@@ -4493,8 +4553,7 @@ impl App {
                 let mut details = column![].spacing(8);
                 if open
                     && name == "spawn_subagent"
-                    && let (Some(h), Some(session)) = (&self.harness, self.current())
-                    && let Some(run) = h.subagent_for_request(&session.id, &entry.id)
+                    && let Some(run) = self.transcript_run(entry)
                 {
                     details = details.push(
                         theme::button(
@@ -10128,6 +10187,11 @@ Then implement the fix.";
         let h = app.harness.as_ref().unwrap().clone();
         h.edit(&parent, |s| {
             s.title = "Parent task".into();
+            s.entries.push(Entry {
+                id: "subagent-earlier".into(),
+                kind: EntryKind::Notice,
+                text: "Earlier completion".into(),
+            });
             for n in 0..60 {
                 s.entries.push(Entry::new(
                     EntryKind::Assistant,
@@ -10178,25 +10242,35 @@ Then implement the fix.";
             profile: Profile::Explore,
             title: child.title.clone(),
             status: RunStatus::Completed,
-            assignment: 1,
+            assignment: 2,
             started: finished - 17,
             finished: Some(finished),
             notified: true,
             attention_acknowledged: false,
         };
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
-        db.execute(
-            "INSERT INTO subagent_runs (id,parent,session,request,metadata,result,error) VALUES (?1,?2,?3,?4,?5,?6,NULL)",
-            rusqlite::params![
-                run.run_id,
-                parent,
-                child_id,
-                run.request_id,
-                serde_json::to_string(&run).unwrap(),
-                "Final inspection result"
-            ],
-        )
-        .unwrap();
+        let earlier = RunInfo {
+            assignment: 1,
+            run_id: "earlier".into(),
+            request_id: "earlier-spawn".into(),
+            title: "Inspect retry".into(),
+            ..run.clone()
+        };
+        for run in [earlier, run] {
+            db.execute(
+                "INSERT INTO subagent_runs (id,parent,session,request,metadata,result)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    run.run_id,
+                    parent,
+                    child_id,
+                    run.request_id,
+                    serde_json::to_string(&run).unwrap(),
+                    "Final inspection result"
+                ],
+            )
+            .unwrap();
+        }
         app.harness = Some(Harness::new(h.store.clone(), h.store.load().unwrap().1).unwrap());
         app.catalog_revision = u64::MAX;
         dispatch(&mut app, Message::ToggleAgents).await;
@@ -10383,6 +10457,12 @@ Then implement the fix.";
         assert_eq!(app.editor.text(), "Keep this unsent parent draft λ");
         assert!(!app.auto_scroll);
         assert_eq!(app.transcript.offset, parent_offset);
+        // Expanding a historical notice resolves that assignment, not its successor.
+        let epoch = app.view_epoch;
+        dispatch(&mut app, Message::Scroll(epoch, 0., 300., false)).await;
+        dispatch(&mut app, Message::ToggleEntry("subagent-earlier".into())).await;
+        let labels = chat_text(&app);
+        assert!(labels.contains("Inspect retry") && labels.contains("Open subagent"));
         dispatch(&mut app, Message::ToggleSettings).await;
         assert!(app.settings_open && !app.agents_open);
         dispatch(&mut app, Message::ToggleAgents).await;
