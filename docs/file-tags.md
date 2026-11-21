@@ -75,7 +75,8 @@ and strips internal `orbit_file` records from wire input.
 - A snapshot contains one byte arena, compact entry offsets, and full-path and
   basename sort orders. ASCII-insensitive matching preserves all original path bytes.
 - Ranking is exact basename, basename prefix, full-path prefix, then substring,
-  with deterministic path ties. Binary lookup handles prefixes. Prefix results
+  with shallower paths first for equal basenames and alphabetical path order
+  breaking same-depth ties. Binary lookup handles prefixes. Prefix results
   are published **before** substring backfill, so a single good match need not
   wait for a million-file miss scan. No fuzzy/trigram database is needed.
 - Discovery, cache loading, sorting and search check cancellation. Sorting uses

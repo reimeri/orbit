@@ -159,10 +159,12 @@ impl Snapshot {
         )?;
         paths.dedup_by(|a, b| self.path(*a) == self.path(*b));
         let mut names = paths.clone();
+        let depth = |id| memchr::memchr_iter(b'/', self.path(id)).count();
         sort_ids(
             &mut names,
             |a, b| {
                 fold_cmp(self.name(*a), self.name(*b))
+                    .then_with(|| depth(*a).cmp(&depth(*b)))
                     .then_with(|| fold_cmp(self.path(*a), self.path(*b)))
                     .then_with(|| self.path(*a).cmp(self.path(*b)))
             },
@@ -1297,6 +1299,25 @@ mod tests {
             b"raw\xff"
         );
     }
+    #[test]
+    fn equal_filenames_rank_by_depth_before_the_result_limit() {
+        let mut index = Snapshot::new();
+        for i in 0..RESULTS {
+            index.append(format!("a/{i}/README.md").as_bytes()).unwrap();
+        }
+        for path in ["z/README.md", "README.md", "benchmarks/readme.md"] {
+            index.append(path.as_bytes()).unwrap();
+        }
+        let index = index.finish(&|| false).unwrap();
+        for query in ["README.md", "read"] {
+            let hits = index.search(query.as_bytes(), || false, |_| {}).unwrap();
+            assert_eq!(
+                &hits[..3],
+                &["@README.md", "@benchmarks/readme.md", "@z/README.md"]
+            );
+        }
+    }
+
     #[test]
     fn prefix_results_are_published_before_cancellable_substring_backfill() {
         let mut snapshot = Snapshot::new();
