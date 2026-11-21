@@ -3894,7 +3894,7 @@ impl App {
                 // Equal side widths keep the title at the actual header center.
                 let side_width = if compact { 60. } else { 170. };
                 row![
-                    container(icon_tip(back, "Back to main agent")).width(side_width),
+                    container(back).width(side_width),
                     title,
                     container(row![status, stop].spacing(4).align_y(iced::Center))
                         .align_right(side_width),
