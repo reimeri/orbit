@@ -13,17 +13,23 @@ clipboard content still pastes normally. Attachments are unavailable in read-onl
 child conversations, questionnaires and while a modal is open.
 
 Thumbnails appear in a separate, left-aligned, horizontally scrollable row above
-the text field. Hover a thumbnail to reveal **×**; click its image to open the
-existing full-size viewer (including GIF playback). Removing a thumbnail only
-removes it from the draft, never the original file. Multiple images and image-only
-messages are accepted. Images sent while the agent runs are queued as steering,
-just like text. Sent messages retain clickable previews.
+the text field. Each dropped file gets a tile immediately. An image paste gets
+one as soon as Wayland confirms a supported image format, without waiting for
+the clipboard bytes or decode; text pastes never show a tile. The active tile
+shows only a spinner; later items show **Queued**. Each tile becomes
+a thumbnail in place, or disappears if the import fails. Hover a thumbnail to
+reveal **×**; click its image to open the existing full-size viewer (including
+GIF playback). Removing a thumbnail removes it from the draft, never the original
+file. Multiple images and image-only messages are accepted. Images sent while the
+agent runs are queued as steering, just like text. Sent messages retain clickable
+previews.
 
 Unsent images survive session/project switches and restarts, and remain attached
-when saving or sending fails. In-flight imports finish before navigation, sending
-or shutdown, preventing images from arriving in the wrong session. Images are
-immutable private snapshots under the Orbit configuration directory's `attachments/`
-folder; moving or deleting the source file does not break a draft or sent message.
+when saving or sending fails. You can switch sessions during an import; its tile
+and result belong to the original draft. Sending that draft and shutting down
+wait for pending imports. Images are immutable private snapshots under the Orbit
+configuration directory's `attachments/` folder; moving or deleting the source
+file does not break a draft or sent message.
 Snapshots are content-addressed and shared across drafts/history. They are retained
 rather than removed on draft removal or session deletion, so shared references
 cannot be broken; automatic orphan collection is not implemented.

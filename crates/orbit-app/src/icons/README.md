@@ -9,6 +9,8 @@ Only the icons used by Orbit are bundled and embedded at compile time; there are
 no runtime downloads. `star-filled.svg` is the upstream `star.svg` with
 `fill="currentColor"` for the selected favorite state. `book-open.svg` and `map.svg`
 use a lighter stroke to match the model glyphs. All other SVGs are unmodified.
+The animated `loader-circle` uses the upstream arc proportions and round caps,
+drawn as antialiased geometry so rotation does not resample a small bitmap.
 
 Use the shared `crate::icons::Icon` component so SVGs inherit the enclosing
 control's foreground color, including hover and disabled states. Standard inline

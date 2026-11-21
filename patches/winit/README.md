@@ -10,7 +10,9 @@ only exposes text. Orbit's local patch registers an ordinary data device per sea
 negotiates Copy for local `text/uri-list` drops, and emits the existing
 `WindowEvent::DroppedFile`. A small `platform::wayland::request_image_clipboard`
 API lets Orbit's worker request PNG/JPEG/WebP/GIF bytes from the focused client's
-selection, without unsafe/raw handles or clipboard-manager protocols. It neither
+selection, without unsafe/raw handles or clipboard-manager protocols. A nonblocking
+callback signals a supported image offer before opening its transfer pipe, so the
+composer can show a pending tile without flashing one for a text paste. It neither
 owns/replaces the clipboard nor moves/deletes source files. No X11 features are
 enabled.
 

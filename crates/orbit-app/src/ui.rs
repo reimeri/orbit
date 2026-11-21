@@ -353,6 +353,7 @@ pub enum Message {
     Sent(String, UserMessage, Result<(), String>),
     DraftSaved(String, Result<(), String>),
     Paste,
+    ClipboardImageOffered(u64),
     AttachmentLoaded(Result<crate::attachments::Input, String>),
     AttachmentPublished(Result<(), String>),
     AttachmentSaveFailed(String, Option<crate::attachments::Input>),
@@ -1546,6 +1547,7 @@ impl App {
                 self.notice = Some((error, std::time::Instant::now()));
             }
             Message::Paste => self.import(None),
+            Message::ClipboardImageOffered(paste) => self.imports.image_offered(paste),
             Message::AttachmentLoaded(result) => self.import_loaded(result),
             Message::AttachmentPublished(released) => self.import_published(released),
             Message::AttachmentSaveFailed(error, pending) => {
@@ -4056,12 +4058,14 @@ impl App {
         // Keep the editor in a fixed sibling slot as attachments and completions come and go.
         let mut above_editor = column![];
         let gap = 10;
-        if !self.attachments.is_empty() {
+        let mut pending = self.imports.tiles(self.draft_key()).peekable();
+        if !self.attachments.is_empty() || pending.peek().is_some() {
             let images = row(self
                 .attachments
                 .iter()
                 .enumerate()
-                .map(|(index, media)| self.image_view.attachment(media, index)))
+                .map(|(index, media)| self.image_view.attachment(media, index))
+                .chain(pending.map(crate::image_view::PendingAttachment::view)))
             .spacing(8);
             above_editor = above_editor
                 .push(crate::scrollbar::horizontal(images))
@@ -6650,7 +6654,7 @@ mod tests {
         }
     }
 
-    fn app() -> App {
+    pub(super) fn app() -> App {
         App::new(crate::Launch::Smoke, Arc::new(AtomicBool::new(false))).0
     }
     #[tokio::test]
@@ -7914,7 +7918,7 @@ mod tests {
         h.insert(session);
         dispatch(app, Message::Select(id)).await;
     }
-    async fn dispatch(app: &mut App, message: Message) {
+    pub(super) async fn dispatch(app: &mut App, message: Message) {
         let task = app.update(message);
         drain(app, task).await;
     }
@@ -9807,6 +9811,44 @@ mod tests {
         let second = app.update(Message::Event(iced::Event::Window(
             window::Event::FileDropped(gif),
         )));
+        let mut renderer = header_renderer();
+        let mut composer_bounds = |app: &App| {
+            let mut ui = iced_runtime::UserInterface::build(
+                app.center(),
+                Size::new(930., 800.),
+                Default::default(),
+                &mut renderer,
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            bounds
+        };
+        let bounds = composer_bounds(&app);
+        let queued = bounds.label("Queued").center();
+        let queued_tile = bounds
+            .containers
+            .iter()
+            .filter(|r| r.contains(queued) && r.width == r.height)
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .expect("queued attachment tile");
+        let visible_tiles = |bounds: &UiBounds| {
+            bounds
+                .containers
+                .iter()
+                .filter(|r| r.size() == queued_tile.size())
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let tiles = visible_tiles(&bounds);
+        assert!(matches!(&tiles[..], [active, waiting]
+            if waiting.contains(queued) && active.x + active.width <= waiting.x && active.y == waiting.y));
+        assert!(
+            !bounds
+                .labels
+                .iter()
+                .any(|(_, label)| tiles[0].contains(label.center())),
+            "the active tile shows only the spinner"
+        );
         // Autosave and navigation complete even with both results outstanding.
         type_message(&mut app, "owner draft").await;
         dispatch(&mut app, Message::SaveDraft).await;
@@ -9815,6 +9857,17 @@ mod tests {
         assert_eq!(store.load_session(&id).unwrap().draft, "owner draft");
         dispatch(&mut app, Message::Send).await;
         assert!(store.load_session(&id).unwrap().entries.is_empty());
+        dispatch(&mut app, Message::Create(root.clone())).await;
+        assert!(
+            visible_tiles(&composer_bounds(&app)).is_empty(),
+            "other drafts do not inherit the placeholders"
+        );
+        dispatch(&mut app, Message::Select(id.clone())).await;
+        assert_eq!(
+            visible_tiles(&composer_bounds(&app)).len(),
+            2,
+            "the originating draft still has both"
+        );
         let switch = app.update(Message::Create(root.clone()));
         // Deliver the first result during the switch; the queued drop must follow it.
         drain(&mut app, first).await;

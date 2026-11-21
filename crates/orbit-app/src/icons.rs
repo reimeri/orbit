@@ -1,9 +1,14 @@
-//! Embedded Lucide SVGs. Foreground is inherited from the entire enclosing control,
+//! Lucide icons. Foreground is inherited from the entire enclosing control,
 //! not just the icon's own hover bounds. Asset provenance and license: icons/README.md.
 use iced::{
     Color, Element, Event, Length, Rectangle, Size,
     advanced::{
-        Clipboard, Layout, Shell, Widget, layout, renderer,
+        Clipboard, Layout, Shell, Widget,
+        graphics::{
+            color,
+            mesh::{self, Renderer as _},
+        },
+        layout, renderer,
         svg::{self, Renderer as _},
         widget::{Tree, tree},
     },
@@ -51,12 +56,13 @@ pub enum Icon {
     LogOut,
     RotateCcw,
     RefreshCw,
+    LoaderCircle,
     Info,
     CircleAlert,
 }
 
 impl Icon {
-    fn handle(self) -> svg::Handle {
+    fn glyph(self) -> Glyph {
         let bytes: &'static [u8] = match self {
             Self::GitFork => include_bytes!("icons/git-fork.svg"),
             Self::Pencil => include_bytes!("icons/pencil.svg"),
@@ -94,10 +100,11 @@ impl Icon {
             Self::LogOut => include_bytes!("icons/log-out.svg"),
             Self::RotateCcw => include_bytes!("icons/rotate-ccw.svg"),
             Self::RefreshCw => include_bytes!("icons/refresh-cw.svg"),
+            Self::LoaderCircle => return Glyph::LoaderCircle,
             Self::Info => include_bytes!("icons/info.svg"),
             Self::CircleAlert => include_bytes!("icons/circle-alert.svg"),
         };
-        svg::Handle::from_memory(bytes)
+        Glyph::Svg(svg::Handle::from_memory(bytes))
     }
 
     pub fn view<'a, Message: 'a>(self, size: f32) -> Element<'a, Message> {
@@ -105,8 +112,8 @@ impl Icon {
     }
 
     pub fn spinning<'a, Message: 'a>(self, size: f32, spinning: bool) -> Element<'a, Message> {
-        Element::new(SvgIcon {
-            handle: self.handle(),
+        Element::new(IconWidget {
+            glyph: self.glyph(),
             size,
             color: None,
             spinning,
@@ -114,8 +121,8 @@ impl Icon {
     }
 
     pub fn colored<'a, Message: 'a>(self, size: f32, color: Color) -> Element<'a, Message> {
-        Element::new(SvgIcon {
-            handle: self.handle(),
+        Element::new(IconWidget {
+            glyph: self.glyph(),
             size,
             color: Some(color),
             spinning: false,
@@ -144,14 +151,19 @@ pub fn tip<'a, Message: 'a>(
         .into()
 }
 
-struct SvgIcon {
-    handle: svg::Handle,
+enum Glyph {
+    Svg(svg::Handle),
+    LoaderCircle,
+}
+
+struct IconWidget {
+    glyph: Glyph,
     size: f32,
     color: Option<Color>,
     spinning: bool,
 }
 
-impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SvgIcon {
+impl<Message> Widget<Message, iced::Theme, iced::Renderer> for IconWidget {
     fn tag(&self) -> tree::Tag {
         if self.spinning {
             tree::Tag::of::<Instant>()
@@ -211,16 +223,103 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SvgIcon {
         viewport: &Rectangle,
     ) {
         let color = self.color.unwrap_or(style.text_color);
-        // The SVG tint filter only applies RGB; pass alpha as draw opacity.
-        let mut svg = svg::Svg::new(self.handle.clone())
-            .color(Color { a: 1., ..color })
-            .opacity(color.a);
-        if self.spinning {
-            let turns = tree.state.downcast_ref::<Instant>().elapsed().as_secs_f32();
-            svg = svg.rotation(turns.fract() * std::f32::consts::TAU);
-        }
-        renderer.draw_svg(svg, layout.bounds(), *viewport);
+        let angle = if self.spinning {
+            tree.state
+                .downcast_ref::<Instant>()
+                .elapsed()
+                .as_secs_f32()
+                .fract()
+                * std::f32::consts::TAU
+        } else {
+            0.
+        };
+        self.glyph
+            .draw(renderer, layout.bounds(), *viewport, color, angle);
     }
+}
+
+impl Glyph {
+    fn draw(
+        &self,
+        renderer: &mut iced::Renderer,
+        bounds: Rectangle,
+        viewport: Rectangle,
+        tint: Color,
+        angle: f32,
+    ) {
+        match self {
+            Self::Svg(handle) => {
+                // The SVG tint filter only applies RGB; pass alpha as draw opacity.
+                let svg = svg::Svg::new(handle.clone())
+                    .color(Color { a: 1., ..tint })
+                    .opacity(tint.a)
+                    .rotation(angle);
+                renderer.draw_svg(svg, bounds, viewport);
+            }
+            Self::LoaderCircle => {
+                if let Some(clip) = bounds.intersection(&viewport) {
+                    draw_loader_circle(renderer, bounds, clip, tint, angle);
+                }
+            }
+        }
+    }
+}
+
+/// Tessellate Lucide's round-capped loader-circle directly at its current angle.
+/// The renderer multisamples the stroke edges instead of rotating cached texels.
+fn draw_loader_circle(
+    renderer: &mut iced::Renderer,
+    bounds: Rectangle,
+    clip: Rectangle,
+    tint: Color,
+    angle: f32,
+) {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    const ARC_SEGMENTS: u32 = 40;
+    const CAP_SEGMENTS: u32 = 4;
+    const SWEEP: f32 = TAU * 0.8;
+    // Radius 9 and stroke width 2 in the original 24-unit viewBox.
+    let half_stroke = bounds.width.min(bounds.height) / 24.;
+    let radius = 9. * half_stroke;
+    let center = bounds.center();
+    let color = color::pack(tint);
+    let sections = (ARC_SEGMENTS + 1 + 2 * CAP_SEGMENTS) as usize;
+    let mut vertices = Vec::with_capacity(2 * sections);
+    let mut indices = Vec::with_capacity(6 * (sections - 1));
+
+    // Each cross-section spans the stroke radially. At either end, slide
+    // the section along the tangent and narrow it to trace a semicircle.
+    let mut section = |theta: f32, cap: f32| {
+        let (sin, cos) = theta.sin_cos();
+        let (along, across) = cap.sin_cos();
+        let i = vertices.len() as u32;
+        for r in [radius - across * half_stroke, radius + across * half_stroke] {
+            vertices.push(mesh::SolidVertex2D {
+                position: [
+                    center.x + r * cos - along * half_stroke * sin,
+                    center.y + r * sin + along * half_stroke * cos,
+                ],
+                color,
+            });
+        }
+        if i > 0 {
+            indices.extend_from_slice(&[i - 2, i - 1, i, i, i - 1, i + 1]);
+        }
+    };
+    for i in (1..=CAP_SEGMENTS).rev() {
+        section(angle, -FRAC_PI_2 * i as f32 / CAP_SEGMENTS as f32);
+    }
+    for i in 0..=ARC_SEGMENTS {
+        section(angle + SWEEP * i as f32 / ARC_SEGMENTS as f32, 0.);
+    }
+    for i in 1..=CAP_SEGMENTS {
+        section(angle + SWEEP, FRAC_PI_2 * i as f32 / CAP_SEGMENTS as f32);
+    }
+    renderer.draw_mesh(mesh::Mesh::Solid {
+        buffers: mesh::Indexed { vertices, indices },
+        transformation: iced::Transformation::IDENTITY,
+        clip_bounds: clip,
+    });
 }
 
 #[cfg(test)]
@@ -228,6 +327,45 @@ mod tests {
     use super::*;
     use iced::{Point, advanced::Renderer as _, widget::button};
     use iced_runtime::{UserInterface, user_interface::Cache};
+
+    #[test]
+    fn loader_rotation_moves_the_gap_without_shimmering_along_the_rest_of_the_ring() {
+        let mut renderer = crate::test_renderer::new(16.);
+        // Exercise a small, single-scale icon as in the reported screenshot.
+        let size = Size::new(18, 18);
+        let bounds = Rectangle::with_size(Size::new(size.width as f32, size.height as f32));
+        let loader = Icon::LoaderCircle.glyph();
+        let mut render = |angle| {
+            renderer.reset(bounds);
+            loader.draw(&mut renderer, bounds, bounds, Color::WHITE, angle);
+            crate::test_renderer::screenshot(&mut renderer, size, 1., Color::TRANSPARENT)
+        };
+        let first = render(0.);
+        let turned = render(std::f32::consts::FRAC_PI_4);
+        let (first, _) = first.as_chunks::<4>();
+        let (turned, _) = turned.as_chunks::<4>();
+        assert!(
+            turned.iter().any(|p| (1..255).contains(&p[3])),
+            "stroke edges should have partial pixel coverage"
+        );
+
+        // The gap moves within the right half. On the left the same circular
+        // stroke covers the same pixels, even at a non-axis-aligned angle.
+        let mut left = 0u32;
+        let mut right = 0u32;
+        for (i, (a, b)) in first.iter().zip(turned).enumerate() {
+            let delta = u32::from(a[3].abs_diff(b[3]));
+            if (i as u32 % size.width) < size.width / 2 {
+                left += delta;
+            } else {
+                right += delta;
+            }
+        }
+        assert!(
+            left * 4 < right,
+            "rotation should change the gap, not resample the entire ring: left={left} right={right}"
+        );
+    }
 
     #[test]
     fn svg_foreground_follows_button_color_and_opacity() {

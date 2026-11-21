@@ -21,9 +21,12 @@ pub enum Source {
 }
 
 impl Source {
-    pub fn clipboard(text: tokio::sync::oneshot::Receiver<Option<String>>) -> Self {
+    pub fn clipboard(
+        text: tokio::sync::oneshot::Receiver<Option<String>>,
+        on_image: impl FnOnce() + Send + 'static,
+    ) -> Self {
         Self::Clipboard {
-            offer: winit::platform::wayland::request_image_clipboard(MAX_BYTES)
+            offer: winit::platform::wayland::request_image_clipboard(MAX_BYTES, on_image)
                 .map_err(|e| e.to_string()),
             text,
         }

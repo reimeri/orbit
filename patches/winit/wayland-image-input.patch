@@ -27,17 +27,22 @@
 +optional = true
 --- a/src/platform/wayland.rs
 +++ b/src/platform/wayland.rs
-@@ -129,3 +129,11 @@
+@@ -129,3 +129,16 @@
          self.inner.native_identifier()
      }
  }
 +
 +/// Request a PNG, JPEG, WebP or GIF from the focused application's ordinary
 +/// Wayland selection. Orbit extension: no clipboard-manager protocol is required.
++/// `on_image` runs on the event loop when a supported image MIME is selected,
++/// before the transfer starts. The callback must not block.
 +/// Wait for the reply off the event-loop thread. `None` means no image is offered.
 +#[cfg(wayland_platform)]
-+pub fn request_image_clipboard(max_bytes: usize) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<Option<Vec<u8>>>>> {
-+    crate::platform_impl::wayland::data_device::request_image_clipboard(max_bytes)
++pub fn request_image_clipboard(
++    max_bytes: usize,
++    on_image: impl FnOnce() + Send + 'static,
++) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<Option<Vec<u8>>>>> {
++    crate::platform_impl::wayland::data_device::request_image_clipboard(max_bytes, Box::new(on_image))
 +}
 --- /dev/null
 +++ b/src/platform_impl/linux/wayland/data_device/uri_list.rs
@@ -74,7 +79,7 @@
 +}
 --- /dev/null
 +++ b/src/platform_impl/linux/wayland/data_device.rs
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,354 @@
 +//! Ordinary wl_data_device offers for file drops and image paste. Own dropped
 +//! offers until their transfers finish, independently of the next drag/selection.
 +mod uri_list;
@@ -114,10 +119,12 @@
 +const URI_MIME: &str = "text/uri-list";
 +const IMAGE_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 +type Reply = mpsc::Sender<io::Result<Option<Vec<u8>>>>;
-+static REQUESTS: Mutex<Option<channel::Sender<(usize, Reply)>>> = Mutex::new(None);
++type OnImage = Box<dyn FnOnce() + Send>;
++static REQUESTS: Mutex<Option<channel::Sender<(usize, Reply, OnImage)>>> = Mutex::new(None);
 +
 +pub(crate) fn request_image_clipboard(
 +    max_bytes: usize,
++    on_image: OnImage,
 +) -> io::Result<mpsc::Receiver<io::Result<Option<Vec<u8>>>>> {
 +    let (reply, receiver) = mpsc::channel();
 +    REQUESTS
@@ -125,7 +132,7 @@
 +        .unwrap()
 +        .as_ref()
 +        .ok_or_else(|| io::Error::other("Wayland clipboard not initialized"))?
-+        .send((max_bytes, reply))
++        .send((max_bytes, reply, on_image))
 +        .map_err(|_| io::Error::other("Wayland event loop closed"))?;
 +    Ok(receiver)
 +}
@@ -190,15 +197,15 @@
 +        let (sender, receiver) = channel::channel();
 +        self.loop_handle
 +            .insert_source(receiver, |event, _, state| {
-+                if let channel::Event::Msg((limit, reply)) = event {
-+                    state.paste_image(limit, reply);
++                if let channel::Event::Msg((limit, reply, on_image)) = event {
++                    state.paste_image(limit, reply, on_image);
 +                }
 +            })
 +            .map_err(|e| e.error)?;
 +        *REQUESTS.lock().unwrap() = Some(sender);
 +        Ok(())
 +    }
-+    fn paste_image(&mut self, limit: usize, reply: Reply) {
++    fn paste_image(&mut self, limit: usize, reply: Reply, on_image: OnImage) {
 +        // Follow the seat that delivered the latest key press, not hash-map order.
 +        let selection = self
 +            .clipboard_seat
@@ -230,6 +237,7 @@
 +            return;
 +        };
 +        drop(info);
++        on_image();
 +        match offer.receive(mime) {
 +            Ok(pipe) => self.read_transfer(pipe, limit, move |result, _| {
 +                let _ = reply.send(result.map(Some));

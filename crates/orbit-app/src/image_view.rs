@@ -124,6 +124,29 @@ const INFO_PADDING: f32 = 8.;
 const INFO_TITLE_SIZE: f32 = 14.;
 const INFO_DETAIL_SIZE: f32 = 12.;
 const INFO_LINE_SPACING: f32 = 2.;
+const ATTACHMENT_SIDE: f32 = 72.;
+
+pub enum PendingAttachment {
+    Adding,
+    Queued,
+}
+impl PendingAttachment {
+    pub fn view<'a>(self) -> Element<'a, crate::ui::Message> {
+        let content = match self {
+            Self::Adding => Icon::LoaderCircle.spinning(18., true),
+            Self::Queued => column![Icon::Clock.view(18.), text("Queued").size(10)]
+                .spacing(4)
+                .align_x(iced::Center)
+                .into(),
+        };
+        container(content)
+            .center_x(ATTACHMENT_SIDE)
+            .center_y(ATTACHMENT_SIDE)
+            .style(theme::card)
+            .into()
+    }
+}
+
 const THUMBNAIL_MAX_WIDTH: f32 = 320.;
 const THUMBNAIL_MAX_HEIGHT: f32 = 220.;
 
@@ -224,8 +247,8 @@ impl Viewer {
         };
         let base = theme::button(container(preview).center_x(56).center_y(56))
             .padding(8)
-            .width(72)
-            .height(72)
+            .width(ATTACHMENT_SIDE)
+            .height(ATTACHMENT_SIDE)
             .style(theme::attachment_button)
             .on_press(crate::ui::Message::OpenImage(media.clone()));
         let base: Element<'_, crate::ui::Message> = match media
@@ -243,8 +266,8 @@ impl Viewer {
                 .on_press(crate::ui::Message::RemoveAttachment(index)),
             "Remove attachment",
         ))
-        .width(72)
-        .height(72)
+        .width(ATTACHMENT_SIDE)
+        .height(ATTACHMENT_SIDE)
         .align_x(iced::Right)
         .padding(3);
         iced::widget::hover(base, remove)

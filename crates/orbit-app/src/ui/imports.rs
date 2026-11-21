@@ -2,6 +2,7 @@
 //! not open files, decoded pixels, blocking threads, or storage-worker jobs.
 use super::*;
 use crate::attachments::{Input, Source};
+use crate::image_view::PendingAttachment;
 use std::collections::VecDeque;
 
 enum Step {
@@ -10,7 +11,15 @@ enum Step {
     SaveSession,
 }
 
+#[derive(PartialEq)]
+enum Tile {
+    AwaitingImageOffer(u64),
+    Visible,
+    PublishingOffscreen,
+}
+
 struct Import {
+    tile: Tile,
     owner: DraftKey,
     clipboard: bool,
     left_composer: bool,
@@ -21,10 +30,37 @@ struct Import {
 #[derive(Default)]
 pub(super) struct Imports {
     queue: VecDeque<Import>,
+    next_paste: u64,
     pub(super) retry_on_save: bool,
 }
 
 impl Imports {
+    pub(super) fn image_offered(&mut self, paste: u64) {
+        // The transfer can fail or finish before iced delivers its offer notice.
+        if let Some(p) = self
+            .queue
+            .iter_mut()
+            .find(|p| p.tile == Tile::AwaitingImageOffer(paste))
+        {
+            p.tile = Tile::Visible;
+        }
+    }
+    pub(super) fn tiles(
+        &self,
+        owner: Option<DraftKey>,
+    ) -> impl Iterator<Item = PendingAttachment> + '_ {
+        self.queue
+            .iter()
+            .enumerate()
+            .filter(move |(_, p)| Some(&p.owner) == owner.as_ref() && p.tile == Tile::Visible)
+            .map(|(i, _)| {
+                if i == 0 {
+                    PendingAttachment::Adding
+                } else {
+                    PendingAttachment::Queued
+                }
+            })
+    }
     pub(super) fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -66,8 +102,8 @@ impl App {
             return;
         }
         let clipboard = path.is_none();
-        let source = match path {
-            Some(path) => Source::File(path),
+        let (source, tile) = match path {
+            Some(path) => (Source::File(path), Tile::Visible),
             None => {
                 // Capture both offers at paste time. Each native reply can buffer MAX_BYTES.
                 if self.imports.queue.iter().filter(|p| p.clipboard).count() >= 2 {
@@ -81,10 +117,21 @@ impl App {
                     let _ = send.take().expect("one clipboard text reply").send(text);
                     Task::none()
                 }));
-                Source::clipboard(text)
+                let paste = self.imports.next_paste;
+                self.imports.next_paste += 1;
+                let (notify, offered) = tokio::sync::oneshot::channel();
+                let source = Source::clipboard(text, move || {
+                    let _ = notify.send(());
+                });
+                self.tasks.push(
+                    Task::future(async move { offered.await.ok() })
+                        .and_then(move |()| Task::done(Message::ClipboardImageOffered(paste))),
+                );
+                (source, Tile::AwaitingImageOffer(paste))
             }
         };
         self.imports.queue.push_back(Import {
+            tile,
             owner: self.draft_key().expect("composer owner"),
             clipboard,
             left_composer: false,
@@ -182,6 +229,9 @@ impl App {
                     } else {
                         None
                     };
+                    // A switch back can restore the saved thumbnail before the
+                    // publication acknowledgement arrives. Do not render both.
+                    p.tile = Tile::PublishingOffscreen;
                     let id = id.clone();
                     let h = h.clone();
                     let selected = self.selected.clone();
@@ -228,5 +278,53 @@ impl App {
             }
             Input::Empty => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::tests::{app, dispatch};
+
+    #[tokio::test]
+    async fn clipboard_tiles_follow_confirmed_offers_not_paste_or_reply_order() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        dispatch(&mut app, Message::Create(root)).await;
+
+        // Stand in for two Wayland offers. Neither MIME has arrived yet.
+        let mut paste = || {
+            let _ = app.update(Message::Paste);
+            let Tile::AwaitingImageOffer(id) = app.imports.queue.back().unwrap().tile else {
+                panic!("paste should await its offer");
+            };
+            id
+        };
+        let text_paste = paste();
+        let image_paste = paste();
+        let tiles = |app: &App| app.imports.tiles(app.draft_key()).collect::<Vec<_>>();
+        assert!(tiles(&app).is_empty());
+
+        // Only the second offer is an image; it is visible even while the
+        // queue is still waiting on the text paste ahead of it.
+        dispatch(&mut app, Message::ClipboardImageOffered(image_paste)).await;
+        assert!(matches!(
+            tiles(&app).as_slice(),
+            [PendingAttachment::Queued]
+        ));
+        // Do not run the native transfer here; deliver its result below.
+        let _ = app.update(Message::AttachmentLoaded(Ok(Input::Text("hello".into()))));
+        assert_eq!(app.editor.text(), "hello");
+        assert!(matches!(
+            tiles(&app).as_slice(),
+            [PendingAttachment::Adding]
+        ));
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Err("transfer failed".into())),
+        )
+        .await;
+        dispatch(&mut app, Message::ClipboardImageOffered(text_paste)).await;
+        assert!(tiles(&app).is_empty());
     }
 }
