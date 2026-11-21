@@ -128,6 +128,7 @@ optional offline migration with `python3 -m unittest discover -s tests`.
   to full input.
 - [Session and rendering performance](performance.md) covers storage boundaries,
   recovery, and viewport caches. For measurements, see the
+  [whole-app performance audit (HTML)](benchmarks/app-performance.html),
   [session and rendering benchmarks](benchmarks/session-and-rendering.md),
   [editor benchmarks](editor-performance.md) and [file-index benchmarks](file-tags.md#verification-and-benchmarks).
 - Use `theme::button` and the shared styles in `crates/orbit-app/src/theme.rs`

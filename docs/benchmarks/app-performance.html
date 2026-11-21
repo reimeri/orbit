@@ -1,0 +1,1043 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Orbit · Whole-app performance audit</title>
+<style>
+*{box-sizing:border-box}html{scroll-padding-top:1rem}body{margin:0;color:#152e36;background:#f5f6ef;font:16px/1.55 system-ui,sans-serif}a{color:#006a68;text-underline-offset:.18em}a:hover{color:#963a16}a:focus-visible,summary:focus-visible{outline:3px solid #dc811a;outline-offset:3px}header{background:#112f38;color:#f7fbef;border-bottom:7px solid #efa75a}.inner,main,nav{max-width:68rem;margin:auto;padding:2.4rem clamp(1rem,4vw,3.5rem)}header .eyebrow{color:#a1dfce}h1,h2,h3{line-height:1.14;letter-spacing:-.035em}h1{font-size:clamp(2.3rem,6vw,4.8rem);margin:.35em 0 .28em;max-width:18ch}header p{font-size:1.15rem;max-width:72ch;color:#d8ece7}header small{color:#b1d2d0}.eyebrow{font:.78rem/1.3 ui-monospace,monospace;font-weight:bold;letter-spacing:.12em;color:#336965}nav{display:flex;flex-wrap:wrap;gap:.25rem 1.25rem;padding-top:1.1rem;padding-bottom:1.1rem;border-bottom:1px solid #c3d0c8}nav a{font-size:.92rem;font-weight:650}main{padding-top:.2rem}section{padding:2.35rem 0;border-bottom:1px solid #b8c8be}h2{font-size:clamp(1.7rem,3.7vw,2.65rem);margin:.38em 0 .53em}h3{font-size:1.35rem;margin:1.55em 0 .45em}p{max-width:86ch;margin:.67em 0}figure,.tablewrap{margin:1.2rem 0}.tablewrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:.92rem;background:#fffefa}td,th{border-bottom:1px solid #d1dcd2;padding:.56rem .7rem;text-align:left;vertical-align:top;font-variant-numeric:tabular-nums}thead th{background:#dce9e1;color:#234b4c}tbody th{font-weight:620}caption{text-align:left;font-weight:700;padding:0 0 .4rem}figure{background:#fffefa;border:1px solid #c8d4c9;padding:clamp(.75rem,2vw,1.3rem);border-radius:.5rem}figcaption{font-weight:680;margin-bottom:1rem}figcaption b{color:#a24920;text-transform:uppercase;font:.8rem monospace;letter-spacing:.04em;margin-right:.4rem}.brow{display:grid;grid-template-columns:minmax(9em,1fr) 2fr 6.7em;gap:.6em;align-items:center;margin:.55em 0}.track{height:.75em;background:#e3eae4;border-radius:2px;overflow:hidden}.track i{display:block;height:100%;background:#178379}.brow strong{font-variant-numeric:tabular-nums;text-align:right}.note,.sources{font-size:.87rem;color:#45615f}.sources{overflow-wrap:anywhere}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:.8rem;margin:1.2rem 0}.metric{display:block;padding:1rem;background:#e0eee7;color:#214c4a;border-top:3px solid #2a7e79;text-decoration:none}.metric strong{display:block;font-size:2rem;letter-spacing:-.04em}.call{padding:.8rem 1.15rem;border-left:4px solid #b9632c;background:#fff2dc}.tag{font:.77rem monospace;text-transform:uppercase;letter-spacing:.06em;color:#8c3c1c}pre{max-height:27rem;overflow:auto;margin:.75rem 0;padding:1rem;border-radius:.4rem;background:#19353b;color:#e5f3eb;font: .82rem/1.5 ui-monospace,monospace;tab-size:4}code{font-family:ui-monospace,monospace;font-size:.92em}pre code{font-size:inherit}summary{cursor:pointer;color:#006a68;font-weight:620;padding:.4rem 0}details{border-bottom:1px solid #d1dcd2;padding:.2rem 0}li{margin:.38em 0}footer{padding:2rem 0;color:#46615c}.sr{position:absolute;left:-10000px}.sr:focus{position:static}
+@media(max-width:620px){.metrics{grid-template-columns:1fr}.metric{padding:.55rem .9rem}.metric strong{display:inline-block;font-size:1.45rem;margin-right:.55em}.brow{grid-template-columns:minmax(6em,1fr) 1fr 5em;font-size:.86rem}.tablewrap{font-size:.85rem}.inner,main{padding-left:1rem;padding-right:1rem}th,td{padding:.4rem}.sources a{display:inline-block}}
+@media print{body{font:10pt/1.35 sans-serif;background:white;color:#111}header{background:white;color:#111;border-bottom:2px solid #333}header p,header small,header .eyebrow{color:#333}nav,details,footer{display:none}main,.inner{padding:.5rem}section{padding:.7rem 0}h1{font-size:25pt}h2{font-size:18pt}figure,tr,.call{break-inside:avoid}h2,h3{break-after:avoid}.track,.track i{print-color-adjust:exact}a{color:inherit}}
+</style></head><body><a class="sr" href="#summary">Skip to findings</a><header><div class="inner"><div class="eyebrow">ORBIT &nbsp; / &nbsp; ENGINEERING REPORT &nbsp; 01</div><h1>Where Orbit spends its time</h1><p>A whole-app performance audit: from the first Wayland buffer to drawing a long answer, committing a tool result and polling an unchanged repository.</p><small>21 November 2026 &nbsp; · &nbsp; Production source 98131077b6b2 &nbsp; · &nbsp; Locked release builds &nbsp; · &nbsp; Offline fixtures</small></div></header>
+<nav aria-label="Report contents"><a href="#summary">Priorities</a><a href="#window">Launch &amp; memory</a><a href="#ui">Interaction</a><a href="#git">Git &amp; indexing</a><a href="#turn">Agent &amp; storage</a><a href="#media">Media</a><a href="#plan">Next steps</a><a href="#method">Methods &amp; data</a></nav><main>
+<section id="summary"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 01</div><h2>Fix the repeated work first</h2>
+<p>The sharpest performance cliff is in Git status, not rendering: one extra untracked file can turn every five-second refresh into a full content reread. The sharpest <em>foreground</em> stall is text layout. Orbit keeps the number of mounted messages small, but one message or one editor line can still exceed the entire frame budget several times over.</p>
+<div class="metrics"><a class="metric" href="#git"><strong>64 MiB</strong>reread per unchanged Git poll beyond cache capacity</a><a class="metric" href="#ui"><strong>122 ms</strong>to lay out one 2,000-block message on first mount</a><a class="metric" href="#media"><strong>327 ms</strong>to prepare one high-entropy 4K image</a></div>
+<div class="tablewrap"><table>
+<thead><tr><th scope="col">Order</th><th scope="col">Finding / when it matters</th><th scope="col">First engineering move</th></tr></thead><tbody>
+<tr><th scope="row">1 · recurring</th><td>Untracked working sets just above the line-count cache capacity thrash even with no edits.</td><td>Keep a stable cache subset across scans; verify bytes actually read, not just elapsed time.</td></tr>
+<tr><th scope="row">2 · foreground</th><td>Long Markdown mounts and giant single-line editor edits stall the UI thread. Most warm selection and viewport work is already cheap.</td><td>Split Markdown layout by visible block. For the editor, prototype line-internal layout checkpoints separately.</td></tr>
+<tr><th scope="row">3 · queued work</th><td>Image decode, PNG creation and durable saves occupy the same UI I/O queue as selection and autosave.</td><td>Move preparation to a bounded worker, keep ordered publication.</td></tr>
+<tr><th scope="row">4 · large libraries</th><td>Restoring 50,000 historical subagent assignments materially delays the first window and adds 31 MiB PSS on the hardware path (51 MiB in the CPU-renderer stack).</td><td>Start from latest/undelivered assignments; query old results by ID as needed.</td></tr>
+<tr><th scope="row">5 · concurrent tools</th><td>Eight immediate local turns spend substantially longer on the persistent filesystem than in RAM.</td><td>Trace commit waits and queue delays per turn before changing any checkpoint.</td></tr>
+<tr><th scope="row">6 · monorepos</th><td>A deep million-path snapshot takes seconds to build off-thread, while a cached prefix can be usable almost immediately.</td><td>Avoid whole-corpus rebuilds for small changes before tuning the prefix lookup.</td></tr>
+</tbody></table></div>
+<p><span class="tag">How to read the ranking</span> &nbsp; Recurrence, whether the user is blocked, and the availability of an isolated reproduction matter more than the largest millisecond value. These are triggered costs, not estimates of their prevalence in real sessions. No production behavior was changed.</p>
+</section>
+<section id="window"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 02</div><h2>The first window and what stays resident</h2>
+<p>We launched the normal binary in a private compositor with no selected project or credentials. The endpoint is the first non-null buffer commit on the application’s xdg surface, observed in the client protocol trace—not process creation, a first token, or a confirmed physical presentation. Cases differ only in synthetic saved state; transcripts were not selected.</p>
+<div class="tablewrap"><table>
+<caption>Fresh process, warm filesystem: median of three launches per case</caption>
+<thead><tr><th scope="col">Vulkan / compositor</th><th scope="col">Saved state</th><th scope="col">First commit, ms (range)</th><th scope="col">PSS, MiB</th><th scope="col">RSS, MiB</th></tr></thead><tbody>
+<tr><th scope="row">RADV · Weston GL</th><td>Empty</td><td>74.3 (73.9–76.0)</td><td>34.8</td><td>65.4</td></tr>
+<tr><th scope="row">RADV · Weston GL</th><td>10,500 sessions</td><td>107.7 (107.7–108.7)</td><td>49.8</td><td>80.4</td></tr>
+<tr><th scope="row">RADV · Weston GL</th><td>Same + 50,000 assignments</td><td>194.9 (193.5–195.6)</td><td>80.4</td><td>111.1</td></tr>
+<tr><th scope="row">Lavapipe · Weston Pixman</th><td>Empty</td><td>266.8 (264.8–268.2)</td><td>109.8</td><td>145.9</td></tr>
+<tr><th scope="row">Lavapipe · Weston Pixman</th><td>10,500 sessions</td><td>300.9 (299.9–303.0)</td><td>130.4</td><td>166.5</td></tr>
+<tr><th scope="row">Lavapipe · Weston Pixman</th><td>Same + 50,000 assignments</td><td>560.8 (557.4–576.2)</td><td>181.1</td><td>217.3</td></tr>
+</tbody></table></div>
+<figure><figcaption><b>Fig. 1</b> First window commit on the hardware Vulkan path</figcaption>
+<div class="brow"><span>Empty</span><span class="track" aria-hidden="true"><i style="width:38.12%"></i></span><strong>74.31 ms</strong></div>
+<div class="brow"><span>10,500 sessions</span><span class="track" aria-hidden="true"><i style="width:55.26%"></i></span><strong>107.72 ms</strong></div>
+<div class="brow"><span>Same + 50,000 assignments</span><span class="track" aria-hidden="true"><i style="width:100.00%"></i></span><strong>194.93 ms</strong></div>
+<p class="note">Same hardware stack and window size for all bars. Zero-based, linear scale.</p></figure>
+<p>The sessions-only control retains the same 10,000 main and 500 child session summaries, including one large unselected transcript; only the run table is emptied and the database repacked. On hardware, adding the historical assignments takes the median from 108 to 195 ms and from 50 to 80 MiB PSS. The corresponding deltas on the CPU-renderer stack are larger: about 260 ms and 51 MiB. These are whole-application deltas, including any differences in visible status rows, not an attribution of every millisecond or byte to the coordinator. That is not the price of drawing 50,000 rows. <code>App::new</code> synchronously loads the catalog and constructs the harness. <code>Coordinator::load</code> decodes <em>every</em> assignment and records it in a per-family map, including old terminal runs; result bodies are not eagerly decoded. Reading summaries, rebuilding the sidebar projection and driver initialization are also inside launch time.</p>
+<p><b>Idle:</b> 1 s after the first commit we took a five-second process CPU delta. The observed range across measured launches was 0.0–0.0% of one core (100 Hz tick accounting; one tick is about 0.2%). A zero delta is not proof of zero wakeups. No selected repository means no Git poll; no work means no activity-wave tick. RSS counts shared mappings in full, PSS apportions them; neither includes compositor memory or dedicated VRAM.</p>
+<p><b>What the startup profile means.</b> Five more empty CPU-renderer launches, killed after 1.5 s each, yielded 6,528 user-cycle samples at 499 Hz; 73.94% of sampled overhead was in LLVM and 6.61% in Lavapipe. Mesa shader caching was disabled in that stack. Do not optimize Rust session loading on the strength of an empty software-renderer profile, or attribute that profile to a hardware GPU.</p>
+<p class="sources">Inspect: <a href="../../crates/orbit-app/src/ui.rs"><code>App::new / subscription</code></a> · <a href="../../crates/orbit-core/src/agent/subagents.rs"><code>Coordinator::load / Family::record</code></a> · <a href="../../crates/orbit-core/src/store.rs"><code>Store::load</code></a></p>
+</section>
+<section id="ui"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 03</div><h2>Virtualization stops at the message boundary</h2>
+<p>The session example mounted 16 overscan/visible rows out of 20,000 at entry 15,000. Median indexed range lookup was 0.016 µs and incremental height append 0.060 µs. Those are data-structure operations, <em>not frame times</em>. Stable row keys and persistent-tree diffs let chat reuse unchanged paragraphs. The expensive transition is when a large entry itself enters the mounted range, or its width changes.</p>
+<div class="tablewrap"><table>
+<caption>Milliseconds per named CPU stage; cold layout is one first mount, warm values are medians of 120 rebuilds.</caption>
+<thead><tr><th scope="col">One Markdown entry</th><th scope="col">Bytes</th><th scope="col">Parse</th><th scope="col">Cold layout</th><th scope="col">Narrower reflow</th><th scope="col">Warm view / layout</th></tr></thead><tbody>
+<tr><th scope="row">20 blocks</th><td>3,440</td><td>0.06</td><td>14.20</td><td>0.17</td><td>0.004 / 0.002</td></tr>
+<tr><th scope="row">200 blocks</th><td>34,400</td><td>0.27</td><td>12.41</td><td>1.95</td><td>0.041 / 0.017</td></tr>
+<tr><th scope="row">2,000 blocks</th><td>344,000</td><td>8.11</td><td>121.78</td><td>20.23</td><td>0.387 / 0.169</td></tr>
+<tr><th scope="row">One formatted paragraph</th><td>170,000</td><td>0.72</td><td>112.40</td><td>3.18</td><td>0.024 / 0.039</td></tr>
+<tr><th scope="row">One Unicode paragraph</th><td>64,000</td><td>0.31</td><td>96.60</td><td>1.01</td><td>0.010 / 0.013</td></tr>
+<tr><th scope="row">2,000 code lines</th><td>120,012</td><td>0.31</td><td>31.47</td><td>0.16</td><td>0.206 / 0.158</td></tr>
+</tbody></table></div>
+<p>The 2,000-block mount alone costs ~7.3 refresh intervals at 60 Hz. After mounting, p95 CPU view construction for that entry was 0.465 ms and p95 layout 0.193 ms. Scroll-event handling and draw-command recording were also small (p95 0.068 and 0.011 ms); these stage percentiles are not a frame percentile. The cold cases run in order and share a renderer: the smallest case going first can pay one-time font costs. The breakdown argues against optimizing the Markdown parser before measuring paragraph layout.</p>
+<p><b>Selection:</b> bottom-of-message pointer motion in the 64 KB paragraph cost 0.062 ms/event versus 0.00056 ms at the top. The 200-block bottom hit visited 184 blocks yet took 0.034 ms/event. These benchmarks validate that selection actually moved. In the <em>whole scroll benchmark</em> profile the top two symbols were Unicode word category (27.81%) and the word-boundary iterator (18.57%). The fixture deliberately rebuilds word indexes separately every iteration as an old-path control: those percentages are <strong>not</strong> normal scroll-frame overhead.</p>
+<h3>In the composer, the shape of a paste matters more than its byte count</h3>
+<figure><figcaption><b>Fig. 2</b> Mounted editor · initial paste through undo recording and layout</figcaption>
+<div class="brow"><span>7,000 newline-terminated Unicode lines · 385 kB</span><span class="track" aria-hidden="true"><i style="width:0.94%"></i></span><strong>0.77 ms</strong></div>
+<div class="brow"><span>One repeated Unicode paragraph · 350 kB</span><span class="track" aria-hidden="true"><i style="width:42.42%"></i></span><strong>34.82 ms</strong></div>
+<div class="brow"><span>One distinct-word paragraph · 294 kB</span><span class="track" aria-hidden="true"><i style="width:100.00%"></i></span><strong>82.08 ms</strong></div>
+<p class="note">Median of three per case; bytes use decimal kB. A fresh document, warm font/device, 900 px width. Does not include spellcheck, autosave, drawing or presentation.</p></figure>
+<p>At the tail of the repeated paragraph, the first typed character cost 22.96 ms, versus 0.03 ms on a new line after the many-line paste. Jumping to the beginning and inserting in the distinct-word fixture took 77.56 ms. In its median paste sample, native layout took 81.91 ms and the edit 0.17 ms; scrollbar measurement rounded to 0.000 ms. Moving undo bookkeeping off-thread is not the first fix.</p>
+<p>A separate 957-sample cycle profile restricted to the distinct-word editor case put 9.52% in bidi property lookup, 8.92% in font fallback iteration and 8.86% in a <code>ShapeLine::layout_to_buffer</code> closure. This covers both mounted and unlaid cases and all edit phases, not just paste. Optimize paragraph-scale bidi/shaping/placement while preserving combining marks, directionality, selection offsets and undo; do not insert artificial newlines into the saved text.</p>
+<p class="sources">Inspect: <a href="../../crates/orbit-app/src/ui.rs"><code>App::refresh / prepare_visible</code></a> · <a href="../../crates/orbit-app/src/virtual_list.rs"><code>Fenwick viewport index</code></a> · <a href="../../crates/orbit-app/src/chat_selection_benchmark.rs"><code>selection probe and separate index control</code></a> · <a href="../../crates/orbit-app/src/growing_editor_benchmark.rs"><code>editor stage probe</code></a></p>
+</section>
+<section id="git"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 04</div><h2>An unchanged workspace can stay busy</h2>
+<h3>Git status: one extra file defeats the warm cache</h3>
+<p>We exercised the real <code>git::info</code> path, including subprocesses and line counts, in one fresh committed repository. Each untracked file contained 8 KiB of ASCII text. We filled the current cache, polled four times, then added exactly one file at the end of the enumeration and polled four more times. The Git total was checked on every poll. No files changed during either series.</p>
+<div class="tablewrap"><table>
+<caption>One continuous cache; process read-call bytes from /proc/self/io (rchar), not physical SSD reads.</caption>
+<thead><tr><th scope="col">Untracked files</th><th scope="col">First poll after change</th><th scope="col">Three subsequent polls, median</th><th scope="col">Read chars per subsequent poll</th></tr></thead><tbody>
+<tr><th scope="row">8,192</th><td>95.03 ms</td><td>22.61 ms</td><td>205,183 B (0.20 MiB)</td></tr>
+<tr><th scope="row">8,193</th><td>22.57 ms</td><td>85.53 ms</td><td>67,322,260 B (64.20 MiB)</td></tr>
+</tbody></table></div>
+<figure><figcaption><b>Fig. 3</b> Logical read volume on eight consecutive Git polls</figcaption><svg role="img" aria-labelledby="git-label git-desc" viewBox="0 0 700 182" style="display:block;width:100%;max-width:52rem"><title id="git-label">Read volume per poll, in MiB</title><desc id="git-desc">At capacity the first poll reads 64 MiB and the next three almost nothing. After adding one file, the first poll is cheap, but all three later polls read 64 MiB.</desc><g font-family="system-ui,sans-serif" fill="#214643" font-size="13"><path d="M58 27H676 M58 126H676" stroke="#c8d4c9"/><text x="6" y="31">64 MiB</text><text x="37" y="130">0</text><path d="M367 16v126" stroke="#875122" stroke-dasharray="4 4"/>
+<rect x="75" y="26.70" width="48" height="99.30" fill="#197d73"/><text x="99" y="145" text-anchor="middle">1</text>
+<rect x="151" y="125.70" width="48" height="0.30" fill="#197d73"/><text x="175" y="145" text-anchor="middle">2</text>
+<rect x="227" y="125.70" width="48" height="0.30" fill="#197d73"/><text x="251" y="145" text-anchor="middle">3</text>
+<rect x="303" y="125.70" width="48" height="0.30" fill="#197d73"/><text x="327" y="145" text-anchor="middle">4</text>
+<rect x="379" y="125.69" width="48" height="0.31" fill="#aa5728"/><text x="403" y="145" text-anchor="middle">1</text>
+<rect x="455" y="26.69" width="48" height="99.31" fill="#aa5728"/><text x="479" y="145" text-anchor="middle">2</text>
+<rect x="531" y="26.69" width="48" height="99.31" fill="#aa5728"/><text x="555" y="145" text-anchor="middle">3</text>
+<rect x="607" y="26.69" width="48" height="99.31" fill="#aa5728"/><text x="631" y="145" text-anchor="middle">4</text>
+<text x="215" y="174" text-anchor="middle">8,192 files</text><text x="520" y="174" text-anchor="middle">8,193 files</text></g></svg><p class="note">One file added at the dashed line. The 64 MiB spike occurs one poll after the working set exceeds capacity.</p></figure>
+<p>The first over-capacity poll is deceptively fast: only the newly added file misses. It evicts the first file in scan order. On the <em>next</em> scan every miss evicts the file needed next. At five-second polling cadence this fixture accounts for about <b>768 MiB/min of extra logical reads</b> while unchanged, even if the filesystem cache serves every byte. Timing only the first refresh after adding a file misses the cliff.</p>
+<p>The LRU is shared across projects. <code>git::read_info</code> also runs sequential commands for the root, HEAD, branch, tracked numstat and untracked paths. On a hit, metadata is still checked; on a miss, counting reads the file. Captures run off the UI thread, coalesce per project and time out after 15 s. Prefer retaining a stable subset (e.g., admit after repeated use without displacing an entire scan), or a size-bounded per-project cache reconciled to membership and file versions. A bigger fixed LRU merely moves the boundary. Keep exact line counts, ignore rules and replacement detection.</p>
+<h3>File tags: first usable match and complete search are different metrics</h3>
+<div class="tablewrap"><table>
+<caption>Snapshot construction and path-only search. Filesystem discovery is not in these build times.</caption>
+<thead><tr><th scope="col">Synthetic short paths</th><th scope="col">Build, ms</th><th scope="col">Retained¹</th><th scope="col">Prefix candidate / complete²</th><th scope="col">Absent query, ms</th></tr></thead><tbody>
+<tr><th scope="row">10,000</th><td>5</td><td>0.37 MiB</td><td>0.001 / 0.178 ms</td><td>0.047</td></tr>
+<tr><th scope="row">100,000</th><td>58</td><td>3.74 MiB</td><td>0.001 / 1.853 ms</td><td>0.485</td></tr>
+<tr><th scope="row">1,000,000</th><td>558</td><td>37.38 MiB</td><td>0.003 / 27.445 ms</td><td>7.361</td></tr>
+<tr><th scope="row">1,000,000 deep / Unicode</th><td>3,032</td><td>141.41 MiB</td><td>0.032 / 80.221 ms</td><td>77.464</td></tr>
+</tbody></table></div>
+<p>¹ Arena, entries and two sorted ID vectors (logical retained bytes, not peak RSS). ² Short query <code>file0001234</code>; deep query <code>component-0999999.rs</code>. Short-path values are medians of three builds or three within-build medians (seven queries each); deep fixture is one run. In the actual worker with 10,000 generated files and an empty query, first nonempty results arrived in 42.51 ms with no Orbit filename cache and 5.49 ms cached (median of three; OS page cache not flushed).</p>
+<p>In the deep-path profile (674 samples), the three largest <code>Snapshot::finish</code> / comparator symbols accounted for 84.68% of sampled cycles. Finishing orders IDs by folded path and basename, deduplicates, and performs cancellable sorts. Comparisons revisit long common prefixes. Existing early publication makes a good prefix feel fast; substring backfill or a miss still scans. The watcher already ignores ordinary in-place content and metadata changes except on policy files. Measure rebuild frequency for renames, creates/deletes and atomic-save replacements before investing in incremental updates; the path-only probe measures the cost per build, not how often it runs. Any incremental index must preserve ignore/rename semantics, deterministic ranking, cancellation, memory bounds and fallback reconciliation.</p>
+<p class="sources">Inspect: <a href="../../crates/orbit-app/src/git.rs"><code>read_info / untracked_lines / poll probe</code></a> · <a href="../../crates/orbit-core/src/file_index.rs"><code>Snapshot::finish / search / discovery_worker</code></a> · <a href="../../crates/orbit-app/src/ui.rs"><code>GitTick / subscription</code></a></p>
+</section>
+<section id="turn"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 05</div><h2>Tool turns are sensitive to durable writes</h2>
+<p>A loopback WebSocket peer returned one real QuickJS call, accepted its result on a chained request, streamed 64 text deltas and completed the answer. No remote inference or artificial think time. The stopwatch starts before starting one or eight main conversations on the same harness and ends after every turn finishes; the final saved answer is then checked. This is group makespan, including peer framing, scheduling, startup work per turn and persistence—not time to first token, agent throughput in production or pure SQLite time.</p>
+<div class="tablewrap"><table>
+<caption>Median and range across three groups after one warmup per size. Same production durability configuration.</caption>
+<thead><tr><th scope="col">Main conversations</th><th scope="col">Persistent ext4 · ms</th><th scope="col">RAM-backed tmpfs · ms</th><th scope="col">Interpretation</th></tr></thead><tbody>
+<tr><th scope="row">1</th><td>65.39 (64.43–65.51)</td><td>45.59 (44.54–45.63)</td><td>Protocol and scheduling costs remain even without persistent storage.</td></tr>
+<tr><th scope="row">8 together</th><td>179.07 (170.57–183.01)</td><td>47.89 (46.78–47.93)</td><td>Parallel conversations share one connection protected by a mutex; eight do not finish in one-turn time on disk.</td></tr>
+</tbody></table></div>
+<p>The eight-turn gap between storage targets is ~131 ms vs ~20 ms for one. This implicates the storage path under concurrency; it does not prove the entire gap is lock contention. SQLite uses WAL and <code>synchronous=FULL</code>. Tool-start and result boundaries must survive crashes, and saves are already offloaded from async execution. Record time waiting for the connection separately from transaction and sync time. Test coalescing <em>redundant</em> ordinary saves, not accepting or starting side effects before their commit.</p>
+<div class="tablewrap"><table>
+<caption>Six independent example runs. Each observation is the fixture’s batch average, not a percentile of individual writes.</caption>
+<thead><tr><th scope="col">Session fixture operation</th><th scope="col">Median ms/op</th><th scope="col">Range of run means, ms/op</th></tr></thead><tbody>
+<tr><th scope="row">Deep-copy all entries and context (control)</th><td>13.61</td><td>12.95–14.35</td></tr>
+<tr><th scope="row">Share a session snapshot</th><td>0.000095</td><td>0.000093–0.000106</td></tr>
+<tr><th scope="row">Full durable JSON rewrite (control)</th><td>85.53</td><td>83.59–200.67</td></tr>
+<tr><th scope="row">Durable draft edit</th><td>1.94</td><td>1.89–42.98</td></tr>
+<tr><th scope="row">Durable single entry edit</th><td>1.92</td><td>1.89–41.39</td></tr>
+<tr><th scope="row">Load 10,000 summaries, no transcripts</th><td>24.80</td><td>24.42–25.19</td></tr>
+<tr><th scope="row">Open selected 20,000-entry session</th><td>43.59</td><td>41.95–43.70</td></tr>
+<tr><th scope="row">Child status snapshot + 10,000 lookups</th><td>0.218</td><td>0.214–0.226</td></tr>
+</tbody></table></div>
+<p>The long session holds 20,000 entries and 2,000 provider items, but no fork checkpoints. Shared histories and SQLite tree diffs pay off: a draft update need not rewrite the conversation. Slow early runs are included, not silently discarded. On tmpfs, draft and single-entry writes averaged 0.020 and 0.030 ms; selected-session load was still 42.53 ms. A separate instrumented <code>strace -f -w -c</code> run saw 238 <code>fsync</code> calls totaling 1.06 s across the entire example including setup. This supports filesystem sensitivity, not a per-turn sync count; traced wall timings were excluded from the table. Never use tmpfs or relaxed durability as a proposed fix for user state.</p>
+<h3>Where local computation ends and service latency begins</h3>
+<p>Nine warm-process probes measured 0.69 ms median for a fresh cell emitting text, and 2.01 ms for a fresh cell spawning <code>/bin/sh</code> to run <code>printf</code>. These exercise the runtime with a no-op transcript observer; durable tool events are included instead in the loopback-turn experiment. The timer fixture recorded zero process CPU ticks during one second of waiting in all six runs. Neither the JS interpreter nor timer polling looks like the first target for short tools.</p>
+<p>On the wire, reuse of <code>previous_response_id</code> slices off unchanged items before media projection. Locally the prefix is still compared, and prior tool-call IDs are collected by scanning history; the checkpoint <em>shares</em> its persistent input tree, not a deep clone. At a cold reconnect, full input must be materialized and serialized. Native compaction may serialize a large candidate request to estimate size; fallback chunks and archives unsummarized entries. These are source-supported scaling risks, not measured service delays. Instrument item counts, frame bytes, prepare time and fallback frequency before changing continuation logic.</p>
+<p class="sources">Inspect: <a href="../../crates/orbit-core/src/agent.rs"><code>Harness / Conversation::save_locked</code></a> · <a href="../../crates/orbit-core/src/agent/execution.rs"><code>tool-start checkpoints</code></a> · <a href="../../crates/orbit-core/src/agent/execution/tests.rs"><code>loopback probe</code></a> · <a href="../../crates/orbit-core/src/provider/websocket.rs"><code>websocket_request</code></a> · <a href="../../crates/orbit-core/src/provider.rs"><code>Provider::compact</code></a> · <a href="../../crates/orbit-core/src/history.rs"><code>history sharing</code></a></p>
+</section>
+<section id="media"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 06</div><h2>Image preparation can queue unrelated work</h2>
+<p>The image probe feeds deterministic noisy JPEG bytes to the real media store. Each import uses a new directory so content-addressed files do not accidentally turn later writes into hits. Creation of the input JPEG is excluded. The second stage projects the stored media reference to an input-image data URL and serializes a minimal provider frame; it does not send that frame.</p>
+<div class="tablewrap"><table>
+<caption>Median and min–max, five samples after one warmup per size. Pixel dimensions grow 9×; no resizing to the provider patch budget is needed in these cases.</caption>
+<thead><tr><th scope="col">Input</th><th scope="col">JPEG → prepared PNG</th><th scope="col">Import, ms</th><th scope="col">Project + serialize, ms</th><th scope="col">Approx. base64 alone</th></tr></thead><tbody>
+<tr><th scope="row">1,280 × 720</th><td>1.10 → 2.64 MiB</td><td>47.18 (45.88–50.14)</td><td>6.40 (3.70–6.43)</td><td>3.52 MiB</td></tr>
+<tr><th scope="row">3,840 × 2,160</th><td>9.90 → 23.73 MiB</td><td>326.97 (322.55–363.65)</td><td>95.21 (94.21–114.47)</td><td>31.65 MiB</td></tr>
+</tbody></table></div>
+<p>A 4K import takes ~0.33 s <em>before</em> the attachment is ready. The file import runs on the single UI I/O worker; a selection or draft save queued behind it can inherit the remaining wait even though the window thread itself is free. <code>MediaStore::image</code> holds a process-wide decoder lock across validation, durable original/prepared/thumbnail writes and PNG encoding. The stage timings measure the whole operation, not which codec subroutine dominates. The queue effect is inferred from its scheduling, not a measured click delay.</p>
+<p>Prepared PNG, base64 string and serialized JSON can coexist; the 31.65 MiB wire-string length is <em>not</em> a peak heap estimate. A full reconnect can repeat projection, unlike a successful suffix continuation. Actual screenshots often compress far better than this stressor. Bound worker concurrency by decoded memory, not merely image count; preserve original bytes, hash identity, orientation, deletion leases and atomic saves.</p>
+<p class="sources">Inspect: <a href="../../crates/orbit-core/src/media.rs"><code>MediaStore::image / project</code></a> · <a href="../../crates/orbit-app/src/attachments.rs"><code>attachments::file / clipboard</code></a> · <a href="../../crates/orbit-app/src/io_worker.rs"><code>serialized Worker</code></a> · <a href="../../crates/orbit-core/examples/runtime_performance.rs"><code>isolated image and tool probe</code></a></p>
+</section>
+<section id="plan"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 07</div><h2>What to change, and how to tell if it helped</h2>
+<div class="tablewrap"><table>
+<thead><tr><th scope="col">Candidate</th><th scope="col">Observable acceptance experiment</th><th scope="col">Keep intact</th></tr></thead><tbody>
+<tr><th scope="row">Git scan admission</th><td>Repeat the at-capacity / capacity+1 sequence; steady unchanged scans should read bytes proportional to misses, not the entire corpus. Include a rewrite, binary file, rename and project switch.</td><td>Exact totals; bounded memory; freshness and cancellation.</td></tr>
+<tr><th scope="row">Bound foreground layout</th><td>Measure time from wheel/resize/paste to next presented frame with one giant entry and many short ones. Track cold mount separately from cache hits; at 60 Hz, work over 16.7 ms cannot fit in one refresh interval.</td><td>Stable anchors, links, bidi, selections across blocks, IME, full copy/undo.</td></tr>
+<tr><th scope="row">Move image preparation</th><td>Queue a session switch immediately after a 4K import. Measure ready-to-select latency, import latency and peak PSS with two imports. The switch should not wait for PNG encoding.</td><td>No dropped attachments, expired media published, unbounded decodes or stale-session updates.</td></tr>
+<tr><th scope="row">Lazy assignment restoration</th><td>Compare the same 10,500-session fixture with zero and 50,000 historical assignments. Shrink differential first-commit latency and PSS; then request an old result by ID.</td><td>Latest status, unacknowledged failures, interrupted-run repair, historical results.</td></tr>
+<tr><th scope="row">Storage scheduling</th><td>Instrument lock wait, transaction execution and durable flush. Repeat concurrent local turns on slow and fast storage and exercise failed commits.</td><td>Exactly-once acceptance, recovery order, durable tool start before side effects.</td></tr>
+<tr><th scope="row">Incremental file discovery</th><td>Trace build CPU / peak RSS while renaming files and generating a burst of path changes. Track first result, final result and staleness independently.</td><td>Ignore rules, raw path identities, stable ranking, cancellation; no partial silent results.</td></tr>
+</tbody></table></div>
+<h3>Other audited paths: risks, not demonstrated bottlenecks</h3>
+<div class="tablewrap"><table>
+<thead><tr><th scope="col">Surface</th><th scope="col">Existing guard / residual risk</th><th scope="col">Useful follow-up</th></tr></thead><tbody>
+<tr><th scope="row">Sidebar &amp; forks</th><td>Only mounted rows become widgets, but catalog revisions clone/sort summaries and rebuild the fork index; search recategorizes rows. Selected-session loads replay all fork-point deltas.</td><td>Profile filter keystrokes over 10k titles and reopening a fork-heavy transcript. The 20k-entry store example has no fork points.</td></tr>
+<tr><th scope="row">Streaming UI</th><td>Watch notifications coalesce and visible Markdown appends use incremental parsing. Checking a text prefix, discovering image URLs and copy-on-write of a shared growing entry can still scale with answer length.</td><td>Replay the same byte count at different delta sizes with the tail visible vs hidden. Measure allocations per delivered KiB.</td></tr>
+<tr><th scope="row">Idle &amp; visual work</th><td>Active work uses a 100 ms tick; waves do not demand continuous self-redraws. Equations are queued with cached SVGs. Markdown decode concurrency and modal GIF playback are bounded, but decoded frames can be large.</td><td>Measure CPU, VRAM and frame pacing with several visible active rows and animated attachments; do not infer active GPU cost from idle PSS.</td></tr>
+<tr><th scope="row">Editor services</th><td>Spellcheck debounces ~180 ms and checks revisions off-thread. With a language selected, it still snapshots the draft on the UI side.</td><td>Trace sustained typing/paste with spellcheck enabled, including snapshot cost, not only native layout.</td></tr>
+<tr><th scope="row">Tools, children &amp; output</th><td>Cell runtimes and nested calls use worker threads; shells, cells and child conversations have local limits, not a process-wide memory budget. Noisy output spills rather than being lost to inline budgets.</td><td>Measure thread count, peak PSS and spill throughput across concurrent parents; constrain admission rather than truncate results.</td></tr>
+<tr><th scope="row">External services</th><td>Login, subscription WebSocket, web search and image generation depend on remote systems. Retry/backoff, service capacity and compaction can dominate wall time. No live calls were made.</td><td>With consent, measure local prepare, connect, first delta, inter-delta gaps, service retry and final commit separately. Never log prompt bodies or credentials.</td></tr>
+</tbody></table></div>
+<p>A real desktop Wayland smoke run rendered the full staged sequence successfully on the host Vulkan stack (14.26 s elapsed, 0.72 s task clock). It includes scheduled waits, screenshots and assertions; it is a coverage check, <em>not</em> a GPU throughput or FPS benchmark. No input-to-photon, GPU timestamp, long-run leak, energy or cross-machine claims are made.</p>
+<p class="sources">Inspect: <a href="../../crates/orbit-core/src/store/forks.rs"><code>fork storage</code></a> · <a href="../../crates/orbit-app/src/ui/forks.rs"><code>sidebar family projection</code></a> · <a href="../../crates/orbit-app/src/spellcheck.rs"><code>spellcheck</code></a> · <a href="../../crates/orbit-app/src/equations.rs"><code>equation queue</code></a> · <a href="../../crates/orbit-app/src/image_view.rs"><code>image view</code></a> · <a href="../../crates/orbit-core/src/output.rs"><code>output spill handling</code></a></p>
+</section>
+<section id="method"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 08</div><h2>Measurement notebook</h2>
+<p>Local audit of <code>98131077b6b2be4d058c4ece1bdc08111b3dd316</code> plus benchmark-only instrumentation. AMD Ryzen 7 5800X3D, 8 cores / 16 threads, performance governor, ~31 GiB RAM, Linux 7.3.5. Rust 1.99.1, Cargo 1.99.0, pinned Nix shell, normal release profile and mold configuration. Persistent temporary files: ext4 on a Crucial MX500 SATA SSD; RAM comparison: Linux tmpfs. Builds, provider service time and fixture generation are excluded unless explicitly named. This was a shared desktop, not an isolated lab core; timing precision is not a confidence interval.</p>
+<p><b>Graphics:</b> RX 7900 GRE + RADV (Mesa 26.3.1) on private headless Weston GL with a private Mesa cache; Lavapipe/llvmpipe on Weston Pixman with shader caching disabled by the test harness. Window launch uses 1,200 × 800 logical pixels, native Wayland, fresh app processes, rotating order, one warmup round excluded. The hardware probe starts a fresh compositor outside each timed region; the software probe reuses one. A first GL attempt lost the compositor on its second client and was discarded; the rerun isolates compositor lifetimes. Compare saved-state deltas <em>within</em> each stack, not the two stacks as a GPU speedup. Trace polling is ~1 ms. Kernel page caches are not reset; no selected-project Git work is included.</p>
+<p><b>Sampling:</b> Linux perf user-mode cycle sampling; flat self percentages are sampled CPU work, not fractions of elapsed time. Profiles and strace were separate from the uninstrumented timing runs. Optimized monomorphizations can share symbols. Short-path and stage bench timings use their own warmups/aggregation as labeled; first mounts and deep-path runs are single observations. A release build initially picked up stale patched iced artifacts; only affected release dependencies were rebuilt in the pinned shell. No figures use the old binary.</p>
+<p><b>Validation:</b> the probes check published results (Git line totals, received chained tool output, restored final answer, buffer commits). <code>just verify</code> passed: format, Clippy, workspace tests, QuickJS Valgrind checks and a private Wayland smoke sequence. The opt-in release probes and desktop smoke were run separately. The benchmark tests have no machine-specific timing assertions.</p>
+<h3>Reproduce from the repository root</h3>
+<pre><code>nix develop
+cargo build --locked --release -p orbit -p orbit-core --bins --examples
+# Set TMPDIR to a directory on a persistent volume; verify it differs from tmpfs.
+export TMPDIR=/tmp
+findmnt -T &quot;$TMPDIR&quot; -o TARGET,SOURCE,FSTYPE
+findmnt -T /dev/shm -o TARGET,SOURCE,FSTYPE
+# Isolated native launches. Scripts print the private trace/fixture directory.
+python3 docs/benchmarks/app-performance/launch.py
+python3 docs/benchmarks/app-performance/launch.py --hardware-icd /run/opengl-driver/share/vulkan/icd.d/radeon_icd.x86_64.json
+
+for i in 1 2 3 4 5 6; do target/release/examples/performance; done
+TMPDIR=/dev/shm target/release/examples/performance
+target/release/examples/runtime_performance
+cargo test --locked --release -p orbit-core --lib local_turn_benchmark -- --ignored --nocapture --test-threads=1
+TMPDIR=/dev/shm cargo test --locked --release -p orbit-core --lib local_turn_benchmark -- --ignored --nocapture --test-threads=1
+# Ignore machine-specific global excludes and commit signing for this fixture.
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null XDG_CONFIG_HOME=&quot;$(mktemp -d)&quot; cargo test --locked --release -p orbit untracked_poll_benchmark -- --ignored --nocapture --test-threads=1
+
+for name in selection_scroll_benchmark selection_motion_benchmark editor_stage_benchmark; do
+  ORBIT_EDITOR_BENCH_HISTORY=1 scripts/test-renderer.sh cargo test --locked --release -p orbit &quot;$name&quot; -- --ignored --nocapture --test-threads=1
+done
+for name in benchmark workspace_benchmark deep_paths_benchmark; do
+  cargo test --locked --release -p orbit-core --lib &quot;file_index::tests::$name&quot; -- --exact --ignored --nocapture --test-threads=1
+done</code></pre>
+<p>Use a private writable temporary directory for raw output (e.g. <code>mktemp -d /tmp/orbit-audit-XXXXXXXX</code>); do not point the launch probe at real Orbit state. For the hardware form use the ICD of an installed hardware driver. For CPU profiling, use the actual executable printed by Cargo’s <code>--no-run</code>, not a wildcard matching older test artifacts. With <code>perf</code> and <code>strace</code> available:</p>
+<pre><code>D=$(mktemp -d /tmp/orbit-profile-XXXXXXXX)
+# Set APP_TEST and CORE_TEST to the exact Executable paths printed by:
+# cargo test --locked --release -p orbit --no-run
+# cargo test --locked --release -p orbit-core --lib --no-run
+perf record -e cycles:u -F 199 -o &quot;$D/index.perf&quot; -- &quot;$CORE_TEST&quot; file_index::tests::deep_paths_benchmark --exact --ignored --test-threads=1
+ORBIT_EDITOR_BENCH_HISTORY=1 ORBIT_EDITOR_BENCH_CASE=paragraph-distinct-7000 perf record -e cycles:u -F 499 -o &quot;$D/editor.perf&quot; -- scripts/test-renderer.sh &quot;$APP_TEST&quot; editor_stage_benchmark --ignored --test-threads=1
+perf report -i &quot;$D/editor.perf&quot; --stdio --no-children
+strace -f -w -c -e fsync,fdatasync,pread64,pwrite64 target/release/examples/performance
+# Desktop only; uses isolated capture state, never logs in:
+env -u DISPLAY ICED_BACKEND=wgpu timeout 90s target/release/orbit --smoke-test</code></pre>
+<p>Sources: <a href="app-performance/launch.py">launch and memory probe</a>, <a href="../../crates/orbit-core/examples/performance.rs">session fixture</a>, <a href="../performance.md">storage and rendering architecture</a>, <a href="session-and-rendering.md">earlier rendering investigations</a>, <a href="../editor-performance.md">editor benchmark design</a>, <a href="../file-tags.md">file-index lifecycle</a>. Older measurements are context, not inputs to these figures.</p>
+<h3>Evidence appendix</h3>
+<p>Open the panels for individual samples and fixture output. Benchmark payloads are synthetic; no session content, authentication data or host-specific temp paths are required to read this report.</p>
+<details><summary>RADV launch records</summary><pre>{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 0, &quot;commit_ms&quot;: 143.80392400016717, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 41.5556640625, &quot;Rss&quot;: 72.30859375}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 0, &quot;commit_ms&quot;: 121.88026500007254, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 53.8232421875, &quot;Rss&quot;: 84.51953125}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 0, &quot;commit_ms&quot;: 203.22217000011733, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 85.34375, &quot;Rss&quot;: 116.09375}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 1, &quot;commit_ms&quot;: 107.72361700037436, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 49.796875, &quot;Rss&quot;: 80.41796875}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 1, &quot;commit_ms&quot;: 195.60933800039493, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 80.447265625, &quot;Rss&quot;: 111.19921875}
+{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 1, &quot;commit_ms&quot;: 76.01201299985405, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 34.8359375, &quot;Rss&quot;: 65.5078125}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 2, &quot;commit_ms&quot;: 194.93156599946815, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 80.447265625, &quot;Rss&quot;: 111.07421875}
+{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 2, &quot;commit_ms&quot;: 74.309653000455, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 34.80859375, &quot;Rss&quot;: 65.41015625}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 2, &quot;commit_ms&quot;: 107.69557900039217, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 49.8134765625, &quot;Rss&quot;: 80.3828125}
+{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 3, &quot;commit_ms&quot;: 73.89780899939069, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 34.7861328125, &quot;Rss&quot;: 65.40234375}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 3, &quot;commit_ms&quot;: 108.74137100017833, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 49.8173828125, &quot;Rss&quot;: 80.38671875}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 3, &quot;commit_ms&quot;: 193.45515500026522, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 80.455078125, &quot;Rss&quot;: 111.08203125}</pre></details>
+<details><summary>Lavapipe launch records</summary><pre>{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 0, &quot;commit_ms&quot;: 302.5194779997946, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 110.8759765625, &quot;Rss&quot;: 147.02734375}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 0, &quot;commit_ms&quot;: 316.15495000005467, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 129.9130859375, &quot;Rss&quot;: 165.9921875}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 0, &quot;commit_ms&quot;: 560.2679830003581, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 181.2587890625, &quot;Rss&quot;: 217.359375}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 1, &quot;commit_ms&quot;: 299.8838080002315, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 130.4833984375, &quot;Rss&quot;: 166.5625}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 1, &quot;commit_ms&quot;: 557.3629089999486, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 181.142578125, &quot;Rss&quot;: 217.30078125}
+{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 1, &quot;commit_ms&quot;: 264.84875599999214, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 109.3984375, &quot;Rss&quot;: 145.5390625}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 2, &quot;commit_ms&quot;: 560.8028959995863, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 181.142578125, &quot;Rss&quot;: 217.30078125}
+{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 2, &quot;commit_ms&quot;: 266.78951699977915, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 110.7890625, &quot;Rss&quot;: 146.9296875}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 2, &quot;commit_ms&quot;: 300.88277200002267, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 130.4326171875, &quot;Rss&quot;: 166.51171875}
+{&quot;case&quot;: &quot;empty&quot;, &quot;sample&quot;: 3, &quot;commit_ms&quot;: 268.1737420002719, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 109.76171875, &quot;Rss&quot;: 145.86328125}
+{&quot;case&quot;: &quot;sessions&quot;, &quot;sample&quot;: 3, &quot;commit_ms&quot;: 302.96435600030236, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 129.1240234375, &quot;Rss&quot;: 165.2421875}
+{&quot;case&quot;: &quot;assignments&quot;, &quot;sample&quot;: 3, &quot;commit_ms&quot;: 576.2234480002917, &quot;idle_cpu_percent&quot;: 0.0, &quot;Pss&quot;: 180.5087890625, &quot;Rss&quot;: 216.61328125}</pre></details>
+<details><summary>Git capacity transition and loopback turns</summary><pre>GIT files=8192 poll=0 ms=95.029 rchar=67314042
+GIT files=8192 poll=1 ms=22.652 rchar=205183
+GIT files=8192 poll=2 ms=22.613 rchar=205183
+GIT files=8192 poll=3 ms=22.298 rchar=205183
+GIT files=8193 poll=0 ms=22.568 rchar=213395
+GIT files=8193 poll=1 ms=88.032 rchar=67322259
+GIT files=8193 poll=2 ms=84.966 rchar=67322260
+GIT files=8193 poll=3 ms=85.531 rchar=67322260
+ext4 TURN sample=0 conversations=1 group_ms=68.104
+ext4 TURN sample=0 conversations=8 group_ms=179.672
+ext4 TURN sample=1 conversations=1 group_ms=65.509
+ext4 TURN sample=1 conversations=8 group_ms=179.066
+ext4 TURN sample=2 conversations=1 group_ms=64.428
+ext4 TURN sample=2 conversations=8 group_ms=183.005
+ext4 TURN sample=3 conversations=1 group_ms=65.387
+ext4 TURN sample=3 conversations=8 group_ms=170.572
+tmpfs TURN sample=0 conversations=1 group_ms=44.236
+tmpfs TURN sample=0 conversations=8 group_ms=48.776
+tmpfs TURN sample=1 conversations=1 group_ms=45.591
+tmpfs TURN sample=1 conversations=8 group_ms=47.890
+tmpfs TURN sample=2 conversations=1 group_ms=44.537
+tmpfs TURN sample=2 conversations=8 group_ms=47.927
+tmpfs TURN sample=3 conversations=1 group_ms=45.630
+tmpfs TURN sample=3 conversations=8 group_ms=46.777</pre></details>
+<details><summary>Six session runs, RAM control and syscall summary</summary><pre>Run 1
+Fixture: 20,000 transcript entries; 2,000 provider context items
+Baseline deep transcript/context clone: 13.309686 ms/op (20 iterations)
+Shared full-session snapshot: 0.000095 ms/op (10000 iterations)
+Baseline full JSON durable rewrite: 200.672327 ms/op (5 iterations)
+Incremental durable draft update: 42.981257 ms/op (100 iterations)
+Incremental durable one-entry update: 41.393071 ms/op (100 iterations)
+Load 10,000 sidebar summaries (no transcripts): 25.191034 ms/op (10 iterations)
+Child status snapshot + 10,000 sidebar lookups (50,000 assignments): 0.216221 ms/op (200 iterations)
+Load selected 20,000-entry session: 41.952701 ms/op (5 iterations)
+Visible/overscan rows at entry 15,000: 16 of 20,000
+Indexed viewport lookup: 0.000015 ms/op (100000 iterations)
+Incremental height-index append: 0.000058 ms/op (10000 iterations)
+Process CPU ticks during 1s awaiting JS timer: 0 (Linux /proc/self/stat user+system)
+
+Run 2
+Fixture: 20,000 transcript entries; 2,000 provider context items
+Baseline deep transcript/context clone: 13.164099 ms/op (20 iterations)
+Shared full-session snapshot: 0.000094 ms/op (10000 iterations)
+Baseline full JSON durable rewrite: 153.742651 ms/op (5 iterations)
+Incremental durable draft update: 34.536696 ms/op (100 iterations)
+Incremental durable one-entry update: 1.910862 ms/op (100 iterations)
+Load 10,000 sidebar summaries (no transcripts): 24.458256 ms/op (10 iterations)
+Child status snapshot + 10,000 sidebar lookups (50,000 assignments): 0.220583 ms/op (200 iterations)
+Load selected 20,000-entry session: 43.698859 ms/op (5 iterations)
+Visible/overscan rows at entry 15,000: 16 of 20,000
+Indexed viewport lookup: 0.000017 ms/op (100000 iterations)
+Incremental height-index append: 0.000061 ms/op (10000 iterations)
+Process CPU ticks during 1s awaiting JS timer: 0 (Linux /proc/self/stat user+system)
+
+Run 3
+Fixture: 20,000 transcript entries; 2,000 provider context items
+Baseline deep transcript/context clone: 12.945254 ms/op (20 iterations)
+Shared full-session snapshot: 0.000105 ms/op (10000 iterations)
+Baseline full JSON durable rewrite: 86.935510 ms/op (5 iterations)
+Incremental durable draft update: 1.934405 ms/op (100 iterations)
+Incremental durable one-entry update: 1.919048 ms/op (100 iterations)
+Load 10,000 sidebar summaries (no transcripts): 24.887295 ms/op (10 iterations)
+Child status snapshot + 10,000 sidebar lookups (50,000 assignments): 0.219756 ms/op (200 iterations)
+Load selected 20,000-entry session: 43.633332 ms/op (5 iterations)
+Visible/overscan rows at entry 15,000: 16 of 20,000
+Indexed viewport lookup: 0.000017 ms/op (100000 iterations)
+Incremental height-index append: 0.000060 ms/op (10000 iterations)
+Process CPU ticks during 1s awaiting JS timer: 0 (Linux /proc/self/stat user+system)
+
+Run 4
+Fixture: 20,000 transcript entries; 2,000 provider context items
+Baseline deep transcript/context clone: 13.913308 ms/op (20 iterations)
+Shared full-session snapshot: 0.000094 ms/op (10000 iterations)
+Baseline full JSON durable rewrite: 83.586528 ms/op (5 iterations)
+Incremental durable draft update: 1.892394 ms/op (100 iterations)
+Incremental durable one-entry update: 1.894623 ms/op (100 iterations)
+Load 10,000 sidebar summaries (no transcripts): 24.911076 ms/op (10 iterations)
+Child status snapshot + 10,000 sidebar lookups (50,000 assignments): 0.213869 ms/op (200 iterations)
+Load selected 20,000-entry session: 42.357959 ms/op (5 iterations)
+Visible/overscan rows at entry 15,000: 16 of 20,000
+Indexed viewport lookup: 0.000016 ms/op (100000 iterations)
+Incremental height-index append: 0.000059 ms/op (10000 iterations)
+Process CPU ticks during 1s awaiting JS timer: 0 (Linux /proc/self/stat user+system)
+
+Run 5
+Fixture: 20,000 transcript entries; 2,000 provider context items
+Baseline deep transcript/context clone: 14.350668 ms/op (20 iterations)
+Shared full-session snapshot: 0.000106 ms/op (10000 iterations)
+Baseline full JSON durable rewrite: 84.132205 ms/op (5 iterations)
+Incremental durable draft update: 1.903945 ms/op (100 iterations)
+Incremental durable one-entry update: 1.979575 ms/op (100 iterations)
+Load 10,000 sidebar summaries (no transcripts): 24.416026 ms/op (10 iterations)
+Child status snapshot + 10,000 sidebar lookups (50,000 assignments): 0.215910 ms/op (200 iterations)
+Load selected 20,000-entry session: 43.618379 ms/op (5 iterations)
+Visible/overscan rows at entry 15,000: 16 of 20,000
+Indexed viewport lookup: 0.000016 ms/op (100000 iterations)
+Incremental height-index append: 0.000060 ms/op (10000 iterations)
+Process CPU ticks during 1s awaiting JS timer: 0 (Linux /proc/self/stat user+system)
+
+Run 6
+Fixture: 20,000 transcript entries; 2,000 provider context items
+Baseline deep transcript/context clone: 13.998291 ms/op (20 iterations)
+Shared full-session snapshot: 0.000093 ms/op (10000 iterations)
+Baseline full JSON durable rewrite: 83.656255 ms/op (5 iterations)
+Incremental durable draft update: 1.936449 ms/op (100 iterations)
+Incremental durable one-entry update: 1.915829 ms/op (100 iterations)
+Load 10,000 sidebar summaries (no transcripts): 24.714036 ms/op (10 iterations)
+Child status snapshot + 10,000 sidebar lookups (50,000 assignments): 0.226320 ms/op (200 iterations)
+Load selected 20,000-entry session: 43.555853 ms/op (5 iterations)
+Visible/overscan rows at entry 15,000: 16 of 20,000
+Indexed viewport lookup: 0.000016 ms/op (100000 iterations)
+Incremental height-index append: 0.000062 ms/op (10000 iterations)
+Process CPU ticks during 1s awaiting JS timer: 0 (Linux /proc/self/stat user+system)
+
+RAM control
+Fixture: 20,000 transcript entries; 2,000 provider context items
+Baseline deep transcript/context clone: 13.483409 ms/op (20 iterations)
+Shared full-session snapshot: 0.000094 ms/op (10000 iterations)
+Baseline full JSON durable rewrite: 31.436923 ms/op (5 iterations)
+Incremental durable draft update: 0.019987 ms/op (100 iterations)
+Incremental durable one-entry update: 0.029695 ms/op (100 iterations)
+Load 10,000 sidebar summaries (no transcripts): 24.110788 ms/op (10 iterations)
+Child status snapshot + 10,000 sidebar lookups (50,000 assignments): 0.217936 ms/op (200 iterations)
+Load selected 20,000-entry session: 42.531640 ms/op (5 iterations)
+Visible/overscan rows at entry 15,000: 16 of 20,000
+Indexed viewport lookup: 0.000017 ms/op (100000 iterations)
+Incremental height-index append: 0.000059 ms/op (10000 iterations)
+Process CPU ticks during 1s awaiting JS timer: 0 (Linux /proc/self/stat user+system)
+
+Filtered syscall summary (separate run)
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 59.67    2.465187           7    316347           pread64
+ 25.66    1.060158        4454       238           fsync
+ 14.67    0.606297           8     67765           pwrite64
+------ ----------- ----------- --------- --------- ----------------
+100.00    4.131642          10    384350           total</pre></details>
+<details><summary>Media and cell samples (ms)</summary><pre>case,sample,ms
+cell,1,0.767
+cell,2,0.693
+cell,3,0.719
+cell,4,0.736
+cell,5,0.811
+cell,6,0.681
+cell,7,0.681
+cell,8,0.655
+cell,9,0.659
+cell+shell,1,2.218
+cell+shell,2,2.215
+cell+shell,3,2.006
+cell+shell,4,1.736
+cell+shell,5,2.149
+cell+shell,6,1.901
+cell+shell,7,1.798
+cell+shell,8,1.898
+cell+shell,9,2.055
+import-1280,1,45.884
+import-1280,2,47.297
+import-1280,3,47.079
+import-1280,4,47.175
+import-1280,5,50.140
+project+serialize-1280,1,3.988
+project+serialize-1280,2,6.400
+project+serialize-1280,3,6.432
+project+serialize-1280,4,6.418
+project+serialize-1280,5,3.703
+import-3840,1,326.969
+import-3840,2,363.649
+import-3840,3,322.553
+import-3840,4,324.475
+import-3840,5,328.144
+project+serialize-3840,1,94.208
+project+serialize-3840,2,95.207
+project+serialize-3840,3,114.469
+project+serialize-3840,4,107.923
+project+serialize-3840,5,94.430
+1280x720: jpeg=1154154 prepared=2765798
+3840x2160: jpeg=10376386 prepared=24887323</pre></details>
+<details><summary>Filename search, discovery and deep-path samples</summary><pre>running 1 test
+test file_index::tests::benchmark ... sample=1 paths=10000 build_ms=5 bytes=391970
+sample=1 paths=10000 query=file0001234 median_ms=0.178 first_batch_ms=0.001 hits=1
+sample=1 paths=10000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=1 paths=10000 query=1234 median_ms=0.128 first_batch_ms=0.128 hits=1
+sample=1 paths=10000 query=no-match median_ms=0.047 first_batch_ms=0.047 hits=0
+sample=1 paths=100000 build_ms=60 bytes=3919700
+sample=1 paths=100000 query=file0001234 median_ms=1.853 first_batch_ms=0.002 hits=1
+sample=1 paths=100000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=1 paths=100000 query=1234 median_ms=1.417 first_batch_ms=1.417 hits=20
+sample=1 paths=100000 query=no-match median_ms=0.485 first_batch_ms=0.485 hits=0
+sample=1 paths=1000000 build_ms=558 bytes=39197063
+sample=1 paths=1000000 query=file0001234 median_ms=26.928 first_batch_ms=0.003 hits=1
+sample=1 paths=1000000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=1 paths=1000000 query=1234 median_ms=1.286 first_batch_ms=1.286 hits=24
+sample=1 paths=1000000 query=no-match median_ms=7.277 first_batch_ms=7.277 hits=0
+sample=2 paths=10000 build_ms=5 bytes=391970
+sample=2 paths=10000 query=file0001234 median_ms=0.178 first_batch_ms=0.001 hits=1
+sample=2 paths=10000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=2 paths=10000 query=1234 median_ms=0.128 first_batch_ms=0.128 hits=1
+sample=2 paths=10000 query=no-match median_ms=0.047 first_batch_ms=0.047 hits=0
+sample=2 paths=100000 build_ms=57 bytes=3919700
+sample=2 paths=100000 query=file0001234 median_ms=1.817 first_batch_ms=0.001 hits=1
+sample=2 paths=100000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=2 paths=100000 query=1234 median_ms=1.414 first_batch_ms=1.414 hits=20
+sample=2 paths=100000 query=no-match median_ms=0.467 first_batch_ms=0.467 hits=0
+sample=2 paths=1000000 build_ms=541 bytes=39197063
+sample=2 paths=1000000 query=file0001234 median_ms=27.445 first_batch_ms=0.004 hits=1
+sample=2 paths=1000000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=2 paths=1000000 query=1234 median_ms=1.306 first_batch_ms=1.306 hits=24
+sample=2 paths=1000000 query=no-match median_ms=7.365 first_batch_ms=7.365 hits=0
+sample=3 paths=10000 build_ms=5 bytes=391970
+sample=3 paths=10000 query=file0001234 median_ms=0.181 first_batch_ms=0.001 hits=1
+sample=3 paths=10000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=3 paths=10000 query=1234 median_ms=0.127 first_batch_ms=0.127 hits=1
+sample=3 paths=10000 query=no-match median_ms=0.047 first_batch_ms=0.047 hits=0
+sample=3 paths=100000 build_ms=58 bytes=3919700
+sample=3 paths=100000 query=file0001234 median_ms=1.857 first_batch_ms=0.001 hits=1
+sample=3 paths=100000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=3 paths=100000 query=1234 median_ms=1.441 first_batch_ms=1.441 hits=20
+sample=3 paths=100000 query=no-match median_ms=0.488 first_batch_ms=0.487 hits=0
+sample=3 paths=1000000 build_ms=559 bytes=39197063
+sample=3 paths=1000000 query=file0001234 median_ms=27.531 first_batch_ms=0.003 hits=1
+sample=3 paths=1000000 query=d13/ median_ms=0.003 first_batch_ms=0.003 hits=24
+sample=3 paths=1000000 query=1234 median_ms=1.292 first_batch_ms=1.292 hits=24
+sample=3 paths=1000000 query=no-match median_ms=7.361 first_batch_ms=7.360 hits=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 157 filtered out; finished in 2.71s
+
+
+
+running 1 test
+test file_index::tests::workspace_benchmark ... sample=1 phase=cold files=10000 first_results_ms=43.803 status=Ignore-aware filesystem discovery
+sample=1 phase=cached files=10000 first_results_ms=5.278 status=Cached filenames
+sample=2 phase=cold files=10000 first_results_ms=42.508 status=Ignore-aware filesystem discovery
+sample=2 phase=cached files=10000 first_results_ms=5.718 status=Cached filenames
+sample=3 phase=cold files=10000 first_results_ms=29.693 status=Ignore-aware filesystem discovery
+sample=3 phase=cached files=10000 first_results_ms=5.488 status=Cached filenames
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 157 filtered out; finished in 0.40s
+
+
+
+running 1 test
+test file_index::tests::deep_paths_benchmark ... deep_paths=1000000 build_ms=3032 arena_bytes=128280758 retained_bytes=148280758
+query=component-0999999.rs complete_ms=80.221 first_batch_ms=0.032 hits=1
+query=not-in-this-workspace complete_ms=77.464 first_batch_ms=77.464 hits=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 157 filtered out; finished in 3.20s</pre></details>
+<details><summary>Markdown mounts, scrolling stages and pointer motion</summary><pre>running 1 test
+test chat_selection::benchmark::selection_scroll_benchmark ... Rendering tests: llvmpipe (LLVM 21.1.8, 256 bits) (Cpu) via Vulkan
+SCROLL case=20-blocks bytes=3440 blocks=20 parse_ms=0.063 cold_layout_ms=14.203 cold_draw_ms=0.014 reflow_ms=0.173
+SCROLL stage=view median_ms=0.004350 p95_ms=0.004720
+SCROLL stage=layout median_ms=0.001600 p95_ms=0.001770
+SCROLL stage=wheel_redraw median_ms=0.001370 p95_ms=0.001500
+SCROLL stage=draw_recording median_ms=0.001590 p95_ms=0.001730
+SCROLL stage=word_indexes_separate median_ms=0.038390 p95_ms=0.042530
+SCROLL case=200-blocks bytes=34400 blocks=200 parse_ms=0.268 cold_layout_ms=12.411 cold_draw_ms=0.005 reflow_ms=1.953
+SCROLL stage=view median_ms=0.041110 p95_ms=0.048530
+SCROLL stage=layout median_ms=0.017060 p95_ms=0.022390
+SCROLL stage=wheel_redraw median_ms=0.007180 p95_ms=0.008200
+SCROLL stage=draw_recording median_ms=0.002570 p95_ms=0.003410
+SCROLL stage=word_indexes_separate median_ms=0.383065 p95_ms=0.402885
+SCROLL case=2000-blocks bytes=344000 blocks=2000 parse_ms=8.106 cold_layout_ms=121.777 cold_draw_ms=0.011 reflow_ms=20.230
+SCROLL stage=view median_ms=0.387205 p95_ms=0.464576
+SCROLL stage=layout median_ms=0.169352 p95_ms=0.193072
+SCROLL stage=wheel_redraw median_ms=0.062631 p95_ms=0.068170
+SCROLL stage=draw_recording median_ms=0.008930 p95_ms=0.010900
+SCROLL stage=word_indexes_separate median_ms=3.926621 p95_ms=4.171214
+SCROLL case=formatted-single-paragraph-200 bytes=34000 blocks=1 parse_ms=0.162 cold_layout_ms=21.618 cold_draw_ms=0.016 reflow_ms=0.488
+SCROLL stage=view median_ms=0.005300 p95_ms=0.005800
+SCROLL stage=layout median_ms=0.006190 p95_ms=0.006400
+SCROLL stage=wheel_redraw median_ms=0.013980 p95_ms=0.015031
+SCROLL stage=draw_recording median_ms=0.012901 p95_ms=0.013640
+SCROLL stage=word_indexes_separate median_ms=0.354874 p95_ms=0.363465
+SCROLL case=formatted-single-paragraph-1000 bytes=170000 blocks=1 parse_ms=0.724 cold_layout_ms=112.396 cold_draw_ms=0.086 reflow_ms=3.184
+SCROLL stage=view median_ms=0.024140 p95_ms=0.031191
+SCROLL stage=layout median_ms=0.038570 p95_ms=0.046121
+SCROLL stage=wheel_redraw median_ms=0.014860 p95_ms=0.018910
+SCROLL stage=draw_recording median_ms=0.069661 p95_ms=0.076541
+SCROLL stage=word_indexes_separate median_ms=1.782823 p95_ms=1.863244
+SCROLL case=64k-paragraph bytes=64000 blocks=1 parse_ms=0.311 cold_layout_ms=96.599 cold_draw_ms=0.004 reflow_ms=1.009
+SCROLL stage=view median_ms=0.010240 p95_ms=0.010550
+SCROLL stage=layout median_ms=0.012740 p95_ms=0.014200
+SCROLL stage=wheel_redraw median_ms=0.015880 p95_ms=0.020550
+SCROLL stage=draw_recording median_ms=0.000660 p95_ms=0.000720
+SCROLL stage=word_indexes_separate median_ms=0.720429 p95_ms=0.732519
+SCROLL case=2000-code-lines bytes=120012 blocks=2001 parse_ms=0.313 cold_layout_ms=31.465 cold_draw_ms=0.012 reflow_ms=0.162
+SCROLL stage=view median_ms=0.206303 p95_ms=0.214723
+SCROLL stage=layout median_ms=0.157932 p95_ms=0.168872
+SCROLL stage=wheel_redraw median_ms=0.047460 p95_ms=0.052411
+SCROLL stage=draw_recording median_ms=0.009420 p95_ms=0.010020
+SCROLL stage=word_indexes_separate median_ms=1.854664 p95_ms=1.888144
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 231 filtered out; finished in 1.98s
+
+
+running 1 test
+test chat_selection::benchmark::selection_motion_benchmark ... Rendering tests: llvmpipe (LLVM 21.1.8, 256 bits) (Cpu) via Vulkan
+SELECTION case=paragraph-6400 location=top bytes=6400 blocks=1 ms/event=0.000591 hits/event=1.0 focus=Position { entry: 0, block: 0, byte: 223 }
+SELECTION case=paragraph-6400 location=bottom bytes=6400 blocks=1 ms/event=0.003235 hits/event=1.0 focus=Position { entry: 0, block: 0, byte: 3159 }
+SELECTION case=paragraph-64000 location=top bytes=64000 blocks=1 ms/event=0.000562 hits/event=1.0 focus=Position { entry: 0, block: 0, byte: 223 }
+SELECTION case=paragraph-64000 location=bottom bytes=64000 blocks=1 ms/event=0.061828 hits/event=1.0 focus=Position { entry: 0, block: 0, byte: 60703 }
+SELECTION case=many-blocks location=top bytes=13000 blocks=200 ms/event=0.006899 hits/event=2.0 focus=Position { entry: 0, block: 1, byte: 63 }
+SELECTION case=many-blocks location=bottom bytes=13000 blocks=200 ms/event=0.034306 hits/event=184.0 focus=Position { entry: 0, block: 183, byte: 63 }
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 231 filtered out; finished in 0.28s</pre></details>
+<details><summary>Deep-path indexing · perf top ten self symbols</summary><pre># Total Lost Samples: 0
+# Samples: 674  of event &#x27;cycles:u&#x27;
+45.18%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] &lt;orbit_core::file_index::Snapshot&gt;::finish::&lt;orbit_core::file_index::tests::deep_paths_benchmark::{closure#0}&gt;
+28.59%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] &lt;orbit_core::file_index::Snapshot&gt;::finish::&lt;orbit_core::file_index::tests::prefix_results_are_published_before_cancellable_substring_backfill::{closure#0}&gt;::{closure#3}
+10.91%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] &lt;orbit_core::file_index::Snapshot&gt;::finish::&lt;orbit_core::file_index::tests::prefix_results_are_published_before_cancellable_substring_backfill::{closure#0}&gt;::{closure#0}
+6.16%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] &lt;std::path::Components as core::iter::traits::iterator::Iterator&gt;::next
+2.98%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] memchr::arch::x86_64::memchr::memchr2_raw::find_avx2
+1.25%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] &lt;orbit_core::file_index::Snapshot&gt;::search::&lt;orbit_core::file_index::tests::deep_paths_benchmark::{closure#1}, orbit_core::file_index::tests::deep_paths_benchmark::{closure#2}&gt;
+0.76%  file_index::tes  libc.so.6                    [.] __memcmp_avx2_movbe
+0.63%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] &lt;[u8]&gt;::eq_ignore_ascii_case_chunks::&lt;16&gt;
+0.60%  file_index::tes  orbit_core-c5309e21f9efdea3  [.] core::slice::sort::unstable::quicksort::quicksort::&lt;u32, &lt;[u32]&gt;::sort_unstable_by&lt;&amp;&lt;orbit_core::file_index::Snapshot&gt;::finish&lt;orbit_core::file_index::tests::deep_paths_benchmark::{closure#0}&gt;::{closure#0}&gt;::{closure#0}&gt;
+0.59%  file_index::tes  libc.so.6                    [.] __memmove_avx_unaligned_erms</pre></details>
+<details><summary>Distinct-word editor · perf top ten self symbols</summary><pre># Total Lost Samples: 0
+# Samples: 957  of event &#x27;cycles:u&#x27;
+9.52%  growing_editor:  orbit-f8f6a3b68116e02e       [.] unicode_bidi::char_data::bsearch_range_value_table
+8.92%  growing_editor:  orbit-f8f6a3b68116e02e       [.] &lt;cosmic_text::font::fallback::FontFallbackIter as core::iter::traits::iterator::Iterator&gt;::next
+8.86%  growing_editor:  orbit-f8f6a3b68116e02e       [.] &lt;cosmic_text::shape::ShapeLine&gt;::layout_to_buffer::{closure#6}
+5.12%  growing_editor:  orbit-f8f6a3b68116e02e       [.] &lt;cosmic_text::shape::ShapeLine&gt;::build_with_reuse
+3.45%  growing_editor:  orbit-f8f6a3b68116e02e       [.] &lt;char as unicode_script::UnicodeScript&gt;::script
+3.37%  growing_editor:  orbit-f8f6a3b68116e02e       [.] &lt;cosmic_text::shape::ShapeLine&gt;::layout_to_buffer
+3.26%  growing_editor:  orbit-f8f6a3b68116e02e       [.] harfrust::hb::ot_layout::apply_forward
+2.99%  growing_editor:  orbit-f8f6a3b68116e02e       [.] &lt;fontdb::Database&gt;::face
+2.73%  growing_editor:  orbit-f8f6a3b68116e02e       [.] cosmic_text::shape::shape_fallback
+2.64%  growing_editor:  orbit-f8f6a3b68116e02e       [.] &lt;core::iter::adapters::map::Map&lt;core::str::iter::CharIndices, unicode_linebreak::linebreaks::{closure#0}&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold::&lt;(), &amp;mut &lt;core::iter::adapters::scan::Scan&lt;_, _, _&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold::scan&lt;(usize, u8), (u8, bool), (usize, bool, bool), (), core::ops::control_flow::ControlFlow&lt;(usize, unicode_linebreak::BreakOpportunity)&gt;, unicode_linebreak::linebreaks::{closure#1}, core::iter::traits::iterator::Iterator::find_map::check&lt;(usize, bool, bool), (usize, unicode_linebreak::BreakOpportunity), &amp;mut unicode_linebreak::linebreaks::{closure#2}&gt;::{closure#0}&gt;::{closure#0}, core::ops::control_flow::ControlFlow&lt;core::ops::control_flow::ControlFlow&lt;(usize, unicode_linebreak::BreakOpportunity)&gt;&gt;&gt;</pre></details>
+<details><summary>Scrolling fixture including old-path control · perf top ten self symbols</summary><pre># Total Lost Samples: 0
+# Samples: 536  of event &#x27;cycles:u&#x27;
+27.81%  chat_selection:  orbit-f8f6a3b68116e02e  [.] unicode_segmentation::tables::word::word_category
+18.57%  chat_selection:  orbit-f8f6a3b68116e02e  [.] &lt;core::iter::adapters::map::Map&lt;unicode_segmentation::word::UWordBoundIndices, &lt;orbit::chat_selection::TextUnits&gt;::new::{closure#1}&gt; as core::iter::traits::iterator::Iterator&gt;::next
+6.89%  chat_selection:  orbit-f8f6a3b68116e02e  [.] &lt;alloc::vec::Vec&lt;core::ops::range::Range&lt;usize&gt;&gt; as alloc::vec::spec_from_iter_nested::SpecFromIterNested&lt;core::ops::range::Range&lt;usize&gt;, core::iter::adapters::map::Map&lt;unicode_segmentation::word::UWordBoundIndices, &lt;orbit::chat_selection::TextUnits&gt;::new::{closure#1}&gt;&gt;&gt;::from_iter
+4.76%  chat_selection:  orbit-f8f6a3b68116e02e  [.] &lt;orbit::chat_selection::TextUnits&gt;::new
+2.71%  chat_selection:  orbit-f8f6a3b68116e02e  [.] &lt;cosmic_text::font::fallback::FontFallbackIter as core::iter::traits::iterator::Iterator&gt;::next
+2.52%  chat_selection:  libc.so.6               [.] __memmove_avx_unaligned_erms
+2.18%  chat_selection:  orbit-f8f6a3b68116e02e  [.] &lt;iced_widget::markdown::Text&gt;::spans
+2.00%  chat_selection:  libc.so.6               [.] _int_malloc
+1.67%  chat_selection:  libc.so.6               [.] _int_free_merge_chunk
+1.53%  chat_selection:  libc.so.6               [.] realloc</pre></details>
+<details><summary>Editor timings: every phase, mounted and unlaid</summary><pre>case,initial_state,sample,bytes,lines,phase,edit_ms,native_ms,scrollbar_ms,native_cached_lines
+ascii-700,unlaid,1,36400,701,paste,0.237,0.115,0.003,14
+ascii-700,unlaid,1,36400,701,unchanged,0.000,0.001,0.002,14
+ascii-700,unlaid,1,36400,701,type,0.002,0.006,0.002,14
+ascii-700,unlaid,1,36400,701,type-again,0.004,0.006,0.002,14
+ascii-700,unlaid,1,36400,701,backspace,0.001,0.002,0.002,14
+ascii-700,unlaid,1,36400,701,resize,0.000,0.009,0.002,14
+ascii-700,unlaid,1,36400,701,type-start,0.002,0.015,0.002,14
+ascii-700,unlaid,2,36400,701,paste,0.132,0.068,0.003,14
+ascii-700,unlaid,2,36400,701,unchanged,0.000,0.001,0.002,14
+ascii-700,unlaid,2,36400,701,type,0.001,0.002,0.002,14
+ascii-700,unlaid,2,36400,701,type-again,0.001,0.001,0.002,14
+ascii-700,unlaid,2,36400,701,backspace,0.001,0.001,0.002,14
+ascii-700,unlaid,2,36400,701,resize,0.000,0.009,0.002,14
+ascii-700,unlaid,2,36400,701,type-start,0.001,0.005,0.002,14
+ascii-700,unlaid,3,36400,701,paste,0.084,0.066,0.003,14
+ascii-700,unlaid,3,36400,701,unchanged,0.000,0.001,0.002,14
+ascii-700,unlaid,3,36400,701,type,0.001,0.002,0.002,14
+ascii-700,unlaid,3,36400,701,type-again,0.001,0.001,0.002,14
+ascii-700,unlaid,3,36400,701,backspace,0.001,0.002,0.002,14
+ascii-700,unlaid,3,36400,701,resize,0.000,0.009,0.002,14
+ascii-700,unlaid,3,36400,701,type-start,0.001,0.005,0.002,14
+ascii-700,mounted,1,36400,701,paste,0.077,0.032,0.003,7
+ascii-700,mounted,1,36400,701,unchanged,0.000,0.001,0.002,7
+ascii-700,mounted,1,36400,701,type,0.001,0.002,0.002,7
+ascii-700,mounted,1,36400,701,type-again,0.001,0.001,0.002,7
+ascii-700,mounted,1,36400,701,backspace,0.001,0.001,0.002,7
+ascii-700,mounted,1,36400,701,resize,0.000,0.005,0.002,7
+ascii-700,mounted,1,36400,701,type-start,0.001,0.032,0.002,14
+ascii-700,mounted,2,36400,701,paste,0.078,0.031,0.003,7
+ascii-700,mounted,2,36400,701,unchanged,0.000,0.001,0.002,7
+ascii-700,mounted,2,36400,701,type,0.001,0.002,0.002,7
+ascii-700,mounted,2,36400,701,type-again,0.001,0.001,0.002,7
+ascii-700,mounted,2,36400,701,backspace,0.001,0.001,0.002,7
+ascii-700,mounted,2,36400,701,resize,0.000,0.005,0.002,7
+ascii-700,mounted,2,36400,701,type-start,0.001,0.032,0.002,14
+ascii-700,mounted,3,36400,701,paste,0.074,0.031,0.003,7
+ascii-700,mounted,3,36400,701,unchanged,0.000,0.001,0.002,7
+ascii-700,mounted,3,36400,701,type,0.001,0.002,0.002,7
+ascii-700,mounted,3,36400,701,type-again,0.001,0.001,0.002,7
+ascii-700,mounted,3,36400,701,backspace,0.001,0.001,0.002,7
+ascii-700,mounted,3,36400,701,resize,0.000,0.005,0.002,7
+ascii-700,mounted,3,36400,701,type-start,0.001,0.040,0.002,14
+greek-700,unlaid,1,37100,701,paste,0.074,0.079,0.003,14
+greek-700,unlaid,1,37100,701,unchanged,0.000,0.001,0.002,14
+greek-700,unlaid,1,37100,701,type,0.001,0.001,0.002,14
+greek-700,unlaid,1,37100,701,type-again,0.001,0.002,0.002,14
+greek-700,unlaid,1,37100,701,backspace,0.001,0.001,0.002,14
+greek-700,unlaid,1,37100,701,resize,0.000,0.009,0.002,14
+greek-700,unlaid,1,37100,701,type-start,0.001,0.005,0.002,14
+greek-700,unlaid,2,37100,701,paste,0.075,0.070,0.003,14
+greek-700,unlaid,2,37100,701,unchanged,0.000,0.001,0.002,14
+greek-700,unlaid,2,37100,701,type,0.001,0.002,0.002,14
+greek-700,unlaid,2,37100,701,type-again,0.001,0.001,0.002,14
+greek-700,unlaid,2,37100,701,backspace,0.001,0.001,0.002,14
+greek-700,unlaid,2,37100,701,resize,0.000,0.009,0.002,14
+greek-700,unlaid,2,37100,701,type-start,0.001,0.005,0.002,14
+greek-700,unlaid,3,37100,701,paste,0.082,0.080,0.003,14
+greek-700,unlaid,3,37100,701,unchanged,0.000,0.001,0.002,14
+greek-700,unlaid,3,37100,701,type,0.001,0.002,0.002,14
+greek-700,unlaid,3,37100,701,type-again,0.001,0.001,0.002,14
+greek-700,unlaid,3,37100,701,backspace,0.001,0.001,0.002,14
+greek-700,unlaid,3,37100,701,resize,0.000,0.009,0.002,14
+greek-700,unlaid,3,37100,701,type-start,0.001,0.005,0.002,14
+greek-700,mounted,1,37100,701,paste,0.068,0.033,0.003,7
+greek-700,mounted,1,37100,701,unchanged,0.000,0.001,0.002,7
+greek-700,mounted,1,37100,701,type,0.001,0.001,0.002,7
+greek-700,mounted,1,37100,701,type-again,0.001,0.001,0.002,7
+greek-700,mounted,1,37100,701,backspace,0.001,0.001,0.002,7
+greek-700,mounted,1,37100,701,resize,0.000,0.005,0.002,7
+greek-700,mounted,1,37100,701,type-start,0.001,0.033,0.002,14
+greek-700,mounted,2,37100,701,paste,0.069,0.043,0.003,7
+greek-700,mounted,2,37100,701,unchanged,0.000,0.001,0.002,7
+greek-700,mounted,2,37100,701,type,0.001,0.002,0.002,7
+greek-700,mounted,2,37100,701,type-again,0.001,0.001,0.002,7
+greek-700,mounted,2,37100,701,backspace,0.001,0.002,0.002,7
+greek-700,mounted,2,37100,701,resize,0.000,0.005,0.002,7
+greek-700,mounted,2,37100,701,type-start,0.001,0.033,0.002,14
+greek-700,mounted,3,37100,701,paste,0.078,0.037,0.003,7
+greek-700,mounted,3,37100,701,unchanged,0.000,0.001,0.002,7
+greek-700,mounted,3,37100,701,type,0.001,0.002,0.002,7
+greek-700,mounted,3,37100,701,type-again,0.001,0.001,0.002,7
+greek-700,mounted,3,37100,701,backspace,0.001,0.001,0.002,7
+greek-700,mounted,3,37100,701,resize,0.000,0.005,0.002,7
+greek-700,mounted,3,37100,701,type-start,0.001,0.033,0.002,14
+cjk-700,unlaid,1,37800,701,paste,0.069,0.079,0.003,14
+cjk-700,unlaid,1,37800,701,unchanged,0.000,0.001,0.002,14
+cjk-700,unlaid,1,37800,701,type,0.001,0.002,0.002,14
+cjk-700,unlaid,1,37800,701,type-again,0.001,0.002,0.002,14
+cjk-700,unlaid,1,37800,701,backspace,0.001,0.001,0.002,14
+cjk-700,unlaid,1,37800,701,resize,0.000,0.009,0.002,14
+cjk-700,unlaid,1,37800,701,type-start,0.001,0.005,0.002,14
+cjk-700,unlaid,2,37800,701,paste,0.076,0.076,0.003,14
+cjk-700,unlaid,2,37800,701,unchanged,0.000,0.001,0.002,14
+cjk-700,unlaid,2,37800,701,type,0.001,0.002,0.002,14
+cjk-700,unlaid,2,37800,701,type-again,0.001,0.001,0.002,14
+cjk-700,unlaid,2,37800,701,backspace,0.001,0.001,0.002,14
+cjk-700,unlaid,2,37800,701,resize,0.000,0.009,0.002,14
+cjk-700,unlaid,2,37800,701,type-start,0.001,0.005,0.002,14
+cjk-700,unlaid,3,37800,701,paste,0.075,0.071,0.003,14
+cjk-700,unlaid,3,37800,701,unchanged,0.000,0.001,0.002,14
+cjk-700,unlaid,3,37800,701,type,0.001,0.002,0.002,14
+cjk-700,unlaid,3,37800,701,type-again,0.001,0.001,0.002,14
+cjk-700,unlaid,3,37800,701,backspace,0.001,0.002,0.002,14
+cjk-700,unlaid,3,37800,701,resize,0.000,0.009,0.002,14
+cjk-700,unlaid,3,37800,701,type-start,0.001,0.005,0.002,14
+cjk-700,mounted,1,37800,701,paste,0.077,0.034,0.003,7
+cjk-700,mounted,1,37800,701,unchanged,0.000,0.001,0.002,7
+cjk-700,mounted,1,37800,701,type,0.001,0.002,0.002,7
+cjk-700,mounted,1,37800,701,type-again,0.001,0.001,0.002,7
+cjk-700,mounted,1,37800,701,backspace,0.001,0.001,0.002,7
+cjk-700,mounted,1,37800,701,resize,0.000,0.005,0.002,7
+cjk-700,mounted,1,37800,701,type-start,0.001,0.034,0.002,14
+cjk-700,mounted,2,37800,701,paste,0.076,0.033,0.003,7
+cjk-700,mounted,2,37800,701,unchanged,0.000,0.001,0.002,7
+cjk-700,mounted,2,37800,701,type,0.001,0.001,0.002,7
+cjk-700,mounted,2,37800,701,type-again,0.001,0.001,0.002,7
+cjk-700,mounted,2,37800,701,backspace,0.001,0.001,0.002,7
+cjk-700,mounted,2,37800,701,resize,0.000,0.005,0.002,7
+cjk-700,mounted,2,37800,701,type-start,0.001,0.034,0.002,14
+cjk-700,mounted,3,37800,701,paste,0.077,0.033,0.003,7
+cjk-700,mounted,3,37800,701,unchanged,0.000,0.001,0.002,7
+cjk-700,mounted,3,37800,701,type,0.001,0.002,0.002,7
+cjk-700,mounted,3,37800,701,type-again,0.001,0.001,0.002,7
+cjk-700,mounted,3,37800,701,backspace,0.001,0.001,0.002,7
+cjk-700,mounted,3,37800,701,resize,0.000,0.005,0.002,7
+cjk-700,mounted,3,37800,701,type-start,0.001,0.033,0.002,14
+unicode-700,unlaid,1,38500,701,paste,0.077,0.074,0.003,14
+unicode-700,unlaid,1,38500,701,unchanged,0.000,0.001,0.002,14
+unicode-700,unlaid,1,38500,701,type,0.001,0.002,0.002,14
+unicode-700,unlaid,1,38500,701,type-again,0.001,0.001,0.002,14
+unicode-700,unlaid,1,38500,701,backspace,0.001,0.001,0.002,14
+unicode-700,unlaid,1,38500,701,resize,0.000,0.009,0.002,14
+unicode-700,unlaid,1,38500,701,type-start,0.001,0.005,0.002,14
+unicode-700,unlaid,2,38500,701,paste,0.077,0.072,0.003,14
+unicode-700,unlaid,2,38500,701,unchanged,0.000,0.001,0.002,14
+unicode-700,unlaid,2,38500,701,type,0.001,0.001,0.002,14
+unicode-700,unlaid,2,38500,701,type-again,0.001,0.001,0.002,14
+unicode-700,unlaid,2,38500,701,backspace,0.001,0.001,0.002,14
+unicode-700,unlaid,2,38500,701,resize,0.000,0.009,0.002,14
+unicode-700,unlaid,2,38500,701,type-start,0.001,0.005,0.002,14
+unicode-700,unlaid,3,38500,701,paste,0.077,0.074,0.003,14
+unicode-700,unlaid,3,38500,701,unchanged,0.000,0.001,0.002,14
+unicode-700,unlaid,3,38500,701,type,0.001,0.001,0.002,14
+unicode-700,unlaid,3,38500,701,type-again,0.001,0.001,0.002,14
+unicode-700,unlaid,3,38500,701,backspace,0.001,0.001,0.002,14
+unicode-700,unlaid,3,38500,701,resize,0.000,0.009,0.002,14
+unicode-700,unlaid,3,38500,701,type-start,0.001,0.005,0.002,14
+unicode-700,mounted,1,38500,701,paste,0.078,0.034,0.003,7
+unicode-700,mounted,1,38500,701,unchanged,0.000,0.001,0.002,7
+unicode-700,mounted,1,38500,701,type,0.001,0.001,0.002,7
+unicode-700,mounted,1,38500,701,type-again,0.001,0.001,0.002,7
+unicode-700,mounted,1,38500,701,backspace,0.001,0.001,0.002,7
+unicode-700,mounted,1,38500,701,resize,0.000,0.005,0.002,7
+unicode-700,mounted,1,38500,701,type-start,0.001,0.034,0.002,14
+unicode-700,mounted,2,38500,701,paste,0.077,0.034,0.003,7
+unicode-700,mounted,2,38500,701,unchanged,0.000,0.001,0.002,7
+unicode-700,mounted,2,38500,701,type,0.001,0.001,0.002,7
+unicode-700,mounted,2,38500,701,type-again,0.001,0.001,0.002,7
+unicode-700,mounted,2,38500,701,backspace,0.001,0.001,0.002,7
+unicode-700,mounted,2,38500,701,resize,0.000,0.005,0.002,7
+unicode-700,mounted,2,38500,701,type-start,0.001,0.043,0.002,14
+unicode-700,mounted,3,38500,701,paste,0.078,0.034,0.003,7
+unicode-700,mounted,3,38500,701,unchanged,0.000,0.001,0.002,7
+unicode-700,mounted,3,38500,701,type,0.001,0.002,0.002,7
+unicode-700,mounted,3,38500,701,type-again,0.001,0.001,0.002,7
+unicode-700,mounted,3,38500,701,backspace,0.001,0.001,0.002,7
+unicode-700,mounted,3,38500,701,resize,0.000,0.005,0.002,7
+unicode-700,mounted,3,38500,701,type-start,0.001,0.034,0.002,14
+ascii-7000,unlaid,1,364000,7001,paste,2.358,0.109,0.053,14
+ascii-7000,unlaid,1,364000,7001,unchanged,0.000,0.016,0.022,14
+ascii-7000,unlaid,1,364000,7001,type,0.002,0.018,0.021,14
+ascii-7000,unlaid,1,364000,7001,type-again,0.001,0.005,0.021,14
+ascii-7000,unlaid,1,364000,7001,backspace,0.001,0.005,0.022,14
+ascii-7000,unlaid,1,364000,7001,resize,0.000,0.020,0.021,14
+ascii-7000,unlaid,1,364000,7001,type-start,0.001,0.006,0.022,14
+ascii-7000,unlaid,2,364000,7001,paste,2.023,0.091,0.034,14
+ascii-7000,unlaid,2,364000,7001,unchanged,0.000,0.004,0.021,14
+ascii-7000,unlaid,2,364000,7001,type,0.001,0.005,0.021,14
+ascii-7000,unlaid,2,364000,7001,type-again,0.001,0.005,0.021,14
+ascii-7000,unlaid,2,364000,7001,backspace,0.001,0.004,0.022,14
+ascii-7000,unlaid,2,364000,7001,resize,0.000,0.020,0.022,14
+ascii-7000,unlaid,2,364000,7001,type-start,0.001,0.006,0.021,14
+ascii-7000,unlaid,3,364000,7001,paste,0.958,0.103,0.032,14
+ascii-7000,unlaid,3,364000,7001,unchanged,0.000,0.004,0.022,14
+ascii-7000,unlaid,3,364000,7001,type,0.002,0.005,0.022,14
+ascii-7000,unlaid,3,364000,7001,type-again,0.001,0.005,0.022,14
+ascii-7000,unlaid,3,364000,7001,backspace,0.001,0.005,0.022,14
+ascii-7000,unlaid,3,364000,7001,resize,0.000,0.020,0.022,14
+ascii-7000,unlaid,3,364000,7001,type-start,0.002,0.006,0.022,14
+ascii-7000,mounted,1,364000,7001,paste,1.809,0.035,0.024,7
+ascii-7000,mounted,1,364000,7001,unchanged,0.000,0.004,0.022,7
+ascii-7000,mounted,1,364000,7001,type,0.001,0.005,0.022,7
+ascii-7000,mounted,1,364000,7001,type-again,0.001,0.005,0.022,7
+ascii-7000,mounted,1,364000,7001,backspace,0.001,0.004,0.022,7
+ascii-7000,mounted,1,364000,7001,resize,0.000,0.015,0.022,7
+ascii-7000,mounted,1,364000,7001,type-start,0.001,0.033,0.022,14
+ascii-7000,mounted,2,364000,7001,paste,0.744,0.035,0.024,7
+ascii-7000,mounted,2,364000,7001,unchanged,0.000,0.004,0.022,7
+ascii-7000,mounted,2,364000,7001,type,0.001,0.005,0.023,7
+ascii-7000,mounted,2,364000,7001,type-again,0.001,0.005,0.023,7
+ascii-7000,mounted,2,364000,7001,backspace,0.001,0.005,0.022,7
+ascii-7000,mounted,2,364000,7001,resize,0.000,0.016,0.022,7
+ascii-7000,mounted,2,364000,7001,type-start,0.001,0.034,0.022,14
+ascii-7000,mounted,3,364000,7001,paste,2.261,0.038,0.024,7
+ascii-7000,mounted,3,364000,7001,unchanged,0.000,0.004,0.022,7
+ascii-7000,mounted,3,364000,7001,type,0.002,0.005,0.022,7
+ascii-7000,mounted,3,364000,7001,type-again,0.001,0.005,0.022,7
+ascii-7000,mounted,3,364000,7001,backspace,0.001,0.004,0.022,7
+ascii-7000,mounted,3,364000,7001,resize,0.000,0.015,0.022,7
+ascii-7000,mounted,3,364000,7001,type-start,0.001,0.033,0.022,14
+unicode-7000,unlaid,1,385000,7001,paste,0.711,0.094,0.022,14
+unicode-7000,unlaid,1,385000,7001,unchanged,0.000,0.004,0.021,14
+unicode-7000,unlaid,1,385000,7001,type,0.001,0.005,0.021,14
+unicode-7000,unlaid,1,385000,7001,type-again,0.001,0.005,0.021,14
+unicode-7000,unlaid,1,385000,7001,backspace,0.001,0.005,0.021,14
+unicode-7000,unlaid,1,385000,7001,resize,0.000,0.019,0.022,14
+unicode-7000,unlaid,1,385000,7001,type-start,0.001,0.006,0.022,14
+unicode-7000,unlaid,2,385000,7001,paste,0.740,0.084,0.022,14
+unicode-7000,unlaid,2,385000,7001,unchanged,0.000,0.004,0.022,14
+unicode-7000,unlaid,2,385000,7001,type,0.001,0.005,0.022,14
+unicode-7000,unlaid,2,385000,7001,type-again,0.001,0.005,0.021,14
+unicode-7000,unlaid,2,385000,7001,backspace,0.001,0.004,0.021,14
+unicode-7000,unlaid,2,385000,7001,resize,0.000,0.019,0.022,14
+unicode-7000,unlaid,2,385000,7001,type-start,0.001,0.006,0.022,14
+unicode-7000,unlaid,3,385000,7001,paste,0.699,0.082,0.023,14
+unicode-7000,unlaid,3,385000,7001,unchanged,0.000,0.004,0.030,14
+unicode-7000,unlaid,3,385000,7001,type,0.001,0.005,0.021,14
+unicode-7000,unlaid,3,385000,7001,type-again,0.001,0.005,0.021,14
+unicode-7000,unlaid,3,385000,7001,backspace,0.001,0.005,0.021,14
+unicode-7000,unlaid,3,385000,7001,resize,0.000,0.019,0.022,14
+unicode-7000,unlaid,3,385000,7001,type-start,0.001,0.006,0.022,14
+unicode-7000,mounted,1,385000,7001,paste,0.706,0.037,0.023,7
+unicode-7000,mounted,1,385000,7001,unchanged,0.000,0.004,0.021,7
+unicode-7000,mounted,1,385000,7001,type,0.001,0.005,0.021,7
+unicode-7000,mounted,1,385000,7001,type-again,0.001,0.005,0.022,7
+unicode-7000,mounted,1,385000,7001,backspace,0.001,0.004,0.021,7
+unicode-7000,mounted,1,385000,7001,resize,0.000,0.015,0.022,7
+unicode-7000,mounted,1,385000,7001,type-start,0.001,0.035,0.022,14
+unicode-7000,mounted,2,385000,7001,paste,0.703,0.037,0.022,7
+unicode-7000,mounted,2,385000,7001,unchanged,0.000,0.004,0.021,7
+unicode-7000,mounted,2,385000,7001,type,0.001,0.005,0.021,7
+unicode-7000,mounted,2,385000,7001,type-again,0.001,0.005,0.021,7
+unicode-7000,mounted,2,385000,7001,backspace,0.001,0.005,0.021,7
+unicode-7000,mounted,2,385000,7001,resize,0.000,0.015,0.027,7
+unicode-7000,mounted,2,385000,7001,type-start,0.001,0.035,0.022,14
+unicode-7000,mounted,3,385000,7001,paste,0.745,0.044,0.037,7
+unicode-7000,mounted,3,385000,7001,unchanged,0.000,0.025,0.048,7
+unicode-7000,mounted,3,385000,7001,type,0.003,0.021,0.027,7
+unicode-7000,mounted,3,385000,7001,type-again,0.002,0.006,0.027,7
+unicode-7000,mounted,3,385000,7001,backspace,0.001,0.006,0.027,7
+unicode-7000,mounted,3,385000,7001,resize,0.000,0.019,0.027,7
+unicode-7000,mounted,3,385000,7001,type-start,0.002,0.047,0.027,14
+paragraph-ascii-700,unlaid,1,32900,1,paste,0.027,7.522,0.000,1
+paragraph-ascii-700,unlaid,1,32900,1,unchanged,0.000,0.001,0.000,1
+paragraph-ascii-700,unlaid,1,32900,1,type,0.021,2.205,0.000,1
+paragraph-ascii-700,unlaid,1,32900,1,type-again,0.002,1.670,0.000,1
+paragraph-ascii-700,unlaid,1,32900,1,backspace,0.002,1.385,0.000,1
+paragraph-ascii-700,unlaid,1,32900,1,resize,0.000,1.475,0.000,1
+paragraph-ascii-700,unlaid,1,32900,1,type-start,0.017,2.247,0.000,1
+paragraph-ascii-700,unlaid,2,32900,1,paste,0.026,3.168,0.000,1
+paragraph-ascii-700,unlaid,2,32900,1,unchanged,0.000,0.001,0.000,1
+paragraph-ascii-700,unlaid,2,32900,1,type,0.002,1.739,0.000,1
+paragraph-ascii-700,unlaid,2,32900,1,type-again,0.002,1.374,0.000,1
+paragraph-ascii-700,unlaid,2,32900,1,backspace,0.001,1.368,0.000,1
+paragraph-ascii-700,unlaid,2,32900,1,resize,0.000,0.530,0.000,1
+paragraph-ascii-700,unlaid,2,32900,1,type-start,0.020,2.242,0.000,1
+paragraph-ascii-700,unlaid,3,32900,1,paste,0.027,3.074,0.000,1
+paragraph-ascii-700,unlaid,3,32900,1,unchanged,0.000,0.001,0.000,1
+paragraph-ascii-700,unlaid,3,32900,1,type,0.002,1.407,0.000,1
+paragraph-ascii-700,unlaid,3,32900,1,type-again,0.001,1.373,0.000,1
+paragraph-ascii-700,unlaid,3,32900,1,backspace,0.001,1.352,0.000,1
+paragraph-ascii-700,unlaid,3,32900,1,resize,0.000,0.467,0.000,1
+paragraph-ascii-700,unlaid,3,32900,1,type-start,0.003,2.236,0.000,1
+paragraph-ascii-700,mounted,1,32900,1,paste,0.038,2.726,0.000,1
+paragraph-ascii-700,mounted,1,32900,1,unchanged,0.000,0.001,0.000,1
+paragraph-ascii-700,mounted,1,32900,1,type,0.002,1.421,0.000,1
+paragraph-ascii-700,mounted,1,32900,1,type-again,0.001,1.356,0.000,1
+paragraph-ascii-700,mounted,1,32900,1,backspace,0.001,1.368,0.000,1
+paragraph-ascii-700,mounted,1,32900,1,resize,0.000,0.468,0.000,1
+paragraph-ascii-700,mounted,1,32900,1,type-start,0.003,2.238,0.000,1
+paragraph-ascii-700,mounted,2,32900,1,paste,0.019,2.705,0.000,1
+paragraph-ascii-700,mounted,2,32900,1,unchanged,0.000,0.001,0.000,1
+paragraph-ascii-700,mounted,2,32900,1,type,0.002,1.384,0.000,1
+paragraph-ascii-700,mounted,2,32900,1,type-again,0.001,1.376,0.000,1
+paragraph-ascii-700,mounted,2,32900,1,backspace,0.001,1.396,0.000,1
+paragraph-ascii-700,mounted,2,32900,1,resize,0.000,0.492,0.000,1
+paragraph-ascii-700,mounted,2,32900,1,type-start,0.004,2.255,0.000,1
+paragraph-ascii-700,mounted,3,32900,1,paste,0.026,2.730,0.000,1
+paragraph-ascii-700,mounted,3,32900,1,unchanged,0.000,0.001,0.000,1
+paragraph-ascii-700,mounted,3,32900,1,type,0.002,1.372,0.000,1
+paragraph-ascii-700,mounted,3,32900,1,type-again,0.001,1.384,0.000,1
+paragraph-ascii-700,mounted,3,32900,1,backspace,0.001,1.392,0.000,1
+paragraph-ascii-700,mounted,3,32900,1,resize,0.000,0.466,0.000,1
+paragraph-ascii-700,mounted,3,32900,1,type-start,0.003,2.233,0.000,1
+paragraph-unicode-700,unlaid,1,35000,1,paste,0.021,3.257,0.000,1
+paragraph-unicode-700,unlaid,1,35000,1,unchanged,0.000,0.001,0.000,1
+paragraph-unicode-700,unlaid,1,35000,1,type,0.002,1.446,0.000,1
+paragraph-unicode-700,unlaid,1,35000,1,type-again,0.001,1.425,0.000,1
+paragraph-unicode-700,unlaid,1,35000,1,backspace,0.001,1.404,0.000,1
+paragraph-unicode-700,unlaid,1,35000,1,resize,0.000,0.650,0.000,1
+paragraph-unicode-700,unlaid,1,35000,1,type-start,0.021,2.371,0.000,1
+paragraph-unicode-700,unlaid,2,35000,1,paste,0.028,3.255,0.000,1
+paragraph-unicode-700,unlaid,2,35000,1,unchanged,0.000,0.001,0.000,1
+paragraph-unicode-700,unlaid,2,35000,1,type,0.002,1.406,0.000,1
+paragraph-unicode-700,unlaid,2,35000,1,type-again,0.001,1.433,0.000,1
+paragraph-unicode-700,unlaid,2,35000,1,backspace,0.001,1.384,0.000,1
+paragraph-unicode-700,unlaid,2,35000,1,resize,0.000,0.498,0.000,1
+paragraph-unicode-700,unlaid,2,35000,1,type-start,0.003,2.359,0.000,1
+paragraph-unicode-700,unlaid,3,35000,1,paste,0.027,3.280,0.000,1
+paragraph-unicode-700,unlaid,3,35000,1,unchanged,0.000,0.001,0.000,1
+paragraph-unicode-700,unlaid,3,35000,1,type,0.002,1.410,0.000,1
+paragraph-unicode-700,unlaid,3,35000,1,type-again,0.001,1.420,0.000,1
+paragraph-unicode-700,unlaid,3,35000,1,backspace,0.001,1.395,0.000,1
+paragraph-unicode-700,unlaid,3,35000,1,resize,0.000,0.484,0.000,1
+paragraph-unicode-700,unlaid,3,35000,1,type-start,0.003,2.342,0.000,1
+paragraph-unicode-700,mounted,1,35000,1,paste,0.027,2.875,0.000,1
+paragraph-unicode-700,mounted,1,35000,1,unchanged,0.000,0.001,0.000,1
+paragraph-unicode-700,mounted,1,35000,1,type,0.002,1.418,0.000,1
+paragraph-unicode-700,mounted,1,35000,1,type-again,0.001,1.439,0.000,1
+paragraph-unicode-700,mounted,1,35000,1,backspace,0.002,1.387,0.000,1
+paragraph-unicode-700,mounted,1,35000,1,resize,0.000,0.487,0.000,1
+paragraph-unicode-700,mounted,1,35000,1,type-start,0.003,2.346,0.000,1
+paragraph-unicode-700,mounted,2,35000,1,paste,0.020,2.877,0.000,1
+paragraph-unicode-700,mounted,2,35000,1,unchanged,0.000,0.001,0.000,1
+paragraph-unicode-700,mounted,2,35000,1,type,0.002,1.415,0.000,1
+paragraph-unicode-700,mounted,2,35000,1,type-again,0.001,1.391,0.000,1
+paragraph-unicode-700,mounted,2,35000,1,backspace,0.001,1.410,0.000,1
+paragraph-unicode-700,mounted,2,35000,1,resize,0.000,0.496,0.000,1
+paragraph-unicode-700,mounted,2,35000,1,type-start,0.003,2.345,0.000,1
+paragraph-unicode-700,mounted,3,35000,1,paste,0.027,2.992,0.000,1
+paragraph-unicode-700,mounted,3,35000,1,unchanged,0.000,0.001,0.000,1
+paragraph-unicode-700,mounted,3,35000,1,type,0.003,1.416,0.000,1
+paragraph-unicode-700,mounted,3,35000,1,type-again,0.001,1.396,0.000,1
+paragraph-unicode-700,mounted,3,35000,1,backspace,0.001,1.408,0.000,1
+paragraph-unicode-700,mounted,3,35000,1,resize,0.000,0.482,0.000,1
+paragraph-unicode-700,mounted,3,35000,1,type-start,0.003,2.380,0.000,1
+paragraph-ascii-7000,unlaid,1,329000,1,paste,0.172,93.955,0.000,1
+paragraph-ascii-7000,unlaid,1,329000,1,unchanged,0.000,0.008,0.000,1
+paragraph-ascii-7000,unlaid,1,329000,1,type,0.159,21.512,0.000,1
+paragraph-ascii-7000,unlaid,1,329000,1,type-again,0.005,19.646,0.000,1
+paragraph-ascii-7000,unlaid,1,329000,1,backspace,0.003,18.921,0.000,1
+paragraph-ascii-7000,unlaid,1,329000,1,resize,0.000,26.525,0.000,1
+paragraph-ascii-7000,unlaid,1,329000,1,type-start,0.155,29.654,0.000,1
+paragraph-ascii-7000,unlaid,2,329000,1,paste,0.270,42.019,0.000,1
+paragraph-ascii-7000,unlaid,2,329000,1,unchanged,0.000,0.008,0.000,1
+paragraph-ascii-7000,unlaid,2,329000,1,type,0.032,24.497,0.000,1
+paragraph-ascii-7000,unlaid,2,329000,1,type-again,0.004,19.360,0.000,1
+paragraph-ascii-7000,unlaid,2,329000,1,backspace,0.003,19.114,0.000,1
+paragraph-ascii-7000,unlaid,2,329000,1,resize,0.000,15.037,0.000,1
+paragraph-ascii-7000,unlaid,2,329000,1,type-start,0.160,28.682,0.000,1
+paragraph-ascii-7000,unlaid,3,329000,1,paste,0.207,36.838,0.000,1
+paragraph-ascii-7000,unlaid,3,329000,1,unchanged,0.000,0.008,0.000,1
+paragraph-ascii-7000,unlaid,3,329000,1,type,0.029,22.698,0.000,1
+paragraph-ascii-7000,unlaid,3,329000,1,type-again,0.005,19.712,0.000,1
+paragraph-ascii-7000,unlaid,3,329000,1,backspace,0.004,18.725,0.000,1
+paragraph-ascii-7000,unlaid,3,329000,1,resize,0.000,8.455,0.000,1
+paragraph-ascii-7000,unlaid,3,329000,1,type-start,0.043,27.066,0.000,1
+paragraph-ascii-7000,mounted,1,329000,1,paste,0.207,35.183,0.000,1
+paragraph-ascii-7000,mounted,1,329000,1,unchanged,0.000,0.008,0.000,1
+paragraph-ascii-7000,mounted,1,329000,1,type,0.029,22.732,0.000,1
+paragraph-ascii-7000,mounted,1,329000,1,type-again,0.004,19.158,0.000,1
+paragraph-ascii-7000,mounted,1,329000,1,backspace,0.004,18.686,0.000,1
+paragraph-ascii-7000,mounted,1,329000,1,resize,0.000,8.316,0.000,1
+paragraph-ascii-7000,mounted,1,329000,1,type-start,0.046,27.152,0.000,1
+paragraph-ascii-7000,mounted,2,329000,1,paste,0.234,33.022,0.000,1
+paragraph-ascii-7000,mounted,2,329000,1,unchanged,0.000,0.007,0.000,1
+paragraph-ascii-7000,mounted,2,329000,1,type,0.026,22.586,0.000,1
+paragraph-ascii-7000,mounted,2,329000,1,type-again,0.004,19.225,0.000,1
+paragraph-ascii-7000,mounted,2,329000,1,backspace,0.004,19.413,0.000,1
+paragraph-ascii-7000,mounted,2,329000,1,resize,0.000,8.413,0.000,1
+paragraph-ascii-7000,mounted,2,329000,1,type-start,0.045,26.921,0.000,1
+paragraph-ascii-7000,mounted,3,329000,1,paste,0.217,32.652,0.000,1
+paragraph-ascii-7000,mounted,3,329000,1,unchanged,0.000,0.008,0.000,1
+paragraph-ascii-7000,mounted,3,329000,1,type,0.023,22.161,0.000,1
+paragraph-ascii-7000,mounted,3,329000,1,type-again,0.004,19.575,0.000,1
+paragraph-ascii-7000,mounted,3,329000,1,backspace,0.004,19.273,0.000,1
+paragraph-ascii-7000,mounted,3,329000,1,resize,0.000,8.324,0.000,1
+paragraph-ascii-7000,mounted,3,329000,1,type-start,0.045,26.734,0.000,1
+paragraph-unicode-7000,unlaid,1,350000,1,paste,0.291,41.540,0.000,1
+paragraph-unicode-7000,unlaid,1,350000,1,unchanged,0.000,0.008,0.000,1
+paragraph-unicode-7000,unlaid,1,350000,1,type,0.036,23.453,0.000,1
+paragraph-unicode-7000,unlaid,1,350000,1,type-again,0.004,19.712,0.000,1
+paragraph-unicode-7000,unlaid,1,350000,1,backspace,0.004,19.403,0.000,1
+paragraph-unicode-7000,unlaid,1,350000,1,resize,0.000,11.449,0.000,1
+paragraph-unicode-7000,unlaid,1,350000,1,type-start,0.178,30.017,0.000,1
+paragraph-unicode-7000,unlaid,2,350000,1,paste,0.222,39.832,0.000,1
+paragraph-unicode-7000,unlaid,2,350000,1,unchanged,0.000,0.008,0.000,1
+paragraph-unicode-7000,unlaid,2,350000,1,type,0.034,23.262,0.000,1
+paragraph-unicode-7000,unlaid,2,350000,1,type-again,0.004,20.625,0.000,1
+paragraph-unicode-7000,unlaid,2,350000,1,backspace,0.004,19.560,0.000,1
+paragraph-unicode-7000,unlaid,2,350000,1,resize,0.000,8.716,0.000,1
+paragraph-unicode-7000,unlaid,2,350000,1,type-start,0.051,28.376,0.000,1
+paragraph-unicode-7000,unlaid,3,350000,1,paste,0.228,41.703,0.000,1
+paragraph-unicode-7000,unlaid,3,350000,1,unchanged,0.000,0.008,0.000,1
+paragraph-unicode-7000,unlaid,3,350000,1,type,0.034,22.956,0.000,1
+paragraph-unicode-7000,unlaid,3,350000,1,type-again,0.004,19.706,0.000,1
+paragraph-unicode-7000,unlaid,3,350000,1,backspace,0.004,19.558,0.000,1
+paragraph-unicode-7000,unlaid,3,350000,1,resize,0.000,8.602,0.000,1
+paragraph-unicode-7000,unlaid,3,350000,1,type-start,0.053,28.961,0.000,1
+paragraph-unicode-7000,mounted,1,350000,1,paste,0.227,34.353,0.000,1
+paragraph-unicode-7000,mounted,1,350000,1,unchanged,0.000,0.007,0.000,1
+paragraph-unicode-7000,mounted,1,350000,1,type,0.029,22.846,0.000,1
+paragraph-unicode-7000,mounted,1,350000,1,type-again,0.004,19.820,0.000,1
+paragraph-unicode-7000,mounted,1,350000,1,backspace,0.003,20.202,0.000,1
+paragraph-unicode-7000,mounted,1,350000,1,resize,0.000,8.928,0.000,1
+paragraph-unicode-7000,mounted,1,350000,1,type-start,0.052,28.645,0.000,1
+paragraph-unicode-7000,mounted,2,350000,1,paste,0.256,34.565,0.000,1
+paragraph-unicode-7000,mounted,2,350000,1,unchanged,0.000,0.007,0.000,1
+paragraph-unicode-7000,mounted,2,350000,1,type,0.030,23.724,0.000,1
+paragraph-unicode-7000,mounted,2,350000,1,type-again,0.004,20.382,0.000,1
+paragraph-unicode-7000,mounted,2,350000,1,backspace,0.004,19.874,0.000,1
+paragraph-unicode-7000,mounted,2,350000,1,resize,0.000,8.975,0.000,1
+paragraph-unicode-7000,mounted,2,350000,1,type-start,0.051,28.705,0.000,1
+paragraph-unicode-7000,mounted,3,350000,1,paste,0.285,35.528,0.000,1
+paragraph-unicode-7000,mounted,3,350000,1,unchanged,0.000,0.007,0.000,1
+paragraph-unicode-7000,mounted,3,350000,1,type,0.031,22.932,0.000,1
+paragraph-unicode-7000,mounted,3,350000,1,type-again,0.004,20.082,0.000,1
+paragraph-unicode-7000,mounted,3,350000,1,backspace,0.003,19.558,0.000,1
+paragraph-unicode-7000,mounted,3,350000,1,resize,0.000,9.019,0.000,1
+paragraph-unicode-7000,mounted,3,350000,1,type-start,0.054,28.861,0.000,1
+paragraph-distinct-7000,unlaid,1,294000,1,paste,0.244,86.978,0.000,1
+paragraph-distinct-7000,unlaid,1,294000,1,unchanged,0.000,0.007,0.000,1
+paragraph-distinct-7000,unlaid,1,294000,1,type,0.022,16.828,0.000,1
+paragraph-distinct-7000,unlaid,1,294000,1,type-again,0.003,14.497,0.000,1
+paragraph-distinct-7000,unlaid,1,294000,1,backspace,0.002,13.988,0.000,1
+paragraph-distinct-7000,unlaid,1,294000,1,resize,0.000,5.733,0.000,1
+paragraph-distinct-7000,unlaid,1,294000,1,type-start,0.040,78.716,0.000,1
+paragraph-distinct-7000,unlaid,2,294000,1,paste,0.175,84.909,0.000,1
+paragraph-distinct-7000,unlaid,2,294000,1,unchanged,0.000,0.007,0.000,1
+paragraph-distinct-7000,unlaid,2,294000,1,type,0.020,15.772,0.000,1
+paragraph-distinct-7000,unlaid,2,294000,1,type-again,0.003,13.770,0.000,1
+paragraph-distinct-7000,unlaid,2,294000,1,backspace,0.002,13.477,0.000,1
+paragraph-distinct-7000,unlaid,2,294000,1,resize,0.000,5.691,0.000,1
+paragraph-distinct-7000,unlaid,2,294000,1,type-start,0.032,80.660,0.000,1
+paragraph-distinct-7000,unlaid,3,294000,1,paste,0.187,87.387,0.000,1
+paragraph-distinct-7000,unlaid,3,294000,1,unchanged,0.000,0.007,0.000,1
+paragraph-distinct-7000,unlaid,3,294000,1,type,0.024,15.907,0.000,1
+paragraph-distinct-7000,unlaid,3,294000,1,type-again,0.004,13.730,0.000,1
+paragraph-distinct-7000,unlaid,3,294000,1,backspace,0.003,13.750,0.000,1
+paragraph-distinct-7000,unlaid,3,294000,1,resize,0.000,6.347,0.000,1
+paragraph-distinct-7000,unlaid,3,294000,1,type-start,0.036,77.609,0.000,1
+paragraph-distinct-7000,mounted,1,294000,1,paste,0.159,81.262,0.000,1
+paragraph-distinct-7000,mounted,1,294000,1,unchanged,0.000,0.007,0.000,1
+paragraph-distinct-7000,mounted,1,294000,1,type,0.023,16.287,0.000,1
+paragraph-distinct-7000,mounted,1,294000,1,type-again,0.003,13.440,0.000,1
+paragraph-distinct-7000,mounted,1,294000,1,backspace,0.003,13.980,0.000,1
+paragraph-distinct-7000,mounted,1,294000,1,resize,0.000,5.917,0.000,1
+paragraph-distinct-7000,mounted,1,294000,1,type-start,0.034,75.552,0.000,1
+paragraph-distinct-7000,mounted,2,294000,1,paste,0.166,81.909,0.000,1
+paragraph-distinct-7000,mounted,2,294000,1,unchanged,0.000,0.007,0.000,1
+paragraph-distinct-7000,mounted,2,294000,1,type,0.022,16.378,0.000,1
+paragraph-distinct-7000,mounted,2,294000,1,type-again,0.003,13.922,0.000,1
+paragraph-distinct-7000,mounted,2,294000,1,backspace,0.003,13.353,0.000,1
+paragraph-distinct-7000,mounted,2,294000,1,resize,0.000,5.709,0.000,1
+paragraph-distinct-7000,mounted,2,294000,1,type-start,0.034,77.525,0.000,1
+paragraph-distinct-7000,mounted,3,294000,1,paste,0.174,83.427,0.000,1
+paragraph-distinct-7000,mounted,3,294000,1,unchanged,0.000,0.007,0.000,1
+paragraph-distinct-7000,mounted,3,294000,1,type,0.021,16.967,0.000,1
+paragraph-distinct-7000,mounted,3,294000,1,type-again,0.003,14.356,0.000,1
+paragraph-distinct-7000,mounted,3,294000,1,backspace,0.003,14.664,0.000,1
+paragraph-distinct-7000,mounted,3,294000,1,resize,0.000,6.211,0.000,1
+paragraph-distinct-7000,mounted,3,294000,1,type-start,0.035,79.387,0.000,1</pre></details>
+</section>
+<footer>Orbit engineering · Offline performance audit · <a href="#summary">Back to priorities ↑</a></footer></main></body></html>

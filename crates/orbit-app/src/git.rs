@@ -452,4 +452,46 @@ mod tests {
             other => panic!("Expected Git changes, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    #[ignore = "offline Git polling capacity benchmark; run alone"]
+    async fn untracked_poll_benchmark() {
+        fn read_chars() -> u64 {
+            std::fs::read_to_string("/proc/self/io")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("rchar: "))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        command(root, &["init", "--template=", "--initial-branch=main"]);
+        command(root, &["commit", "--allow-empty", "-m", "initial"]);
+        let counts = Arc::new(LineCounts::default());
+        let capacity = counts.0.lock().unwrap().cap().get();
+        let payload = "abcdefg\n".repeat(1024);
+        for n in 0..=capacity {
+            std::fs::write(root.join(format!("sample-{n:08}.txt")), &payload).unwrap();
+            let files = n + 1;
+            if files < capacity {
+                continue;
+            }
+            for poll in 0..4 {
+                let start = Instant::now();
+                let before = read_chars();
+                let status = info(root.to_owned(), counts.clone()).await;
+                let elapsed = start.elapsed();
+                let bytes = read_chars() - before;
+                assert!(
+                    matches!(status, Some(Info::Changes { added, .. }) if added == files as u64 * 1024)
+                );
+                println!(
+                    "GIT files={files} poll={poll} ms={:.3} rchar={bytes}",
+                    elapsed.as_secs_f64() * 1000.
+                );
+            }
+        }
+    }
 }

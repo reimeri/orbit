@@ -168,6 +168,13 @@ fn main() -> Result<()> {
         }
     }
     tx.commit()?;
+    // Optional, synthetic-only startup fixture for the Wayland launch probe.
+    if let Some(path) = std::env::var_os("ORBIT_BENCH_DB_COPY") {
+        let path = path
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("Fixture path must be UTF-8"))?;
+        db.execute("VACUUM INTO ?1", [path])?;
+    }
     let harness = Harness::new(store.clone(), store.load()?.1)?;
     assert!(harness.all().is_empty());
     timed(

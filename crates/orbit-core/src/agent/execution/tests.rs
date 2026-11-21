@@ -557,3 +557,76 @@ async fn dropped_partial_output_retries_from_history_until_stopped_or_exhausted(
         );
     }
 }
+
+/// Group makespan, not model latency: the peer replies immediately over loopback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "offline release timing probe; run alone on the target filesystem"]
+async fn local_turn_benchmark() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::test_support::authenticated_store(dir.path().join("state"));
+    let (endpoint, mut requests, server) = streaming_server().await;
+    let h =
+        Harness::with_provider(store.clone(), vec![], Provider::fixture(store, endpoint)).unwrap();
+    let source = call("audit-call", "text(42)");
+    let first = json!({"type":"response.completed","response":{"id":"audit-response","status":"completed","output":[source]}}).to_string();
+    let piece = "local stream λ ";
+    let answer = piece.repeat(64);
+    let delta = json!({"type":"response.output_text.delta","item_id":"answer","delta":piece});
+    let final_batch = format!("{delta}\n").repeat(64)
+        + &completed(json!([{
+            "type":"message","role":"assistant","id":"answer","content":[{"type":"output_text","text":answer}]
+        }]));
+    for sample in 0..4 {
+        for n in [1, 8] {
+            let conversations: Vec<_> = (0..n)
+                .map(|_| {
+                    let mut session = Session::new(dir.path().into(), &Settings::default());
+                    session.rename("Local benchmark".into());
+                    session.accept("Run an offline tool".into());
+                    h.insert(session)
+                })
+                .collect();
+            let start = std::time::Instant::now();
+            for c in &conversations {
+                h.start(&c.id, Settings::default()).unwrap();
+            }
+            let mut chained = 0;
+            tokio::time::timeout(Duration::from_secs(60), async {
+                for _ in 0..2 * n {
+                    let request = requests.recv().await.unwrap();
+                    let reply = if request.body["previous_response_id"] == "audit-response" {
+                        chained += 1;
+                        assert!(
+                            request.body["input"].as_array().unwrap().iter().any(
+                                |item| item["call_id"] == "audit-call"
+                                    && item["output"]
+                                        .as_str()
+                                        .is_some_and(|text| text.contains("42"))
+                            )
+                        );
+                        &final_batch
+                    } else {
+                        &first
+                    };
+                    request.reply.send(reply.clone()).unwrap();
+                }
+                while conversations.iter().any(|c| c.is_turn_active()) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("local turns must finish");
+            let elapsed = start.elapsed();
+            assert_eq!(chained, n);
+            for c in conversations {
+                let persisted = h.store.load_session(&c.id).unwrap();
+                assert_eq!(persisted.entries.by_id("answer").unwrap().text, answer);
+            }
+            println!(
+                "TURN sample={sample} conversations={n} group_ms={:.3}",
+                elapsed.as_secs_f64() * 1000.
+            );
+        }
+    }
+    server.abort();
+}
