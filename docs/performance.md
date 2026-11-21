@@ -26,6 +26,8 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   per child so a later failure stays unread. Historical waits and retried spawn
   requests use parent-scoped SQLite lookups. The transcript fetches visible
   historical assignment details on the storage worker, not while drawing.
+  Sidebar and transcript reads use a separate in-memory assignment index, so
+  filing a cold session does not block drawing while its history loads or saves.
   See the [launch comparison](benchmarks/session-and-rendering.md#historical-subagent-assignments).
 - Indexed, structurally shared histories make snapshots cheap and edits by ID
   logarithmic/hashed rather than full-transcript searches. Tree differences skip

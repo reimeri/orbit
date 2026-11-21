@@ -9,6 +9,17 @@ use tokio::{
     sync::mpsc,
 };
 
+/// Wall-clock stages for the ignored local-turn probe, collected outside the DB lock.
+#[derive(Debug)]
+pub enum SaveTiming {
+    WorkerQueue(Duration),
+    Database {
+        wait: Duration,
+        body: Duration,
+        commit: Duration,
+    },
+}
+
 pub fn authenticated_store(root: PathBuf) -> Store {
     let store = Store::open(root).unwrap();
     store

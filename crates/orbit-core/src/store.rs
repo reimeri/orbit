@@ -677,6 +677,9 @@ pub struct Store {
     root: PathBuf,
     pub(crate) db: Arc<Mutex<Connection>>,
     _lock: Arc<nix::fcntl::Flock<File>>,
+    #[cfg(test)]
+    pub(crate) save_trace:
+        Option<std::sync::mpsc::Sender<(String, crate::test_support::SaveTiming)>>,
 }
 impl Store {
     pub fn open(root: PathBuf) -> Result<Self> {
@@ -715,6 +718,8 @@ impl Store {
             root,
             db: Arc::new(Mutex::new(db)),
             _lock: Arc::new(lock),
+            #[cfg(test)]
+            save_trace: None,
         })
     }
     pub fn from_env() -> Result<Self> {
@@ -834,7 +839,11 @@ impl Store {
         run: Option<&crate::agent::subagents::RunInfo>,
     ) -> Result<()> {
         Uuid::parse_str(&session.id)?;
+        #[cfg(test)]
+        let waiting = std::time::Instant::now();
         let mut db = self.db.lock().expect("database lock");
+        #[cfg(test)]
+        let acquired = std::time::Instant::now();
         let tx = db.transaction()?;
         tx.execute("INSERT INTO sessions VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated,summary=excluded.summary,metadata=excluded.metadata",
             params![session.id,session.updated as i64,serde_json::to_string(&SessionSummary::from(session))?,serde_json::to_string(session)?])?;
@@ -859,7 +868,24 @@ impl Store {
         if consume_draft {
             tx.execute("DELETE FROM new_session_draft", [])?;
         }
+        #[cfg(test)]
+        let committing = std::time::Instant::now();
         tx.commit()?;
+        #[cfg(test)]
+        if let Some(trace) = &self.save_trace {
+            let commit = committing.elapsed();
+            drop(db);
+            trace
+                .send((
+                    session.id.clone(),
+                    crate::test_support::SaveTiming::Database {
+                        wait: acquired - waiting,
+                        body: committing - acquired,
+                        commit,
+                    },
+                ))
+                .expect("live benchmark receiver");
+        }
         Ok(())
     }
     /// Media paths are embedded in immutable tool/context records (including

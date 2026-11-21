@@ -452,6 +452,57 @@ async fn stream_failure_stop_and_invalid_completion_preserve_results_without_rep
 }
 
 #[tokio::test]
+async fn failed_tool_start_commit_rolls_back_without_dispatch() {
+    let mut f = Fixture::new().await;
+    let stream = f.request().await;
+    // The raw call can commit. Writing its transcript entry succeeds too, but
+    // the deferred constraint rejects COMMIT (including the terminal save).
+    f.h.store.db.lock().unwrap().execute_batch("
+        CREATE TABLE commit_guard (missing TEXT REFERENCES sessions(id) DEFERRABLE INITIALLY DEFERRED);
+        CREATE TRIGGER reject_start AFTER INSERT ON entries WHEN json_extract(NEW.data,'$.id')='guarded'
+        BEGIN INSERT INTO commit_guard VALUES ('absent'); END;
+    ").unwrap();
+    let call = call("guarded", "store('dispatched', true);");
+    stream.reply.send(done(0, &call)).unwrap();
+    until(|| !f.c.is_turn_active()).await;
+
+    let durable = f.saved();
+    assert_eq!(durable.in_progress_response.unwrap().items[&0], call);
+    assert!(durable.entries.by_id("guarded").is_none());
+    assert!(f.c.snapshot().needs_attention);
+
+    f.h.store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_start")
+        .unwrap();
+    f.h.flush().unwrap();
+    let saved = f.saved();
+    assert!(saved.in_progress_response.is_none());
+    assert!(matches!(
+        saved.entries.by_id("guarded").unwrap().kind,
+        EntryKind::Tool {
+            complete: true,
+            failed: true,
+            ..
+        }
+    ));
+    let c = f.c.clone();
+    let check = tokio::task::spawn_blocking(move || {
+        c.code.exec(
+            "text(load('dispatched') === true ? 'ran' : 'skipped');",
+            "check",
+            &CancellationToken::new(),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(check.contains("skipped"));
+}
+
+#[tokio::test]
 async fn storage_failures_prevent_dispatch_and_retain_completed_results_for_save_retry() {
     for fail_after_start in [false, true] {
         let mut f = Fixture::new().await;
@@ -563,7 +614,9 @@ async fn dropped_partial_output_retries_from_history_until_stopped_or_exhausted(
 #[ignore = "offline release timing probe; run alone on the target filesystem"]
 async fn local_turn_benchmark() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::test_support::authenticated_store(dir.path().join("state"));
+    let mut store = crate::test_support::authenticated_store(dir.path().join("state"));
+    let (tx, timings) = std::sync::mpsc::channel();
+    store.save_trace = Some(tx);
     let (endpoint, mut requests, server) = streaming_server().await;
     let h =
         Harness::with_provider(store.clone(), vec![], Provider::fixture(store, endpoint)).unwrap();
@@ -618,6 +671,23 @@ async fn local_turn_benchmark() {
             .expect("local turns must finish");
             let elapsed = start.elapsed();
             assert_eq!(chained, n);
+            // Drain/print after the timed interval. One session is exactly one turn here.
+            for (id, timing) in timings.try_iter() {
+                use crate::test_support::SaveTiming;
+                let turn = conversations.iter().position(|c| c.id == id).unwrap();
+                match timing {
+                    SaveTiming::WorkerQueue(wait) => println!(
+                        "SAVE sample={sample} conversations={n} turn={turn} worker_queue_us={:.3}",
+                        wait.as_secs_f64() * 1e6
+                    ),
+                    SaveTiming::Database { wait, body, commit } => println!(
+                        "TX sample={sample} conversations={n} turn={turn} db_wait_us={:.3} body_us={:.3} commit_us={:.3}",
+                        wait.as_secs_f64() * 1e6,
+                        body.as_secs_f64() * 1e6,
+                        commit.as_secs_f64() * 1e6
+                    ),
+                }
+            }
             for c in conversations {
                 let persisted = h.store.load_session(&c.id).unwrap();
                 assert_eq!(persisted.entries.by_id("answer").unwrap().text, answer);

@@ -177,8 +177,6 @@ struct Family {
     // An inclusive acknowledgement cutoff per child with outstanding failures. Metadata stays
     // in SQLite until a user action acknowledges this captured range.
     unacknowledged: HashMap<String, usize>,
-    // Retain complete terminal text on storage failure, without rerunning work.
-    unsaved: HashMap<String, (Option<String>, Option<String>)>,
 }
 
 impl Family {
@@ -225,13 +223,22 @@ impl Family {
     }
 }
 
+type AssignmentResult = (Option<String>, Option<String>);
+
 #[derive(Default)]
 pub(super) struct Coordinator {
-    families: HashMap<String, Family>,
+    // Retain complete terminal text on storage failure, without rerunning work.
+    unsaved: HashMap<String, HashMap<String, AssignmentResult>>,
     pub stopped: HashSet<String>,
     pub closing: bool,
 }
-impl Coordinator {
+/// Resident assignment metadata. Its lock never spans I/O or lifecycle operations:
+/// rendering the open conversation must not wait for a different session to load.
+#[derive(Default)]
+pub(super) struct RunIndex {
+    families: HashMap<String, Family>,
+}
+impl RunIndex {
     pub(super) fn record(&mut self, run: RunInfo) {
         self.families
             .entry(run.parent_id.clone())
@@ -305,7 +312,7 @@ impl Coordinator {
     }
 
     pub fn load(store: &Store) -> Result<(Self, Vec<String>)> {
-        let mut coordinator = Self::default();
+        let mut index = Self::default();
         let mut warnings = Vec::new();
         let db = store.db.lock().expect("database lock");
         let mut skipped = HashSet::new();
@@ -338,10 +345,7 @@ impl Coordinator {
             let mut rows = latest.query([child.get_ref(0)?.as_str()?])?;
             while let Some(row) = rows.next()? {
                 if let Some(run) = decode(row)? {
-                    let family = coordinator
-                        .families
-                        .entry(run.parent_id.clone())
-                        .or_default();
+                    let family = index.families.entry(run.parent_id.clone()).or_default();
                     if child.get::<_, bool>(1)? {
                         family
                             .unacknowledged
@@ -364,45 +368,37 @@ impl Coordinator {
                     run.finished = Some(now());
                     interrupted.push((run.run_id.clone(), serde_json::to_string(&run)?));
                 }
-                coordinator.record(run);
+                index.record(run);
             }
         }
         // Updating indexed metadata while traversing the pending index can skip rows.
         for (id, metadata) in interrupted {
             db.execute("UPDATE subagent_runs SET metadata=?2,error=?3 WHERE id=?1", params![id, metadata, "Orbit exited before this assignment finished. Commands are not replayed; continue through the parent after inspecting the workspace."])?;
         }
-        Ok((coordinator, warnings))
+        Ok((index, warnings))
     }
 }
 
 impl Harness {
+    pub(super) fn run_index(&self) -> std::sync::MutexGuard<'_, RunIndex> {
+        self.run_index.lock().expect("run index lock")
+    }
     pub fn subagent_runs(&self, parent: &str) -> Vec<RunInfo> {
-        let coordinator = self.subagents.lock().expect("subagent lock");
-        coordinator.latest_runs(parent)
+        self.run_index().latest_runs(parent)
     }
     pub fn child_statuses(&self) -> HashMap<String, ChildStatus> {
-        self.subagents
-            .lock()
-            .expect("subagent lock")
+        self.run_index()
             .families
             .iter()
             .map(|(id, family)| (id.clone(), family.status()))
             .collect()
     }
     pub fn active_children(&self, parent: &str) -> usize {
-        self.subagents
-            .lock()
-            .expect("subagent lock")
-            .status(parent)
-            .running
+        self.run_index().status(parent).running
     }
     /// Memory-only path for rendering current activity.
     pub fn resident_subagent(&self, parent: &str, key: RunKey<'_>) -> Option<RunInfo> {
-        self.subagents
-            .lock()
-            .expect("subagent lock")
-            .resident(parent, key)
-            .cloned()
+        self.run_index().resident(parent, key).cloned()
     }
     pub fn subagent_run(&self, parent: &str, key: RunKey<'_>) -> Result<Option<RunInfo>> {
         match self.resident_subagent(parent, key) {
@@ -442,10 +438,10 @@ impl Harness {
         if args.task.trim().is_empty() {
             bail!("Provide a complete, nonempty task briefing");
         }
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        let coordinator = self.subagents.lock().expect("subagent lock");
         let key = RunKey::Request(request);
-        if let Some(run) = coordinator.resident(parent, key) {
-            return Ok(run.clone());
+        if let Some(run) = self.resident_subagent(parent, key) {
+            return Ok(run);
         }
         if let Some(run) = RunInfo::stored(&self.store, parent, key)? {
             return Ok(run);
@@ -458,7 +454,7 @@ impl Harness {
         if snapshot.child.is_some() {
             bail!("Subagents cannot delegate");
         }
-        if coordinator.status(parent).running >= 6 {
+        if self.active_children(parent) >= 6 {
             bail!(
                 "Six subagents are already running. Wait for one to finish before spawning another."
             );
@@ -481,7 +477,8 @@ impl Harness {
                 bail!("Resume only your own child with its original profile");
             }
             if child.is_executing()
-                || coordinator
+                || self
+                    .run_index()
                     .latest_run(parent, &child.id)
                     .is_some_and(|r| r.status == RunStatus::Running)
             {
@@ -557,7 +554,7 @@ impl Harness {
                 .save_session_transaction(None, &session, false, Some(&run))?;
             self.make_conversation(session, true);
         }
-        coordinator.record(run.clone());
+        self.run_index().record(run.clone());
         // start_inner only schedules work; its worker cannot finish under this lock.
         self.start_inner(&run.session_id, settings)?;
         self.catalog_revision.fetch_add(1, Ordering::Release);
@@ -584,7 +581,7 @@ impl Harness {
                     for run in runs {
                         let mut result = json!({"run_id":run.run_id,"session_id":run.session_id,"status":run.status});
                         if run.status != RunStatus::Running {
-                            let unsaved = self.subagents.lock().expect("subagent lock").families.get(parent).and_then(|f| f.unsaved.get(&run.run_id)).cloned();
+                            let unsaved = self.subagents.lock().expect("subagent lock").unsaved.get(parent).and_then(|results| results.get(&run.run_id)).cloned();
                             let (text,error) = if let Some(result) = unsaved { result } else {
                                 self.store.db.lock().expect("database lock").query_row("SELECT result,error FROM subagent_runs WHERE id=?1",[&run.run_id],|r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?)))?
                             };
@@ -615,7 +612,8 @@ impl Harness {
             .expect("child assignment")
             .parent_id
             .clone();
-        let Some(mut run) = coordinator
+        let Some(mut run) = self
+            .run_index()
             .latest_run(&parent, &child.id)
             .filter(|r| r.status == RunStatus::Running)
             .cloned()
@@ -641,12 +639,11 @@ impl Harness {
             }
         };
         run.finished = Some(now());
-        coordinator.record(run.clone());
+        self.run_index().record(run.clone());
         coordinator
-            .families
-            .get_mut(&parent)
-            .expect("recorded family")
             .unsaved
+            .entry(parent.clone())
+            .or_default()
             .insert(run.run_id.clone(), (text, error));
         self.retry_results(&mut coordinator, &parent)?;
         self.deliver_notices(&mut coordinator, &run.parent_id)?;
@@ -658,28 +655,30 @@ impl Harness {
         Ok(())
     }
     pub(super) fn retry_results(&self, coordinator: &mut Coordinator, parent: &str) -> Result<()> {
-        let Some(family) = coordinator.families.get_mut(parent) else {
+        let Some(results) = coordinator.unsaved.get(parent) else {
             return Ok(());
         };
-        if family.unsaved.is_empty() {
-            return Ok(());
-        }
         let mut db = self.store.db.lock().expect("database lock");
         let tx = db.transaction()?;
-        for (id, (text, error)) in &family.unsaved {
+        for (id, (text, error)) in results {
+            let metadata = serde_json::to_string(
+                self.run_index()
+                    .run(parent, id)
+                    .expect("unsaved assignment"),
+            )?;
             tx.execute(
                 "UPDATE subagent_runs SET metadata=?2,result=?3,error=?4 WHERE id=?1",
-                params![id, serde_json::to_string(&family.runs[id])?, text, error],
+                params![id, metadata, text, error],
             )?;
         }
         tx.commit()?;
-        family.unsaved.clear();
+        coordinator.unsaved.remove(parent);
         Ok(())
     }
     /// Explicit flush is global. A broken family must not stop another family's
     /// results and notices from becoming durable.
     pub(super) fn flush_results(&self, coordinator: &mut Coordinator) -> Result<()> {
-        let parents: Vec<_> = coordinator.families.keys().cloned().collect();
+        let parents: Vec<_> = self.run_index().families.keys().cloned().collect();
         let mut failures = Vec::new();
         for parent in parents {
             if let Err(error) = self
@@ -698,10 +697,11 @@ impl Harness {
     }
     pub(super) fn deliver_notices(
         &self,
-        coordinator: &mut Coordinator,
+        _coordinator: &mut Coordinator,
         parent: &str,
     ) -> Result<()> {
-        let runs: Vec<_> = coordinator
+        let runs: Vec<_> = self
+            .run_index()
             .runs(parent)
             .filter(|r| r.status != RunStatus::Running && !r.notified)
             .cloned()
@@ -741,7 +741,7 @@ impl Harness {
                 "UPDATE subagent_runs SET metadata=?2 WHERE id=?1",
                 params![run.run_id, serde_json::to_string(&run)?],
             )?;
-            coordinator.record(run);
+            self.run_index().record(run);
         }
         conversation.changed();
         Ok(())
@@ -752,13 +752,15 @@ impl Harness {
         if let Some(c) = self.get(session) {
             c.cancel();
         }
-        for child in coordinator
+        let children: Vec<_> = self
+            .run_index()
             .families
             .get(session)
             .into_iter()
-            .flat_map(|f| f.latest.keys())
-        {
-            if let Some(c) = self.get(child) {
+            .flat_map(|f| f.latest.keys().cloned())
+            .collect();
+        for child in children {
+            if let Some(c) = self.get(&child) {
                 if c.is_running() {
                     c.cancel();
                 } else {
@@ -797,12 +799,14 @@ impl Harness {
                 .collect(),
         };
         let mut ids = parents.clone();
+        let index = self.run_index();
         ids.extend(
             parents
                 .iter()
-                .filter_map(|id| coordinator.families.get(id))
+                .filter_map(|id| index.families.get(id))
                 .flat_map(|f| f.latest.keys().cloned()),
         );
+        drop(index);
         // A child's only assignment may have been skipped during startup recovery.
         ids.extend(
             self.summaries
@@ -816,7 +820,7 @@ impl Harness {
                 })
                 .map(|s| s.id.clone()),
         );
-        if parents.iter().any(|id| coordinator.status(id).running > 0)
+        if parents.iter().any(|id| self.active_children(id) > 0)
             || ids.iter().any(|id| {
                 self.get(id).is_some_and(|c| {
                     if project_deletion {
@@ -867,7 +871,8 @@ impl Harness {
             }
         }
         for parent in parents {
-            coordinator.families.remove(&parent);
+            self.run_index().families.remove(&parent);
+            coordinator.unsaved.remove(&parent);
         }
         self.catalog_revision.fetch_add(1, Ordering::Release);
         self.changes.send_replace(());
@@ -1829,7 +1834,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
 
     #[test]
     fn older_assignments_do_not_change_latest_child_status() {
-        let mut coordinator = Coordinator::default();
+        let mut coordinator = RunIndex::default();
         let mut old = RunInfo {
             configuration: None,
             run_id: "old".into(),
@@ -1886,6 +1891,57 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 .run("parent", "old")
                 .unwrap()
                 .attention_acknowledged
+        );
+    }
+
+    #[tokio::test]
+    async fn sidebar_status_reads_do_not_wait_for_cold_session_filing() {
+        let mut f = Fixture::new().await;
+        let run = f
+            .spawn(Profile::Review, None, "review the open session")
+            .unwrap();
+        let _pending_request = f.request().await;
+        let h = &f.h;
+        let parent = &f.parent;
+        let cold = Session::new(f._dir.path().into(), &Settings::default());
+        h.store.save_session(&cold).unwrap();
+
+        // Stall the actual cold load rather than assuming a large transcript is slow.
+        std::thread::scope(|scope| {
+            let db = h.store.db.lock().unwrap();
+            let filing =
+                scope.spawn(|| h.file_session(&cold.id, FilingAction::File(FilingKind::Settled)));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while h.loading.try_lock().is_ok() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "filing did not enter the cold load"
+                );
+                std::thread::yield_now();
+            }
+
+            let (read, done) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                assert_eq!(h.active_children(parent), 1);
+                assert_eq!(h.child_statuses()[parent].running, 1);
+                assert_eq!(h.subagent_runs(parent)[0].run_id, run.run_id);
+                assert_eq!(
+                    h.resident_subagent(parent, RunKey::Id(&run.run_id))
+                        .unwrap()
+                        .status,
+                    RunStatus::Running
+                );
+                assert!(h.attention(parent).is_none());
+                read.send(()).unwrap();
+            });
+            let responsive = done.recv_timeout(Duration::from_secs(5));
+            drop(db);
+            assert_eq!(filing.join().unwrap().unwrap(), FilingOutcome::Applied);
+            responsive.expect("UI reads blocked on storage for a different session");
+        });
+        assert_eq!(
+            h.store.load_session(&cold.id).unwrap().filing.unwrap().kind,
+            FilingKind::Settled
         );
     }
 
@@ -1949,7 +2005,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
         assert!(!f.h.child_statuses()[&f.parent].needs_attention);
         f.h.flush().unwrap();
         assert_eq!(f.wait(vec![first.run_id.clone()], 0).await, original);
-        let (reloaded, _) = Coordinator::load(&f.h.store).unwrap();
+        let (reloaded, _) = RunIndex::load(&f.h.store).unwrap();
         for id in [&first.run_id, &second.run_id] {
             assert!(reloaded.run(&f.parent, id).unwrap().attention_acknowledged);
             assert_eq!(
@@ -2156,7 +2212,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
         store
             .save_session_transaction(Some(&child), &child, false, Some(&later))
             .unwrap();
-        h.subagents.lock().unwrap().record(later);
+        h.run_index().record(later);
         let error = h.acknowledge_attention(seen).unwrap_err();
         assert!(error.to_string().contains("identity mismatch"));
         assert!(lookup(RunKey::Id("run-3")).attention_acknowledged);

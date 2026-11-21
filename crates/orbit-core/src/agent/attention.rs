@@ -11,7 +11,6 @@ pub struct Attention {
 
 impl Harness {
     pub fn attention(&self, session: &str) -> Option<Attention> {
-        let coordinator = self.subagents.lock().expect("subagent lock");
         let conversation = self.get(session).and_then(|c| {
             let state = c.state.lock().expect("session lock");
             let generation = c.turn_generation.load(Ordering::Acquire);
@@ -30,7 +29,7 @@ impl Harness {
             .and_then(|s| s.child.as_ref())
             .map(|c| c.parent_id.clone())
             .unwrap_or_else(|| session.to_owned());
-        let ranges = coordinator.attention_ranges(&parent, session);
+        let ranges = self.run_index().attention_ranges(&parent, session);
         (conversation.is_some() || !ranges.is_empty()).then_some(Attention {
             conversation,
             parent,
@@ -68,7 +67,11 @@ impl Harness {
                         match RunInfo::from_row(row) {
                             Ok(mut run) => {
                                 rowids.push(rowid);
-                                if coordinator.run(&attention.parent, &run.run_id).is_some() {
+                                if self
+                                    .run_index()
+                                    .run(&attention.parent, &run.run_id)
+                                    .is_some()
+                                {
                                     run.attention_acknowledged = true;
                                     resident.push(run);
                                 }
@@ -84,10 +87,12 @@ impl Harness {
                 drop(query);
                 tx.commit()?;
             }
+            let mut index = self.run_index();
             for run in resident {
-                coordinator.record(run);
+                index.record(run);
             }
-            coordinator.acknowledged(&attention.parent, &attention.ranges);
+            index.acknowledged(&attention.parent, &attention.ranges);
+            drop(index);
             self.catalog_revision.fetch_add(1, Ordering::Release);
             self.changes.send_replace(());
         }

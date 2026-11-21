@@ -130,7 +130,23 @@ impl Conversation {
     }
     async fn save_async(self: &Arc<Self>) -> Result<()> {
         let conversation = self.clone();
-        tokio::task::spawn_blocking(move || conversation.save()).await?
+        #[cfg(test)]
+        let queued = std::time::Instant::now();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let wait = queued.elapsed();
+            #[cfg(test)]
+            if let Some(trace) = &conversation.store.save_trace {
+                trace
+                    .send((
+                        conversation.id.clone(),
+                        crate::test_support::SaveTiming::WorkerQueue(wait),
+                    ))
+                    .expect("live benchmark receiver");
+            }
+            conversation.save()
+        })
+        .await?
     }
     /// The main turn includes terminal persistence, not just model/tool execution.
     pub fn is_turn_active(&self) -> bool {
@@ -189,6 +205,7 @@ pub struct Harness {
     catalog_revision: AtomicU64,
     loading: Mutex<()>,
     subagents: Mutex<subagents::Coordinator>,
+    run_index: Mutex<subagents::RunIndex>,
     /// Recoverable problems opening individual records, for the startup UI.
     pub startup_warnings: Vec<String>,
     weak: std::sync::Weak<Self>,
@@ -214,7 +231,7 @@ impl Harness {
         home: Option<std::path::PathBuf>,
     ) -> Result<Arc<Self>> {
         let auth = provider.auth.clone();
-        let (subagents, startup_warnings) = subagents::Coordinator::load(&store)?;
+        let (run_index, startup_warnings) = subagents::RunIndex::load(&store)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -227,7 +244,8 @@ impl Harness {
             web_client,
             weak: weak.clone(),
             loading: Mutex::new(()),
-            subagents: Mutex::new(subagents),
+            subagents: Mutex::default(),
+            run_index: Mutex::new(run_index),
             startup_warnings,
             changes: tokio::sync::watch::channel(()).0,
             store,
@@ -513,7 +531,7 @@ impl Harness {
         summaries.values().cloned().collect()
     }
     pub fn evict_inactive(&self, selected: Option<&str>) -> Result<()> {
-        let coordinator = self.subagents.lock().expect("subagent lock");
+        let _coordinator = self.subagents.lock().expect("subagent lock");
         let _loading = self.loading.lock().expect("loading lock");
         for c in self.all() {
             if Some(c.id.as_str()) == selected {
@@ -521,14 +539,14 @@ impl Harness {
             }
             if c.naming.load(Ordering::Acquire)
                 || c.is_executing()
-                || coordinator.status(&c.id).running > 0
+                || self.active_children(&c.id) > 0
                 || !c.loaded.load(Ordering::Acquire)
             {
                 continue;
             }
             // The coordinator/loading guards exclude new starts and eviction.
             // Skip running/finalizing work before waiting on its storage lock,
-            // otherwise a slow save would block UI child-status reads and Stop.
+            // otherwise a slow save would delay Stop and new turns.
             let mut saved = c.persisted.lock().expect("persistence lock");
             c.save_locked(&mut saved)?;
             let mut state = c.state.lock().expect("session lock");
@@ -540,8 +558,10 @@ impl Harness {
             state.points = Default::default();
             state.entries = Default::default();
             state.input = Default::default();
-            *saved = None;
             c.loaded.store(false, Ordering::Release);
+            drop(state);
+            // Free the last saved history outside the lock used by UI summary reads.
+            *saved = None;
             if !c.code.has_work() {
                 self.conversations
                     .lock()
@@ -622,7 +642,7 @@ impl Harness {
         let destination = match action {
             FilingAction::Undo => None,
             FilingAction::File(kind) | FilingAction::StopCommandsAndFile(kind) => {
-                let children = coordinator.latest_runs(id);
+                let children = self.subagent_runs(id);
                 if conversation.is_turn_active()
                     || conversation.code.cells_executing()
                     || conversation
@@ -664,7 +684,7 @@ impl Harness {
                 }
                 // Finish outstanding durable delivery before filing. Stopped turns may
                 // retain queued input/notices; filing preserves them without resuming.
-                if coordinator.runs(id).any(|r| !r.notified) {
+                if self.run_index().runs(id).any(|r| !r.notified) {
                     self.retry_results(&mut coordinator, id)
                         .and_then(|()| self.deliver_notices(&mut coordinator, id))
                         .context("Could not finish saving child results before filing the session. Keep Orbit open, check disk space and permissions, then retry")?;
@@ -911,14 +931,14 @@ impl Harness {
                 if !is_child {
                     // start_inner can wait for a cancelled turn while holding the
                     // coordinator. Publish only after marking idle and waking it.
-                    let coordinator = harness.subagents.lock().expect("subagent lock");
+                    let _coordinator = harness.subagents.lock().expect("subagent lock");
                     let mut state = conversation.state.lock().expect("session lock");
                     if conversation.turn_generation.load(Ordering::Acquire) == generation {
                         if !cancel.is_cancelled() {
                             if result.is_err() || save_result.is_err() {
                                 conversation.notifications.publish(&state, notifications::Kind::Failed);
                             } else if !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
-                                && coordinator.status(&conversation.id).running == 0
+                                && harness.active_children(&conversation.id) == 0
                             {
                                 // This sidebar hint uses ordinary session saves (eviction,
                                 // edits, shutdown), not a separate completion transaction.
@@ -1829,19 +1849,19 @@ mod tests {
             notified: true,
             attention_acknowledged: false,
         };
-        h.subagents.lock().unwrap().record(run.clone());
+        h.run_index().record(run.clone());
         assert!(
             h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
                 .is_err()
         );
         run.status = subagents::RunStatus::Failed;
-        h.subagents.lock().unwrap().record(run.clone());
+        h.run_index().record(run.clone());
         assert!(
             h.file_session(&c.id, FilingAction::File(FilingKind::Settled))
                 .is_err()
         );
         run.attention_acknowledged = true;
-        h.subagents.lock().unwrap().record(run);
+        h.run_index().record(run);
         child.finishing.store(true, Ordering::Release);
         assert!(
             h.file_session(&c.id, FilingAction::File(FilingKind::Settled))

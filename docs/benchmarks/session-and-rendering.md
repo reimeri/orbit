@@ -639,3 +639,60 @@ clipboard. Reproduce inside `nix develop`:
 ```sh
 scripts/test-renderer.sh cargo test --locked --release -p orbit two_4k_import_probe -- --ignored --nocapture --test-threads=1
 ```
+
+## Persistence during concurrent tool turns
+
+Follow-up to [finding 5](app-performance.html#turn). The delay on ext4 was
+primarily **waiting for other turns' SQLite commits**, not waiting for a blocking
+worker or preparing SQL. At eight turns, 88 commits occupied the single
+connection for 168–178 ms in groups that finished in 179–184 ms. Those commits
+do not overlap; wait times from different turns *do*, so adding waits across
+turns would overstate the delay.
+
+| Storage | Turns | Group makespan (ms) | Worker queue (ms/turn) | DB mutex wait (ms/turn) | Transaction body (ms/turn) | Commit (ms/turn) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ext4 | 1 | 66.90 | 0.09 | <0.01 | 0.45 | 22.15 |
+| tmpfs | 1 | 44.34 | 0.09 | <0.01 | 0.40 | 0.21 |
+| ext4 | 8 | 183.11 | 0.09 | 148.29 | 0.48 | 21.50 |
+| tmpfs | 8 | 48.79 | 0.08 | 2.30 | 0.42 | 0.20 |
+
+Same release binary, Ryzen 7 5800X3D, ext4 on a Crucial MX500 SATA SSD vs
+tmpfs. Each local turn runs one QuickJS call, sends its result back to the
+loopback peer, streams 64 text deltas, and verifies the restored final answer.
+Each row excludes the first group as warmup. Makespan is the median of three
+groups. The remaining columns are medians of **per-turn sums** (3 single turns
+or 24 concurrent turns); all measured turns made 11 session saves.
+
+The test-only trace times submission to entry of the blocking save worker,
+then separately times acquiring the shared connection, executing the transaction
+(including serialization), and calling SQLite commit with WAL and
+`synchronous=FULL`. It does not attribute snapshotting, network or other
+scheduling to a DB phase. Commit includes more than a device flush: in a
+**separate** syscall-traced run the median successful `fsync` on
+`sessions.sqlite3-wal` was 1.74 ms on ext4 vs 0.007 ms on tmpfs (413 calls
+per filesystem, including setup and warmup). These syscall timings corroborate
+the storage difference; they are not subtracted from the untraced measurements.
+
+Reproduce inside `nix develop` (check mounts; `/tmp` is not always persistent).
+`SAVE` and `TX` rows report microseconds and are keyed by sample, group size
+and turn; sample 0 is warmup. The trace is drained after the group stopwatch stops.
+
+```sh
+findmnt -T /tmp -o SOURCE,FSTYPE
+findmnt -T /dev/shm -o SOURCE,FSTYPE
+probe() { cargo test --locked --release -p orbit-core --lib local_turn_benchmark -- --ignored --nocapture --test-threads=1; }
+TMPDIR=/tmp probe
+TMPDIR=/dev/shm probe
+# Optional, run separately with strace available; repeat on the other mount.
+log=$(mktemp)
+TMPDIR=/tmp CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="strace -f -T -yy -e trace=fsync,fdatasync -o $log" probe
+```
+
+**Durability check:** `failed_tool_start_commit_rolls_back_without_dispatch`
+uses a deferred foreign-key failure: the raw call commits, the tool-start write
+runs, but COMMIT fails. The previous checkpoint remains readable, the tool's
+side effect never occurs, and retrying the save after clearing the fault
+persists the interrupted outcome. This checks application ordering, not a
+physical power loss. No checkpoint or sync policy changed. If fewer commits
+are investigated, distinguish ordinary saves from acceptance, tool-start and
+result saves before trying to combine any of them.
