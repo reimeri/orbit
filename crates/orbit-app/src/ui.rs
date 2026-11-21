@@ -1,4 +1,5 @@
 mod forks;
+mod marketing;
 mod settings;
 
 use crate::activity::{self, Row as ActivityRow};
@@ -217,6 +218,7 @@ pub struct App {
     git_pending: HashSet<PathBuf>,
     git_counts: Arc<crate::git::LineCounts>,
     draft_dirty: bool,
+    launch: crate::Launch,
     smoke_stage: usize,
     screenshot_check: Option<crate::screenshot_check::Check>,
     smoke_passed: Arc<AtomicBool>,
@@ -414,8 +416,8 @@ impl App {
         self.preset().theme.clone()
     }
 
-    pub fn new(smoke: bool, smoke_passed: Arc<AtomicBool>) -> (Self, Task<Message>) {
-        let smoke_dir = smoke
+    pub fn new(launch: crate::Launch, smoke_passed: Arc<AtomicBool>) -> (Self, Task<Message>) {
+        let smoke_dir = (!matches!(launch, crate::Launch::Normal))
             .then(|| std::env::temp_dir().join(format!("orbit-smoke-{}", orbit_core::store::id())));
         let loaded = (|| -> Result<_, String> {
             let store = if let Some(path) = &smoke_dir {
@@ -529,6 +531,7 @@ impl App {
             git_pending: HashSet::new(),
             git_counts: Arc::default(),
             draft_dirty: false,
+            launch,
             smoke_stage: 0,
             screenshot_check: None,
             smoke_passed,
@@ -2711,7 +2714,11 @@ impl App {
             },
             Message::WindowOpened(id) => {
                 self.window_id = Some(id);
-                if self.smoke_dir.is_some() {
+                if matches!(self.launch, crate::Launch::Marketing(_)) {
+                    self.stage_marketing_session();
+                    return delayed_capture();
+                }
+                if matches!(self.launch, crate::Launch::Smoke) {
                     // Change the view and request capture in the same update;
                     // no timer can hide an ordering bug in the screenshot API.
                     self.screenshot_check = Some(Default::default());
@@ -3453,6 +3460,11 @@ impl App {
                     } else {
                         text(age.clone()).size(10).style(theme::muted).into()
                     };
+                    let phase_offset = match (&self.launch, status) {
+                        (crate::Launch::Marketing(_), SessionStatus::Working) => 0.125,
+                        (crate::Launch::Marketing(_), SessionStatus::Question) => 0.4,
+                        _ => 0.,
+                    };
                     let content = mouse_area(
                         theme::button(session_wave::wave(
                             container(
@@ -3471,6 +3483,7 @@ impl App {
                             .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
                             .width(Fill),
                             status,
+                            phase_offset,
                         ))
                         .padding(0)
                         .width(Fill)
@@ -5270,6 +5283,29 @@ impl App {
             && pixels.len() == screenshot.size.width as usize * screenshot.size.height as usize * 4
             && pixels.as_chunks::<4>().0.iter().any(|p| p != &pixels[..4]);
         if !valid {
+            eprintln!("Window capture returned an empty or uniform frame.");
+            return iced::exit();
+        }
+        if let crate::Launch::Marketing(path) = &self.launch {
+            match image::save_buffer_with_format(
+                path,
+                pixels,
+                screenshot.size.width,
+                screenshot.size.height,
+                image::ColorType::Rgba8,
+                image::ImageFormat::Png,
+            ) {
+                Ok(()) => {
+                    self.smoke_passed.store(true, Ordering::Relaxed);
+                    println!(
+                        "Saved {} × {} window to {}",
+                        screenshot.size.width,
+                        screenshot.size.height,
+                        path.display()
+                    );
+                }
+                Err(error) => eprintln!("Cannot save {}: {error}", path.display()),
+            }
             return iced::exit();
         }
         if let Some(path) = std::env::var_os("ORBIT_SMOKE_RGBA") {
@@ -6501,7 +6537,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(true, Arc::new(AtomicBool::new(false))).0
+        App::new(crate::Launch::Smoke, Arc::new(AtomicBool::new(false))).0
     }
     #[tokio::test]
     async fn long_user_prompts_wrap_within_the_right_two_thirds_only() {

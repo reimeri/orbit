@@ -42,14 +42,22 @@ use std::{
     },
 };
 use ui::App;
+#[derive(Clone)]
+enum Launch {
+    Normal,
+    Smoke,
+    Marketing(std::path::PathBuf),
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let smoke = match args.as_slice() {
-        [] => false,
-        [arg] if arg == "--smoke-test" => true,
+    let launch = match args.as_slice() {
+        [] => Launch::Normal,
+        [arg] if arg == "--smoke-test" => Launch::Smoke,
+        [arg, path] if arg == "--marketing-shot" => Launch::Marketing(path.into()),
         [arg] if arg == "--help" || arg == "-h" => {
             println!(
-                "Usage: orbit [--smoke-test]\n\nNative Wayland coding harness. Settings and credentials: $XDG_CONFIG_HOME/orbit (or ~/.config/orbit).\n--smoke-test uses isolated temporary state and never connects to OpenAI."
+                "Usage: orbit [--smoke-test | --marketing-shot OUTPUT.png]\n\nNative Wayland coding harness. Settings and credentials: $XDG_CONFIG_HOME/orbit (or ~/.config/orbit).\nCapture modes use isolated temporary state and never connect to OpenAI. --marketing-shot saves a staged window as a PNG."
             );
             return ExitCode::SUCCESS;
         }
@@ -64,10 +72,11 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    let capturing = !matches!(launch, Launch::Normal);
     let passed = Arc::new(AtomicBool::new(false));
     let flag = passed.clone();
     let result = iced::application(
-        move || App::new(smoke, flag.clone()),
+        move || App::new(launch.clone(), flag.clone()),
         App::update,
         App::view,
     )
@@ -91,8 +100,8 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    if smoke && !passed.load(Ordering::Relaxed) {
-        eprintln!("Window smoke test failed.");
+    if capturing && !passed.load(Ordering::Relaxed) {
+        eprintln!("Window capture did not complete.");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

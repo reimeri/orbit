@@ -50,16 +50,20 @@ impl Status {
 pub fn wave<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     status: Status,
+    phase_offset: f32,
 ) -> Element<'a, Message> {
     Element::new(Wave {
         content: content.into(),
         status,
+        phase_offset,
     })
 }
 
 struct Wave<'a, Message> {
     content: Element<'a, Message>,
     status: Status,
+    /// Visual offset in cycles, independent of the animation clock.
+    phase_offset: f32,
 }
 
 struct Motion {
@@ -209,7 +213,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Wave<'_, Message>
         {
             let motion = tree.state.downcast_ref::<Motion>();
             renderer.with_layer(clip, |renderer| {
-                draw_wave(renderer, bounds, color, motion.elapsed);
+                draw_wave(
+                    renderer,
+                    bounds,
+                    color,
+                    motion.elapsed + self.phase_offset * PERIOD,
+                );
                 // Keep all foreground primitives above the mesh, including badges.
                 renderer.with_layer(clip, draw_content);
             });
@@ -295,7 +304,7 @@ mod tests {
         let size = Size::new(320., 80.);
         let viewport = Rectangle::with_size(size);
         let start = Instant::now();
-        let make = |status| wave::<()>(space().width(270).height(48), status);
+        let make = |status| wave::<()>(space().width(270).height(48), status, 0.);
         let mut content = make(Status::Working);
         let mut tree = Tree::new(&content);
         let mut frames = Vec::new();

@@ -33,6 +33,11 @@ smoke:
     cargo build --locked -p orbit
     ./scripts/smoke-wayland.sh
 
+# Save a staged Orbit window on a private Wayland display.
+marketing-shot $output="target/orbit-marketing.png":
+    cargo build --locked -p orbit
+    ./scripts/smoke-wayland.sh ./target/debug/orbit "$output"
+
 # Requires a running Wayland desktop and a working graphics driver; no fallback.
 smoke-gpu:
     cargo build --locked -p orbit

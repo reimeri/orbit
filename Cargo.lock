@@ -2739,6 +2739,7 @@ dependencies = [
  "iced",
  "iced_runtime",
  "iced_wgpu",
+ "image",
  "inotify",
  "lru",
  "orbit-core",

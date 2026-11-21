@@ -472,6 +472,7 @@ mod tests {
                         let button = crate::theme::button(session_wave::wave(
                             space().width(200).height(60),
                             status,
+                            0.,
                         ))
                         .padding(0)
                         .on_press(id)

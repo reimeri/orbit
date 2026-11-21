@@ -53,6 +53,24 @@ full dependency debug info. Nix packaging builds do not reuse local artifacts.
 Use `just timings` for a Cargo timing report, a temporary `CARGO_TARGET_DIR`
 for cold measurements, or `CARGO_BUILD_JOBS=4` if memory is constrained.
 
+## Capture a marketing screenshot
+
+From the repository root, run:
+
+```sh
+nix develop --command just marketing-shot
+```
+
+This writes **`target/orbit-marketing.png`**, a 2560 × 1600 capture of the
+window contents (1280 × 800 at 2× scale). To choose a different output file,
+pass its path, for example `just marketing-shot "/tmp/Orbit demo.png"`
+inside the dev shell. The parent directory must exist.
+
+The recipe uses the smoke test’s private headless Weston display and pinned
+CPU Vulkan driver. It doesn’t need a desktop or login, use your Orbit state,
+or execute the commands shown in the chat. Edit the [staged sessions and
+transcript](../crates/orbit-app/src/ui/marketing.rs) to change the scene.
+
 ## Runtime troubleshooting
 
 - **No Wayland session:** verify `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` from a

@@ -11,6 +11,7 @@ iced = { version = "0.14.0", default-features = false, features = [
     "wgpu", "wayland", "tokio", "crisp", "markdown", "advanced", "image-without-codecs", "svg",
 ] }
 
+image = { version = "0.25", default-features = false, features = ["png"] }
 iced_runtime = "0.14"
 lru = { version = "0.16", default-features = false }
 
