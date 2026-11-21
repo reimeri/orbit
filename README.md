@@ -1,4 +1,4 @@
-# <img src="assets/icon/orbit.png" alt="" width="24" height="24"> Orbit
+![Orbit coding agent with a staged session open](assets/marketing/orbit-banner.png)
 
 Orbit is a coding agent harness made for OpenAI models. It was created because the
 codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage.

@@ -38,6 +38,10 @@ marketing-shot $output="target/orbit-marketing.png":
     cargo build --locked -p orbit
     ./scripts/smoke-wayland.sh ./target/debug/orbit "$output"
 
+# Compose the README banner from an existing staged capture.
+marketing-banner $screenshot="target/orbit-marketing.png" $output="assets/marketing/orbit-banner.png":
+    ./scripts/marketing-banner.sh "$screenshot" "$output"
+
 # Requires a running Wayland desktop and a working graphics driver; no fallback.
 smoke-gpu:
     cargo build --locked -p orbit

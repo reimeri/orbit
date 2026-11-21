@@ -71,6 +71,18 @@ CPU Vulkan driver. It doesn’t need a desktop or login, use your Orbit state,
 or execute the commands shown in the chat. Edit the [staged sessions and
 transcript](../crates/orbit-app/src/ui/marketing.rs) to change the scene.
 
+To rebuild the banner at the top of the README from that capture, run:
+
+```sh
+nix develop --command just marketing-banner
+```
+
+This combines the full window with the title and background in
+[`assets/marketing/`](../assets/marketing/) and writes `orbit-banner.png` there.
+It does not retake the screenshot. To preview an alternate capture without
+changing the README image, use `just marketing-banner "/tmp/Orbit demo.png" "/tmp/banner.png"`
+inside the dev shell.
+
 ## Runtime troubleshooting
 
 - **No Wayland session:** verify `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` from a

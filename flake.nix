@@ -137,6 +137,7 @@
           rustc cargo rustfmt clippy rust-analyzer
           pkg-config mold git just time xdg-utils valgrind
           weston wayland-utils
+          imagemagick
         ];
         buildInputs = runtimeLibraries ++ [ pkgs.sqlite ];
         LD_LIBRARY_PATH = runtimePath;
