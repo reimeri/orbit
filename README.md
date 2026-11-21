@@ -18,20 +18,47 @@ codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage
 - Spell checking
 - Markdown and LaTEX rendering
 
-## Develop
-
-On **x86_64 Linux with Nix and a Wayland desktop**, run `nix run` from the
-checkout. Once installed, launch **Orbit** from the desktop menu or run `orbit`.
-For development:
-
-```sh
-nix develop
-just run
-```
-
 ## Install
 
-TODO
+Orbit requires x86_64 Linux, a Wayland desktop.
+With [Nix](https://nixos.org/download/) installed, run this command to install
+Orbit from GitHub into your user profile (no clone needed):
+
+```sh
+nix --extra-experimental-features 'nix-command flakes' profile add github:reimeri/orbit
+```
+
+Launch **Orbit** from the desktop menu or run `orbit` in a terminal.
+
+<details>
+<summary>Declaratively in the NixOS configuration</summary>
+
+For a declarative NixOS install, add Orbit as an input and package in your system flake (replace `hostname` with your configuration name):
+
+```nix
+{
+  inputs.orbit = {
+     url = "github:reimeri/orbit";
+     inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, orbit, ... }: {
+    nixosConfigurations.hostname = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        ({ pkgs, ... }: {
+          environment.systemPackages = [
+            orbit.packages.${pkgs.system}.default
+          ];
+        })
+      ];
+    };
+  };
+}
+```
+
+</details>
 
 ## Directories & Configuration
 
