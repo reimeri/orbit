@@ -29,7 +29,7 @@ cancels the pending task by dropping its sender (the API has no error result).
 
 ## Regression coverage
 
-`crates/pico-app/src/screenshot_check.rs` runs at the beginning of the existing
+`crates/orbit-app/src/screenshot_check.rs` runs at the beginning of the existing
 native `--smoke-test`, before the usual app scenes. It replaces the view and
 requests a capture in the **same update**, with no settling timer, then changes
 the text and moves/recolors a marker while immediately requesting two captures.

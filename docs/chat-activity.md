@@ -88,7 +88,7 @@ eviction, just like the tool's expansion state.
 
 ## Data and virtualization
 
-`pico-app/src/activity.rs` derives display rows from the original history. It does
+`orbit-app/src/activity.rs` derives display rows from the original history. It does
 not rewrite transcript entries, tool parents, model-facing output or notice text.
 Synthetic activity/execution/thinking headers have distinct identities from source
 rows. The virtual list retains row measurements and scroll anchors by identity.

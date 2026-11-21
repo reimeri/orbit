@@ -1,6 +1,6 @@
 # Responses transport
 
-Pico sends Responses requests over TLS WebSockets to
+Orbit sends Responses requests over TLS WebSockets to
 `wss://chatgpt.com/backend-api/codex/responses` with `store: false`. There is no
 HTTP POST/SSE fallback. If the upgrade is blocked, check the connection and
 proxy. OAuth and web search use separate endpoints.
@@ -10,13 +10,13 @@ After a validated completion, the client keeps the response ID, logical input,
 output and request properties in memory. If the next input extends that input
 **and output**, and the properties still match, the next `response.create`
 includes `previous_response_id` and only the new items. Full requests start
-with Pico’s developer message; continuations inherit it rather than resending
-it. Tools and settings still travel with each request. Pico chooses the suffix before reading
+with Orbit’s developer message; continuations inherit it rather than resending
+it. Tools and settings still travel with each request. Orbit chooses the suffix before reading
 and encoding media, so unchanged images are not uploaded again.
 
-At turn start Pico reads `AGENTS.md` directly from the selected project directory.
-It sends the file as user-role project guidance, separate from Pico’s own
-instructions. If the file changes, Pico appends the new guidance; if removed or
+At turn start Orbit reads `AGENTS.md` directly from the selected project directory.
+It sends the file as user-role project guidance, separate from Orbit’s own
+instructions. If the file changes, Orbit appends the new guidance; if removed or
 emptied, it appends a removal notice. Unchanged guidance is not appended again.
 After compaction, only the latest guidance item is carried forward explicitly.
 
@@ -47,8 +47,8 @@ WebSocket per catalog model. It uses no project history and does not refresh or
 modify the saved login. Run only with authorization to consume subscription usage:
 
 ```sh
-PICO_EFFORT_ACCEPTANCE_AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/pico-evo/auth.json" \
-  nix develop --command cargo test --locked -p pico-core live_configuration_update -- --ignored --nocapture
+ORBIT_EFFORT_ACCEPTANCE_AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/orbit/auth.json" \
+  nix develop --command cargo test --locked -p orbit-core live_configuration_update -- --ignored --nocapture
 ```
 
 The [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation)

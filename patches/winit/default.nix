@@ -3,7 +3,7 @@ let
   version = "0.30.13";
 in
 pkgs.applyPatches {
-  name = "pico-winit-${version}-patched";
+  name = "orbit-winit-${version}-patched";
   src = pkgs.fetchurl {
     # The official crates.io release archive, not a moving branch or tag.
     name = "winit-${version}.tar.gz";

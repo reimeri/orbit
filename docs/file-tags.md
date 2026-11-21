@@ -42,7 +42,7 @@ diff’s `@@`) stays plain text without blocking the message or its other attach
   and **256 KiB of file text per message**. These are inline budgets, not read limits.
 - Larger files, non-UTF-8 data, and binary files remain complete. Private `/tmp`
   snapshots are identified to the model by absolute path and exact byte size.
-  Accepted attachments also retain durable copies under the `pico-evo` store's
+  Accepted attachments also retain durable copies under the `orbit` store's
   `files/` directory; OS temporary-file cleanup does not destroy replay data.
   Missing temporary copies are recreated from those durable bytes at projection.
 - PNG/JPEG/WebP/GIF data uses the existing image pipeline and its documented
@@ -60,12 +60,12 @@ including a first-send retry, reuses the accepted message rather than rereading
 changed or deleted originals. Title generation uses authored text, not expanded
 file contents. Pending input, durable user entries and reconstructed history all
 retain attachment metadata. Provider-only projection materializes temporary data
-and strips internal `pico_file` records from wire input.
+and strips internal `orbit_file` records from wire input.
 
 ## Index and lifecycle
 
-`pico-core/src/file_index.rs` owns the UI-independent service;
-`pico-app/src/file_completion.rs` owns session/token state and presentation.
+`orbit-core/src/file_index.rs` owns the UI-independent service;
+`orbit-app/src/file_completion.rs` owns session/token state and presentation.
 
 - Two services at most are retained in an app-local LRU, shared between sessions
   with the same workspace root. Selecting a workspace starts discovery early.
@@ -89,15 +89,15 @@ and strips internal `pico_file` records from wire input.
   output. Non-Git/unavailable-Git discovery uses Rust's ignore-aware walker,
   including hidden files and `.gitignore`, `.ignore`, and `.rgignore`. There is no
   unfiltered whole-workspace fallback and no ripgrep runtime dependency.
-- Directory symlinks are not recursively followed. `.git`, `.pico`, `.pico-evo`,
-  the configured `pico-evo` application state,
+- Directory symlinks are not recursively followed. `.git`, `.orbit`, legacy `.pico` and `.pico-evo`,
+  the configured `orbit` state and its legacy `pico-evo` sibling,
   and the service's own cache are excluded from normal discovery.
 - A directory-qualified query offers **Include ignored directory**. This explicit
   opt-in uses a separately cached, descriptor-pinned directory traversal. It does
   not change the main corpus's ignore policy or allow traversal outside the root.
   Manually entered workspace paths can also refer to ignored files.
-- Path-only, versioned, private caches live under `$XDG_CACHE_HOME/pico-evo/files`
-  (normally `~/.cache/pico-evo/files`). Cache identity includes root bytes and
+- Path-only, versioned, private caches live under `$XDG_CACHE_HOME/orbit/files`
+  (normally `~/.cache/orbit/files`). Cache identity includes root bytes and
   device/inode. Cached results are labelled provisional while live refresh runs.
   Invalid caches are rebuilt; cache write failure does not disable live search.
 - Nonrecursive watches cover indexed parent directories, discovered empty
@@ -138,13 +138,13 @@ machine-dependent CI timing assertions:
 
 ```sh
 # Path-only build/search comparison: 10k, 100k and 1M filenames; three samples.
-nix develop --command cargo test --locked --release -p pico-core \
+nix develop --command cargo test --locked --release -p orbit-core \
   file_index::tests::benchmark -- --ignored --nocapture --test-threads=1
 
 # End-to-end worker/cache startup on a generated 10k-file workspace.
-nix develop --command cargo test --locked --release -p pico-core \
+nix develop --command cargo test --locked --release -p orbit-core \
   file_index::tests::workspace_benchmark -- --ignored --nocapture --test-threads=1
-# Or set PICO_FILE_BENCH_WORKSPACE to an existing project (read-only discovery).
+# Or set ORBIT_FILE_BENCH_WORKSPACE to an existing project (read-only discovery).
 ```
 
 ### Local measurements — 2026-11-17

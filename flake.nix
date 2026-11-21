@@ -1,5 +1,5 @@
 {
-  description = "Pico V2 — native Wayland Rust/iced harness";
+  description = "Orbit — native Wayland Rust/iced harness";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -13,7 +13,7 @@
       testVulkanIcd = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
       fontConfig = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
       enDictionary = pkgs.hunspellDicts.en_US;
-      spellingData = pkgs.runCommand "pico-evo-dictionaries" { } ''
+      spellingData = pkgs.runCommand "orbit-dictionaries" { } ''
         mkdir -p "$out"
         cp ${enDictionary}/share/hunspell/en_US.{aff,dic} "$out/"
         cp ${enDictionary}/share/doc/*.txt "$out/"
@@ -34,7 +34,7 @@
       };
       # The same generated Cargo path is used by package and formatting checks.
       # Upstream source stays in the Nix store, never in the tracked project.
-      src = pkgs.runCommand "pico-evo-source" { } ''
+      src = pkgs.runCommand "orbit-source" { } ''
         cp -R ${projectSrc} "$out"
         chmod u+w "$out"
         mkdir "$out/.build-deps"
@@ -48,16 +48,16 @@
         ln -s ${patchedQuickjs.core} "$out/.build-deps/rquickjs-core"
       '';
       desktopItem = pkgs.makeDesktopItem {
-        name = "pico-evo";
-        desktopName = "Pico V2";
-        icon = "pico-evo";
+        name = "orbit";
+        desktopName = "Orbit";
+        icon = "orbit";
         comment = "Native Wayland AI coding harness";
-        exec = "pico-evo";
+        exec = "orbit";
         terminal = false;
         categories = [ "Development" ];
       };
-      pico = pkgs.rustPlatform.buildRustPackage {
-        pname = "pico-evo";
+      orbit = pkgs.rustPlatform.buildRustPackage {
+        pname = "orbit";
         version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
         inherit src;
         cargoLock.lockFile = ./Cargo.lock;
@@ -69,11 +69,11 @@
         FONTCONFIG_FILE = fontConfig;
         doCheck = true;
         nativeCheckInputs = [ pkgs.git pkgs.valgrind pkgs.dbus pkgs.mesa ];
-        PICO_TEST_VULKAN_ICD = testVulkanIcd;
-        PICO_DICTIONARY_DIR = spellingData;
-        PICO_TEST_DICTIONARY_DIR = spellingData;
+        ORBIT_TEST_VULKAN_ICD = testVulkanIcd;
+        ORBIT_DICTIONARY_DIR = spellingData;
+        ORBIT_TEST_DICTIONARY_DIR = spellingData;
         preCheck = ''
-          export VK_DRIVER_FILES="$PICO_TEST_VULKAN_ICD"
+          export VK_DRIVER_FILES="$ORBIT_TEST_VULKAN_ICD"
           unset VK_ICD_FILENAMES
           export WGPU_BACKEND=vulkan ICED_BACKEND=wgpu MESA_SHADER_CACHE_DISABLE=true
           export LD_LIBRARY_PATH="${runtimePath}:''${LD_LIBRARY_PATH:-}"
@@ -88,40 +88,43 @@
         doInstallCheck = true;
         nativeInstallCheckInputs = [ pkgs.weston ];
         postInstall = ''
-          install -Dm644 -t "$out/share/licenses/pico-evo/katex" ${./docs/licenses/katex}/*.txt
-          mkdir -p "$out/share/applications" "$out/share/pico-evo/dictionaries"
-          cp -r ${spellingData}/. "$out/share/pico-evo/dictionaries/"
+          install -Dm644 -t "$out/share/licenses/orbit/katex" ${./docs/licenses/katex}/*.txt
+          mkdir -p "$out/share/applications" "$out/share/orbit/dictionaries"
+          cp -r ${spellingData}/. "$out/share/orbit/dictionaries/"
           cp ${desktopItem}/share/applications/* "$out/share/applications/"
-          install -Dm644 ${./assets/icon/pico-evo.svg} "$out/share/icons/hicolor/scalable/apps/pico-evo.svg"
-          install -Dm644 ${./assets/icon/pico-evo-48.png} "$out/share/icons/hicolor/48x48/apps/pico-evo.png"
+          for size in 16 32 48 64 128 256 512; do
+            dir="$out/share/icons/hicolor/''${size}x$size/apps"
+            mkdir -p "$dir"
+            ${pkgs.imagemagick}/bin/magick ${./assets/icon/orbit.png} -resize "''${size}x$size" -strip "$dir/orbit.png"
+          done
         '';
         postFixup = ''
-          wrapProgram "$out/bin/pico-evo" \
+          wrapProgram "$out/bin/orbit" \
             --prefix LD_LIBRARY_PATH : ${runtimePath} \
             --prefix PATH : ${lib.makeBinPath [ pkgs.git pkgs.xdg-utils ]} \
-            --set-default PICO_DICTIONARY_DIR "$out/share/pico-evo/dictionaries" \
+            --set-default ORBIT_DICTIONARY_DIR "$out/share/orbit/dictionaries" \
             --set-default FONTCONFIG_FILE ${fontConfig}
         '';
         installCheckPhase = ''
           runHook preInstallCheck
-          bash scripts/smoke-wayland.sh "$out/bin/pico-evo"
+          bash scripts/smoke-wayland.sh "$out/bin/orbit"
           runHook postInstallCheck
         '';
         meta = {
-          description = "Pico V2 native Wayland coding harness";
-          mainProgram = "pico-evo";
+          description = "Orbit native Wayland coding harness";
+          mainProgram = "orbit";
           platforms = [ system ];
         };
       };
     in {
-      packages.${system} = { default = pico; pico-evo = pico; };
+      packages.${system} = { default = orbit; inherit orbit; };
       apps.${system}.default = {
         type = "app";
-        program = "${pico}/bin/pico-evo";
+        program = "${orbit}/bin/orbit";
       };
       checks.${system} = {
-        package = pico; # Includes unit tests and the headless Wayland window check.
-        formatting = pkgs.runCommand "pico-evo-formatting" {
+        package = orbit; # Includes unit tests and the headless Wayland window check.
+        formatting = pkgs.runCommand "orbit-formatting" {
           nativeBuildInputs = with pkgs; [ cargo rustfmt ];
         } ''
           cargo fmt --manifest-path ${src}/Cargo.toml --all --check
@@ -139,16 +142,16 @@
         LD_LIBRARY_PATH = runtimePath;
         FONTCONFIG_FILE = fontConfig;
         # Expose the test driver path, but do not select it for cargo run/the app.
-        PICO_TEST_VULKAN_ICD = testVulkanIcd;
-        PICO_DICTIONARY_DIR = spellingData;
-        PICO_TEST_DICTIONARY_DIR = spellingData;
+        ORBIT_TEST_VULKAN_ICD = testVulkanIcd;
+        ORBIT_DICTIONARY_DIR = spellingData;
+        ORBIT_TEST_DICTIONARY_DIR = spellingData;
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         shellHook = ''
           # Locate this checkout even when entering from a package subdirectory.
           root="$PWD"
           while [[ ! -f "$root/patches/winit/default.nix" ]]; do
             if [[ "$root" == / ]]; then
-              echo "Enter nix develop from the Pico checkout to prepare its patched dependencies." >&2
+              echo "Enter nix develop from the Orbit checkout to prepare its patched dependencies." >&2
               exit 1
             fi
             root="$(dirname "$root")"

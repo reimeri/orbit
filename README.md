@@ -1,12 +1,13 @@
-# Pico V2
+# Orbit
 
-Pico is a native Wayland coding assistant written in Rust with iced. Sign in with
+Orbit is a native Wayland coding assistant written in Rust with iced. Sign in with
 a ChatGPT subscription to work on local projects in persistent chat sessions.
 
 ## Run
 
 On **x86_64 Linux with Nix and a Wayland desktop**, run `nix run` from the
-checkout. For development:
+checkout. Once installed, launch **Orbit** from the desktop menu or run `orbit`.
+For development:
 
 ```sh
 nix develop
@@ -21,7 +22,7 @@ just run
    removes one leading indent from the current or selected lines. When file
    suggestions are open, Tab accepts the highlighted suggestion instead.
    In the focused composer, Ctrl+Z undoes a text edit and Ctrl+Y redoes it.
-   History follows recent drafts while Pico is open; sending clears it. These
+   History follows recent drafts while Orbit is open; sending clears it. These
    shortcuts do not change image attachments or undo a sent message.
 
 **Commands run with your user privileges, without a sandbox or approval prompts.**
@@ -41,7 +42,7 @@ access. Use a disposable project for initial testing.
   prompt, not a separate copy of the working directory.
 - Hover over an idle, checked session and choose the **clock** to defer it for
   later, or **Settle** when the work is complete. If shell commands are still
-  running, Pico asks before stopping them. Search or expand **Deferred** or
+  running, Orbit asks before stopping them. Search or expand **Deferred** or
   **Settled** to find the session. Opening it keeps it there; choose **Undo**
   or send another message to return it to the main list.
 - Right-click a project to rename, stash or delete it. Stashing hides the project
@@ -52,7 +53,7 @@ Select a model, reasoning effort and **Fast** (priority service) in the composer
 Changing models applies the new model's defaults. Set the default model and
 usable input context limit in **Settings → General**; set per-model effort and
 Fast defaults in **Models**, then **Save**. Appearance changes apply immediately.
-If a session's model is retired, Pico switches it to the app default without
+If a session's model is retired, Orbit switches it to the app default without
 changing the draft or transcript. Access, priority availability and usage limits depend on your subscription.
 
 ## Chat and tools
@@ -77,7 +78,7 @@ changing the draft or transcript. Access, priority availability and usage limits
 
 ## State and recovery
 
-Pico stores state under `$XDG_CONFIG_HOME/pico-evo` (default `~/.config/pico-evo`):
+Orbit stores state under `$XDG_CONFIG_HOME/orbit` (default `~/.config/orbit`):
 
 | Path | Contents |
 | --- | --- |
@@ -87,7 +88,7 @@ Pico stores state under `$XDG_CONFIG_HOME/pico-evo` (default `~/.config/pico-evo
 | `auth.json`, `image-api-key.json` | OAuth credentials and the optional image API key |
 | `instance.lock` | Prevents concurrent writes by two app instances |
 
-Close Pico before backing up the directory; do not omit a live WAL or the media
+Close Orbit before backing up the directory; do not omit a live WAL or the media
 files. Credentials are permission-protected, **not encrypted at rest**. Do not
 share credential files; transcripts and tool output can also contain sensitive data.
 
@@ -96,5 +97,31 @@ rebuilds incompatible encrypted context from the transcript. After a restart,
 interrupted tools are marked rather than replayed: inspect their effects before
 retrying. JavaScript store values, cells and shell sessions do not survive restart.
 Historical `sessions/*.json` files are neither loaded nor migrated.
+
+### Bring over an existing Pico V2 or Evo installation
+
+Orbit starts fresh; it does not migrate anything on startup. On the same machine
+and account, quit both apps and run this once from the checkout **before first
+launch** (Python 3, no extra packages):
+
+```sh
+python3 scripts/migrate-pico-evo.py
+```
+
+The script copies the entire `pico-evo` directory beside itself as `orbit`
+under the configured XDG config home, including credentials, the SQLite database
+and its WAL, media, and attachments. It updates structured attachment paths and
+local context tags in the copy, including fork checkpoints. Project folders,
+transcript text, and the original state are untouched. Keep the original as a
+private backup: literal links in old messages may still refer to it. If an
+`orbit` directory already exists, back it up and move it aside first; the script
+will not merge or overwrite it.
+
+If you installed custom dictionaries, copy `pico-evo/dictionaries/` to
+`orbit/dictionaries/` under `$XDG_DATA_HOME` (default `~/.local/share`).
+No cache copy is needed. Update any custom `PICO_*` environment overrides to
+their `ORBIT_*` names (for example, `ORBIT_DICTIONARY_DIR`). After launch, check
+an old session and attachment. Then use Orbit rather than alternating between
+the two copies: session changes and refreshed credentials are not synchronized.
 
 For build commands, tests and troubleshooting, see [Development](docs/development.md).

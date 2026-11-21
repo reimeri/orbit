@@ -1,6 +1,6 @@
 { pkgs }:
 pkgs.applyPatches {
-  name = "pico-iced-winit-0.14.1-patched";
+  name = "orbit-iced-winit-0.14.1-patched";
   src = pkgs.fetchurl {
     name = "iced_winit-0.14.1.tar.gz";
     url = "https://static.crates.io/crates/iced_winit/iced_winit-0.14.1.crate";

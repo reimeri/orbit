@@ -1,8 +1,8 @@
 # Large text editor benchmark
 
 This records the original baseline and subsequent editor optimizations. The opt-in
-benchmark lives in `crates/pico-app/src/growing_editor_benchmark.rs`. It exercises
-the real iced editor and Pico's scrollbar measurement without the surrounding
+benchmark lives in `crates/orbit-app/src/growing_editor_benchmark.rs`. It exercises
+the real iced editor and Orbit's scrollbar measurement without the surrounding
 transcript or questionnaire UI. Original results are retained below for comparison.
 
 ## Reproduce
@@ -10,18 +10,18 @@ transcript or questionnaire UI. Original results are retained below for comparis
 ```sh
 # All cases, three samples each, optimized build:
 nix develop --command ./scripts/test-renderer.sh \
-  cargo test --locked --release -p pico-evo editor_stage_benchmark \
+  cargo test --locked --release -p orbit editor_stage_benchmark \
   -- --ignored --nocapture --test-threads=1
 
 # The smoke test's 700-line answer, unoptimized build:
-nix develop --command env PICO_EDITOR_BENCH_CASE=unicode-700 \
-  PICO_EDITOR_BENCH_SAMPLES=1 ./scripts/test-renderer.sh \
-  cargo test --locked -p pico-evo editor_stage_benchmark \
+nix develop --command env ORBIT_EDITOR_BENCH_CASE=unicode-700 \
+  ORBIT_EDITOR_BENCH_SAMPLES=1 ./scripts/test-renderer.sh \
+  cargo test --locked -p orbit editor_stage_benchmark \
   -- --ignored --nocapture --test-threads=1
 ```
 
-`PICO_EDITOR_BENCH_CASE` selects one exact case name; an unknown name is an error.
-`PICO_EDITOR_BENCH_SAMPLES` is a positive sample count (default 3). Output includes
+`ORBIT_EDITOR_BENCH_CASE` selects one exact case name; an unknown name is an error.
+`ORBIT_EDITOR_BENCH_SAMPLES` is a positive sample count (default 3). Output includes
 CSV rows with payload bytes, logical lines, edit time, native layout time,
 scrollbar measurement time, and native cached logical-line count. Preserve the
 complete stdout/stderr when redirecting a run. Avoid concurrent builds/benchmarks.
@@ -217,6 +217,6 @@ word at the **same byte range**. The last case detects incorrectly advancing the
 reusable prefix after a later append. Existing UI selection/caret/IME tests remain
 in the suite; benchmark timings are not hard-coded test assertions.
 
-Set `PICO_EDITOR_BENCH_HISTORY=1` to run the same edit phases through composer
+Set `ORBIT_EDITOR_BENCH_HISTORY=1` to run the same edit phases through composer
 undo recording instead of bare Content. The edit column then includes collecting
 and grouping native changes; layout and scrollbar measurements are unchanged.

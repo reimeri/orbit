@@ -3,7 +3,7 @@ Backport of QuickJS-NG PR #1877, commit
 https://github.com/quickjs-ng/quickjs/pull/1877
 
 Adapted to the bundled QuickJS-NG 0.11.0. Engine changes only; regression
-coverage lives in pico-core/tests/quickjs_lifetime.rs.
+coverage lives in orbit-core/tests/quickjs_lifetime.rs.
 
 --- a/quickjs/quickjs.c
 +++ b/quickjs/quickjs.c

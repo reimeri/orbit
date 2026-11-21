@@ -33,7 +33,7 @@
  }
 +
 +/// Request a PNG, JPEG, WebP or GIF from the focused application's ordinary
-+/// Wayland selection. Pico extension: no clipboard-manager protocol is required.
++/// Wayland selection. Orbit extension: no clipboard-manager protocol is required.
 +/// Wait for the reply off the event-loop thread. `None` means no image is offered.
 +#[cfg(wayland_platform)]
 +pub fn request_image_clipboard(max_bytes: usize) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<Option<Vec<u8>>>>> {

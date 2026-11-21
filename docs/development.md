@@ -4,7 +4,7 @@
 
 Use `nix develop` for Rust, Cargo, rust-analyzer and native libraries. Launch
 your editor from the shell or configure it to use the flake. The supported
-toolchain is pinned by `flake.lock`. Keep iced out of `pico-core`; the app uses
+toolchain is pinned by `flake.lock`. Keep iced out of `orbit-core`; the app uses
 wgpu on native Wayland, without an X11 backend or software-renderer fallback.
 
 The flake has a source allowlist. New build inputs must be known to Git
@@ -29,9 +29,9 @@ Run these from the repository root inside `nix develop`:
 
 | Situation                       | Command                                            |
 | ------------------------------- | -------------------------------------------------- |
-| Most edits                      | `cargo check --locked -p pico-evo` or `just check` |
-| Core logic                      | `cargo test --locked -p pico-core`                 |
-| One test                        | `cargo test --locked -p pico-core <test-name>`     |
+| Most edits                      | `cargo check --locked -p orbit` or `just check` |
+| Core logic                      | `cargo test --locked -p orbit-core`                 |
+| One test                        | `cargo test --locked -p orbit-core <test-name>`     |
 | Need to see the UI              | `just run`                                         |
 | Renderer/Wayland changes        | `just smoke` and `just smoke-gpu`                  |
 | Before handing off a change     | `just verify`                                      |
@@ -40,7 +40,7 @@ Run these from the repository root inside `nix develop`:
 
 `just test` selects the pinned Mesa Lavapipe CPU Vulkan driver. For a focused UI
 test use `just test <test-name>` or
-`./scripts/test-renderer.sh cargo test --locked -p pico-evo <test-name>`.
+`./scripts/test-renderer.sh cargo test --locked -p orbit <test-name>`.
 `just verify` checks formatting, Clippy, workspace tests, QuickJS under
 Valgrind, and rendered frames on a private headless Weston compositor.
 Tests use temporary state and local fixtures; they do not verify login or live
@@ -69,8 +69,8 @@ for cold measurements, or `CARGO_BUILD_JOBS=4` if memory is constrained.
   the pinned CPU driver, or use `scripts/test-renderer.sh` for a focused Cargo
   command. Do not export its ICD selection in your normal desktop environment.
 - **Missing native library or linker:** re-enter `nix develop`. A raw
-  `target/debug/pico-evo` is intended to run inside the dev environment. Use the
-  wrapped `nix run` / `result/bin/pico-evo` outside it.
+  `target/debug/orbit` is intended to run inside the dev environment. Use the
+  wrapped `nix run` / `result/bin/orbit` outside it.
 - **Fonts:** the shell and package provide a fontconfig fallback containing
   DejaVu and normal system/user font directories. The package preserves an
   explicitly supplied `FONTCONFIG_FILE`.
@@ -83,10 +83,15 @@ for cold measurements, or `CARGO_BUILD_JOBS=4` if memory is constrained.
 
 ## Implementation notes
 
-`crates/pico-core` owns persistence, OAuth, the provider, agent loop and tools.
-`crates/pico-app` owns iced UI, clipboard, browser launch and folder selection.
+`crates/orbit-core` owns persistence, OAuth, the provider, agent loop and tools.
+`crates/orbit-app` owns iced UI, clipboard, browser launch and folder selection.
 The installed wrapper provides Git and xdg-open; the desktop provides the portal
 for the optional folder chooser. Manual path entry needs no portal.
+
+The Wayland app ID, desktop entry and icon name are all `orbit`. Packaging resizes
+[`assets/icon/orbit.png`](../assets/icon/orbit.png) for the desktop icon theme. The square sRGB master keeps
+its transparent corners; the package downsizes it without cropping. Test the
+optional offline migration with `python3 -m unittest discover -s tests`.
 
 - [Code mode](code-mode.md) documents execution, resource limits and recovery.
   [Responses transport](responses-websocket.md) covers connection reuse and fallback
@@ -95,7 +100,7 @@ for the optional folder chooser. Manual path entry needs no portal.
   recovery, and viewport caches. For measurements, see the
   [session and rendering benchmarks](benchmarks/session-and-rendering.md),
   [editor benchmarks](editor-performance.md) and [file-index benchmarks](file-tags.md#verification-and-benchmarks).
-- Use `theme::button` and the shared styles in `crates/pico-app/src/theme.rs`
+- Use `theme::button` and the shared styles in `crates/orbit-app/src/theme.rs`
   rather than hard-coded colors. For vertical scrolls use `scrollbar::scroll`:
   it reserves the rail even when content fits. Keep row backgrounds and hit
   targets outside that gutter. Use `scrollbar::horizontal` for horizontal scrolls.

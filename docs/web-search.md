@@ -1,6 +1,6 @@
 # Web access in code mode
 
-`tools.web__run` is Pico's built-in implementation of Codex's
+`tools.web__run` is Orbit's built-in implementation of Codex's
 standalone `web.run` tool for main agents and subagents. It uses the ChatGPT
 subscription, not browser cookies or API-key billing.
 
@@ -78,7 +78,7 @@ limits and do not claim a page was inspected based only on a search snippet.
 Image queries return text with image URLs. PDF screenshot calls are supported, but
 the tested standalone endpoint returns only a text reference: **no image bytes or
 structured screenshot result**. As in the inspected Codex standalone handler,
-Pico does not turn these into model-visible images or claim the model saw pixels.
+Orbit does not turn these into model-visible images or claim the model saw pixels.
 This tool is not an interactive browser and does not use browser sessions/cookies.
 
 ## Request identity and privacy
@@ -87,7 +87,7 @@ Web search is always live for main agents and subagents. Every search requests
 `external_web_access: true`, including in existing sessions that previously used
 Cached or Disabled. Each invocation uses the calling conversation's selected model.
 
-Requests use existing Pico V2 ChatGPT OAuth and account routing, a stable calling
+Requests use existing Orbit ChatGPT OAuth and account routing, a stable calling
 conversation ID, the selected model, explicit commands, and access/output settings.
 They do **not** include user/assistant history, project files or system instructions.
 Separate conversations, including children, do not share IDs. Each subagent uses its
@@ -98,7 +98,7 @@ No local result cache or remote-reference replay layer is added.
 
 Backend: `https://chatgpt.com/backend-api/codex/alpha/search`. This is experimental
 Codex backend functionality, not a promised public API. Account/model availability
-can change. Pico never silently substitutes a different backend, model, access mode,
+can change. Orbit never silently substitutes a different backend, model, access mode,
 or billing method. Search usage is not invented as model token counts: the inspected
 response does not provide token accounting.
 
@@ -119,14 +119,14 @@ web details, not in agent-visible errors. Non-UTF-8 diagnostics are base64 encod
 The chat has no Copy buttons; displayed tool text supports selection and Ctrl+C.
 
 Agent-facing text over 40,000 Unicode characters is saved in full to a private
-`/tmp/pico-evo-output-*` file, with an absolute path and exact byte count. Outer
+`/tmp/orbit-output-*` file, with an absolute path and exact byte count. Outer
 `exec`/`wait` budgets also apply. No partial preview replaces full received data.
 If a text spill fails, complete text is returned inline with an explicit warning.
-Temporary text artifacts are left to the OS, not deleted by Pico; unlike SQLite
+Temporary text artifacts are left to the OS, not deleted by Orbit; unlike SQLite
 metadata, they are not guaranteed to survive OS temporary-file cleanup.
 
 Requests have a 20-second connect timeout and a 120-second total HTTP timeout.
-They use an explicit Pico User-Agent and reject redirects, preventing credentials
+They use an explicit Orbit User-Agent and reject redirects, preventing credentials
 from following a different endpoint. Only a definite first 401 triggers one
 synchronized OAuth refresh/retry. Connection failures, 429/5xx, malformed responses
 and uncertain outcomes are not automatically replayed. Received partial body bytes
@@ -150,7 +150,7 @@ The wire contract follows public OpenAI Codex (Apache-2.0), pinned at
 - `codex-rs/core/src/tools/spec_plan.rs` and `codex-rs/features/src/lib.rs`
 
 Repository: <https://github.com/openai/codex>. The command types in
-`web_search/commands.rs` adapt that source; Pico independently implements the
+`web_search/commands.rs` adapt that source; Orbit independently implements the
 transport, QuickJS integration, persistence and UI. See the accompanying
 [Apache-2.0 license](licenses/codex-Apache-2.0.txt) and
 [upstream notice](licenses/codex-NOTICE.txt).
@@ -161,18 +161,18 @@ alone does not establish subscription entitlement.
 
 ## Verification and live acceptance
 
-Run `cargo test --locked -p pico-core web` for credential-free fixture tests.
+Run `cargo test --locked -p orbit-core web` for credential-free fixture tests.
 
 **Live checks consume ChatGPT subscription usage and require explicit authorization.**
 The ignored end-to-end check uses the actual Harness, QuickJS and Rust transport in
 an isolated private store, copying only a valid short-lived access token from the
-explicitly supplied Pico V2 auth file. It never rotates the original credentials.
+explicitly supplied Orbit auth file. It never rotates the original credentials.
 It leaves its full transcript/output artifacts under `/tmp` and prints their location:
 
 ```sh
-PICO_WEB_ACCEPTANCE_AUTH="$HOME/.config/pico-evo/auth.json" \
-  nix develop --command cargo test --locked -p pico-core \
+ORBIT_WEB_ACCEPTANCE_AUTH="$HOME/.config/orbit/auth.json" \
+  nix develop --command cargo test --locked -p orbit-core \
   agent::web_acceptance::live_web_code_mode -- --ignored --nocapture
 ```
 
-Refresh the Pico login first if less than ten minutes of token validity remain.
+Refresh the Orbit login first if less than ten minutes of token validity remain.

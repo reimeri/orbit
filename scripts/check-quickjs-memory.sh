@@ -4,7 +4,7 @@ set -euo pipefail
 if (( $# == 0 )); then
   root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   source="$root/.build-deps/rquickjs-sys/quickjs"
-  work="$(mktemp -d /tmp/pico-quickjs-bytecode-XXXXXX)"
+  work="$(mktemp -d /tmp/orbit-quickjs-bytecode-XXXXXX)"
   echo "QuickJS bytecode regression artifacts: $work"
   "${CC:-cc}" -std=c11 -D_GNU_SOURCE -g -O1 -I"$source" \
     "$root/patches/quickjs/bytecode-lifetime.c" \

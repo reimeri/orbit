@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/pico-app", "crates/pico-core"]
-default-members = ["crates/pico-app"]
+members = ["crates/orbit-app", "crates/orbit-core"]
+default-members = ["crates/orbit-app"]
 exclude = [".build-deps/pulldown-cmark", ".build-deps/cosmic-text", ".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-winit", ".build-deps/iced-graphics", ".build-deps/rquickjs-sys", ".build-deps/rquickjs-core"]
 resolver = "3"
 

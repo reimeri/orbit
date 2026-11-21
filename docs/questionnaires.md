@@ -37,7 +37,7 @@ to JavaScript is saved in full to a private `/tmp` file when it exceeds 40,000
 Unicode characters (the normal 10,000-token inline budget). It then returns a
 file notice with the absolute path and exact byte size, not a clipped JSON value.
 Read the file with shell tools. The outer `exec`/`wait` budget applies independently.
-Files remain after cell/app exit; Pico does not clean them up. If file preservation
+Files remain after cell/app exit; Orbit does not clean them up. If file preservation
 fails, the complete result is returned inline with a warning. Normal process and
 QuickJS memory limits still apply; an unbounded answer policy is not a guarantee
 of unlimited physical memory.
@@ -62,7 +62,7 @@ of unlimited physical memory.
   and its children. A menu/modal/search/settings/Agents panel gets Escape first.
 - Requests keep their conversations resident across selection changes. A failed
   result write retains the complete answer in the in-memory transcript, reports the
-  failure, and allows normal session saving/flush to retry. Keep Pico open until
+  failure, and allows normal session saving/flush to retry. Keep Orbit open until
   storage is fixed; do not blindly repeat the tool.
 - Pending requests and UI drafts are **not persisted**. After a restart, unfinished
   `ask_user` rows are marked cancelled, with an explanatory notice. Already submitted,

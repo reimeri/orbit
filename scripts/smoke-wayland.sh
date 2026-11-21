@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run an already-built binary on a private, native Wayland compositor.
 set -euo pipefail
-binary=${1:-./target/debug/pico-evo}
+binary=${1:-./target/debug/orbit}
 if [[ ! -x "$binary" ]]; then
     echo "Missing executable: $binary. Run 'cargo build --locked' inside nix develop first." >&2
     exit 1
@@ -19,7 +19,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export XDG_RUNTIME_DIR="$runtime"
-export WAYLAND_DISPLAY=pico-evo-smoke
+export WAYLAND_DISPLAY=orbit-smoke
 export ICED_BACKEND=wgpu
 unset DISPLAY WAYLAND_SOCKET
 

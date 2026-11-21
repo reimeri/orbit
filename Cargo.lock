@@ -2732,6 +2732,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "iced",
+ "iced_runtime",
+ "iced_wgpu",
+ "inotify",
+ "lru",
+ "orbit-core",
+ "pollster",
+ "pulldown-cmark",
+ "ratex-layout",
+ "ratex-parser",
+ "ratex-svg",
+ "ratex-types",
+ "rfd",
+ "rusqlite",
+ "serde_json",
+ "spellbook",
+ "tempfile",
+ "tokio",
+ "unicode-segmentation",
+ "unicode-width",
+ "url",
+ "winit",
+ "zbus",
+]
+
+[[package]]
+name = "orbit-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "filedescriptor",
+ "futures-util",
+ "ignore",
+ "im",
+ "image",
+ "memchr",
+ "nix 0.30.1",
+ "notify",
+ "portable-pty",
+ "pulldown-cmark",
+ "rand 0.9.5",
+ "reqwest",
+ "rquickjs",
+ "rusqlite",
+ "rustix 1.1.6",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "ordered-float"
 version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2848,68 +2910,6 @@ name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
-
-[[package]]
-name = "pico-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "filedescriptor",
- "futures-util",
- "ignore",
- "im",
- "image",
- "memchr",
- "nix 0.30.1",
- "notify",
- "portable-pty",
- "pulldown-cmark",
- "rand 0.9.5",
- "reqwest",
- "rquickjs",
- "rusqlite",
- "rustix 1.1.6",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "pico-evo"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "iced",
- "iced_runtime",
- "iced_wgpu",
- "inotify",
- "lru",
- "pico-core",
- "pollster",
- "pulldown-cmark",
- "ratex-layout",
- "ratex-parser",
- "ratex-svg",
- "ratex-types",
- "rfd",
- "rusqlite",
- "serde_json",
- "spellbook",
- "tempfile",
- "tokio",
- "unicode-segmentation",
- "unicode-width",
- "url",
- "winit",
- "zbus",
-]
 
 [[package]]
 name = "pin-project"

@@ -5,7 +5,7 @@ a skill's Markdown instructions are not automatically included in every chat.
 
 ## Where to put a skill
 
-Create `<root>/<skill-folder>/SKILL.md`. Pico looks in these roots:
+Create `<root>/<skill-folder>/SKILL.md`. Orbit looks in these roots:
 
 - **Repo:** `.agents/skills/` in the selected project folder and each ancestor
   up to and including its nearest Git root. Outside Git, only the selected
@@ -28,7 +28,7 @@ Read the proposed migration and check whether existing rows remain valid.
 Use lowercase letters, digits and hyphens for the name. Names can repeat: the
 picker shows a person icon for personal skills or a folder icon for repo skills,
 followed by the name and description. Hover over the icon to see the scope.
-Symlinked skill folders are supported. Pico reads local skills; it does not
+Symlinked skill folders are supported. Orbit reads local skills; it does not
 install packages, register new tools or execute anything during discovery.
 
 ## How to use a skill
@@ -41,7 +41,7 @@ install packages, register new tools or execute anything during discovery.
 - **Explicit:** type `$` at the beginning of a word in the composer, filter by
   name, then click a skill or select it with Up/Down and Tab/Enter. Escape
   dismisses the picker. The selection inserts an editable Markdown link to the
-  exact skill. Pico captures the selected file when you **send**, including
+  exact skill. Orbit captures the selected file when you **send**, including
   steering messages, and attaches its contents as user context, not developer
   instructions. A missing or renamed selection blocks the send and leaves the
   draft intact; reselect the skill or remove the link. A bare name is not a
@@ -52,4 +52,4 @@ install packages, register new tools or execute anything during discovery.
   body, not a changed file. Resending a fork draft makes a new selection at send time.
 
 Skills do not grant permissions or change a subagent's role. Only use skills
-you trust: Pico's existing shell tools run with your user privileges.
+you trust: Orbit's existing shell tools run with your user privileges.

@@ -6,7 +6,7 @@ For current storage, recovery, and rendering behavior, see the
 ## Session storage and viewport indexing
 
 ```sh
-nix develop --command cargo run --locked --release -p pico-core --example performance
+nix develop --command cargo run --locked --release -p orbit-core --example performance
 nix develop --command just verify
 nix develop --command just smoke-gpu   # when a Wayland desktop is available
 ```
@@ -274,17 +274,17 @@ and outside pointer-event handling. Existing renderer newline mapping is unchang
 
 ### Reproducing the benchmark
 
-`crates/pico-app/src/chat_selection_benchmark.rs` is an ignored benchmark using
+`crates/orbit-app/src/chat_selection_benchmark.rs` is an ignored benchmark using
 the real Markdown viewer, selection root, scrollable and iced UI update path:
 
 ```sh
 nix develop --command ./scripts/test-renderer.sh \
-  cargo test --locked --release -p pico-evo selection_motion_benchmark \
+  cargo test --locked --release -p orbit selection_motion_benchmark \
   -- --ignored --nocapture --test-threads=1
 ```
 
 Omit `--release` for the debug comparison. To include a long local assistant
-message, set `PICO_SELECTION_BENCH_TEXT=/absolute/path/to/message.md`; its contents
+message, set `ORBIT_SELECTION_BENCH_TEXT=/absolute/path/to/message.md`; its contents
 are never printed. The synthetic cases need no session data. Run benchmarks alone.
 
 Each case uses a 760x600 viewport and explicit 16px text, alternates the pointer
@@ -341,12 +341,12 @@ copy-reconstruction block strings are still constructed during view building.
 
 ```sh
 nix develop --command ./scripts/test-renderer.sh \
-  cargo test --locked --release -p pico-evo selection_scroll_benchmark \
+  cargo test --locked --release -p orbit selection_scroll_benchmark \
   -- --ignored --nocapture --test-threads=1
 
 # Existing pointer-selection benchmark, also rerun for this change:
 nix develop --command ./scripts/test-renderer.sh \
-  cargo test --locked --release -p pico-evo selection_motion_benchmark \
+  cargo test --locked --release -p orbit selection_motion_benchmark \
   -- --ignored --nocapture --test-threads=1
 ```
 

@@ -5,7 +5,7 @@ exposed on the JavaScript `tools` object, not duplicated in the top-level catalo
 
 Nested tool documentation lives in `exec.description`, not the system instructions.
 Each entry has a one-line purpose and a TypeScript declaration generated from its
-input and output JSON schemas in `crates/pico-core/src/code_mode/catalog.rs`.
+input and output JSON schemas in `crates/orbit-core/src/code_mode/catalog.rs`.
 The same catalog supplies JavaScript `tools`, `ALL_TOOLS` (including both schemas),
 and nested-call availability checks. Text-returning tools are
 correctly declared as `Promise<string>`, even when the string contains JSON.
@@ -60,7 +60,7 @@ TTY disabled, exec yield 10,000 ms, stdin yield 250 ms. A running command return
 a numeric session ID; empty `chars` polls it. TTY mode keeps input open and accepts
 control characters such as `\u0003`. Non-TTY commands have closed stdin.
 
-Pico resource policy: 256 MiB JS heap and 1 MiB stack per cell, 16 MiB serializable
+Orbit resource policy: 256 MiB JS heap and 1 MiB stack per cell, 16 MiB serializable
 session store, 32 open cells, 64 concurrent nested calls and 64 shell sessions per
 conversation. Waits are bounded to 300 seconds. Command output uses a
 1 MiB in-memory spill threshold, spilling the complete unread output to a private file under
@@ -71,7 +71,7 @@ for nonempty output. Budgets use four Unicode characters per approximate token,
 capped at 100,000 tokens. Non-UTF-8 command output is always saved byte-for-byte to
 a file rather than decoded lossily. Each read consumes new output once; its file is
 an immutable snapshot, not a growing log. Files survive command, cell, session and
-app exit; Pico does not clean them up. Read or search files using shell commands.
+app exit; Orbit does not clean them up. Read or search files using shell commands.
 If saving fails, buffered data is retained and the error provides the session/cell
 ID for retry after fixing disk space or permissions; do not rerun the command.
 The app cancels process groups on Stop and exit. Deliberately daemonized/re-parented processes can escape process-group
@@ -79,7 +79,7 @@ cleanup; this is not a sandbox or a process supervisor.
 
 ## Early execution and recovery
 
-Completed top-level calls start while the model response is still streaming. Pico
+Completed top-level calls start while the model response is still streaming. Orbit
 waits for the complete output-item event, not just parseable argument text. Calls
 execute in response order with at most one `exec`/`wait` invocation active. Missing
 earlier output items hold later calls until their ordering is resolved. A yielded
@@ -95,7 +95,7 @@ even before the model response finishes.
 
 On a dropped WebSocket, no more calls from that response start. A running
 invocation can finish or yield; its result is saved before reconnecting. Calls
-that never started get explicit not-executed results. Pico opens a new socket
+that never started get explicit not-executed results. Orbit opens a new socket
 and requests a new response from repaired local history (at most three times
 per turn). It does not resume partial text, redispatch old calls or bypass a
 pending questionnaire. Stop still cancels the invocation and reconnection.
@@ -117,7 +117,7 @@ transcript entries (including nested tools and notifications) so file references
 remain accessible even if the summarizer omits them. The final continuation includes
 these references and is itself saved to a file if it exceeds the inline budget.
 Service error details also use complete-file references when oversized. If saving
-one-shot diagnostics fails, Pico reports the failure and returns the complete data
+one-shot diagnostics fails, Orbit reports the failure and returns the complete data
 inline (hexadecimal for non-UTF-8 bytes), rather than silently discarding it.
 
 ## Other built-in tools
@@ -139,5 +139,5 @@ The top-level grammar/schema and execution semantics were checked against the
 - `codex-rs/core/src/tools/handlers/unified_exec.rs`
 
 The generated exec catalog follows Codex's code-mode-only description assembly,
-checked at revision `b1573f102413e96a6481087922bf425231222dee`. Pico does not need
+checked at revision `b1573f102413e96a6481087922bf425231222dee`. Orbit does not need
 Codex's deferred-tool discovery or general-purpose schema renderer.

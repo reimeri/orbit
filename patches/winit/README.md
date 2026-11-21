@@ -1,15 +1,15 @@
-# Pico Wayland image input
+# Orbit Wayland image input
 
 Base: the official crates.io `winit` **0.30.13** release archive.
 `default.nix` pins its version and SHA-256; `wayland-image-input.patch` contains
-only Pico's changes. Upstream source and its license are fetched into the Nix
+only Orbit's changes. Upstream source and its license are fetched into the Nix
 store, not copied into this repository.
 
 Upstream 0.30 has no Wayland `wl_data_device` destination; iced's clipboard API
-only exposes text. Pico's local patch registers an ordinary data device per seat,
+only exposes text. Orbit's local patch registers an ordinary data device per seat,
 negotiates Copy for local `text/uri-list` drops, and emits the existing
 `WindowEvent::DroppedFile`. A small `platform::wayland::request_image_clipboard`
-API lets Pico's worker request PNG/JPEG/WebP/GIF bytes from the focused client's
+API lets Orbit's worker request PNG/JPEG/WebP/GIF bytes from the focused client's
 selection, without unsafe/raw handles or clipboard-manager protocols. It neither
 owns/replaces the clipboard nor moves/deletes source files. No X11 features are
 enabled.
@@ -38,7 +38,7 @@ nonlocal URIs are checked against the production code. A missing
    the pristine release. Include newly added files with `/dev/null` as their old
    path; exclude generated files, registry metadata and the upstream lockfile.
 3. When upgrading, update `version` and `hash` in `default.nix`, the exact app
-   dependency in `crates/pico-app/Cargo.toml`, and the root lockfile as needed.
+   dependency in `crates/orbit-app/Cargo.toml`, and the root lockfile as needed.
    Never use a floating branch or relax the checksum to make a build pass.
 4. Run `nix develop --command just verify`, `nix flake check`, and
    `nix develop --command just smoke-gpu` on a Wayland desktop. Confirm

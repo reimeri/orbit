@@ -8,7 +8,7 @@ check:
 
 # UI-independent tests: no iced/wgpu compilation required.
 test-core:
-    cargo test --locked -p pico-core
+    cargo test --locked -p orbit-core
 
 test *args:
     ./scripts/test-renderer.sh cargo test --locked --workspace {{args}}
@@ -26,17 +26,17 @@ lint:
     cargo clippy --locked --workspace --all-targets -- -D warnings
 
 run:
-    cargo run --locked -p pico-evo
+    cargo run --locked -p orbit
 
 # Wgpu/Vulkan window check using the pinned CPU driver; no desktop/GPU required.
 smoke:
-    cargo build --locked -p pico-evo
+    cargo build --locked -p orbit
     ./scripts/smoke-wayland.sh
 
 # Requires a running Wayland desktop and a working graphics driver; no fallback.
 smoke-gpu:
-    cargo build --locked -p pico-evo
-    env -u DISPLAY ICED_BACKEND=wgpu timeout 60s ./target/debug/pico-evo --smoke-test
+    cargo build --locked -p orbit
+    env -u DISPLAY ICED_BACKEND=wgpu timeout 60s ./target/debug/orbit --smoke-test
 
 # Pre-commit checks. Not the edit/compile inner loop.
 verify: lint test test-quickjs-memory smoke

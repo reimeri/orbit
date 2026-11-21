@@ -3,7 +3,7 @@ let
   version = "0.12.2";
 in
 pkgs.applyPatches {
-  name = "pico-pulldown-cmark-${version}-patched";
+  name = "orbit-pulldown-cmark-${version}-patched";
   src = pkgs.fetchurl {
     # The official crates.io release archive, not a moving branch or tag.
     name = "pulldown-cmark-${version}.tar.gz";

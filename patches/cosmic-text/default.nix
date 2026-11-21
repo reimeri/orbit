@@ -1,6 +1,6 @@
 { pkgs }:
 pkgs.applyPatches {
-  name = "pico-cosmic-text-0.15.0-patched";
+  name = "orbit-cosmic-text-0.15.0-patched";
   src = pkgs.fetchurl {
     name = "cosmic-text-0.15.0.tar.gz";
     url = "https://static.crates.io/crates/cosmic-text/cosmic-text-0.15.0.crate";

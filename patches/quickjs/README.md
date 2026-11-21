@@ -27,7 +27,7 @@ without mutating the immutable source or changing the engine's compiler flags.
 
 ## Bug and ownership
 
-Pico evaluates code-mode cells as ES modules. Cancelling a pending top-level
+Orbit evaluates code-mode cells as ES modules. Cancelling a pending top-level
 await can leave async-module reactions alive during garbage collection.
 Previously `JS_FreeContext` unconditionally freed the module definition, then
 the reaction finalizers decremented its freed reference count. This caused
@@ -52,7 +52,7 @@ pointers and `eval`'s duplicate/consume pair are unchanged.
 
 ## Regression checks and maintenance
 
-`crates/pico-core/tests/quickjs_lifetime.rs` covers retained unresolved top-level
+`crates/orbit-core/tests/quickjs_lifetime.rs` covers retained unresolved top-level
 await reactions, fulfillment/rejection controls, pending dynamic import,
 cloned module handles and evaluation, embedded bytecode loading, and real
 code-mode cancellation followed by another cell and `exit()` after an await.
@@ -66,7 +66,7 @@ a private `/tmp` directory; it leaves artifacts for OS cleanup.
 Run these inside `nix develop`:
 
 ```sh
-cargo test --locked -p pico-core --test quickjs_lifetime
+cargo test --locked -p orbit-core --test quickjs_lifetime
 just test-quickjs-memory
 just verify
 nix flake check

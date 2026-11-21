@@ -60,7 +60,7 @@ layout, and sets metrics and viewport size together. Previously setting metrics
 first caused a new editor to shape its entire document with unbounded dimensions.
 
 `Editor::scroll_to` measures the destination logical line and seeks within its
-height without moving the cursor. It is used by Pico's estimated-height scrollbar;
+height without moving the cursor. It is used by Orbit's estimated-height scrollbar;
 ordinary wheel input and keyboard caret reveal still use native editor actions.
 
 When checking release benchmarks after a patch change, use the matching targeted
@@ -75,7 +75,7 @@ preserved. A focused draw regression covers the edit/seek/reflow sequence.
 ## Composer spelling underline patch
 
 `editor-range-spans.patch` exposes the existing caret calculation for a single
-shaped cluster so Pico can underline spelling ranges with the same cluster and
+shaped cluster so Orbit can underline spelling ranges with the same cluster and
 bidirectional geometry. The overlay reads visible native layout runs after
 the editor draws; it does not change shaping, layout, scroll, or selection.
 
@@ -84,7 +84,7 @@ the editor draws; it does not change shaping, layout, scroll, or selection.
 `editor-history.patch` exposes native change recording and replay through the
 existing Content editor callbacks. Replaying invalidates the selection/highlight
 caches and restores the exact native caret and selection (including affinity and
-word/line mode). Grouping, memory bounds and draft ownership live in pico-app.
+word/line mode). Grouping, memory bounds and draft ownership live in orbit-app.
 
 `editor-indent.patch` implements the composer's four-space soft tabs using
 native range edits, so block indentation preserves logical lines, selection

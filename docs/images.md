@@ -1,6 +1,6 @@
 # Images and code-mode media
 
-Pico's built-in image tools use the calling session's workspace, never the currently
+Orbit's built-in image tools use the calling session's workspace, never the currently
 selected UI workspace.
 
 ## Attach images to chat
@@ -22,7 +22,7 @@ just like text. Sent messages retain clickable previews.
 Unsent images survive session/project switches and restarts, and remain attached
 when saving or sending fails. In-flight imports finish before navigation, sending
 or shutdown, preventing images from arriving in the wrong session. Images are
-immutable private snapshots under the V2 configuration directory's `attachments/`
+immutable private snapshots under the Orbit configuration directory's `attachments/`
 folder; moving or deleting the source file does not break a draft or sent message.
 Snapshots are content-addressed and shared across drafts/history. They are retained
 rather than removed on draft removal or session deletion, so shared references
@@ -55,7 +55,7 @@ image(await tools.view_image({path: "assets/screenshot.png"}));
 `view_image({path: string})` returns `{image_url: string}`. Both main and child agents
 can call it. It accepts local PNG, JPEG, WebP and GIF; paths may be relative or
 absolute. Non-regular files (including FIFOs) are rejected without blocking.
-There is no `detail` argument: Pico uses the Codex unified image budget (original
+There is no `detail` argument: Orbit uses the Codex unified image budget (original
 transport detail, at most 6000 pixels per dimension and 10,000 32-pixel patches).
 EXIF orientation is applied during preparation. The source file is never modified.
 Model images are prepared as PNG; animated GIF model input is a **static first
@@ -78,7 +78,7 @@ tools.image_gen__imagegen({
 ```
 
 Generation is available only to the **main agent**. The schema follows Codex,
-except that Pico requires `output_path` instead of automatically choosing an
+except that Orbit requires `output_path` instead of automatically choosing an
 artifact destination. Unknown arguments are rejected.
 
 ```js
@@ -110,22 +110,22 @@ generatedImage(await tools.image_gen__imagegen({
 `output_path` must have `.png` without `gif`, or `.gif` with it. Relative paths
 resolve against the calling workspace; absolute paths are allowed. The parent
 must already exist and pass a write preflight. Existing files and symlinks, including dangling symlinks,
-are **never overwritten**. Pico-owned storage destinations,
+are **never overwritten**. Orbit-owned storage destinations,
 including resolved parent aliases, are rejected.
 
-Pico holds the resolved parent directory open and publishes a complete staged file
+Orbit holds the resolved parent directory open and publishes a complete staged file
 with Linux `renameat2(RENAME_NOREPLACE)`. A competing destination writer wins
 without being overwritten; a moved parent is rejected. Files are caller-owned:
 session deletion never removes them. A crash can leave an uncommitted
-`.pico-image-*.tmp` in the destination directory.
+`.orbit-image-*.tmp` in the destination directory.
 
 Invalid arguments explain what to correct and are rejected before requests.
-Generation can consume usage even if cancelled or if a connection fails. Pico
+Generation can consume usage even if cancelled or if a connection fails. Orbit
 never automatically retries uncertain image requests, HTTP 429/5xx, or API 401.
 Only a definite Codex 401 gets one synchronized OAuth refresh/retry. There are
 no redirects, model/quality downgrades, format fallbacks, or billing switches.
 
-After receiving valid image bytes, Pico saves a private recovery snapshot before
+After receiving valid image bytes, Orbit saves a private recovery snapshot before
 publishing the caller file. If publication fails or cancellation is observed before
 publication, the error identifies those bytes: copy them to a new destination,
 **do not regenerate**. Malformed/unexpected returned image bytes are preserved
@@ -188,7 +188,7 @@ compaction archives full transcript metadata and media paths independently of
 model summaries.
 
 Private originals, prepared images and thumbnails live in `media/<session-id>/`
-under the existing **pico-evo storage root**. They survive restart and source-file
+under the existing **orbit storage root**. They survive restart and source-file
 changes. Deletion releases media only when no session (including a fork)
 still references it; compaction and transcript eviction do not remove media.
 Failed cleanup after a committed deletion is reported without recreating the session.
@@ -204,7 +204,7 @@ Resource policy: 79 MiB per media input, 10,240,000 decoded image pixels,
 512 GIF frames / 256 MiB cumulative decoded animation data, 256 MiB JS heap,
 16 MiB serializable store and 64 media emissions between yields. Two image-tool
 calls can be active globally; waiting acquisition is cancellable. Image preparation
-is serialized to bound decoded allocations. These are explicit Pico resource
+is serialized to bound decoded allocations. These are explicit Orbit resource
 limits, not promises about every backend's acceptance limits.
 
 ## Markdown images in chat
@@ -225,7 +225,7 @@ paths with spaces. PNG, JPEG, WebP and GIF share the existing image validation l
 SVG, data URLs and other source schemes are not supported.
 
 HTTP(S) images load **automatically** when their message is mounted in the chat.
-This contacts the image host (including any tracking URL in the Markdown); Pico
+This contacts the image host (including any tracking URL in the Markdown); Orbit
 sends no account credentials or browser cookies. Downloads have a 30-second timeout,
 at most five redirects and the same 79 MiB input limit, including responses without a
 Content-Length header. Embedded URL credentials and non-HTTP(S) redirects are rejected.
@@ -269,7 +269,7 @@ Public OpenAI Codex source, Apache-2.0, checked at commit
 - `code-mode-runtime/src/runtime/{content.js,value.rs,audio.rs}`
 - `protocol/src/models/mcp_content.rs`, `codex-api/src/images.rs`
 
-Repository: <https://github.com/openai/codex>. Pico independently implements the
+Repository: <https://github.com/openai/codex>. Orbit independently implements the
 contracts in Rust/QuickJS, not Codex/V8 or its extension/attachment machinery.
 Image preparation shares its budget and validation approach, not byte-identical
 encoding. Metadata is not retained in prepared PNGs; originals remain unchanged.

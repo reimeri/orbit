@@ -1,6 +1,6 @@
 # Async subagents
 
-Pico's built-in subagents are persistent child conversations. Each assignment has
+Orbit's built-in subagents are persistent child conversations. Each assignment has
 its own run ID; continuing a child retains its conversation but creates a new run.
 
 | Type | Default model | Default effort | Instructions |
@@ -85,7 +85,7 @@ timeout. It returns the status of each requested run and terminal results:
   output mechanism. Oversized results are saved completely in private `/tmp`
   files with absolute paths and exact byte sizes, never truncated.
 - Results can be retrieved repeatedly, including after continuing the same child
-  or restarting Pico. Waits identify assignments by run ID, not by the latest
+  or restarting Orbit. Waits identify assignments by run ID, not by the latest
   activity in a session.
 - Only the terminal response's final message text is returned. Commentary,
   intermediate responses, reasoning and tool outputs remain in the child
@@ -138,7 +138,7 @@ assignment's delivery acknowledgement. A failed terminal-result write retains
 its complete result in memory. Sending to that parent retries its family's
 results before accepting new input; other parents can send and finish work
 independently. An explicit flush (including shutdown) retries every family and
-reports any that still cannot be saved, without rerunning assignments. Keep Pico open if storage cannot be saved.
+reports any that still cannot be saved, without rerunning assignments. Keep Orbit open if storage cannot be saved.
 
 ## UI
 
@@ -156,4 +156,4 @@ saved with the parent. Confirmed parent deletion atomically deletes the whole
 family and is refused while related turns are active. Project files are never deleted by session deletion.
 
 For focused scheduler and recovery tests, run
-`cargo test --locked -p pico-core agent::subagents` inside `nix develop`.
+`cargo test --locked -p orbit-core agent::subagents` inside `nix develop`.

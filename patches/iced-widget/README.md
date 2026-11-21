@@ -4,7 +4,7 @@ Base: crates.io `iced_widget` **0.14.2**. See [development](../../docs/developme
 for how Nix prepares the patched sources.
 
 The editor-access.patch adds Content::with_editor, a read-only callback exposing the
-underlying renderer editor. Pico's composer needs its actual shaped buffer and
+underlying renderer editor. Orbit's composer needs its actual shaped buffer and
 scroll offset: logical line counts or accumulated wheel deltas cannot represent
 wrapped lines or cursor-driven scrolling correctly.
 
@@ -25,7 +25,7 @@ construct their own Scrollable and do not expose content layout to the app.
 The patch also sets their rail to 5 px and thumb to 3 px, matching the app.
 The padded row keeps option text, backgrounds and hit targets out of the rail
 without adding a container-theme bound. Menu text is clipped to the list bounds
-so long labels cannot paint into that gutter. Keep this width in sync with Pico's
+so long labels cannot paint into that gutter. Keep this width in sync with Orbit's
 scrollbar::GUTTER. Like the app's scroll wrapper, it deliberately does not use
 Scrollable::spacing, which changes the available width when overflow changes.
 

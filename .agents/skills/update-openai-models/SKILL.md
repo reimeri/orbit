@@ -1,6 +1,6 @@
 ---
 name: update-openai-models
-description: Check official OpenAI documentation for newer Astra, Sol, Terra, Luna, and API image models, then update Pico V2's catalog, reasoning efforts and default image model.
+description: Check official OpenAI documentation for newer Astra, Sol, Terra, Luna, and API image models, then update Orbit's catalog, reasoning efforts and default image model.
 ---
 
 # Update the OpenAI model catalog
@@ -11,14 +11,14 @@ description: Check official OpenAI documentation for newer Astra, Sol, Terra, Lu
    changelog, and (where documented) ChatGPT/Codex availability:
    - https://developers.openai.com/api/docs/models
    - https://developers.openai.com/api/docs/guides/latest-model — read the migration
-     guidance for the models being replaced, noting changes that affect Pico.
+     guidance for the models being replaced, noting changes that affect Orbit.
    - https://developers.openai.com/api/docs/guides/reasoning
    - https://developers.openai.com/api/docs/changelog
 2. Find the newest generally available **Astra**, **Sol**, **Terra**, and **Luna** family
    versions. Do not infer API identifiers or capabilities from marketing names,
    unrelated families, dates, or search snippets. Do not substitute a preview or
    specialist variant without user approval. API availability alone does not
-   prove access through Pico's ChatGPT subscription endpoint.
+   prove access through Orbit's ChatGPT subscription endpoint.
 3. Record exact API IDs, display names, supported `reasoning.effort` values,
    usable input context windows, tool support, and priority-tier limitations.
    Include source URLs and the check date in your report. If authoritative
@@ -33,19 +33,19 @@ Current capability reference links (refreshed 2026-11-17):
 
 ## Update the app
 
-- `crates/pico-core/src/models.rs` is the single fixed catalog. Keep **one current
+- `crates/orbit-core/src/models.rs` is the single fixed catalog. Keep **one current
   entry per family**; replace older family versions rather than accumulating
   old versions or compatibility aliases. Update the family constant’s provider
   ID, not its UI name. Keep Sol as the default.
 - Keep effort lists model-specific. The current catalog has low, medium, high,
   xhigh, max for Astra/Sol/Terra; Luna additionally has none. Do not carry these lists
   forward without checking the replacement models' documentation.
-- `crates/pico-core/src/store.rs` owns per-model preferences (Medium, Fast off
+- `crates/orbit-core/src/store.rs` owns per-model preferences (Medium, Fast off
   initially). Preferences for unchanged IDs must survive catalog refresh.
   Newly introduced IDs receive defaults; retired preferences are removed. A
   retired app default resolves to `DEFAULT_MODEL`. Validate changed capabilities
   and decide explicitly how affected saved preferences should be corrected.
-- `crates/pico-app/src/ui.rs` uses the same catalog for Models settings, the
+- `crates/orbit-app/src/ui.rs` uses the same catalog for Models settings, the
   default-model dropdown, and footer choices. Do not add another hard-coded
   model list. Removed session models must be replaced by the configured app
   default, with that model's effort/Fast defaults, persisted, and accompanied by
@@ -57,7 +57,7 @@ Current capability reference links (refreshed 2026-11-17):
   for the newest generally available successor to the default API image model
   (currently `gpt-image-2.6-sunburst`). Keep the same family/purpose unless the user
   approves a change; do not infer identifiers or replace it with a preview.
-  Update only `DEFAULT_API_MODEL` in `crates/pico-core/src/image_tools.rs`. That
+  Update only `DEFAULT_API_MODEL` in `crates/orbit-core/src/image_tools.rs`. That
   constant supplies fresh settings and the explicit Reset button. Saved model
   fields survive unchanged. Verify both generation and editing support, document
   supported quality/GIF restrictions, and do not silently change the selected
@@ -68,7 +68,7 @@ Current capability reference links (refreshed 2026-11-17):
 - Update model `audio_input` capability flags only from verified documentation.
   All current chat catalog models accept images and reject native audio; Codex
   voice UI availability is not evidence of direct model audio support.
-- `crates/pico-core/src/provider.rs` uses ChatGPT/Codex Responses. Fast currently
+- `crates/orbit-core/src/provider.rs` uses ChatGPT/Codex Responses. Fast currently
   sends `service_tier: "priority"` and
   `x-codex-routing-hint: model=<id>;tier=priority`. Normal mode omits the body tier
   and sends only `model=<id>` in the hint. Preserve body/header consistency on

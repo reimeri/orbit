@@ -3,5 +3,7 @@ pico-reference
 /result
 /result-*
 /.pico/
+/.orbit/
 /.build-deps/
 docs/mockups/
+/tests/__pycache__/

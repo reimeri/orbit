@@ -25,12 +25,12 @@ Do not maintain backward compatibility.
 ## Rust development workflow
 
 - Use `nix develop --command <tool> ...` or work inside `nix develop`.
-- Prefer `cargo check --locked` for iteration and `cargo test --locked -p pico-core` for core-only changes.
+- Prefer `cargo check --locked` for iteration and `cargo test --locked -p orbit-core` for core-only changes.
 - Preserve `target/`; do not routinely run `cargo clean`, release builds, or `nix build` in the edit loop.
 - Keep compiler flags, feature selection, and linker configuration stable. Toolchain/flag changes rebuild dependencies.
 - Run `just verify` before handoff; also run `nix flake check` when packaging changes and `just smoke-gpu` for graphics changes when a Wayland desktop is available.
-- Keep iced out of `pico-core`. Target native Wayland only, with no X11/Xwayland backend.
-- All V2 configuration/state must use `pico-evo`, never the old `pico` directories.
+- Keep iced out of `orbit-core`. Target native Wayland only, with no X11/Xwayland backend.
+- Use `orbit` for configuration and state; do not read or migrate older directories on startup.
 
 ## Avoid Overly Defensive Code
 
