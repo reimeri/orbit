@@ -8,8 +8,9 @@ codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage
 - Native rust executable
   - Extremely fast
   - Light on system resources
+- Very light base system instructions (~50 tokens)
 - Code mode with essential tools
-  - Shell (for reading and writing)
+  - Shell
   - Questionnaires
   - Image viewing and generation
   - Web search
@@ -17,6 +18,7 @@ codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage
 - File tags and attachements
 - Spell checking
 - Markdown and LaTEX rendering
+- Skill support
 
 ## Install
 
