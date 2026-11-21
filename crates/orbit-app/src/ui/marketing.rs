@@ -4,7 +4,17 @@ use iced::futures::FutureExt;
 
 impl App {
     pub(super) fn stage_marketing_session(&mut self) {
-        let project = PathBuf::from("/workspace/atlas");
+        let workspace = Path::new("/workspace");
+        // The favorite badges spell CO · SM · OS in catalog order.
+        for name in ["celestial-observatory", "star-map", "orbital-sketch"] {
+            self.catalog.projects.push(Project {
+                path: workspace.join(name),
+                favorite: true,
+                display_name: None,
+                stashed: false,
+            });
+        }
+        let project = workspace.join("atlas");
         let harness = self.harness.as_ref().expect("isolated capture storage");
         let mut session = Session::new(project.clone(), &self.settings);
         session.title = "Keep map tiles warm".into();
