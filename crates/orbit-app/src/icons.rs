@@ -210,8 +210,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SvgIcon {
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let mut svg =
-            svg::Svg::new(self.handle.clone()).color(self.color.unwrap_or(style.text_color));
+        let color = self.color.unwrap_or(style.text_color);
+        // The SVG tint filter only applies RGB; pass alpha as draw opacity.
+        let mut svg = svg::Svg::new(self.handle.clone())
+            .color(Color { a: 1., ..color })
+            .opacity(color.a);
         if self.spinning {
             let turns = tree.state.downcast_ref::<Instant>().elapsed().as_secs_f32();
             svg = svg.rotation(turns.fract() * std::f32::consts::TAU);
@@ -227,17 +230,21 @@ mod tests {
     use iced_runtime::{UserInterface, user_interface::Cache};
 
     #[test]
-    fn svg_foreground_follows_button_hover_and_disabled_state() {
+    fn svg_foreground_follows_button_color_and_opacity() {
         let mut renderer = crate::test_renderer::new(16.);
         let size = Size::new(180., 48.);
         let active = Color::from_rgb8(220, 65, 90);
         let hovered = Color::from_rgb8(60, 210, 130);
         let disabled = Color::from_rgb8(75, 110, 230);
-        for (enabled, hover_label, expected) in [
-            (true, false, active),
-            (true, true, hovered),
-            (false, true, disabled),
-        ] {
+        let mut render = |enabled: bool, hover_label: bool, disabled_alpha: f32| {
+            let disabled = disabled.scale_alpha(disabled_alpha);
+            let expected = if !enabled {
+                disabled
+            } else if hover_label {
+                hovered
+            } else {
+                active
+            };
             let control = || {
                 button(Icon::Pencil.label("Rename", 16.))
                     .padding(8)
@@ -293,20 +300,37 @@ mod tests {
                 &mut renderer,
                 Size::new(width, size.height as u32),
                 1.,
-                Color::BLACK,
+                Color::TRANSPARENT,
             );
             let foreground = expected.into_rgba8();
-            // There must be painted SVG strokes in the control's foreground color,
-            // even when only the label (not the icon) is hovered.
-            assert!(
-                (icon.y.ceil() as u32..(icon.y + icon.height).floor() as u32).any(|y| {
-                    (icon.x.ceil() as u32..(icon.x + icon.width).floor() as u32).any(|x| {
-                        let pixel = &pixels[((y * width + x) * 4) as usize..][..4];
-                        (0..3).all(|c| pixel[c].abs_diff(foreground[c]) < 30)
-                    })
-                }),
-                "missing inherited SVG foreground: enabled={enabled}, hover={hover_label}"
-            );
-        }
+            let strokes =
+                (icon.y.ceil() as u32..(icon.y + icon.height).floor() as u32).flat_map(|y| {
+                    let pixels = &pixels;
+                    (icon.x.ceil() as u32..(icon.x + icon.width).floor() as u32)
+                        .map(move |x| &pixels[((y * width + x) * 4) as usize..][..4])
+                });
+            if expected.a == 1. {
+                // Even when only the label is hovered, the SVG inherits the button's tint.
+                assert!(
+                    strokes
+                        .clone()
+                        .any(|pixel| { (0..3).all(|c| pixel[c].abs_diff(foreground[c]) < 30) }),
+                    "missing inherited SVG foreground: enabled={enabled}, hover={hover_label}"
+                );
+            }
+            strokes.map(|pixel| pixel[3]).max().unwrap()
+        };
+
+        render(true, false, 1.);
+        render(true, true, 1.);
+        let opaque_peak = render(false, true, 1.);
+        assert!(opaque_peak > 0, "the reference icon must be visible");
+        let opacity = 0.4;
+        let faded_peak = render(false, true, opacity);
+        let expected_peak = (f32::from(opaque_peak) * opacity).round() as u8;
+        assert!(
+            faded_peak.abs_diff(expected_peak) <= 1,
+            "SVG stroke opacity: expected {expected_peak} from opaque peak {opaque_peak}, got {faded_peak}"
+        );
     }
 }
