@@ -45,6 +45,12 @@ width constraint is opt-in: code blocks and other scrollers remain unbounded.
 Keeping it in the native Markdown widget (which owns the private row cells)
 preserves the same viewer traversal for rendering, selection and copy.
 
+markdown-items.patch exposes read-only table cells so Orbit can index selectable
+leaves and image URLs without constructing offscreen table widgets. Incremental
+Markdown parsing reports the earliest replaced top-level item (including earlier
+sections reparsed by newly resolved references); this keeps the layout index
+current without rescanning the whole answer on each token.
+
 The existing input-method fallback anchors empty paint geometry at the text
 viewport origin while keeping the focused editor enabled. This lets IME commits
 reveal an offscreen caret without requiring offscreen measurement.

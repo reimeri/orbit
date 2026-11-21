@@ -43,6 +43,7 @@
 <p class="sources">Inspect: <a href="../../crates/orbit-app/src/ui.rs"><code>App::new / subscription</code></a> · <a href="../../crates/orbit-core/src/agent/subagents.rs"><code>Coordinator::load / Family::record</code></a> · <a href="../../crates/orbit-core/src/store.rs"><code>Store::load</code></a></p>
 </section>
 <section id="ui"><div class="eyebrow">FIELD NOTES &nbsp;/&nbsp; 03</div><h2>Virtualization stops at the message boundary</h2>
+<p class="call"><strong>Follow-up: multi-block transcript layout.</strong> In a paired 2,000-paragraph release probe, windowing top-level Markdown items reduced CPU mount time after preparation from 59.46 to 0.78 ms (prepare + mount: 68.83 to 10.55 ms). The original audit measurements below are preserved. See the <a href="session-and-rendering.md#layout-within-a-long-markdown-reply">reproduction and measurement boundaries</a>. Single giant blocks and the composer remain separate cases.</p>
 <p>The session example mounted 16 overscan/visible rows out of 20,000 at entry 15,000. Median indexed range lookup was 0.016 µs and incremental height append 0.060 µs. Those are data-structure operations, <em>not frame times</em>. Stable row keys and persistent-tree diffs let chat reuse unchanged paragraphs. The expensive transition is when a large entry itself enters the mounted range, or its width changes.</p>
 <div class="tablewrap"><table>
 <caption>Milliseconds per named CPU stage; cold layout is one first mount, warm values are medians of 120 rebuilds.</caption>

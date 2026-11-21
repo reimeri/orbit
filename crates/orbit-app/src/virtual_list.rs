@@ -135,11 +135,23 @@ impl List {
         }
         index.min(self.order.len())
     }
+    pub fn position(&self, id: usize) -> Option<usize> {
+        self.positions.get(&id).copied()
+    }
+    pub fn height(&self, position: usize) -> f32 {
+        self.heights[position]
+    }
     pub fn visible(&self) -> Range<usize> {
-        let height = self.viewport_height();
+        self.visible_at(self.offset, self.viewport_height())
+    }
+    pub fn visible_at(&self, offset: f32, height: f32) -> Range<usize> {
         let margin = self.overscan.unwrap_or(height);
-        let start = self.at((self.offset - margin).max(0.));
-        let end = (self.at(self.offset + height + margin) + 1).min(self.order.len());
+        // A freshly laid-out tail may be taller than the indexed estimate.
+        // Keep its last row mounted until the resize observation catches up.
+        let start = self
+            .at((offset - margin).max(0.))
+            .min(self.order.len().saturating_sub(1));
+        let end = (self.at(offset + height + margin) + 1).min(self.order.len());
         start..end
     }
     /// Returns true when preserving the viewport anchor requires a scroll correction.

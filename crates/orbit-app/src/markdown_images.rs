@@ -326,30 +326,14 @@ async fn load(
 }
 
 /// Traverse the rendered items, not Content::images (which retains stale streaming URLs).
-pub fn urls(content: &iced::widget::markdown::Content) -> HashSet<String> {
-    use iced::widget::markdown;
-    #[derive(Default)]
-    struct Collector(std::cell::RefCell<HashSet<String>>);
-    impl<'a> markdown::Viewer<'a, ()> for Collector {
-        fn on_link_click(_: String) {}
-        fn image(
-            &self,
-            _: markdown::Settings,
-            url: &'a String,
-            _: &'a str,
-            _: &markdown::Text,
-        ) -> Element<'a, ()> {
-            self.0.borrow_mut().insert(url.clone());
-            iced::widget::space().into()
+pub fn urls(items: &[iced::widget::markdown::Item]) -> HashSet<String> {
+    let mut urls = HashSet::new();
+    crate::markdown_window::visit_leaves(items, &mut |item| {
+        if let iced::widget::markdown::Item::Image { url, .. } = item {
+            urls.insert(url.clone());
         }
-    }
-    let collector = Collector::default();
-    let _ = markdown::view_with(
-        content.items(),
-        markdown::Settings::from(iced::Theme::Dark),
-        &collector,
-    );
-    collector.0.into_inner()
+    });
+    urls
 }
 
 #[cfg(test)]
@@ -781,13 +765,13 @@ mod tests {
             "![first](one.png)\n\n> ![quote](two.png)\n\n- ![list][ref]\n\n[ref]: three.png\n\n| image | other |\n| --- | --- |\n| ![table](four.png) | [link](not-image.png) |\n\n`![code](ignored.png)`\n",
         );
         assert_eq!(
-            urls(&content),
+            urls(content.items()),
             HashSet::from(["one.png", "two.png", "three.png", "four.png"].map(str::to_owned))
         );
         let mut streaming = markdown::Content::parse("![x](old.png)");
         streaming.push_str(" extra\n\n![new](new.png)");
         assert_eq!(
-            urls(&streaming),
+            urls(streaming.items()),
             HashSet::from(["old.png", "new.png"].map(str::to_owned))
         );
     }

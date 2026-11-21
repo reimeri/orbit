@@ -321,6 +321,9 @@ impl<'a> Viewer<'a> {
             blocks: RefCell::new(Vec::new()),
         }
     }
+    pub fn start_block(&self, block: usize) {
+        self.next.set(block);
+    }
     pub fn with_equations(
         mut self,
         equations: &'a crate::equations::Cache,

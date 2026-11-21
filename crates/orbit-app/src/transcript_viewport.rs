@@ -20,15 +20,30 @@ pub fn observe<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     Element::new(Viewport {
         content: content.into(),
-        epoch,
-        on_change: Box::new(on_change),
+        observer: Observer::Viewport(epoch, Box::new(on_change)),
     })
 }
 
+// Unlike the outer extent, individual child heights can change while their sum
+// remains constant. Let the window compare the laid-out rows with its index.
+pub fn observe_layout<'a, Message: 'a>(
+    content: Element<'a, Message>,
+    probe: impl Fn(Layout<'_>, &Rectangle) -> Option<Message> + 'a,
+) -> Element<'a, Message> {
+    Element::new(Viewport {
+        content,
+        observer: Observer::Layout(Box::new(probe)),
+    })
+}
+
+type Probe<'a, Message> = dyn Fn(Layout<'_>, &Rectangle) -> Option<Message> + 'a;
+enum Observer<'a, Message> {
+    Viewport(u64, Box<dyn Fn(f32, f32, f32) -> Message + 'a>),
+    Layout(Box<Probe<'a, Message>>),
+}
 struct Viewport<'a, Message> {
     content: Element<'a, Message>,
-    epoch: u64,
-    on_change: Box<dyn Fn(f32, f32, f32) -> Message + 'a>,
+    observer: Observer<'a, Message>,
 }
 
 #[derive(Default)]
@@ -83,15 +98,16 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Viewport<'_, Mess
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+        let redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_)));
+        if redraw && let Observer::Viewport(epoch, on_change) = &self.observer {
             let bounds = layout.bounds();
-            let geometry = (self.epoch, *viewport, bounds);
+            let geometry = (*epoch, *viewport, bounds);
             let state = tree.state.downcast_mut::<State>();
             if state.last != Some(geometry) {
                 state.last = Some(geometry);
                 // Publish before row measurements so bottom-following uses the
                 // actual viewport height from the very first frame.
-                shell.publish((self.on_change)(
+                shell.publish(on_change(
                     viewport.y - bounds.y,
                     viewport.height,
                     // The gutter container may be taller than fitting content;
@@ -110,6 +126,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Viewport<'_, Mess
             shell,
             viewport,
         );
+        if redraw
+            && let Observer::Layout(probe) = &self.observer
+            && let Some(message) = probe(layout, viewport)
+        {
+            shell.publish(message);
+        }
     }
 
     fn operate(

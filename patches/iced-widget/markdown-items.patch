@@ -1,0 +1,64 @@
+--- a/src/markdown.rs
++++ b/src/markdown.rs
+@@ -94,7 +94,7 @@
+     /// Creates some new [`Content`] by parsing the given Markdown.
+     pub fn parse(markdown: &str) -> Self {
+         let mut content = Self::new();
+-        content.push_str(markdown);
++        let _ = content.push_str(markdown);
+         content
+     }
+ 
+@@ -102,9 +102,11 @@
+     ///
+     /// This is specially useful when you have long streams of Markdown; like
+     /// big files or potentially long replies.
+-    pub fn push_str(&mut self, markdown: &str) {
++    ///
++    /// Returns the first item which may have changed (including resolved references).
++    pub fn push_str(&mut self, markdown: &str) -> usize {
+         if markdown.is_empty() {
+-            return;
++            return self.items.len();
+         }
+ 
+         // Append to last leftover text
+@@ -119,6 +121,7 @@
+ 
+         // Pop the last item
+         let _ = self.items.pop();
++        let mut first_changed = self.items.len();
+ 
+         // Re-parse last item and new text
+         for (item, source, broken_links) in parse_with(&mut self.state, input) {
+@@ -162,6 +165,7 @@
+                     if let Some((item, _source, _broken_links)) =
+                         parse_with(&mut state, &section.content).next()
+                     {
++                        first_changed = first_changed.min(*index);
+                         self.items[*index] = item;
+                     }
+ 
+@@ -172,6 +176,8 @@
+                 !section.broken_links.is_empty()
+             });
+         }
++
++        first_changed
+     }
+ 
+     /// Returns the Markdown items, ready to be rendered.
+@@ -250,6 +256,13 @@
+ pub struct Row {
+     /// The cells of the row.
+     cells: Vec<Vec<Item>>,
++}
++
++impl Row {
++    /// Returns the parsed items in each cell, in column order.
++    pub fn cells(&self) -> &[Vec<Item>] {
++        &self.cells
++    }
+ }
+ 
+ /// A bunch of parsed Markdown text.

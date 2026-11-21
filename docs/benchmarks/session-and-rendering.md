@@ -537,3 +537,43 @@ inside `nix develop`:
 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null XDG_CONFIG_HOME="$(mktemp -d)" \
   cargo test --locked --release -p orbit untracked_poll_benchmark -- --ignored --nocapture --test-threads=1
 ```
+
+### Layout within a long Markdown reply
+
+Long assistant replies and expanded reasoning now mount a window of keyed
+**top-level Markdown items** inside the existing chat scroll surface. The
+complete Markdown and logical selection/copy traversal are unchanged. Unseen
+heights are estimates; measured heights survive leaving/re-entering the message
+without retaining its widgets. A streaming reply that crosses into windowed
+layout starts from its measured eager heights. The index updates from the
+first reparsed item, including earlier items affected by a late link definition.
+
+**Paired release measurement** on the Ryzen 7 5800X3D: one answer with 2,000
+numbered paragraphs containing Unicode, a link and inline code. Both arms run
+the actual transcript view with the same parsed content, theme and font/device
+cache. The control disables the inner window, not the outer transcript index.
+Median of three samples after a warmup pair, alternating arm order. CPU wall
+time includes widget construction, layout, redraw-event updates, scroll
+operations and rebuilding until measurements settle; no GPU draw, readback or
+presentation is timed.
+
+| Phase | Eager control | Windowed |
+| --- | ---: | ---: |
+| Mount fresh reply, after preparation (760 × 600 window) | 59.46 ms | 0.78 ms |
+| Jump to middle | 1.65 ms | 0.89 ms |
+| Narrow window to 510 px while in middle | 15.01 ms | 0.13 ms |
+| Jump to end | 1.67 ms | 0.94 ms |
+
+Initial parsing/indexing is **not free**: including the separately timed
+preparation step, median prepare + mount was **68.83 → 10.55 ms**. Both arms
+prepare the production index before choosing a renderer. The audit’s original
+122 ms was a single cold layout with a different fixture/driver warmup; it is
+not the baseline for these ratios. Full-document copy still traverses the
+selected content on demand. A single huge paragraph, table, quote, list or
+code fence remains one layout unit, and composer editing is unaffected.
+
+Reproduce inside `nix develop`:
+
+```sh
+scripts/test-renderer.sh cargo test --locked --release -p orbit long_reply_layout_benchmark -- --ignored --nocapture --test-threads=1
+```

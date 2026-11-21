@@ -135,6 +135,54 @@ struct Markdown {
     source: Arc<Entry>,
     content: markdown::Content,
     images: HashSet<String>,
+    window: Option<crate::markdown_window::Window>,
+    // Small eager replies can cross the threshold mid-stream while being read.
+    eager_heights: std::cell::RefCell<Vec<f32>>,
+}
+
+impl Markdown {
+    fn sync_window(&mut self, font_size: f32, from: usize) {
+        let size = if matches!(self.source.kind, EntryKind::Reasoning) {
+            12.
+        } else {
+            font_size
+        };
+        crate::markdown_window::Window::sync(&mut self.window, self.content.items(), from, size);
+    }
+
+    fn refresh_images(&mut self) {
+        self.images.clear();
+        if !self.content.images().is_empty() {
+            let items = self.content.items();
+            let visible = self.window.as_ref().map_or(items, |w| w.visible(items));
+            self.images = crate::markdown_images::urls(visible);
+        }
+    }
+    fn view<'a>(
+        &'a self,
+        settings: markdown::Settings,
+        viewer: &chat_selection::Viewer<'a>,
+    ) -> Element<'a, Message> {
+        if let Some(window) = &self.window {
+            window.view(self.content.items(), settings, viewer)
+        } else {
+            crate::transcript_viewport::observe_layout(
+                markdown::view_with(self.content.items(), settings, viewer),
+                move |layout, _| {
+                    let mut heights = self.eager_heights.borrow_mut();
+                    heights.clear();
+                    // Include the trailing gap: on handover, the old tail is now
+                    // followed by more content.
+                    heights.extend(
+                        layout
+                            .children()
+                            .map(|child| child.bounds().height + settings.spacing.0),
+                    );
+                    None
+                },
+            )
+        }
+    }
 }
 
 pub struct App {
@@ -191,6 +239,7 @@ pub struct App {
     active_questionnaire: Option<String>,
     chat_selection: chat_selection::Shared,
     markdown: HashMap<String, Markdown>,
+    markdown_heights: HashMap<String, crate::markdown_window::Heights>,
     expanded: HashSet<String>,
     groups: HashSet<String>,
     settings_open: bool,
@@ -386,6 +435,13 @@ pub enum Message {
     ToggleExecution(String),
     Scroll(u64, f32, f32, bool),
     RowSize(u64, usize, f32),
+    MarkdownGeometry(
+        u64,
+        usize,
+        Arc<Entry>,
+        f32,
+        Option<crate::markdown_window::Geometry>,
+    ),
     SidebarScroll(u64, f32, f32),
     SidebarSize(u64, usize, f32),
     Link(String),
@@ -504,6 +560,7 @@ impl App {
             active_questionnaire: None,
             chat_selection: Default::default(),
             markdown: HashMap::new(),
+            markdown_heights: HashMap::new(),
             expanded: HashSet::new(),
             groups: HashSet::new(),
             settings_open: false,
@@ -686,6 +743,7 @@ impl App {
             }
             self.outputs.clear();
             self.markdown.clear();
+            self.markdown_heights.clear();
             self.chat_selection.borrow_mut().clear();
             self.prepare_visible();
             return false;
@@ -703,6 +761,7 @@ impl App {
         if previous.is_none() {
             self.outputs.clear();
             self.markdown.clear();
+            self.markdown_heights.clear();
             self.chat_selection.borrow_mut().clear();
             self.view_epoch = self.view_epoch.wrapping_add(1);
             self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
@@ -724,15 +783,33 @@ impl App {
                 view.set(input, output);
             }
             if let Some(markdown) = self.markdown.get_mut(&entry.id) {
-                if entry.text.starts_with(&markdown.source.text) {
-                    markdown
-                        .content
-                        .push_str(&entry.text[markdown.source.text.len()..]);
+                let was_eager = markdown.window.is_none();
+                let from = if let Some(suffix) = entry.text.strip_prefix(&markdown.source.text) {
+                    markdown.content.push_str(suffix)
                 } else {
                     markdown.content = markdown::Content::parse(&entry.text);
-                }
-                markdown.images = crate::markdown_images::urls(&markdown.content);
+                    markdown.window = None;
+                    markdown.eager_heights.get_mut().clear();
+                    0
+                };
                 markdown.source = snapshot.entries.shared(index);
+                markdown.sync_window(self.catalog.settings.font_size, from);
+                if was_eager
+                    && let Some(window) = &mut markdown.window
+                    && let Some(pos) = self.transcript.position(index)
+                {
+                    window.restore(
+                        markdown
+                            .eager_heights
+                            .take()
+                            .into_iter()
+                            .enumerate()
+                            .collect(),
+                        self.transcript.offset - self.transcript.prefix(pos),
+                        self.transcript.viewport,
+                    );
+                }
+                markdown.refresh_images();
             }
         }
         self.current_session = Some(snapshot);
@@ -791,25 +868,77 @@ impl App {
                 .rows(0, &self.groups, &self.execution, &self.expanded),
         );
     }
+    fn measure_row(&mut self, index: usize, height: f32, inner: Option<f32>) -> Task<Message> {
+        let spacing = self
+            .current()
+            .map_or(8., |s| ActivityRow::from_id(index).spacing(&s.entries));
+        let visible = self.transcript.visible();
+        // Decide which layer owns the anchor using the SAME pre-measurement
+        // row bounds, including when a resizing row crosses the viewport edge.
+        let Some(pos) = self.transcript.position(index) else {
+            return Task::none();
+        };
+        let height = height + spacing;
+        let size_changed = (height - self.transcript.height(pos)).abs() >= 0.5;
+        let inside = if (self.transcript.prefix(pos)..self.transcript.prefix(pos + 1))
+            .contains(&self.transcript.offset)
+        {
+            inner.unwrap_or(0.)
+        } else {
+            0.
+        };
+        let corrected = self.transcript.measure(index, height);
+        if self.auto_scroll && size_changed {
+            self.transcript.end();
+            self.prepare_visible();
+            return bottom();
+        }
+        if !self.auto_scroll && (corrected || inside != 0.) {
+            self.transcript.offset = (self.transcript.offset + inside).max(0.);
+            self.prepare_visible();
+            return widget::operation::scroll_to(
+                "chat",
+                scrollable::AbsoluteOffset {
+                    x: 0.,
+                    y: self.transcript.offset + 20.,
+                },
+            );
+        }
+        if inner.is_some() || self.transcript.visible() != visible {
+            self.prepare_visible();
+        }
+        Task::none()
+    }
     fn prepare_visible(&mut self) {
         let mut visible_media = self.attachments.clone();
         let mut image_urls = HashSet::new();
         if let Some(session) = &self.current_session {
-            let visible: Vec<_> = self.transcript.order[self.transcript.visible()]
-                .iter()
-                .filter_map(|&id| match ActivityRow::from_id(id) {
-                    ActivityRow::Entry(i) => Some(i),
-                    _ => None,
-                })
+            let visible: Vec<_> = self
+                .transcript
+                .visible()
+                .filter_map(
+                    |pos| match ActivityRow::from_id(self.transcript.order[pos]) {
+                        ActivityRow::Entry(i) => Some((pos, i)),
+                        _ => None,
+                    },
+                )
                 .collect();
             let ids: HashSet<_> = visible
                 .iter()
-                .map(|&i| session.entries[i].id.as_str())
+                .map(|&(_, i)| session.entries[i].id.as_str())
                 .collect();
-            self.markdown.retain(|id, _| ids.contains(id.as_str()));
+            for (id, markdown) in self.markdown.extract_if(|id, _| !ids.contains(id.as_str())) {
+                // Keep only numerical measurements in this session, not the
+                // parsed items, text, images or widget trees.
+                if let Some(window) = markdown.window
+                    && !window.known.is_empty()
+                {
+                    self.markdown_heights.insert(id, window.known);
+                }
+            }
             self.outputs
                 .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
-            for &index in &visible {
+            for &(position, index) in &visible {
                 let entry = &session.entries[index];
                 if let EntryKind::User { images, files, .. } = &entry.kind {
                     visible_media.extend(images.iter().cloned());
@@ -819,11 +948,23 @@ impl App {
                 if matches!(entry.kind, EntryKind::Assistant | EntryKind::Reasoning) {
                     let markdown = self.markdown.entry(entry.id.clone()).or_insert_with(|| {
                         let content = markdown::Content::parse(&entry.text);
-                        Markdown {
+                        let mut markdown = Markdown {
+                            eager_heights: Default::default(),
+                            images: HashSet::new(),
+                            window: None,
                             source: session.entries.shared(index),
-                            images: crate::markdown_images::urls(&content),
                             content,
+                        };
+                        markdown.sync_window(self.catalog.settings.font_size, 0);
+                        if let Some(window) = &mut markdown.window {
+                            window.restore(
+                                self.markdown_heights.remove(&entry.id).unwrap_or_default(),
+                                self.transcript.offset - self.transcript.prefix(position),
+                                self.transcript.viewport,
+                            );
                         }
+                        markdown.refresh_images();
+                        markdown
                     });
                     image_urls.extend(markdown.images.iter().cloned());
                 }
@@ -2375,34 +2516,37 @@ impl App {
                 self.transcript.viewport = height;
                 self.prepare_visible();
             }
-            Message::RowSize(epoch, index, height) => {
-                if epoch != self.view_epoch {
+            Message::MarkdownGeometry(epoch, index, source, height, geometry) => {
+                if epoch != self.view_epoch
+                    || !self
+                        .current()
+                        .and_then(|s| s.entries.by_id(&source.id))
+                        .is_some_and(|e| std::ptr::eq(e, source.as_ref()))
+                {
                     return Task::none();
                 }
-                let spacing = self
-                    .current()
-                    .map_or(8., |s| ActivityRow::from_id(index).spacing(&s.entries));
-                let visible = self.transcript.visible();
-                let corrected = self.transcript.measure(index, height + spacing);
-                if self.auto_scroll {
-                    self.transcript.end();
-                    self.prepare_visible();
-                    return bottom();
-                }
-                if corrected {
-                    self.prepare_visible();
-                    return widget::operation::scroll_to(
-                        "chat",
-                        scrollable::AbsoluteOffset {
-                            x: 0.,
-                            y: self.transcript.offset + 20.,
-                        },
-                    );
-                }
-                // A shrinking measured row can expose uncached rows even when
-                // the scroll anchor stays put. Prepare exactly what we render.
-                if self.transcript.visible() != visible {
-                    self.prepare_visible();
+                // Scroll is delivered before the row's measurement. A jump past
+                // the old estimated extent can already have evicted this body;
+                // its actual outer height and sampled item heights still count.
+                let inner = if let Some(markdown) = self.markdown.get_mut(&source.id)
+                    && let Some(window) = &mut markdown.window
+                {
+                    let delta = geometry.map(|g| window.update(g));
+                    if delta.is_some() {
+                        markdown.refresh_images();
+                    }
+                    delta
+                } else {
+                    if let Some(g) = geometry {
+                        g.save_heights(self.markdown_heights.entry(source.id.clone()).or_default());
+                    }
+                    None
+                };
+                return self.measure_row(index, height, inner);
+            }
+            Message::RowSize(epoch, index, height) => {
+                if epoch == self.view_epoch {
+                    return self.measure_row(index, height, None);
                 }
             }
             Message::SidebarScroll(epoch, offset, height) => {
@@ -3798,8 +3942,20 @@ impl App {
                     }
                     _ => content,
                 };
-                let row = widget::sensor(content)
-                    .on_resize(move |size| Message::RowSize(epoch, index, size.height));
+                let row = if let ActivityRow::Entry(_) = projected
+                    && let Some(md) = self.markdown.get(&entry.id)
+                    && let Some(window) = &md.window
+                {
+                    let expected =
+                        self.transcript.height(position) - projected.spacing(&session.entries);
+                    window.observe_row(content, expected, move |height, geometry| {
+                        Message::MarkdownGeometry(epoch, index, md.source.clone(), height, geometry)
+                    })
+                } else {
+                    widget::sensor(content)
+                        .on_resize(move |size| Message::RowSize(epoch, index, size.height))
+                        .into()
+                };
                 children.push((
                     TranscriptKey::Entry {
                         session: session.id.clone(),
@@ -4487,8 +4643,7 @@ impl App {
             EntryKind::Reasoning => {
                 let content: Element<'_, Message> =
                     if let Some(markdown) = self.markdown.get(&entry.id) {
-                        markdown::view_with(
-                            markdown.content.items(),
+                        markdown.view(
                             markdown::Settings::with_text_size(
                                 12.,
                                 theme::markdown_style(&self.preset().theme),
@@ -4547,16 +4702,17 @@ impl App {
                     }
                 }
                 if let Some(markdown) = self.markdown.get(&entry.id) {
-                    content = content.push(markdown::view_with(
-                        markdown.content.items(),
-                        markdown::Settings::with_text_size(
-                            self.catalog.settings.font_size,
-                            theme::markdown_style(&self.preset().theme),
+                    content = content.push(
+                        markdown.view(
+                            markdown::Settings::with_text_size(
+                                self.catalog.settings.font_size,
+                                theme::markdown_style(&self.preset().theme),
+                            ),
+                            &chat_selection::Viewer::new(self.chat_selection.clone(), index)
+                                .with_images(&self.markdown_images)
+                                .with_equations(&self.equations, &entry.id),
                         ),
-                        &chat_selection::Viewer::new(self.chat_selection.clone(), index)
-                            .with_images(&self.markdown_images)
-                            .with_equations(&self.equations, &entry.id),
-                    ));
+                    );
                 } else {
                     content = content.push(chat_selection::plain(
                         &entry.text,
@@ -5829,6 +5985,7 @@ impl App {
                 });
                 self.current_session = Some(session);
                 self.markdown.clear();
+                self.markdown_heights.clear();
                 self.rebuild_transcript();
                 self.prepare_visible();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
@@ -6498,6 +6655,7 @@ fn window_events() -> Subscription<Message> {
 
 #[cfg(test)]
 mod tests {
+    mod long_reply;
     use super::*;
     use orbit_core::models::{ASTRA, LUNA};
     mod sqlite {

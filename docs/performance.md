@@ -77,8 +77,12 @@ For file locations, backup and format compatibility, see
   selection and link hits, including inline-code backgrounds and decorations.
   Selection-copy resolves logical positions, without full message strings embedded in every tree.
 - Selection indexes and decoration geometry belong to mounted paragraphs, not
-  the entire history. Virtualization bounds work by message, not by bytes: one
-  very large Markdown block can still be expensive to shape.
+  the entire history. Inside a long assistant/reasoning entry, a second height
+  index mounts top-level Markdown items around the same scroll viewport; only
+  their image URLs are requested. Sparse numeric height measurements can outlive
+  the mounted entry within the selected session. Copy still walks the complete
+  source. A single giant paragraph, code fence or nested structure can still
+  be expensive to lay out; see the [long-reply measurements](benchmarks/session-and-rendering.md#layout-within-a-long-markdown-reply).
 
 ## Background work
 
