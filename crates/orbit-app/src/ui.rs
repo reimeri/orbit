@@ -481,6 +481,7 @@ pub enum Message {
     WindowOpened(window::Id),
     Screenshot(window::Screenshot),
     CheckScreenshot(window::Screenshot),
+    SmokeOpenTool(String),
     Capture,
     Exit(Result<(), String>),
 }
@@ -2965,6 +2966,22 @@ impl App {
                         return iced::exit();
                     }
                 }
+            }
+            Message::SmokeOpenTool(session_id) => {
+                let index = self
+                    .current_session
+                    .as_ref()
+                    .filter(|session| session.id == session_id)
+                    .and_then(|session| session.entries.index_of("smoke-tool"))
+                    .expect("selected smoke fixture must contain the tool");
+                assert!(
+                    self.transcript
+                        .position(ActivityRow::Activity(index).id())
+                        .is_some(),
+                    "selected smoke tool must have a projected activity row"
+                );
+                return Task::done(Message::ToggleEntry("smoke-tool".into()))
+                    .chain(delayed_capture());
             }
             Message::Capture => {
                 if self.io_busy {
@@ -5684,9 +5701,10 @@ impl App {
                 s.entries.push(tool);
                 let id = s.id.clone();
                 h.insert(s);
-                self.select(Selection::Session(id));
-                let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
-                self.groups.insert("smoke-tool".into());
+                self.select(Selection::Session(id.clone()));
+                // Deliver Selected (which projects the transcript) before opening the tool.
+                return Task::batch(self.tasks.drain(..))
+                    .chain(Task::done(Message::SmokeOpenTool(id)));
             }
             2 => {
                 // Render a cross-message selection through rich text and lists,
@@ -5756,7 +5774,7 @@ impl App {
             5 => {
                 self.context_menu = None;
                 let output = format!(
-                    "{}\nTAIL: complete output remains accessible",
+                    "{}\n{SMOKE_OUTPUT_TAIL}",
                     "long output row with Unicode λ界 and asymmetric data 0123456789\n"
                         .repeat(16000)
                 );
@@ -5793,8 +5811,15 @@ impl App {
                 ]);
             }
             8 => {
-                self.settings_open = true;
-                return Task::batch([bottom(), delayed_capture()]);
+                // The virtualized tail row only mounts after the inner scrollable reaches it.
+                return iced::advanced::widget::operate(FindSmokeTail(false)).then(|found| {
+                    if !found {
+                        eprintln!("Scrolled smoke tool output did not show its tail row.");
+                        return iced::exit();
+                    }
+                    Task::done(Message::ToggleSettings)
+                        .chain(Task::batch([bottom(), delayed_capture()]))
+                });
             }
             9 => {
                 return Task::batch([
@@ -6573,6 +6598,22 @@ fn right_panel_header(title: &str, on_close: Message) -> Element<'_, Message> {
 
 fn bottom() -> Task<Message> {
     widget::operation::snap_to("chat", scrollable::RelativeOffset::END)
+}
+const SMOKE_OUTPUT_TAIL: &str = "TAIL";
+struct FindSmokeTail(bool);
+impl iced::advanced::widget::Operation<bool> for FindSmokeTail {
+    fn traverse(
+        &mut self,
+        visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<bool>),
+    ) {
+        visit(self);
+    }
+    fn text(&mut self, _: Option<&widget::Id>, _: iced::Rectangle, text: &str) {
+        self.0 |= text == SMOKE_OUTPUT_TAIL;
+    }
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<bool> {
+        iced::advanced::widget::operation::Outcome::Some(self.0)
+    }
 }
 fn delayed_capture() -> Task<Message> {
     Task::perform(
