@@ -1,0 +1,24 @@
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -105,6 +105,9 @@
+     /// - **Wayland:** Requires `xdg_activation_v1` protocol, `None` has no effect.
+     RequestUserAttention(Id, Option<UserAttention>),
+ 
++    /// Submit an activation token for this window, or request attention if unsupported.
++    ActivateWithToken(Id, String),
++
+     /// Bring the window to the front and sets input focus. Has no effect if the window is
+     /// already in focus, minimized, or not visible.
+     ///
+@@ -422,6 +425,11 @@
+     )))
+ }
+ 
++/// Asks the compositor to activate this existing window using a supplied token.
++pub fn activate_with_token<T>(id: Id, token: String) -> Task<T> {
++    task::effect(crate::Action::Window(Action::ActivateWithToken(id, token)))
++}
++
+ /// Brings the window to the front and sets input focus. Has no effect if the window is
+ /// already in focus, minimized, or not visible.
+ ///

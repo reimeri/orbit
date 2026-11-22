@@ -14,9 +14,15 @@ use zbus::{
 
 type Desired = HashMap<String, Event>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Open {
+    pub event: Event,
+    pub token: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Message {
-    Open(Event),
+    Open(Open),
     Unavailable(String),
 }
 
@@ -72,10 +78,24 @@ struct Desktop {
     owners: OwnerChangedStream<'static>,
 }
 
+struct Shown {
+    event: Event,
+    id: u32,
+    notified_at: zbus::message::Sequence,
+    token: Option<String>,
+}
+
+impl Shown {
+    fn matches(&self, id: u32, signal: &zbus::Message) -> bool {
+        // A queued click or close may predate Notify's replacement of the same ID.
+        self.id == id && signal.recv_position() > self.notified_at
+    }
+}
+
 #[derive(Default)]
 struct Delivery {
     owner: Option<zbus::names::OwnedUniqueName>,
-    shown: HashMap<String, (Event, u32)>,
+    shown: HashMap<String, Shown>,
     delivered: HashMap<String, u64>,
 }
 impl Desktop {
@@ -123,6 +143,12 @@ impl Desktop {
         if delivery.owner.as_ref() != Some(&owner) {
             delivery.shown.clear();
             delivery.owner = Some(owner);
+        } else {
+            // Positions are connection-local. Don't pair signals across a disconnect.
+            for shown in delivery.shown.values_mut() {
+                shown.notified_at = Default::default();
+                shown.token = None;
+            }
         }
         Ok(Self {
             proxy,
@@ -138,7 +164,7 @@ impl Desktop {
             .cloned()
             .collect();
         for session in obsolete {
-            let id = delivery.shown[&session].1;
+            let id = delivery.shown[&session].id;
             self.proxy
                 .call::<_, _, ()>("CloseNotification", &(id,))
                 .await?;
@@ -151,14 +177,14 @@ impl Desktop {
             if delivery.delivered.get(session) == Some(&event.id) {
                 continue;
             }
-            let replaces = delivery.shown.get(session).map_or(0, |(_, id)| *id);
+            let replaces = delivery.shown.get(session).map_or(0, |shown| shown.id);
             let hints = HashMap::from([
                 ("desktop-entry", Value::from(orbit_core::APP_ID)),
                 ("urgency", Value::from(1_u8)),
             ]);
-            let id: u32 = self
+            let reply = self
                 .proxy
-                .call(
+                .call_method(
                     "Notify",
                     &(
                         "Orbit",
@@ -172,30 +198,48 @@ impl Desktop {
                     ),
                 )
                 .await?;
-            delivery.shown.insert(session.clone(), (event.clone(), id));
+            delivery.shown.insert(
+                session.clone(),
+                Shown {
+                    event: event.clone(),
+                    id: reply.body().deserialize()?,
+                    notified_at: reply.recv_position(),
+                    token: None,
+                },
+            );
             delivery.delivered.insert(session.clone(), event.id);
         }
         Ok(())
     }
-    fn signal(
-        &mut self,
-        signal: zbus::Message,
-        delivery: &mut Delivery,
-    ) -> zbus::Result<Option<Event>> {
+}
+
+// The notification protocol sends the optional token *before* the action.
+// Keep it on that live delivery, never in a process-wide "last token" slot.
+impl Delivery {
+    fn signal(&mut self, signal: zbus::Message) -> zbus::Result<Option<Open>> {
         match signal.header().member().map(|m| m.as_str()) {
+            Some("ActivationToken") => {
+                let (id, token): (u32, String) = signal.body().deserialize()?;
+                if let Some(shown) = self.shown.values_mut().find(|s| s.matches(id, &signal)) {
+                    shown.token = (!token.is_empty()).then_some(token);
+                }
+            }
             Some("ActionInvoked") => {
                 let (id, action): (u32, String) = signal.body().deserialize()?;
-                if action == "default" {
-                    return Ok(delivery
-                        .shown
-                        .values()
-                        .find(|(_, shown)| *shown == id)
-                        .map(|(event, _)| event.clone()));
+                // Orbit posts non-resident notifications: invoking an action consumes it.
+                if let Some((_, shown)) =
+                    self.shown.extract_if(|_, s| s.matches(id, &signal)).next()
+                    && action == "default"
+                {
+                    return Ok(Some(Open {
+                        event: shown.event,
+                        token: shown.token,
+                    }));
                 }
             }
             Some("NotificationClosed") => {
                 let (id, _reason): (u32, u32) = signal.body().deserialize()?;
-                delivery.shown.retain(|_, (_, shown)| *shown != id);
+                self.shown.retain(|_, s| !s.matches(id, &signal));
             }
             _ => {}
         }
@@ -235,9 +279,9 @@ fn run(client: &Client) -> iced::futures::stream::BoxStream<'static, Message> {
                         }
                         signal = desktop.signals.next() => {
                             let signal = signal.ok_or("Desktop notification connection closed")?;
-                            if let Some(event) = desktop.signal(signal, &mut delivery).map_err(|e| e.to_string())?
-                                && changes.borrow().get(&event.session_id) == Some(&event)
-                                && output.send(Message::Open(event)).await.is_err()
+                            if let Some(open) = delivery.signal(signal).map_err(|e| e.to_string())?
+                                && changes.borrow().get(&open.event.session_id) == Some(&open.event)
+                                && output.send(Message::Open(open)).await.is_err()
                             { return Ok(()); }
                         }
                         _ = desktop.owners.next() => return Err("Desktop notification service restarted".into()),
@@ -495,6 +539,32 @@ mod tests {
             1,
             "reconnect must not duplicate delivery"
         );
+        // Queue signals for the old event, but process them only after Notify
+        // reuses its native ID. Neither the click nor the close belongs to the replacement.
+        macro_rules! emit {
+            ($name:literal, $body:expr) => {
+                server
+                    .emit_signal(
+                        None::<&str>,
+                        "/org/freedesktop/Notifications",
+                        "org.freedesktop.Notifications",
+                        $name,
+                        &$body,
+                    )
+                    .await
+                    .unwrap()
+            };
+        }
+        async fn next(desktop: &mut Desktop, delivery: &mut Delivery) -> Option<Open> {
+            let signal = tokio::time::timeout(Duration::from_secs(3), desktop.signals.next())
+                .await
+                .unwrap()
+                .unwrap();
+            delivery.signal(signal).unwrap()
+        }
+        emit!("ActivationToken", (41_u32, "superseded"));
+        emit!("ActionInvoked", (41_u32, "default"));
+        emit!("NotificationClosed", (41_u32, 2_u32));
         event.id = 8;
         event.kind = Kind::Failed;
         desired.insert(event.session_id.clone(), event.clone());
@@ -504,57 +574,73 @@ mod tests {
             calls.lock().unwrap()[1].body,
             "Agent needs attention — an error occurred"
         );
-        server
-            .emit_signal(
-                None::<&str>,
-                "/org/freedesktop/Notifications",
-                "org.freedesktop.Notifications",
-                "ActionInvoked",
-                &(41_u32, "default"),
-            )
-            .await
-            .unwrap();
-        let signal = tokio::time::timeout(Duration::from_secs(3), desktop.signals.next())
-            .await
-            .unwrap()
-            .unwrap();
+        for _ in 0..3 {
+            assert!(next(&mut desktop, &mut delivery).await.is_none());
+        }
+
+        let other = Event {
+            id: 15,
+            session_id: "other".into(),
+            ..event.clone()
+        };
+        desired.insert(other.session_id.clone(), other.clone());
+        desktop.sync(&desired, &mut delivery).await.unwrap();
+        // A token must neither open a window by itself nor bleed into a different click.
+        emit!("ActivationToken", (43_u32, "other-window-token"));
+        assert!(next(&mut desktop, &mut delivery).await.is_none());
+        emit!("ActionInvoked", (41_u32, "default"));
         assert_eq!(
-            desktop.signal(signal, &mut delivery).unwrap(),
-            Some(event.clone())
+            next(&mut desktop, &mut delivery).await,
+            Some(Open {
+                event: event.clone(),
+                token: None
+            })
         );
-        server
-            .emit_signal(
-                None::<&str>,
-                "/org/freedesktop/Notifications",
-                "org.freedesktop.Notifications",
-                "NotificationClosed",
-                &(41_u32, 2_u32),
-            )
-            .await
-            .unwrap();
-        let signal = tokio::time::timeout(Duration::from_secs(3), desktop.signals.next())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(desktop.signal(signal, &mut delivery).unwrap().is_none());
+        emit!("ActivationToken", (41_u32, "late"));
+        assert!(next(&mut desktop, &mut delivery).await.is_none());
+        emit!("ActionInvoked", (43_u32, "default"));
+        assert_eq!(
+            next(&mut desktop, &mut delivery).await,
+            Some(Open {
+                event: other,
+                token: Some("other-window-token".into())
+            })
+        );
+        emit!("ActionInvoked", (41_u32, "default"));
+        assert!(next(&mut desktop, &mut delivery).await.is_none());
+
+        event.id = 9;
+        event.kind = Kind::Finished;
+        desired.insert(event.session_id.clone(), event.clone());
+        desktop.sync(&desired, &mut delivery).await.unwrap();
+        assert_eq!(calls.lock().unwrap()[3].body, "Agent finished");
+        assert_eq!(
+            calls.lock().unwrap()[3].replaces,
+            0,
+            "do not reuse invoked IDs"
+        );
+        emit!("ActivationToken", (44_u32, "dismissed"));
+        assert!(next(&mut desktop, &mut delivery).await.is_none());
+        emit!("NotificationClosed", (44_u32, 2_u32));
+        assert!(next(&mut desktop, &mut delivery).await.is_none());
+        emit!("ActionInvoked", (44_u32, "default"));
+        assert!(next(&mut desktop, &mut delivery).await.is_none());
         desktop.sync(&desired, &mut delivery).await.unwrap();
         assert_eq!(
             calls.lock().unwrap().len(),
-            2,
+            4,
             "dismissal must not cause reposting"
         );
-        event.id = 9;
-        event.kind = Kind::Finished;
+        event.id = 10;
         desired.insert(event.session_id.clone(), event);
         desktop.sync(&desired, &mut delivery).await.unwrap();
-        assert_eq!(calls.lock().unwrap()[2].body, "Agent finished");
         assert_eq!(
-            calls.lock().unwrap()[2].replaces,
+            calls.lock().unwrap()[4].replaces,
             0,
             "do not reuse dismissed IDs"
         );
         desktop.sync(&HashMap::new(), &mut delivery).await.unwrap();
-        assert_eq!(*closed.lock().unwrap(), [43]);
+        assert_eq!(*closed.lock().unwrap(), [45]);
         assert!(delivery.delivered.is_empty());
     }
 }

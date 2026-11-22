@@ -6,6 +6,6 @@ pkgs.applyPatches {
     url = "https://static.crates.io/crates/iced_winit/iced_winit-0.14.1.crate";
     hash = "sha256-dYmIjI6VGJnMaIJHppkzu3oFEfC0suEirD/NXayzf3I=";
   };
-  patches = [ ./screenshot-ordering.patch ];
+  patches = [ ./screenshot-ordering.patch ./notification-activation.patch ];
   patchFlags = [ "-p1" "--fuzz=0" ];
 }

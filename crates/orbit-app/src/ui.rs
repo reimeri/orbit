@@ -1585,7 +1585,8 @@ impl App {
             return Task::none();
         }
         match message {
-            Message::Notification(crate::notifications::Message::Open(event)) => {
+            Message::Notification(crate::notifications::Message::Open(open)) => {
+                let crate::notifications::Open { event, token } = open;
                 if !self.closing
                     && !self.close_requested
                     && self.notifications.contains(&event)
@@ -1596,6 +1597,9 @@ impl App {
                 {
                     self.notification_selection = Some(event.session_id);
                     if let Some(id) = self.window_id {
+                        if let Some(token) = token {
+                            return window::activate_with_token(id, token);
+                        }
                         return window::request_user_attention(
                             id,
                             Some(window::UserAttention::Informational),
