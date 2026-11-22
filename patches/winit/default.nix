@@ -9,6 +9,6 @@ pkgs.applyPatches {
     url = "https://static.crates.io/crates/winit/winit-${version}.crate";
     hash = "sha256-pnVfpYqfg1C9HkctTD/MJfgk7DWJM7ujMwbQtj31l40=";
   };
-  patches = [ ./wayland-image-input.patch ];
+  patches = [ ./wayland-image-input.patch ./notification-activation.patch ];
   patchFlags = [ "-p1" "--fuzz=0" ];
 }

@@ -24,6 +24,7 @@
       patchedCosmicText = import ./patches/cosmic-text { inherit pkgs; };
       patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
       patchedIcedWinit = import ./patches/iced-winit { inherit pkgs; };
+      patchedIcedRuntime = import ./patches/iced-runtime { inherit pkgs; };
       patchedIcedWidget = import ./patches/iced-widget { inherit pkgs; };
       # Never copy target/ or session assets into Nix builds.
       projectSrc = lib.fileset.toSource {
@@ -41,6 +42,7 @@
         ln -s ${patchedWinit} "$out/.build-deps/winit"
         ln -s ${patchedCmark} "$out/.build-deps/pulldown-cmark"
         ln -s ${patchedIcedWinit} "$out/.build-deps/iced-winit"
+        ln -s ${patchedIcedRuntime} "$out/.build-deps/iced-runtime"
         ln -s ${patchedIcedWidget} "$out/.build-deps/iced-widget"
         ln -s ${patchedCosmicText} "$out/.build-deps/cosmic-text"
         ln -s ${patchedIcedGraphics} "$out/.build-deps/iced-graphics"
@@ -161,6 +163,7 @@
             ln -sfnT ${patchedWinit} "$root/.build-deps/winit" &&
             ln -sfnT ${patchedCmark} "$root/.build-deps/pulldown-cmark" &&
             ln -sfnT ${patchedIcedWinit} "$root/.build-deps/iced-winit" &&
+            ln -sfnT ${patchedIcedRuntime} "$root/.build-deps/iced-runtime" &&
             ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" &&
             ln -sfnT ${patchedCosmicText} "$root/.build-deps/cosmic-text" &&
             ln -sfnT ${patchedIcedGraphics} "$root/.build-deps/iced-graphics" &&

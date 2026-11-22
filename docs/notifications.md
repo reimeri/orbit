@@ -27,9 +27,12 @@ sound policy remain under the notification server's control. Orbit adds no setti
 notification history or notification controls to its GUI.
 
 Clicking a notification selects its conversation, preserving drafts through the
-normal serialized navigation path. Orbit requests native window attention, but
-**raising an existing Wayland window is not guaranteed**: the current iced/winit
-API cannot apply the notification server's activation token to that surface.
+normal serialized navigation path. When the server sends an
+[`ActivationToken`](https://specifications.freedesktop.org/notification/latest/protocol.html)
+before the matching `ActionInvoked` signal, Orbit submits it to the compositor for its existing Wayland
+surface. **The compositor decides whether to raise or focus the window.** If
+there is no token or `xdg_activation_v1` is unavailable, Orbit requests
+informational attention instead. It does not force focus or open another window.
 Deleted, answered, stopped and superseded notifications cannot navigate to stale
 work. Desktops without notification action support still display the notification.
 
@@ -54,6 +57,17 @@ reports the problem once using its existing informational notice and stderr;
 agent work is never stopped. Fix the desktop notification service/session bus;
 Orbit does not need restarting. Successfully delivered events are not replayed on
 reconnection. Smoke mode never connects to the desktop notification service.
+
+### Native window activation
+
+Upstream winit 0.30.13 can consume startup tokens when creating a window, but
+not after creation. Three checksum-pinned native-layer patches bridge the gap:
+[iced runtime](../patches/iced-runtime/notification-activation.patch) carries
+the token and window ID in a task; [iced-winit](../patches/iced-winit/notification-activation.patch)
+resolves that ID to a live window; [winit](../patches/winit/notification-activation.patch)
+uses its already-bound `xdg_activation_v1` and `wl_surface`. Closing the window
+before dispatch cancels the request. No raw handle, second Wayland connection or
+process-wide startup environment variable is needed.
 
 ## Sidebar status and unchecked completion
 
@@ -98,11 +112,18 @@ just verify
 
 The protocol test starts its own private `dbus-daemon` and fake notification
 server. It checks payload privacy, desktop identity, replacement IDs, action
-routing, withdrawal and dismissal deduplication without touching the real desktop
+routing with interleaved tokens, late signals for replaced or dismissed IDs,
+withdrawal and dismissal deduplication without touching the real desktop
 bus or user data. Nix provides `dbus-daemon` for development and package tests;
 it is **not** an installed runtime dependency or an app-launched service.
 
 To check desktop integration, use isolated state. Finish a turn outside the
-focused session and click the notification: Orbit should select the right session
-without losing its draft. Repeat with DND enabled to check desktop policy. The
-private-bus test does not verify compositor behavior or window raising.
+focused session, focus another application, then click **Open conversation**:
+Orbit should select the right session without losing its draft and, where the
+compositor permits activation, bring its existing window forward. To distinguish
+activation from an attention request, run the isolated instance with
+`WAYLAND_DEBUG=client` and look for `xdg_activation_v1.activate` carrying the
+server's token for its existing surface. An `activate` request alone is not
+proof: winit's attention fallback requests its own token. Treat traces as
+private. Repeat with DND enabled to check desktop policy. The private-bus test
+does not verify compositor behavior or window raising.

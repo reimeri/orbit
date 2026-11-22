@@ -1,0 +1,42 @@
+--- a/src/platform/wayland.rs
++++ b/src/platform/wayland.rs
+@@ -79,11 +79,24 @@
+ ///
+ /// [`Window`]: crate::window::Window
+ pub trait WindowExtWayland {
++    /// Submit an externally supplied activation token for this existing surface.
++    /// Returns whether a request was sent, not whether the compositor accepted it.
++    fn activate_with_token(&self, token: String) -> bool;
++
+     /// Returns `xdg_toplevel` of the window or [`None`] if the window is X11 window.
+     fn xdg_toplevel(&self) -> Option<NonNull<c_void>>;
+ }
+ 
+ impl WindowExtWayland for Window {
++    fn activate_with_token(&self, token: String) -> bool {
++        match &self.window {
++            #[cfg(x11_platform)]
++            crate::platform_impl::Window::X(_) => false,
++            #[cfg(wayland_platform)]
++            crate::platform_impl::Window::Wayland(window) => window.activate_with_token(token),
++        }
++    }
++
+     #[inline]
+     fn xdg_toplevel(&self) -> Option<NonNull<c_void>> {
+         #[allow(clippy::single_match)]
+--- a/src/platform_impl/linux/wayland/window/mod.rs
++++ b/src/platform_impl/linux/wayland/window/mod.rs
+@@ -517,6 +517,12 @@
+         self.window_state.lock().unwrap().set_cursor_visible(visible);
+     }
+ 
++    pub fn activate_with_token(&self, token: String) -> bool {
++        let Some(activation) = &self.xdg_activation else { return false };
++        activation.activate(token, self.surface());
++        true
++    }
++
+     pub fn request_user_attention(&self, request_type: Option<UserAttentionType>) {
+         let xdg_activation = match self.xdg_activation.as_ref() {
+             Some(xdg_activation) => xdg_activation,

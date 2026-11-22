@@ -15,6 +15,7 @@ Cargo's registry. Re-enter the shell after changing a patch. Nix normalizes
 mtimes: if Cargo reuses a stale artifact, clean only the affected crate and
 profile. See the patch notes for the pin, rationale and regression checks:
 
+- [notification activation: iced runtime, iced-winit and winit](notifications.md#native-window-activation)
 - [winit: clipboard and file drops](../patches/winit/README.md)
 - [iced-winit: screenshot ordering](../patches/iced-winit/README.md)
 - [iced-widget: editor, menus and Markdown](../patches/iced-widget/README.md)
