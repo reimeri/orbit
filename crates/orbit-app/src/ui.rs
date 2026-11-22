@@ -199,6 +199,14 @@ fn transcript_run_key(entry: &Entry) -> Option<RunKey<'_>> {
     }
 }
 
+/// Parts of the displayed frame supplied by the capture instead of the harness.
+#[derive(Default)]
+struct SmokeFixtures {
+    questionnaire: Option<String>,
+    transcript: bool,
+    sidebar: bool,
+}
+
 pub struct App {
     harness: Option<Arc<Harness>>,
     catalog: Catalog,
@@ -287,6 +295,7 @@ pub struct App {
     draft_dirty: bool,
     launch: crate::Launch,
     smoke_stage: usize,
+    smoke_fixtures: SmokeFixtures,
     screenshot_check: Option<crate::screenshot_check::Check>,
     smoke_passed: Arc<AtomicBool>,
     smoke_dir: Option<PathBuf>,
@@ -617,6 +626,7 @@ impl App {
             draft_dirty: false,
             launch,
             smoke_stage: 0,
+            smoke_fixtures: SmokeFixtures::default(),
             screenshot_check: None,
             smoke_passed,
             smoke_dir,
@@ -692,8 +702,8 @@ impl App {
             return;
         };
         let previous: HashSet<_> = self.questionnaires.keys().cloned().collect();
-        let mut live = HashSet::new();
-        let mut active = None;
+        let mut active = self.smoke_fixtures.questionnaire.clone();
+        let mut live: HashSet<_> = active.iter().cloned().collect();
         for c in h.all() {
             if let Some(questions) = &c.questionnaires {
                 for pending in questions.pending() {
@@ -733,31 +743,30 @@ impl App {
             }
             self.active_questionnaire = active;
         }
-        if previous != live {
+        if previous != live && !self.smoke_fixtures.sidebar {
             self.prepare_sidebar();
         }
     }
     fn refresh(&mut self) -> bool {
-        if self.smoke_dir.is_some() && self.smoke_stage >= 26 {
-            return false;
-        }
         self.sync_questionnaires();
         let Some(h) = &self.harness else {
             return false;
         };
         let catalog_revision = h.catalog_revision();
         if catalog_revision != self.catalog_revision {
-            self.child_statuses = h.child_statuses();
-            self.sessions = h.summaries();
-            self.sessions
-                .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
-            self.forks = forks::Index::build(&self.sessions);
             self.catalog_revision = catalog_revision;
-            self.prepare_sidebar();
+            self.child_statuses = h.child_statuses();
+            if !self.smoke_fixtures.sidebar {
+                self.sessions = h.summaries();
+                self.sessions
+                    .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+                self.forks = forks::Index::build(&self.sessions);
+                self.prepare_sidebar();
+            }
         }
         // The worker may already have evicted the outgoing conversation.
         // Keep its view mounted until Selected commits the incoming snapshot.
-        if self.switching_session {
+        if self.switching_session || self.smoke_fixtures.transcript {
             return false;
         }
         let h = self.harness.as_ref().expect("harness");
@@ -1773,6 +1782,12 @@ impl App {
                             }
                         }
                         self.new_draft_dirty = false;
+                        // Selection hands the view back to the harness, even when no
+                        // catalog revision changed while a fixture owned the sidebar.
+                        if self.smoke_fixtures.sidebar {
+                            self.catalog_revision = u64::MAX;
+                        }
+                        self.smoke_fixtures = SmokeFixtures::default();
                         self.view_epoch = self.view_epoch.wrapping_add(1);
                         self.context_menu = None;
                         self.auto_scroll = true;
@@ -5624,6 +5639,24 @@ impl App {
             .style(card)
             .into()
     }
+    fn stage_smoke_questionnaire(&mut self, request: orbit_core::questionnaire::Request) {
+        let id = "smoke-questionnaire".to_owned();
+        self.questionnaires.insert(
+            id.clone(),
+            questionnaire::Draft::new(orbit_core::questionnaire::Pending {
+                id: id.clone(),
+                request: Arc::new(request),
+            }),
+        );
+        self.smoke_fixtures.questionnaire = Some(id.clone());
+        self.active_questionnaire = Some(id);
+    }
+    fn stage_smoke_transcript(&mut self, session: Session) {
+        self.smoke_fixtures.transcript = true;
+        self.current_session = Some(session);
+        self.rebuild_transcript();
+        self.prepare_visible();
+    }
     fn smoke_frame(&mut self, screenshot: window::Screenshot) -> Task<Message> {
         let pixels = &screenshot.rgba;
         let valid = screenshot.size.width > 0
@@ -5846,6 +5879,7 @@ impl App {
                     for i in 0..20000 {s.entries.push(Entry::new(EntryKind::Assistant,format!("### Historical message {i}\n\nAsymmetric **Markdown** content with λ and 界.")));}
                 }).expect("large smoke transcript");
                 self.refresh();
+                self.smoke_fixtures.sidebar = true;
                 for i in 0..10000 {
                     self.sessions.push(SessionSummary {
                         origin: None,
@@ -6018,15 +6052,7 @@ impl App {
             }
             26 => {
                 let request = orbit_core::questionnaire::Request::parse(r#"{"questions":[{"id":"project","question":"Here’s a demo of a single-choice question. What kind of project would you like to build? You can also enter your own answer.","kind":"select","options":["A website","A mobile app","A command-line tool"]},{"id":"details","question":"Describe the constraints and any additional requirements.","kind":"text"}]}"#).expect("smoke questionnaire");
-                let id = "smoke-questionnaire".to_owned();
-                self.questionnaires.insert(
-                    id.clone(),
-                    questionnaire::Draft::new(orbit_core::questionnaire::Pending {
-                        id: id.clone(),
-                        request: Arc::new(request),
-                    }),
-                );
-                self.active_questionnaire = Some(id);
+                self.stage_smoke_questionnaire(request);
             }
             27..=30 => {
                 let draft = self
@@ -6070,18 +6096,9 @@ impl App {
             }
             31 => {
                 let request = serde_json::json!({"questions":[{"id":"many","question":"A long question that wraps rather than overflowing the available space. Choose an option, scroll through the complete list, or provide a custom answer.","kind":"select","options":(1..=20).map(|i| format!("Option {i}: preserve this complete descriptive label even in a narrow window with settings open.")).collect::<Vec<_>>()}]});
-                let id = "smoke-questionnaire".to_owned();
-                self.questionnaires.insert(
-                    id.clone(),
-                    questionnaire::Draft::new(orbit_core::questionnaire::Pending {
-                        id: id.clone(),
-                        request: Arc::new(
-                            orbit_core::questionnaire::Request::parse(&request.to_string())
-                                .unwrap(),
-                        ),
-                    }),
+                self.stage_smoke_questionnaire(
+                    orbit_core::questionnaire::Request::parse(&request.to_string()).unwrap(),
                 );
-                self.active_questionnaire = Some(id);
                 self.settings_open = true;
                 self.settings_tab = SettingsTab::General;
                 if let Some(window) = self.window_id {
@@ -6092,8 +6109,8 @@ impl App {
                 }
             }
             32 => {
-                self.active_questionnaire = None;
-                self.questionnaires.clear();
+                self.smoke_fixtures.questionnaire = None;
+                self.sync_questionnaires();
                 self.settings_open = true;
                 self.settings_tab = SettingsTab::Images;
             }
@@ -6128,11 +6145,9 @@ impl App {
                     },
                 };
                 session.entries.push(entry);
-                self.current_session = Some(session);
                 self.expanded.insert("smoke-image".into());
                 self.groups.insert("smoke-image".into());
-                self.rebuild_transcript();
-                self.prepare_visible();
+                self.stage_smoke_transcript(session);
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
             34 => {
@@ -6179,11 +6194,9 @@ impl App {
                     text: "![Markdown GIF preview](markdown.gif \"Click to inspect\")\n\n![Missing image](missing.png)".into(),
                     kind: EntryKind::Assistant,
                 });
-                self.current_session = Some(session);
                 self.markdown.clear();
                 self.markdown_heights.clear();
-                self.rebuild_transcript();
-                self.prepare_visible();
+                self.stage_smoke_transcript(session);
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
             38 => {
@@ -6213,11 +6226,9 @@ impl App {
                     output:"Rust documentation (https://doc.rust-lang.org/book/)\nThe Rust Programming Language".into(),complete:true,failed:false, cell_id: None,parent:None,media:vec![],
                     web:Some(orbit_core::web_search::Metadata{mode:orbit_core::web_search::Mode::Live,searched_at:orbit_core::store::now(),sources:vec![orbit_core::web_search::Source{title:"The Rust Programming Language — a long source title that should fit in a constrained chat column".into(),url:"https://doc.rust-lang.org/book/".into()}],details:r#"[{"type":"text_result","url":"https://doc.rust-lang.org/book/"}]"#.into()})
                 }});
-                self.current_session = Some(session);
                 self.expanded.insert("smoke-web".into());
                 self.groups.insert("smoke-web".into());
-                self.rebuild_transcript();
-                self.prepare_visible();
+                self.stage_smoke_transcript(session);
             }
             40 => {
                 self.settings_open = false;
@@ -6296,9 +6307,7 @@ impl App {
                     tool("activity-live-a", "exec_command", r#"{"cmd":"git diff --check"}"#, Some("activity-live"), true, false),
                     tool("activity-live-b", "exec_command", r#"{"cmd":"nix develop --command just verify"}"#, Some("activity-live"), false, false),
                 ].into();
-                self.current_session = Some(session);
-                self.rebuild_transcript();
-                self.prepare_visible();
+                self.stage_smoke_transcript(session);
                 return Task::batch([
                     widget::operation::snap_to("chat", scrollable::RelativeOffset::START),
                     delayed_capture(),
@@ -6325,6 +6334,7 @@ impl App {
             }
 
             46 => {
+                self.smoke_fixtures.sidebar = true;
                 self.settings_open = false;
                 self.agents_open = false;
                 self.search.clear();
@@ -6457,13 +6467,11 @@ impl App {
                 self.selected = Some(session.id.clone());
                 self.sessions.push(SessionSummary::from(&session));
                 self.prepare_sidebar();
-                self.current_session = Some(session);
-                self.rebuild_transcript();
+                self.stage_smoke_transcript(session);
                 self.restore_draft();
                 self.editor
                     .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                 self.file_completion.edited(&self.editor);
-                self.prepare_visible();
             }
 
             53 => {
@@ -6474,10 +6482,8 @@ impl App {
                     include_str!("fixtures/search-chance.md"),
                 ));
                 self.selected = Some(session.id.clone());
-                self.current_session = Some(session);
+                self.stage_smoke_transcript(session);
                 self.restore_draft();
-                self.rebuild_transcript();
-                self.prepare_visible();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
             54 if self
@@ -9046,6 +9052,56 @@ mod tests {
                 .iter()
                 .any(|row| matches!(row, SidebarRow::Heading("NEEDS ATTENTION", _)))
         );
+    }
+
+    #[tokio::test]
+    async fn delayed_harness_changes_refresh_only_live_parts_of_a_smoke_frame() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root.clone()).await;
+        let owner = app.selected.clone().unwrap();
+        let harness = app.harness.as_ref().unwrap().clone();
+        // The capture index is for sequencing screenshots, not choosing a data source.
+        app.smoke_stage = usize::MAX;
+
+        harness
+            .edit(&owner, |s| s.title = "Live edit".into())
+            .unwrap();
+        let request = r#"{"questions":[{"id":"q","kind":"text","question":"Which project?"}]}"#;
+        let conversation = harness.get(&owner).unwrap();
+        let queue = conversation.questionnaires.as_ref().unwrap();
+        let cancel = CancellationToken::new();
+        let mut ask = std::pin::pin!(queue.ask("real-ask", request, &cancel));
+        // Register the real question, but deliver its notice after staging the fixture.
+        assert!(iced::futures::poll!(&mut ask).is_pending());
+        app.stage_smoke_questionnaire(orbit_core::questionnaire::Request::parse(request).unwrap());
+        let question = app.active_questionnaire.clone().unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert_eq!(app.active_questionnaire.as_ref(), Some(&question));
+        assert!(app.questionnaires.contains_key(&question));
+        assert_eq!(app.current().unwrap().title, "Live edit");
+
+        let fixture = Session::new(root, &app.catalog.settings);
+        let fixture_id = fixture.id.clone();
+        app.stage_smoke_transcript(fixture);
+        harness
+            .edit(&owner, |s| s.title = "New sidebar title".into())
+            .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        assert_eq!(app.current().unwrap().id, fixture_id);
+        assert!(
+            app.sessions
+                .iter()
+                .any(|s| s.id == owner && s.title == "New sidebar title")
+        );
+
+        dispatch(&mut app, Message::Select(owner.clone())).await;
+        assert_eq!(app.current().unwrap().id, owner);
+        assert_eq!(app.current().unwrap().title, "New sidebar title");
+        assert_eq!(app.active_questionnaire.as_deref(), Some("real-ask"));
+        assert!(!app.questionnaires.contains_key(&question));
+        queue.submit("real-ask", vec!["Orbit".into()]).unwrap();
+        ask.await.unwrap();
     }
 
     #[tokio::test]
