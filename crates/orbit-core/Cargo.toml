@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+async-io = "2.6"
 base64 = "0.22"
 filedescriptor = "0.8"
 futures-util = "0.3"

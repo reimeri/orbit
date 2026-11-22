@@ -106,8 +106,9 @@ For file locations, backup and format compatibility, see
   See the [two-import selection probe](benchmarks/session-and-rendering.md#selection-during-image-import).
 
 - Shell output uses a bounded ring/deque instead of shifting its 1 MiB tail.
-  Non-PTY pipes/waiters and PTY readiness use the shared Tokio executor; a PTY
-  child still has a blocking wait thread. QuickJS cells and nested host calls
+  Non-PTY pipes and child waits use Tokio. PTY reads and writes also run on
+  Tokio, with readiness notifications from the shared async-io reactor and
+  one blocking wait thread per PTY child. QuickJS cells and nested host calls
   retain dedicated worker threads, bounded by the existing per-conversation limits.
   Waiting cells wake on completion, cancellation or their next timer deadline,
   not a 2 ms polling cycle. Output/store size accounting is incremental.
