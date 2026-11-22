@@ -28,7 +28,14 @@ pub enum Action {
     AskRemove(PathBuf),
     CancelRemove,
     Run(Operation),
-    Done(String, Result<Option<PathBuf>, String>),
+    Done(String, Result<Outcome, String>),
+}
+
+#[derive(Clone, Debug)]
+pub enum Outcome {
+    Opened(PathBuf),
+    Created { path: PathBuf, origin: PathBuf },
+    Removed,
 }
 
 #[derive(Clone, Debug)]
@@ -78,14 +85,25 @@ impl App {
             }
             Done(id, result) => {
                 self.io_busy = false;
-                if let Err(e) = &result {
-                    self.error = Some(e.clone());
-                }
+                let checkout = match result {
+                    Ok(Outcome::Created { path, origin }) => {
+                        // The checkout exists even if starting its draft fails.
+                        self.catalog.worktree_origins.insert(path.clone(), origin);
+                        self.save_catalog();
+                        Some(path)
+                    }
+                    Ok(Outcome::Opened(path)) => Some(path),
+                    Ok(Outcome::Removed) => None,
+                    Err(e) => {
+                        self.error = Some(e);
+                        None
+                    }
+                };
                 if self.current().is_none_or(|s| s.id != id) || self.close_requested || self.closing
                 {
                     return Task::none();
                 }
-                if let Ok(Some(path)) = result {
+                if let Some(path) = checkout {
                     self.worktrees.retry = Some((
                         self.current().expect("originating session").project.clone(),
                         path.clone(),
@@ -148,13 +166,17 @@ impl App {
                     return Task::none();
                 }
                 let id = s.id.clone();
+                let origin = self.catalog.project_origin(&s.project).to_owned();
                 let h = h.clone();
                 let repo = Arc::clone(repo);
                 self.io_busy = true;
                 return Task::future(async move {
                     let result = match op {
-                        Operation::Open(path) => repo.open(&path).await.map(Some),
-                        Operation::Create(base) => repo.create(&base).await.map(Some),
+                        Operation::Open(path) => repo.open(&path).await.map(Outcome::Opened),
+                        Operation::Create(base) => repo
+                            .create(&base)
+                            .await
+                            .map(|path| Outcome::Created { path, origin }),
                         Operation::Remove(path) => {
                             if checkout_busy(&h, &path) {
                                 Err(anyhow::anyhow!(
@@ -162,7 +184,9 @@ impl App {
                                     path.display()
                                 ))
                             } else {
-                                repo.remove(&path, h.store.root()).await.map(|()| None)
+                                repo.remove(&path, h.store.root())
+                                    .await
+                                    .map(|()| Outcome::Removed)
                             }
                         }
                     };

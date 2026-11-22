@@ -3692,8 +3692,7 @@ impl App {
                 SidebarRow::Session(session_index, status) => {
                     let session = &self.sessions[*session_index];
                     let active = self.parent_id() == Some(session.id.as_str());
-                    let project = self.project_name(&session.project);
-                    let badge = project_badge_named(&session.project, &project);
+                    let (project, badge) = self.session_project_label(&session.project, 16.);
                     // Age restarts on accepted input and successful completion, not streaming.
                     let children = self
                         .child_statuses
@@ -3937,13 +3936,11 @@ impl App {
                 let trailing_width = text_width(&age, crate::session_action::AGE_SIZE)
                     .ceil()
                     .max(crate::session_action::UNDO_SIZE);
+                let (_, badge) = self.session_project_label(&session.project, 16.);
                 let content = mouse_area(
                     theme::button(
                         row![
-                            project_badge_named(
-                                &session.project,
-                                &self.project_name(&session.project)
-                            ),
+                            badge,
                             ellipsized_text(&session.title, 13., None),
                             crate::session_action::slot(trailing_width),
                         ]
@@ -4007,12 +4004,12 @@ impl App {
             && session.child.is_none()
             && session.origin.is_none()
         {
-            let name = self.project_name(&session.project);
+            let (name, badge) = self.session_project_label(&session.project, 32.);
             container(
                 column![
                     text("What are we building?").size(36).align_x(iced::Center),
                     row![
-                        project_badge_sized(&session.project, &name, 32.),
+                        badge,
                         crate::ellipsized_text::shrinking_ellipsized_text(
                             &name,
                             24.,
@@ -4863,8 +4860,14 @@ impl App {
             }
         }
     }
-    fn project_name(&self, path: &Path) -> String {
-        self.catalog
+    fn session_project_label(
+        &self,
+        checkout: &Path,
+        size: f32,
+    ) -> (String, Element<'static, Message>) {
+        let path = self.catalog.project_origin(checkout);
+        let name = self
+            .catalog
             .projects
             .iter()
             .find(|p| p.path == path)
@@ -4874,7 +4877,9 @@ impl App {
                     .unwrap_or(path.as_os_str())
                     .to_string_lossy()
                     .into_owned()
-            })
+            });
+        let badge = project_badge_sized(path, &name, size);
+        (name, badge)
     }
 
     fn project_row(&self, project: &Project) -> Element<'_, Message> {
@@ -5238,7 +5243,7 @@ impl App {
             compact_tokens(session.usage.total_cached),
             compact_tokens(session.usage.total_input),
         );
-        let name = self.project_name(&session.project);
+        let (name, badge) = self.session_project_label(&session.project, 16.);
         let name_width = text_width(&name, 11.).ceil().min(160.);
         let rate_label = format!("TPS: {rate:.0}");
         let cache_label = format!("{cache:.0}% cache");
@@ -5291,7 +5296,7 @@ impl App {
         let mut info = row![].align_y(iced::Center);
         if project {
             let badge = row![
-                project_badge_named(&session.project, &name),
+                badge,
                 container(ellipsized_text(&name, 11., Some(colors.muted))).width(name_width),
             ]
             .spacing(4)

@@ -61,6 +61,12 @@ async fn footer_selects_without_git_changes_and_quick_create_can_retry_only_the_
     );
     git(&ext, &["commit", "--allow-empty", "-m", "other base"]);
     std::fs::write(ext.join("notes"), "do not touch").unwrap();
+    app.catalog.projects.push(Project {
+        path: ext.clone(),
+        display_name: Some("Contour Studio".into()),
+        favorite: false,
+        stashed: false,
+    });
     let before = git(main, &["worktree", "list", "--porcelain"]);
     dispatch(&mut app, Message::Create(main.into())).await;
     type_message(&mut app, "compare the labels").await;
@@ -104,6 +110,16 @@ async fn footer_selects_without_git_changes_and_quick_create_can_retry_only_the_
         "compare the labels"
     );
     assert_eq!(store.load_new_draft().unwrap().project.as_ref(), Some(path));
+
+    // Reopen from a different project using only the persisted association.
+    let branch = path.file_name().unwrap().to_str().unwrap().to_owned();
+    app.catalog = store.load().unwrap().0;
+    dispatch(&mut app, Message::Create(main.into())).await;
+    click(&mut app, "main").await;
+    click(&mut app, &branch).await;
+    let labels = displayed_text(app.center(), Size::new(900., 700.));
+    assert!(labels.contains("Contour Studio"));
+    assert!(labels.contains("CS"));
 }
 
 #[tokio::test]

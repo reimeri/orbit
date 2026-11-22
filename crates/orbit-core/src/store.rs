@@ -218,9 +218,20 @@ impl Settings {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Catalog {
     pub projects: Vec<Project>,
+    /// Display identity for Orbit-created checkouts, independent of their working directory.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub worktree_origins: BTreeMap<PathBuf, PathBuf>,
     pub selected: Option<String>,
     pub settings: Settings,
 }
+impl Catalog {
+    pub fn project_origin<'a>(&'a self, checkout: &'a Path) -> &'a Path {
+        self.worktree_origins
+            .get(checkout)
+            .map_or(checkout, PathBuf::as_path)
+    }
+}
+
 /// A composer draft or accepted user submission. Media bytes stay out of SQLite.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserMessage {
