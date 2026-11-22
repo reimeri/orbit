@@ -15,6 +15,10 @@ offscreen heights, and sends logical-line/fraction seeks for track/drag actions.
 It never shapes offscreen text just to draw the scrollbar, and seeking does not
 move the caret or selection. Wheel input and keyboard reveal remain native.
 
+ctrl-w.patch binds exact Ctrl+W in focused single-line inputs to their native
+Ctrl+Backspace action, including its selection and secure-input behavior.
+TextInput does not expose a custom key binding callback like TextEditor does.
+
 pick-list-f32.patch removes the obsolete std::f32 import so f32::INFINITY
 resolves to the primitive type’s associated constant instead of the deprecated
 module constant. This does not change pick-list behavior.
