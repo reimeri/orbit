@@ -1888,7 +1888,12 @@ impl App {
                             self.spellcheck.clear();
                             self.file_completion.edited(&self.editor);
                             self.attachments.clear();
-                            self.draft_dirty = false;
+                            // A local action did not pass through submission acceptance,
+                            // which normally clears the persisted draft.
+                            self.draft_dirty = text.text == crate::file_completion::COMPACT;
+                            if self.draft_dirty {
+                                self.save_draft();
+                            }
                         }
                         self.auto_scroll = true;
                         self.refresh();
@@ -2254,6 +2259,25 @@ impl App {
                     let workspace = session.project.clone();
                     let settings = self.catalog.settings.clone();
                     self.io_busy = true;
+                    if message.text == crate::file_completion::COMPACT {
+                        if draft.is_some() || !message.images.is_empty() {
+                            self.io_busy = false;
+                            self.error = Some(
+                                if !message.images.is_empty() {
+                                    "Remove the attachments before running /compact."
+                                } else {
+                                    "There is no conversation context to compact yet."
+                                }
+                                .into(),
+                            );
+                            return Task::none();
+                        }
+                        self.tasks.push(self.io.run(move || {
+                            let result = h.compact(&id, settings).map_err(|e| format!("{e:#}"));
+                            Message::Sent(id, message, result)
+                        }));
+                        return Task::none();
+                    }
                     let submission = self
                         .submissions
                         .entry(id.clone())
@@ -4302,7 +4326,14 @@ impl App {
                 )
                 .push(space().height(gap));
         }
-        let (send_icon, action) = if running {
+        let compacting = self
+            .harness
+            .as_ref()
+            .and_then(|h| h.get(&session.id))
+            .is_some_and(|c| c.is_manually_compacting());
+        let (send_icon, action) = if compacting {
+            (Icon::ArrowUp, "Wait for compaction to finish")
+        } else if running {
             (Icon::ArrowRight, "Steer agent")
         } else {
             (Icon::ArrowUp, "Send message")
@@ -4317,7 +4348,8 @@ impl App {
                     .padding(5)
                     .style(secondary)
                     .on_press_maybe(
-                        (!self.io_busy
+                        (!compacting
+                            && !self.io_busy
                             && !self.composer_importing()
                             && (!self.editor.is_empty() || !self.attachments.is_empty()))
                         .then_some(Message::Send)
@@ -4330,7 +4362,11 @@ impl App {
         let toolbar = mouse_area(toolbar)
             .on_press(Message::FocusComposer)
             .interaction(mouse::Interaction::Text);
-        let editor = container(column![self.composer_editor(running), toolbar]).style(card);
+        let editor = container(column![
+            self.composer_editor(running && !compacting),
+            toolbar
+        ])
+        .style(card);
         let compose = column![above_editor, editor];
         column![chat, self.chat_lane(compose, 0.)]
             .width(Fill)
@@ -10017,6 +10053,35 @@ mod tests {
         dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
         assert_eq!(app.editor.text(), original);
         assert_eq!(app.editor.cursor(), selected);
+    }
+
+    #[tokio::test]
+    async fn slash_picker_completes_without_sending_and_only_exact_compact_is_local() {
+        let mut app = app();
+        let root = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, root).await;
+        type_message(&mut app, "/com").await;
+        assert!(app.file_completion.is_open());
+        let accept = app.file_completion.accept_selected();
+        dispatch(&mut app, Message::FileCompletion(accept)).await;
+        assert_eq!(app.editor.text(), "/compact");
+        assert!(!app.file_completion.is_open());
+        assert!(app.current().unwrap().entries.is_empty());
+        dispatch(&mut app, Message::Send).await;
+        assert!(
+            app.error
+                .as_deref()
+                .unwrap()
+                .contains("no conversation context")
+        );
+        assert!(app.current().unwrap().entries.is_empty());
+        assert_eq!(app.editor.text(), "/compact");
+
+        type_message(&mut app, "\n/tmp/notes").await;
+        dispatch(&mut app, Message::Send).await;
+        let entry = &app.current().unwrap().entries[0];
+        assert!(matches!(entry.kind, EntryKind::User { .. }));
+        assert_eq!(entry.text, "/compact\n/tmp/notes");
     }
 
     #[tokio::test]

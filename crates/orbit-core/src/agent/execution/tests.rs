@@ -102,6 +102,103 @@ fn result(session: &Session, id: &str) -> Option<String> {
 const HOLD: &str = "await new Promise(resolve => { const poll = () => load('release') ? resolve() : setTimeout(poll, 2); poll(); });";
 
 #[tokio::test]
+async fn manual_compaction_is_exclusive_and_does_not_start_a_turn() {
+    let mut f = Fixture::new().await;
+    let id = f.c.id.clone();
+    let settings = Settings::default();
+    assert!(
+        f.h.compact(&id, settings.clone()).is_err(),
+        "a turn is active"
+    );
+    f.finish().await;
+    let before = f.saved();
+    let turn_output = f.c.turn_usage.lock().unwrap().output;
+
+    f.h.compact(&id, settings.clone()).unwrap();
+    let request = f.request().await;
+    assert_eq!(
+        request.body["input"].as_array().unwrap().last().unwrap()["type"],
+        "compaction_trigger"
+    );
+    assert!(!request.body.to_string().contains("/compact"));
+    assert!(
+        f.h.send(&id, "too-early", "Next task".into(), settings.clone())
+            .is_err()
+    );
+    let compacted = json!({"type":"compaction","encrypted_content":"compacted fixture"});
+    request.reply.send(completed(json!([compacted]))).unwrap();
+    until(|| !f.c.is_turn_active()).await;
+
+    let saved = f.saved();
+    assert_eq!(saved.input[0], compacted);
+    assert!(saved.usage.total_output > before.usage.total_output);
+    assert_eq!(f.c.turn_usage.lock().unwrap().output, turn_output);
+    assert_eq!(saved.entries.len(), before.entries.len() + 1);
+    assert!(
+        before
+            .entries
+            .iter()
+            .eq(saved.entries.iter().take(before.entries.len()))
+    );
+    assert!(matches!(
+        saved.entries[before.entries.len()].kind,
+        EntryKind::Notice
+    ));
+    assert!(
+        f.requests.try_recv().is_err(),
+        "no assistant response was requested"
+    );
+    f.h.send(&id, "after", "Next task".into(), settings)
+        .unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn failed_manual_compaction_is_not_hidden_by_an_earlier_acknowledgement() {
+    let mut f = Fixture::new().await;
+    f.finish().await;
+    let before = f.saved();
+    f.h.edit(&f.c.id, |s| s.needs_attention = true).unwrap();
+    let acknowledgement = f.h.attention(&f.c.id).unwrap();
+    f.h.auth.logout().await.unwrap();
+    f.h.compact(&f.c.id, Settings::default()).unwrap();
+    until(|| !f.c.is_turn_active()).await;
+    f.h.acknowledge_attention(acknowledgement).unwrap();
+
+    let saved = f.saved();
+    assert!(saved.needs_attention);
+    assert!(saved.input.iter().eq(before.input.iter()));
+    assert_eq!(f.c.status(), ConversationStatus::NeedsAttention);
+}
+
+#[tokio::test]
+async fn stopping_manual_compaction_preserves_context_for_the_next_turn() {
+    let mut f = Fixture::new().await;
+    f.finish().await;
+    let before = f.saved();
+    f.h.compact(&f.c.id, Settings::default()).unwrap();
+    let _request = f.request().await;
+    f.h.stop(&f.c.id);
+    until(|| !f.c.is_turn_active()).await;
+    assert_eq!(f.c.status(), ConversationStatus::Stopped);
+    let saved = f.saved();
+    assert!(saved.input.iter().eq(before.input.iter()));
+    assert_eq!(saved.summary, before.summary);
+    assert!(matches!(
+        saved.entries[saved.entries.len() - 1].kind,
+        EntryKind::Notice
+    ));
+    f.h.send(
+        &f.c.id,
+        "after-stop",
+        "Continue".into(),
+        Settings::default(),
+    )
+    .unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
 async fn calls_execute_before_response_completion_exclusively_and_commit_in_model_order() {
     let mut f = Fixture::new().await;
     let stream = f.request().await;

@@ -54,7 +54,10 @@ pub struct Completion {
 enum Trigger {
     File,
     Skill,
+    Command,
 }
+
+pub const COMPACT: &str = "/compact";
 
 fn active(text: &str, cursor: usize) -> Option<(Trigger, Token)> {
     if let Some(token) = file_tags::active(text, cursor) {
@@ -118,11 +121,29 @@ impl Completion {
     }
     pub fn edited(&mut self, editor: &text_editor::Content) {
         let cursor = editor.cursor();
-        let next = if cursor.selection.is_none() && self.service.is_some() {
-            editor
-                .line(cursor.position.line)
-                .and_then(|line| active(&line.text, cursor.position.column))
-                .map(|(kind, token)| (cursor.position.line, kind, token))
+        let next = if cursor.selection.is_none() {
+            editor.line(cursor.position.line).and_then(|line| {
+                let text = line.text.as_ref();
+                if text.starts_with('/')
+                    && text != COMPACT
+                    && COMPACT.starts_with(text)
+                    && cursor.position.column == text.len()
+                    && editor.line_count() == 1
+                {
+                    return Some((
+                        0,
+                        Trigger::Command,
+                        Token {
+                            range: 0..text.len(),
+                            full_path: None,
+                            query: Vec::new(),
+                        },
+                    ));
+                }
+                self.service.as_ref()?;
+                active(text, cursor.position.column)
+                    .map(|(kind, token)| (cursor.position.line, kind, token))
+            })
         } else {
             None
         };
@@ -185,10 +206,23 @@ impl Completion {
             self.request += 1;
         }
     }
+    fn picking_command(&self) -> bool {
+        matches!(self.token, Some((_, Trigger::Command, _)))
+    }
     fn picking_skill(&self) -> bool {
         matches!(self.token, Some((_, Trigger::Skill, _)))
     }
     fn query(&mut self) {
+        if self.picking_command() {
+            self.request += 1;
+            self.response = Response {
+                request: self.request,
+                phase: SearchPhase::Complete,
+                paths: vec![COMPACT.to_owned()],
+                ..Default::default()
+            };
+            return;
+        }
         if let (Some(service), Some((_, kind, token))) = (&self.service, &self.token) {
             self.request += 1;
             self.response.phase = SearchPhase::Pending;
@@ -254,7 +288,10 @@ impl Completion {
                 }
             }
             Message::Results(response) => {
-                if self.picking_skill() || response.request != self.request || !self.active_query()
+                if self.picking_command()
+                    || self.picking_skill()
+                    || response.request != self.request
+                    || !self.active_query()
                 {
                     return false;
                 }
@@ -346,6 +383,10 @@ impl Completion {
         {
             return None;
         }
+        if self.picking_command() {
+            return (event.key == keyboard::Key::Named(keyboard::key::Named::Tab))
+                .then(|| self.accept_selected());
+        }
         if self.picking_skill() && self.response.paths.is_empty() {
             return None;
         }
@@ -404,7 +445,19 @@ impl Completion {
             .take(VISIBLE)
         {
             let selected = index == self.selected;
-            let label: Element<'_, Message> = if self.picking_skill() {
+            let label: Element<'_, Message> = if self.picking_command() {
+                row![
+                    text(COMPACT).size(LABEL_SIZE),
+                    ellipsized_text(
+                        "Compact the model’s context; keep the full chat.",
+                        LABEL_SIZE - 1.,
+                        Some(colors.muted)
+                    )
+                ]
+                .align_y(iced::Center)
+                .spacing(8)
+                .into()
+            } else if self.picking_skill() {
                 let skill = &self
                     .catalog
                     .as_ref()
@@ -474,20 +527,24 @@ impl Completion {
                 .style(theme::text_button),
             );
         }
-        let refresh = icons::tip(
-            theme::button(
-                Icon::RefreshCw.spinning(12., self.response.phase != SearchPhase::Complete),
-            )
-            .padding(4)
-            .style(theme::sidebar_control)
-            .on_press(Message::Refresh),
-            if self.picking_skill() {
-                "Refresh skills"
-            } else {
-                "Refresh workspace files"
-            },
-        );
-        container(row![rows, refresh].spacing(4))
+        let mut panel = row![rows].spacing(4);
+        if !self.picking_command() {
+            let refresh = icons::tip(
+                theme::button(
+                    Icon::RefreshCw.spinning(12., self.response.phase != SearchPhase::Complete),
+                )
+                .padding(4)
+                .style(theme::sidebar_control)
+                .on_press(Message::Refresh),
+                if self.picking_skill() {
+                    "Refresh skills"
+                } else {
+                    "Refresh workspace files"
+                },
+            );
+            panel = panel.push(refresh);
+        }
+        container(panel)
             .padding(INSET)
             .width(Fill)
             .style(theme::card)

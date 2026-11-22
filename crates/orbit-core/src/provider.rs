@@ -288,7 +288,7 @@ impl Provider {
             body["tools"] = json!([]);
             body["tool_choice"] = json!("none");
             body["input"].as_array_mut().expect("request input").push(json!({"role":"user","content":format!("Previous summary:\n{summary}\n\nNext historical chunk:\n{chunk}")}));
-            let response = self.request(&session.id, body, cancel, &|_| {}).await.context("Automatic compaction failed; the original context and transcript are preserved. Check your connection and retry")?;
+            let response = self.request(&session.id, body, cancel, &|_| {}).await.context("Compaction failed; the original context and transcript are preserved. Check your connection and retry")?;
             account(&response);
             summary = response
                 .output

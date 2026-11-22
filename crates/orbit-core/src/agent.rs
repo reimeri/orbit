@@ -81,6 +81,7 @@ pub struct Conversation {
     changes: tokio::sync::watch::Sender<()>,
     pub state: Mutex<Session>,
     pub running: AtomicBool,
+    manual_compaction: AtomicBool,
     finishing: AtomicBool,
     naming: AtomicBool,
     naming_cancel: CancellationToken,
@@ -173,7 +174,10 @@ impl Conversation {
         self.changed();
     }
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        self.running.load(Ordering::Acquire) || self.is_manually_compacting()
+    }
+    pub fn is_manually_compacting(&self) -> bool {
+        self.manual_compaction.load(Ordering::Acquire)
     }
 }
 /// Usage and streaming time from completed model responses in the current turn.
@@ -453,6 +457,7 @@ impl Harness {
                 questionnaires,
                 state: Mutex::new(session),
                 running: AtomicBool::new(false),
+                manual_compaction: AtomicBool::new(false),
                 finishing: AtomicBool::new(false),
                 naming: AtomicBool::new(false),
                 naming_cancel: CancellationToken::new(),
@@ -769,6 +774,10 @@ impl Harness {
             !conversation.deleted.load(Ordering::Acquire),
             "Session deleted before file attachments could be accepted"
         );
+        anyhow::ensure!(
+            !conversation.is_manually_compacting(),
+            "Wait for compaction to finish before sending a message"
+        );
         self.retry_results(&mut coordinator, id)?;
         self.deliver_notices(&mut coordinator, id)?;
         let needs_start = {
@@ -833,6 +842,10 @@ impl Harness {
     }
     fn start_inner(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
         let conversation = self.load(id)?;
+        anyhow::ensure!(
+            !conversation.is_manually_compacting(),
+            "Wait for compaction to finish before starting a turn"
+        );
         *conversation.last_settings.lock().expect("settings lock") = settings.clone();
         let cancel = {
             let mut state = conversation.state.lock().expect("session lock");
@@ -967,21 +980,88 @@ impl Harness {
         });
         Ok(())
     }
-    async fn run(
+    /// Compact the current context without accepting a submission or starting an agent turn.
+    pub fn compact(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
+        let _coordinator = self.subagents.lock().expect("subagent lock");
+        let conversation = self.load(id)?;
+        anyhow::ensure!(
+            !conversation.is_executing() && self.active_children(id) == 0,
+            "Wait for session activity to finish before compacting"
+        );
+        let cancel = CancellationToken::new();
+        {
+            let state = conversation.state.lock().expect("session lock");
+            anyhow::ensure!(state.child.is_none(), "Child sessions are read-only");
+            anyhow::ensure!(
+                !state.input.is_empty(),
+                "There is no conversation context to compact yet"
+            );
+            anyhow::ensure!(
+                state.pending.is_empty() && state.subagent_notices.is_empty(),
+                "Resume the pending work before compacting"
+            );
+            *conversation.cancel.lock().expect("cancel lock") = cancel.clone();
+            conversation.turn_generation.fetch_add(1, Ordering::Release);
+            conversation
+                .manual_compaction
+                .store(true, Ordering::Release);
+            conversation.set_status(ConversationStatus::CompactingContext);
+        }
+        self.catalog_revision.fetch_add(1, Ordering::Release);
+        conversation.changed();
+        let harness = self.clone();
+        let runtime = self.runtime.as_ref().expect("live runtime");
+        runtime.spawn(async move {
+            let result = async {
+                let instructions = harness.prepare_context(&conversation, &cancel).await?;
+                let snapshot = conversation.snapshot();
+                harness.compact_context(
+                    &conversation,
+                    &snapshot,
+                    &instructions,
+                    settings.context_limit,
+                    &cancel,
+                ).await
+            }.await;
+            let mut status = ConversationStatus::Ready;
+            if let Err(error) = result {
+                status = if cancel.is_cancelled() {
+                    ConversationStatus::Stopped
+                } else {
+                    ConversationStatus::NeedsAttention
+                };
+                {
+                    let mut state = conversation.state.lock().expect("session lock");
+                    state.needs_attention |= !cancel.is_cancelled();
+                    state.entries.push(Entry::new(
+                        EntryKind::Notice,
+                        format!("Could not finish manual compaction: {error:#}. The transcript is preserved."),
+                    ));
+                }
+                if let Err(error) = conversation.save_async().await {
+                    conversation.state.lock().expect("session lock").entries.push(Entry::new(
+                        EntryKind::Notice,
+                        format!("Could not save session: {error:#}. Keep Orbit open, fix storage, and retry saving."),
+                    ));
+                    status = ConversationStatus::NeedsAttention;
+                }
+            }
+            {
+                let _state = conversation.state.lock().expect("session lock");
+                conversation.set_status(status);
+                conversation.manual_compaction.store(false, Ordering::Release);
+            }
+            harness.catalog_revision.fetch_add(1, Ordering::Release);
+            conversation.changed();
+        });
+        Ok(())
+    }
+
+    async fn prepare_context(
         &self,
         conversation: &Arc<Conversation>,
-        settings: &Settings,
         cancel: &CancellationToken,
-        recovery: &mut execution::Recovery,
     ) -> Result<String> {
-        {
-            let mut s = conversation.state.lock().expect("session lock");
-            repair_calls(&mut s);
-            s.interrupted = true;
-            s.needs_attention = false;
-            conversation.changed();
-        }
-        conversation.save_async().await?;
         let credentials = self.auth.token(None).await?;
         let account = credentials.account_id.or(credentials.email);
         {
@@ -1028,6 +1108,25 @@ impl Harness {
             crate::questionnaire::INSTRUCTIONS,
             subagents::Profile::instructions,
         ));
+        Ok(instructions)
+    }
+
+    async fn run(
+        &self,
+        conversation: &Arc<Conversation>,
+        settings: &Settings,
+        cancel: &CancellationToken,
+        recovery: &mut execution::Recovery,
+    ) -> Result<String> {
+        {
+            let mut s = conversation.state.lock().expect("session lock");
+            repair_calls(&mut s);
+            s.interrupted = true;
+            s.needs_attention = false;
+            conversation.changed();
+        }
+        conversation.save_async().await?;
+        let instructions = self.prepare_context(conversation, cancel).await?;
         let mut compacted_size = None;
         loop {
             if cancel.is_cancelled() {
@@ -1144,6 +1243,7 @@ impl Harness {
         limit: u64,
         cancel: &CancellationToken,
     ) -> Result<usize> {
+        let manual = conversation.is_manually_compacting();
         let input = self
             .provider
             .compact(snapshot, instructions, limit, cancel, &|response| {
@@ -1151,16 +1251,19 @@ impl Harness {
                 session.usage.total_input += response.usage.input;
                 session.usage.total_cached += response.usage.cached;
                 session.usage.total_output += response.usage.output;
-                conversation
-                    .turn_usage
-                    .lock()
-                    .expect("turn usage lock")
-                    .record_response(response);
+                if !manual {
+                    conversation
+                        .turn_usage
+                        .lock()
+                        .expect("turn usage lock")
+                        .record_response(response);
+                }
                 conversation.changed();
             })
             .await?;
         let size = {
             let mut session = conversation.state.lock().expect("session lock");
+            anyhow::ensure!(!cancel.is_cancelled(), "Compaction cancelled");
             session.input = input.input.into();
             if let Some(update) = snapshot.latest_effort_update() {
                 session.input.push(update.clone());
@@ -1198,7 +1301,11 @@ impl Harness {
             session.usage.input = 0;
             session.entries.push(Entry::new(
                 EntryKind::Notice,
-                "Context compacted automatically. The complete transcript is preserved.",
+                if manual {
+                    "Context compacted. The complete transcript is preserved."
+                } else {
+                    "Context compacted automatically. The complete transcript is preserved."
+                },
             ));
             session.input.len()
         };
