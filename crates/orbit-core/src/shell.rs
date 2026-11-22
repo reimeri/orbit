@@ -1,6 +1,8 @@
 //! Codex-style command sessions, scoped to one conversation. No approval/sandbox layer.
 use crate::output::{OutputBuffer, character_budget};
 use anyhow::{Context, Result, bail};
+use async_io::Async;
+use filedescriptor::FileDescriptor;
 use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
@@ -9,7 +11,6 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    io::{Read, Write},
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -76,7 +77,7 @@ struct Output {
 }
 struct Process {
     output: Arc<(Mutex<Output>, tokio::sync::Notify)>,
-    stdin: Mutex<Option<tokio::io::unix::AsyncFd<filedescriptor::FileDescriptor>>>,
+    stdin: Option<Mutex<Arc<Async<FileDescriptor>>>>,
     runtime: tokio::runtime::Handle,
     pid: u32,
     started: Instant,
@@ -155,13 +156,6 @@ impl Process {
         ))
     }
 }
-// The owned descriptor must stay open and keep the same number while registered.
-#[allow(deprecated)]
-fn register_pty(
-    fd: filedescriptor::FileDescriptor,
-) -> std::io::Result<tokio::io::unix::AsyncFd<filedescriptor::FileDescriptor>> {
-    tokio::io::unix::AsyncFd::new(fd)
-}
 type SharedOutput = Arc<(Mutex<Output>, tokio::sync::Notify)>;
 fn append(output: &SharedOutput, bytes: &[u8]) {
     let mut state = output.0.lock().expect("output lock");
@@ -190,22 +184,19 @@ async fn pipe_reader(mut source: impl tokio::io::AsyncRead + Unpin, output: Shar
     };
     finish_reader(&output, error);
 }
-async fn pty_reader(
-    mut source: tokio::io::unix::AsyncFd<filedescriptor::FileDescriptor>,
-    output: SharedOutput,
-) {
+async fn pty_reader(source: Arc<Async<FileDescriptor>>, output: SharedOutput) {
     let mut buffer = [0; 8192];
     let error = loop {
-        let mut ready = match source.readable_mut().await {
-            Ok(ready) => ready,
+        // A continuously readable PTY must still yield to other Tokio tasks.
+        tokio::task::consume_budget().await;
+        match source
+            .read_with(|fd| Ok(rustix::io::read(fd, &mut buffer[..])?))
+            .await
+        {
+            Ok(0) => break None,
+            Ok(n) => append(&output, &buffer[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => break Some(e),
-        };
-        match ready.try_io(|fd| fd.get_mut().read(&mut buffer)) {
-            Ok(Ok(0)) => break None,
-            Ok(Ok(n)) => append(&output, &buffer[..n]),
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Ok(Err(e)) => break Some(e),
-            Err(_) => {}
         }
     };
     finish_reader(&output, error);
@@ -306,23 +297,12 @@ impl Shell {
             cmd.args([flag, &args.cmd]);
             cmd.cwd(cwd);
             cmd.env("TERM", "xterm-256color");
-            struct Descriptor(i32);
-            impl std::os::fd::AsRawFd for Descriptor {
-                fn as_raw_fd(&self) -> i32 {
-                    self.0
-                }
-            }
-            let mut stdin = filedescriptor::FileDescriptor::dup(&Descriptor(
-                pair.master
-                    .as_raw_fd()
-                    .context("PTY has no Unix descriptor")?,
-            ))?;
-            stdin.set_non_blocking(true)?;
-            let reader = filedescriptor::FileDescriptor::dup(&stdin)?;
-            let (stdin, reader) = {
-                let _runtime = self.runtime.enter();
-                (register_pty(stdin)?, register_pty(reader)?)
-            };
+            // Register one owned duplicate of the master, shared by the reader and writer.
+            let master_fd = pair
+                .master
+                .as_raw_fd()
+                .context("PTY has no Unix descriptor")?;
+            let pty = Arc::new(Async::new(FileDescriptor::dup(&master_fd)?)?);
             let mut child = pair.slave.spawn_command(cmd).context("Start PTY command")?;
             let pid = match child.process_id() {
                 Some(pid) => pid,
@@ -332,7 +312,7 @@ impl Shell {
                     bail!("Missing PTY process id");
                 }
             };
-            self.runtime.spawn(pty_reader(reader, output.clone()));
+            self.runtime.spawn(pty_reader(pty.clone(), output.clone()));
             drop(pair.slave);
             let state = output.clone();
             thread::spawn(move || {
@@ -346,7 +326,7 @@ impl Shell {
             });
             Arc::new(Process {
                 output,
-                stdin: Mutex::new(Some(stdin)),
+                stdin: Some(Mutex::new(pty)),
                 runtime: self.runtime.clone(),
                 pid,
                 started: Instant::now(),
@@ -390,7 +370,7 @@ impl Shell {
             });
             Arc::new(Process {
                 output,
-                stdin: Mutex::new(None),
+                stdin: None,
                 runtime: self.runtime.clone(),
                 pid,
                 started: Instant::now(),
@@ -471,22 +451,29 @@ impl Shell {
             .cloned()
             .context("Unknown or already closed command session; start a new command")?;
         if !args.chars.is_empty() {
-            let mut stdin = process.stdin.lock().expect("stdin lock");
-            let stdin = stdin.as_mut().context("stdin is closed for this session; rerun exec_command with tty=true for interactive input")?;
+            let stdin = process.stdin.as_ref().context(
+                "stdin is closed for this session; rerun exec_command with tty=true for interactive input",
+            )?;
+            let stdin = stdin.lock().expect("stdin lock");
             self.runtime.block_on(async {
-                let deadline=tokio::time::Instant::now()+Duration::from_secs(10);
-                let mut remaining=args.chars.as_bytes();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                let mut remaining = args.chars.as_bytes();
                 while !remaining.is_empty() {
-                    let mut ready=tokio::select! {
+                    let written = tokio::select! {
                         biased;
-                        _=cancel.cancelled()=>{process.stop();self.processes.lock().expect("process lock").remove(&args.session_id);bail!("Input cancelled; some bytes may already have been sent");}
-                        _=tokio::time::sleep_until(deadline)=>bail!("PTY input stalled; {} bytes were not sent. Poll the session before sending more.",remaining.len()),
-                        ready=stdin.writable_mut()=>ready?,
+                        _ = cancel.cancelled() => {
+                            process.stop();
+                            self.processes.lock().expect("process lock").remove(&args.session_id);
+                            bail!("Input cancelled; some bytes may already have been sent");
+                        }
+                        _ = tokio::time::sleep_until(deadline) => bail!("PTY input stalled; {} bytes were not sent. Poll the session before sending more.", remaining.len()),
+                        result = stdin.write_with(|fd| Ok(rustix::io::write(fd, remaining)?)) => result,
                     };
-                    match ready.try_io(|fd|fd.get_mut().write(remaining)) {
-                        Ok(Ok(0))=>bail!("PTY stdin closed"),Ok(Ok(n))=>remaining=&remaining[n..],
-                        Ok(Err(e)) if e.kind()==std::io::ErrorKind::Interrupted=>{},
-                        Ok(Err(e))=>return Err(e.into()),Err(_)=>{}
+                    match written {
+                        Ok(0) => bail!("PTY stdin closed"),
+                        Ok(n) => remaining = &remaining[n..],
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(e.into()),
                     }
                 }
                 Ok(())
@@ -771,6 +758,27 @@ mod tests {
         let out = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"sleep 10 &", "login":false,"timeout_ms":30,"yield_time_ms":1000})).unwrap(), &CancellationToken::new()).unwrap();
         assert!(out.text.contains("Process exited"), "{}", out.text);
     }
+    // Pin the devpts inode, not an open terminal. Its link disappears when the last
+    // master closes, even if a concurrent test immediately reuses the PTY number.
+    fn pty_slave_inode(shell: &Shell, session_id: i32) -> std::os::fd::OwnedFd {
+        use rustix::fs::{Mode, OFlags, open};
+        let pid = shell.processes.lock().unwrap()[&session_id].pid;
+        open(
+            format!("/proc/{pid}/fd/0"),
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap()
+    }
+
+    fn assert_pty_released(slave: std::os::fd::OwnedFd) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rustix::fs::fstat(&slave).unwrap().st_nlink != 0 {
+            assert!(Instant::now() < deadline, "PTY master was not released");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn blocked_pty_input_can_be_cancelled() {
         let dir = tempfile::tempdir().unwrap();
@@ -778,6 +786,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"stty -echo -icanon; dd bs=1 count=1 of=/dev/null 2>/dev/null && touch received; exec sleep 20", "tty":true,"login":false,"yield_time_ms":30})).unwrap(), &cancel).unwrap();
         let session_id = running_id(&first.text);
+        let slave = pty_slave_inode(&shell, session_id);
         let worker = shell.clone();
         let token = cancel.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -815,6 +824,7 @@ mod tests {
             &CancellationToken::new(),
         );
         assert!(poll.err().unwrap().to_string().contains("closed"));
+        assert_pty_released(slave);
     }
     #[test]
     fn yielded_output_is_consumed_once_and_stderr_is_kept() {
@@ -876,6 +886,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let first = shell.exec(serde_json::from_value(serde_json::json!({"cmd":"read value; printf 'received:%s' \"$value\"", "tty":true,"login":false,"yield_time_ms":10})).unwrap(), &cancel).unwrap();
         let session_id = running_id(&first.text);
+        let slave = pty_slave_inode(&shell, session_id);
         let out = shell
             .write(
                 StdinArgs {
@@ -890,5 +901,6 @@ mod tests {
         assert!(out.text.contains("received:asymmetric"));
         assert!(!out.failed);
         assert!(out.text.contains("code 0"));
+        assert_pty_released(slave);
     }
 }
