@@ -5344,14 +5344,14 @@ impl App {
                         (draft && !self.io_busy && !open)
                             .then_some(Message::Worktree(worktrees::Action::Popup(offset))),
                     );
-                footer_tip(
-                    button,
-                    if draft {
-                        format!("Choose worktree · {git}")
-                    } else {
-                        format!("This chat stays on its original worktree · {git}")
-                    },
-                )
+                if draft {
+                    button.into()
+                } else {
+                    footer_tip(
+                        button,
+                        format!("This chat stays on its original worktree · {git}"),
+                    )
+                }
             } else {
                 footer_tip(label, git.to_string())
             };
