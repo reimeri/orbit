@@ -23,6 +23,7 @@ mod recent_previews;
 mod screenshot_check;
 mod scrollbar;
 mod session_action;
+mod session_list_focus;
 mod session_wave;
 mod spellcheck;
 mod status_circle;

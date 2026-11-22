@@ -4,7 +4,7 @@ use iced::{
     Element, Event, Length, Rectangle, Size, Vector,
     advanced::{
         Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
-        widget::{Id, Operation, Tree, operation, tree},
+        widget::{Operation, Tree, tree},
     },
     keyboard, mouse, touch,
 };
@@ -98,38 +98,6 @@ struct PointerInput<'a> {
 #[derive(Default)]
 struct State {
     dragging: Cell<bool>,
-}
-
-struct SessionListPress {
-    cursor: mouse::Cursor,
-    over_list: bool,
-    composer_focused: bool,
-}
-
-impl Operation for SessionListPress {
-    fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
-        visit(self);
-    }
-
-    fn scrollable(
-        &mut self,
-        id: Option<&Id>,
-        bounds: Rectangle,
-        _: Rectangle,
-        _: Vector,
-        _: &mut dyn operation::Scrollable,
-    ) {
-        self.over_list |= self.cursor.is_over(bounds)
-            && id.is_some_and(|id| {
-                ["sessions", "deferred-sessions", "settled-sessions"]
-                    .into_iter()
-                    .any(|name| *id == Id::new(name))
-            });
-    }
-
-    fn focusable(&mut self, id: Option<&Id>, _: Rectangle, state: &mut dyn operation::Focusable) {
-        self.composer_focused |= state.is_focused() && id == Some(&Id::new("composer"));
-    }
 }
 
 impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
@@ -252,25 +220,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
         if crate::chat_selection::selection_motion(event) {
             self.selection.borrow_mut().begin_motion();
         }
-        let retain_focus = if matches!(
-            event,
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-        ) {
-            let mut press = SessionListPress {
-                cursor,
-                over_list: false,
-                composer_focused: false,
-            };
-            self.content.as_widget_mut().operate(
-                &mut tree.children[0],
-                layout,
-                renderer,
-                &mut press,
-            );
-            press.over_list && press.composer_focused
-        } else {
-            false
-        };
         let state = tree.state.downcast_mut::<State>();
         let mut messages = Vec::new();
         let mut child_shell = Shell::new(&mut messages);
@@ -284,14 +233,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             &mut child_shell,
             viewport,
         );
-        if retain_focus && child_shell.is_event_captured() {
-            self.content.as_widget_mut().operate(
-                &mut tree.children[0],
-                layout,
-                renderer,
-                &mut operation::focusable::focus("composer".into()),
-            );
-        }
         shell.merge(child_shell, |message| match message {
             Message::OpenImageFrom(message, mut source) => {
                 let position = cursor.position().expect("image activation has a cursor");
