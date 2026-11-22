@@ -1,13 +1,10 @@
 //! Images decode off the UI thread. Chat uses static thumbnails; only the modal animates.
 use crate::icons::{Icon, tip as icon_tip};
 use crate::{recent_previews::RecentPreviews, theme};
-#[cfg(test)]
-use iced::Color;
 use iced::{
-    Element, Length, Rectangle, Size, Subscription, Task,
-    advanced::{Layout, Widget, image as image_primitive, layout, renderer, widget::Tree},
-    mouse,
-    widget::{column, container, image, mouse_area, text},
+    Element, Rectangle, Size, Subscription, Task,
+    advanced::image as image_primitive,
+    widget::{column, container, hover, image, mouse_area, text},
 };
 use orbit_core::media::{Frame, Media};
 use std::{
@@ -270,7 +267,7 @@ impl Viewer {
         .height(ATTACHMENT_SIDE)
         .align_x(iced::Right)
         .padding(3);
-        iced::widget::hover(base, remove)
+        hover(base, remove)
     }
     pub fn open(&mut self, media: &Media) -> Task<Message> {
         self.open_source(media.path.clone(), None)
@@ -563,16 +560,13 @@ impl Viewer {
                 .max_width(600)
                 .padding(INFO_PADDING)
                 .style(|_| container::Style {
+                    background: Some(theme::SCRIM.into()),
                     text_color: Some(theme::IMAGE_TEXT),
                     ..Default::default()
                 });
-                let mut body = column![Element::new(ImageInfo {
-                    picture: picture.into(),
-                    info: info.into(),
-                    hovered: false,
-                })]
-                .spacing(8)
-                .align_x(iced::Center);
+                let mut body = column![hover(picture, info)]
+                    .spacing(8)
+                    .align_x(iced::Center);
                 if animated {
                     body = body.push(icon_tip(
                         theme::button(
@@ -603,116 +597,14 @@ impl Viewer {
     }
 }
 
-struct ImageInfo<'a> {
-    picture: Element<'a, crate::ui::Message>,
-    info: Element<'a, crate::ui::Message>,
-    hovered: bool,
-}
-
-impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
-    fn children(&self) -> Vec<Tree> {
-        vec![Tree::new(&self.picture), Tree::new(&self.info)]
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&[&self.picture, &self.info]);
-    }
-
-    fn size(&self) -> Size<Length> {
-        self.picture.as_widget().size()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &iced::Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let picture = self
-            .picture
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits);
-        let info = self.info.as_widget_mut().layout(
-            &mut tree.children[1],
-            renderer,
-            &layout::Limits::new(Size::ZERO, picture.size()),
-        );
-        layout::Node::with_children(picture.size(), vec![picture, info])
-    }
-
-    fn update(
-        &mut self,
-        _tree: &mut Tree,
-        _event: &iced::Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        _renderer: &iced::Renderer,
-        _clipboard: &mut dyn iced::advanced::Clipboard,
-        shell: &mut iced::advanced::Shell<'_, crate::ui::Message>,
-        _viewport: &Rectangle,
-    ) {
-        let hovered = cursor.is_over(layout.bounds());
-        if self.hovered != hovered {
-            self.hovered = hovered;
-            shell.request_redraw();
-        }
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut iced::Renderer,
-        theme: &iced::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        use iced::advanced::Renderer as _;
-        use image_primitive::Renderer as _;
-        let mut children = layout.children();
-        let picture = children.next().expect("picture layout");
-        self.picture.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            picture,
-            cursor,
-            viewport,
-        );
-        if cursor.is_over(picture.bounds())
-            && let Some(visible) = picture.bounds().intersection(viewport)
-        {
-            let info = children.next().expect("info layout");
-            static BACKGROUND: LazyLock<image::Handle> = LazyLock::new(|| {
-                image::Handle::from_rgba(1, 1, theme::SCRIM.into_rgba8().to_vec())
-            });
-            // Keep text in the same foreground layer as its background;
-            // returning to the parent layer would draw it underneath the panel.
-            renderer.with_layer(*viewport, |renderer| {
-                renderer.draw_image(
-                    image_primitive::Image::new(BACKGROUND.clone()).snap(true),
-                    info.bounds(),
-                    picture.bounds(),
-                );
-                self.info.as_widget().draw(
-                    &tree.children[1],
-                    renderer,
-                    theme,
-                    style,
-                    info,
-                    cursor,
-                    &visible,
-                );
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::{
+        Color,
+        advanced::{Layout, Widget, layout, renderer, widget::Tree},
+        mouse,
+    };
     #[test]
     fn zoom_can_reverse_during_loading_and_ignores_late_decode() {
         let handle = image::Handle::from_rgba(120, 40, vec![255; 120 * 40 * 4]);
@@ -1437,7 +1329,7 @@ mod tests {
             }]))),
             ..Default::default()
         };
-        let size = Size::new(721., 321.); // Centering puts both edges at .5 logical pixels.
+        let size = Size::new(640., 320.);
         let mut view = viewer.view(
             "a.png".into(),
             "320 × 120 · 1234 bytes".into(),
@@ -1460,44 +1352,34 @@ mod tests {
             .map(|line| line.bounds())
             .collect();
         assert_eq!(lines.len(), 2);
-        let mut ui = iced_runtime::UserInterface::build(
-            container(viewer.view(
-                "a.png".into(),
-                "320 × 120 · 1234 bytes".into(),
-                size.width,
-                size.height,
-            ))
-            .center_x(iced::Fill)
-            .center_y(iced::Fill),
-            size,
-            iced_runtime::user_interface::Cache::new(),
-            &mut renderer,
-        );
-        for scale in [1., 1.25, 2.] {
+        // Include exact physical half-pixels and an edge just below a tie,
+        // where adding an epsilon before rounding would shift only the quad.
+        for (scale, origin) in [
+            (1., iced::Vector::new(200.5, 100.5)),
+            (1.25, iced::Vector::new(200.4, 100.3996)),
+            (2., iced::Vector::new(200.25, 100.75)),
+        ] {
             let physical = Size::new((size.width * scale) as u32, (size.height * scale) as u32);
-            let mut screenshots = Vec::new();
-            for cursor in [
-                mouse::Cursor::Unavailable,
-                mouse::Cursor::Available(iced::Point::new(250., 120.)),
-            ] {
-                renderer.reset(Rectangle::with_size(size));
-                ui.draw(
+            let layout = Layout::with_offset(origin, &node);
+            let window = Rectangle::with_size(size);
+            let mut capture = |cursor, viewport: Rectangle| {
+                renderer.reset(window);
+                view.as_widget().draw(
+                    &tree,
                     &mut renderer,
                     &iced::Theme::Dark,
                     &renderer::Style {
                         text_color: Color::WHITE,
                     },
+                    layout,
                     cursor,
+                    &viewport,
                 );
-                screenshots.push(crate::test_renderer::screenshot(
-                    &mut renderer,
-                    physical,
-                    scale,
-                    Color::BLACK,
-                ));
-            }
-            let plain = &screenshots[0];
-            let hovered = &screenshots[1];
+                crate::test_renderer::screenshot(&mut renderer, physical, scale, Color::BLACK)
+            };
+            let cursor = mouse::Cursor::Available(layout.bounds().center());
+            let plain = capture(mouse::Cursor::Unavailable, window);
+            let hovered = capture(cursor, window);
             let first = plain
                 .as_chunks::<4>()
                 .0
@@ -1543,6 +1425,36 @@ mod tests {
                     hovered[offset].abs_diff(interior) <= 3,
                     "uncovered image edge on wgpu at scale {scale}: {}",
                     hovered[offset]
+                );
+            }
+
+            // Cut through the panel's top-left padding. Only the visible
+            // intersection may change when the overlay appears.
+            let clip = Rectangle {
+                x: origin.x + 2.,
+                y: origin.y + 2.,
+                width: 4.,
+                height: 3.,
+            };
+            let plain_clip = capture(mouse::Cursor::Unavailable, clip);
+            let hover_clip = capture(mouse::Cursor::Available(clip.center()), clip);
+            let left = (clip.x * scale).round() as usize;
+            let right = ((clip.x + clip.width) * scale).round() as usize;
+            let top = (clip.y * scale).round() as usize;
+            let bottom = ((clip.y + clip.height) * scale).round() as usize;
+            for (i, (before, after)) in plain_clip
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(hover_clip.as_chunks::<4>().0)
+                .enumerate()
+            {
+                let visible = (left..right).contains(&(i % physical.width as usize))
+                    && (top..bottom).contains(&(i / physical.width as usize));
+                assert_eq!(
+                    before != after,
+                    visible,
+                    "viewport clip at scale {scale}, pixel {i}"
                 );
             }
         }

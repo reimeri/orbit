@@ -18,6 +18,7 @@ profile. See the patch notes for the pin, rationale and regression checks:
 - [notification activation: iced runtime, iced-winit and winit](notifications.md#native-window-activation)
 - [winit: clipboard and file drops](../patches/winit/README.md)
 - [iced-winit: screenshot ordering](../patches/iced-winit/README.md)
+- [iced-wgpu: image, quad and scissor snapping](../patches/iced-wgpu/README.md)
 - [iced-widget: editor, menus and Markdown](../patches/iced-widget/README.md)
   and [pulldown-cmark: block math](../patches/pulldown-cmark/README.md)
 - [cosmic-text: shaping](../patches/cosmic-text/README.md) and
