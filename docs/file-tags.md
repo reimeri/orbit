@@ -9,7 +9,9 @@ are retained and at most eight suggestion rows are mounted. The refresh icon spi
 loads matches; early results can be selected while the search continues.
 
 Tags are ordinary editable text, not rich-text chips. They persist with drafts,
-copy/paste normally, and can be edited in their middle. Examples:
+copy/paste normally, and can be edited in their middle. Clicking inside a tag or
+backspacing over the space after it keeps the picker closed if the full path matches
+an indexed file. Shortening the filename to a partial match shows suggestions again. Examples:
 
 ```text
 Compare @src/main.rs with @"docs/design notes.md"

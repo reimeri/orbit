@@ -44,6 +44,7 @@ pub enum SearchPhase {
 pub struct Response {
     pub request: u64,
     pub generation: u64,
+    pub exact_path: bool,
     /// Encoded, complete mention strings; never truncated filesystem paths.
     pub paths: Vec<String>,
     pub phase: SearchPhase,
@@ -53,6 +54,7 @@ pub struct Response {
 struct Request {
     id: u64,
     query: Vec<u8>,
+    full_path: Option<Vec<u8>>,
     ignored: bool,
 }
 #[derive(Clone, Copy)]
@@ -339,7 +341,7 @@ impl Service {
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Response> {
         self.shared.responses.subscribe()
     }
-    pub fn query(&self, request: u64, query: Vec<u8>, ignored: bool) {
+    pub fn query(&self, request: u64, query: Vec<u8>, full_path: Option<Vec<u8>>, ignored: bool) {
         self.shared.serial.store(request, Ordering::Relaxed);
         let mut state = self.shared.state.lock().expect("file index");
         let scope = if ignored {
@@ -355,6 +357,7 @@ impl Service {
         state.request = Some(Request {
             id: request,
             query,
+            full_path,
             ignored,
         });
         state.revision += 1;
@@ -413,6 +416,7 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
             request: request.id,
             generation,
             paths: vec![],
+            exact_path: false,
             phase: if refreshing {
                 SearchPhase::Pending
             } else {
@@ -466,20 +470,33 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
             scope_cache = None;
         }
         if let Some(snapshot) = source {
-            shared.responses.send_replace(Response {
-                phase: SearchPhase::Pending,
-                ..response.clone()
+            // The caret prefix may match more than RESULTS files. Check the whole
+            // tag against the path index, not just the ranked suggestion rows.
+            response.exact_path = request.full_path.as_ref().is_some_and(|full| {
+                snapshot
+                    .paths
+                    .binary_search_by(|id| {
+                        let path = snapshot.path(*id);
+                        fold_cmp(path, full).then_with(|| path.cmp(full))
+                    })
+                    .is_ok()
             });
-            let Some(paths) = snapshot.search(&request.query, cancelled, |paths| {
+            if !response.exact_path {
                 shared.responses.send_replace(Response {
-                    paths: paths.to_vec(),
-                    phase: SearchPhase::Partial,
+                    phase: SearchPhase::Pending,
                     ..response.clone()
                 });
-            }) else {
-                continue;
-            };
-            response.paths = paths;
+                let Some(paths) = snapshot.search(&request.query, cancelled, |paths| {
+                    shared.responses.send_replace(Response {
+                        paths: paths.to_vec(),
+                        phase: SearchPhase::Partial,
+                        ..response.clone()
+                    });
+                }) else {
+                    continue;
+                };
+                response.paths = paths;
+            }
             response.phase = if refreshing {
                 SearchPhase::Partial
             } else {
@@ -1427,8 +1444,8 @@ mod tests {
         fs::create_dir(root.path().join("empty")).unwrap();
         let service = Service::open(root.path().into(), cache.path().into()).unwrap();
         let mut rx = service.subscribe();
-        service.query(1, b"wrong".to_vec(), false);
-        service.query(2, b"first".to_vec(), false);
+        service.query(1, b"wrong".to_vec(), None, false);
+        service.query(2, b"first".to_vec(), None, false);
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 rx.changed().await.unwrap();
@@ -1439,7 +1456,7 @@ mod tests {
                 }
             }
             fs::write(root.path().join("empty/second"), "body").unwrap();
-            service.query(3, b"second".to_vec(), false);
+            service.query(3, b"second".to_vec(), None, false);
             // No explicit refresh: an existing empty directory must be watched.
             loop {
                 rx.changed().await.unwrap();
@@ -1497,7 +1514,7 @@ mod tests {
         let interval = Duration::from_millis(100);
         let service = Service::start(root.path().into(), cache.path().into(), interval).unwrap();
         let mut rx = service.subscribe();
-        service.query(1, b"visible".to_vec(), false);
+        service.query(1, b"visible".to_vec(), None, false);
         let first = until(&mut rx, |r| {
             r.phase != SearchPhase::Pending && r.paths == ["@visible"]
         })
@@ -1510,7 +1527,7 @@ mod tests {
         let inode = cached();
         fs::write(root.path().join("visible"), "ordinary content edit").unwrap();
         tokio::time::sleep(interval * 4).await;
-        service.query(2, b"visible".to_vec(), false);
+        service.query(2, b"visible".to_vec(), None, false);
         let idle = until(&mut rx, |r| {
             r.request == 2 && r.phase != SearchPhase::Pending
         })
@@ -1547,14 +1564,14 @@ mod tests {
         fs::write(root.path().join("visible"), "x").unwrap();
         let service = Service::open(root.path().into(), cache.path().into()).unwrap();
         let mut rx = service.subscribe();
-        service.query(1, b"visible".to_vec(), false);
+        service.query(1, b"visible".to_vec(), None, false);
         let initial = until(&mut rx, |r| {
             r.phase != SearchPhase::Pending && r.paths == ["@visible"]
         })
         .await;
         for (request, scope) in [(2, "generated-a"), (3, "generated-b")] {
             let previous = service.shared.state.lock().unwrap().scope_revision;
-            service.query(request, format!("{scope}/").into_bytes(), true);
+            service.query(request, format!("{scope}/").into_bytes(), None, true);
             until(&mut rx, |r| {
                 r.request == request
                     && r.phase != SearchPhase::Pending
@@ -1599,7 +1616,7 @@ mod tests {
         }
         // Reopening the same scope must not reuse its pre-cancellation cache.
         fs::write(root.path().join("generated-b/nested/third"), "x").unwrap();
-        service.query(4, b"generated-b/".to_vec(), true);
+        service.query(4, b"generated-b/".to_vec(), None, true);
         until(&mut rx, |r| {
             r.request == 4
                 && r.phase != SearchPhase::Pending
@@ -1637,7 +1654,7 @@ mod tests {
         let mut watched = HashSet::new();
         assert!(update_watches(&mut watcher, &mut watched, desired, false).is_none());
         assert!(watched.contains(&root.path().join("generated/scoped-only")));
-        service.query(1, b"generated/".to_vec(), true);
+        service.query(1, b"generated/".to_vec(), None, true);
         service.cancel_query();
         let scope = service.shared.state.lock().unwrap().explicit_scope.clone();
         let (desired, complete) =
@@ -1671,7 +1688,7 @@ mod tests {
         )
         .unwrap();
         let mut rx = service.subscribe();
-        service.query(1, vec![], false);
+        service.query(1, vec![], None, false);
         until(&mut rx, |r| {
             r.paths == vec!["@original"] && r.phase != SearchPhase::Pending
         })
@@ -1805,7 +1822,7 @@ mod tests {
                 let start = Instant::now();
                 let service = Service::open(root.clone(), cache.path().into()).unwrap();
                 let mut rx = service.subscribe();
-                service.query(1, vec![], false);
+                service.query(1, vec![], None, false);
                 let response = tokio::time::timeout(Duration::from_secs(120), async {
                     rx.wait_for(|r| {
                         r.request == 1 && r.phase != SearchPhase::Pending && !r.paths.is_empty()

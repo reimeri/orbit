@@ -9668,20 +9668,28 @@ mod tests {
             ))),
         )
         .await;
-        assert!(app.file_completion.is_open());
         let mut messages = stream::select_all(
             subscription::into_recipes(app.file_completion.subscription())
                 .into_iter()
                 .map(|recipe| recipe.stream(stream::pending().boxed())),
         );
-        tokio::time::timeout(Duration::from_secs(10),async {
-            loop {
-                let message=messages.next().await.unwrap();
-                let ready=matches!(&message,crate::file_completion::Message::Results(r) if r.phase != orbit_core::file_index::SearchPhase::Pending && r.paths.contains(&"@\"source notes.md\"".to_owned()));
-                dispatch(&mut app,Message::FileCompletion(message)).await;
-                if ready {break;}
-            }
-        }).await.unwrap();
+        let mut wait_for_picker = async |app: &mut App| {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let message = messages.next().await.unwrap();
+                    let ready = matches!(&message, crate::file_completion::Message::Results(r)
+                        if r.phase != orbit_core::file_index::SearchPhase::Pending
+                            && r.paths.contains(&"@\"source notes.md\"".to_owned()));
+                    dispatch(app, Message::FileCompletion(message)).await;
+                    if ready && app.file_completion.is_open() {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        };
+        wait_for_picker(&mut app).await;
         // Clicking a picker row takes focus away from the editor before acceptance.
         // Exercise the returned focus operation on the retained native editor tree.
         use iced_runtime::{UserInterface, user_interface::Cache};
@@ -9742,7 +9750,7 @@ mod tests {
         assert!(!app.file_completion.is_open());
         dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
         assert_eq!(app.editor.text(), "Compare @source");
-        assert!(app.file_completion.is_open());
+        wait_for_picker(&mut app).await;
         dispatch(&mut app, Message::ComposerHistory(Direction::Redo)).await;
         assert_eq!(app.editor.text(), "Compare @\"source notes.md\"");
         for message in messages {

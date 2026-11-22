@@ -41,6 +41,7 @@ pub struct Completion {
     token: Option<(usize, Trigger, Token)>,
     dismissed: Option<(usize, Trigger, Token)>,
     in_code: bool,
+    awaiting_path_check: bool,
     skill_epoch: u64,
     catalog: Option<Result<orbit_core::skills::Catalog, String>>,
     skill_rows: Vec<usize>,
@@ -72,6 +73,7 @@ fn active(text: &str, cursor: usize) -> Option<(Trigger, Token)> {
             Trigger::Skill,
             Token {
                 range: start..end,
+                full_path: None,
                 query: text.as_bytes()[start + 1..cursor].to_vec(),
             },
         )
@@ -127,6 +129,7 @@ impl Completion {
         if self.token == next {
             return;
         }
+        let was_open = self.is_open();
         if self.dismissed != next {
             self.dismissed = None;
         }
@@ -135,6 +138,12 @@ impl Completion {
                 kind == new_kind && line == new_line && old.range.start == new.range.start
             },
         );
+        // Re-entering a complete filename must not expose the panel (or its
+        // key bindings) while the background index checks the whole tag.
+        self.awaiting_path_check = next
+            .as_ref()
+            .is_some_and(|(_, _, token)| token.full_path.is_some())
+            && !(same_token && was_open);
         if !same_token {
             // Only parse Markdown when entering a new skill token, not on each
             // keystroke. A link embedded in a code example is not a selection.
@@ -169,7 +178,7 @@ impl Completion {
             self.ignored = false;
         }
         self.token = next;
-        if self.is_open() {
+        if self.active_query() {
             self.query();
         } else if let Some(service) = &self.service {
             service.cancel_query();
@@ -213,12 +222,20 @@ impl Completion {
                 }
                 self.selected = 0;
             } else {
-                service.query(self.request, token.query.clone(), self.ignored);
+                service.query(
+                    self.request,
+                    token.query.clone(),
+                    token.full_path.clone(),
+                    self.ignored,
+                );
             }
         }
     }
-    pub fn is_open(&self) -> bool {
+    fn active_query(&self) -> bool {
         !self.in_code && self.token.is_some() && self.token != self.dismissed
+    }
+    pub fn is_open(&self) -> bool {
+        self.active_query() && !self.awaiting_path_check
     }
     pub fn dismiss(&mut self) {
         self.dismissed = self.token.clone();
@@ -237,7 +254,12 @@ impl Completion {
                 }
             }
             Message::Results(response) => {
-                if self.picking_skill() || response.request != self.request || !self.is_open() {
+                if self.picking_skill() || response.request != self.request || !self.active_query()
+                {
+                    return false;
+                }
+                if response.exact_path {
+                    self.dismiss();
                     return false;
                 }
                 let selected = self.response.paths.get(self.selected).cloned();
@@ -250,17 +272,7 @@ impl Completion {
                     .and_then(|path| response.paths.iter().position(|p| p == &path))
                     .unwrap_or(0);
                 self.response = response;
-                // An exact accepted token does not reopen just because the cursor returned.
-                if let Some((line, _, token)) = &self.token
-                    && let Some(value) = editor.line(*line)
-                    && self
-                        .response
-                        .paths
-                        .iter()
-                        .any(|p| p == &value.text[token.range.clone()])
-                {
-                    self.dismiss();
-                }
+                self.awaiting_path_check = false;
             }
             Message::Move(down) if self.is_open() && !self.response.paths.is_empty() => {
                 let n = self.response.paths.len();
@@ -594,6 +606,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reentering_an_exact_file_tag_stays_closed_until_the_path_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("README.md"), "").unwrap();
+        // Clicking immediately after @ produces an empty prefix; the exact
+        // file need not fit in that prefix's limited suggestion rows.
+        for n in 0..orbit_core::file_index::RESULTS {
+            std::fs::write(root.path().join(format!("{n}.txt")), "").unwrap();
+        }
+        let mut picker = Completion::default();
+        picker
+            .workspace(Some(("s".into(), root.path().into())), cache.path().into())
+            .unwrap();
+        let mut responses = picker.service.as_ref().unwrap().subscribe();
+        let mut settle = async |picker: &mut Completion, editor: &mut text_editor::Content| {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                responses
+                    .wait_for(|r| r.request == picker.request && r.phase != SearchPhase::Pending),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .clone();
+            picker.update(Message::Results(response), editor);
+        };
+
+        let mut editor = text_editor::Content::with_text("see @README.md ");
+        let mut cursor = editor.cursor();
+        cursor.position.column = editor.text().len();
+        editor.move_to(cursor);
+        editor.perform(text_editor::Action::Edit(text_editor::Edit::Backspace));
+        picker.edited(&editor);
+        assert!(!picker.is_open());
+        settle(&mut picker, &mut editor).await;
+        assert!(!picker.is_open());
+
+        cursor.position.column = "see @".len();
+        editor.move_to(cursor);
+        picker.edited(&editor);
+        assert!(!picker.is_open());
+        settle(&mut picker, &mut editor).await;
+        assert!(!picker.is_open());
+
+        cursor.position.column = editor.text().len();
+        editor.move_to(cursor);
+        editor.perform(text_editor::Action::Edit(text_editor::Edit::Backspace));
+        assert_eq!(editor.text(), "see @README.m");
+        picker.edited(&editor);
+        settle(&mut picker, &mut editor).await;
+        assert!(picker.is_open());
+        assert!(picker.update(picker.accept_selected(), &mut editor));
+        assert_eq!(editor.text(), "see @README.md");
+    }
+
     #[test]
     fn completion_replaces_whole_quoted_token_and_rejects_stale_results() {
         let root = tempfile::tempdir().unwrap();
@@ -606,7 +674,7 @@ mod tests {
         cursor.position.column = 13;
         editor.move_to(cursor);
         c.edited(&editor);
-        assert!(c.is_open());
+        assert!(!c.is_open());
         c.update(
             Message::Results(Response {
                 request: c.request - 1,
@@ -631,6 +699,7 @@ mod tests {
             }),
             &mut editor,
         );
+        assert!(c.is_open());
         assert!(c.binding(&enter).is_none());
         c.update(
             Message::Results(Response {

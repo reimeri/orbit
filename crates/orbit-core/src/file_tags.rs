@@ -151,6 +151,8 @@ pub fn encode(path: &Path) -> String {
 pub struct Token {
     pub range: Range<usize>,
     pub query: Vec<u8>,
+    /// Decoded whole path, independent of where the caret splits the query.
+    pub full_path: Option<Vec<u8>>,
 }
 fn boundary(text: &str, at: usize) -> bool {
     at == 0
@@ -238,6 +240,9 @@ pub fn active(text: &str, cursor: usize) -> Option<Token> {
             if cursor <= stop {
                 return decode(&text[i + 1..cursor], true).ok().map(|query| Token {
                     range: i..stop,
+                    full_path: decode(&text[i + 1..stop], false)
+                        .ok()
+                        .filter(|p| !p.is_empty()),
                     query,
                 });
             }
