@@ -114,6 +114,8 @@ impl App {
                 }
             })
             .unwrap_or(0);
+        self.worktrees.panel = false;
+        self.worktrees.popup = None;
         self.fork_panel = Some(panel);
         self.agents_open = false;
         self.view_epoch = self.view_epoch.wrapping_add(1);

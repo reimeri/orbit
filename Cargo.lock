@@ -2735,6 +2735,7 @@ dependencies = [
 name = "orbit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "iced",
  "iced_runtime",
@@ -2752,6 +2753,7 @@ dependencies = [
  "rfd",
  "rusqlite",
  "serde_json",
+ "sha2",
  "spellbook",
  "tempfile",
  "tokio",

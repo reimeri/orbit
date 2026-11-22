@@ -2,6 +2,7 @@ mod forks;
 mod imports;
 mod marketing;
 mod settings;
+mod worktrees;
 
 use crate::activity::{self, Row as ActivityRow};
 use crate::editor_history::{Direction, Draft as DraftKey, DraftHistories};
@@ -125,6 +126,8 @@ const TOOLBAR_BUTTON_HEIGHT: f32 = 26.;
 const TOOLBAR_INSET: f32 = 6.;
 const FOOTER_HEIGHT: f32 = 36.;
 const FOOTER_MENU_TEXT_SIZE: f32 = 12.;
+const FOOTER_MENU_ROW_HEIGHT: f32 = 30.;
+const FOOTER_MENU_ROW_GAP: f32 = 2.;
 const CHAT_OVERSCAN: f32 = 120.;
 const COMPOSER_LINE_HEIGHT_FACTOR: f32 = 1.3;
 const COMPOSER_MIN_LINES: usize = 1;
@@ -257,6 +260,7 @@ pub struct App {
     groups: HashSet<String>,
     settings_open: bool,
     agents_open: bool,
+    worktrees: worktrees::State,
     chat_positions: HashMap<String, (f32, bool)>,
     settings_tab: SettingsTab,
     notice: Option<(String, std::time::Instant)>,
@@ -413,6 +417,7 @@ pub enum Message {
     Send,
     ToggleSettings,
     ToggleAgents,
+    Worktree(worktrees::Action),
     StopAgent(String),
     ApplySettings,
     CatalogSaved(Result<(), String>),
@@ -584,6 +589,7 @@ impl App {
             settings_open: false,
             pending_settings: None,
             agents_open: false,
+            worktrees: Default::default(),
             chat_positions: HashMap::new(),
             settings_tab: SettingsTab::Account,
             notice: None,
@@ -712,6 +718,7 @@ impl App {
                 && !self.search_active
                 && self.modal.is_none()
                 && !self.footer_menu_open
+                && self.worktrees.popup.is_none()
                 && self.context_menu.is_none()
             {
                 let id = id.clone();
@@ -1327,6 +1334,7 @@ impl App {
             && self.active_questionnaire.is_none()
             && self.context_menu.is_none()
             && !self.footer_menu_open
+            && self.worktrees.popup.is_none()
     }
     fn select(&mut self, selection: Selection) {
         self.select_with_fork(selection, None);
@@ -1334,6 +1342,7 @@ impl App {
     fn select_with_fork(&mut self, selection: Selection, fork_entry: Option<String>) {
         self.chat_selection.borrow_mut().clear();
         self.footer_menu_open = false;
+        self.worktrees.popup = None;
         if self.io_busy {
             return;
         }
@@ -1484,6 +1493,7 @@ impl App {
         {
             self.histories.active.separate();
             self.footer_menu_open = false;
+            self.worktrees.popup = None;
         }
         let close = if self.close_requested
             && self.imports.is_empty()
@@ -1739,6 +1749,12 @@ impl App {
                 self.io_busy = false;
                 match result {
                     Ok((selection, notice)) => {
+                        if self.worktrees.retry.as_ref().is_some_and(|(_, target)| matches!(&selection, Selection::Draft(path) if path == target)) {
+                            self.worktrees.retry = None;
+                            self.worktrees.panel = false;
+                        }
+                        self.worktrees.popup = None;
+                        self.worktrees.bases = false;
                         if let Some(notice) = notice {
                             self.notice = Some((notice, std::time::Instant::now()));
                         }
@@ -1771,6 +1787,10 @@ impl App {
                         }
                         let git = self.refresh_git();
                         self.tasks.push(git);
+                        if self.worktrees.panel {
+                            let task = self.load_worktrees();
+                            self.tasks.push(task);
+                        }
                         self.save_catalog();
                         if let Some((source, entry)) = self.jump_after_select.take()
                             && Some(&source) == self.selected.as_ref()
@@ -1800,6 +1820,15 @@ impl App {
                     }
                     Err(error) => {
                         self.jump_after_select = None;
+                        if self.worktrees.retry.as_ref().is_some_and(|(origin, _)| {
+                            self.current().is_some_and(|s| &s.project == origin)
+                        }) {
+                            if !self.worktrees.panel {
+                                let task = self.worktree_action(worktrees::Action::Panel);
+                                self.tasks.push(task);
+                            }
+                            self.worktrees.bases = false;
+                        }
                         self.error = Some(error);
                         self.draft_dirty = self.selected.is_some();
                     }
@@ -1991,6 +2020,7 @@ impl App {
             Message::CloseMenu => self.context_menu = None,
             Message::CloseFooterMenu => self.footer_menu_open = false,
             Message::ToggleFooterMenu => {
+                self.worktrees.popup = None;
                 if self.footer_menu_open {
                     self.footer_menu_open = false;
                 } else if !self.running()
@@ -2179,6 +2209,9 @@ impl App {
                 }
             }
             Message::Send => {
+                if self.worktrees.popup.is_some() {
+                    return Task::none();
+                }
                 self.file_completion.dismiss();
                 if self.active_questionnaire.is_some()
                     || self.modal.is_some()
@@ -2197,6 +2230,7 @@ impl App {
                     let h = h.clone();
                     let id = session.id.clone();
                     let draft = self.draft_session.clone();
+                    let workspace = session.project.clone();
                     let settings = self.catalog.settings.clone();
                     self.io_busy = true;
                     let submission = self
@@ -2208,17 +2242,26 @@ impl App {
                     }
                     let submission = submission.1.clone();
                     self.tasks.push(self.io.run(move || {
-                        let result = if let Some(draft) = draft {
-                            h.send_new(draft, &submission, message.clone(), settings)
-                        } else {
-                            h.send(&id, &submission, message.clone(), settings)
-                        }.map_err(|e| format!("Could not send message: {e:#}. Your message is preserved; fix the problem and retry."));
+                        let result = (|| {
+                            if !workspace.is_dir() {
+                                anyhow::ensure!(!workspace.starts_with(h.store.root().canonicalize()?.join("worktrees")),
+                                    "The worktree at {} is missing. Restore the checkout to continue this chat or start a new session in another worktree.", workspace.display());
+                            }
+                            if let Some(draft) = draft {
+                                h.send_new(draft, &submission, message.clone(), settings)
+                            } else {
+                                h.send(&id, &submission, message.clone(), settings)
+                            }
+                        })().map_err(|e| format!("Could not send message: {e:#}. Your message is preserved; fix the problem and retry."));
                         Message::Sent(id, message, result)
                     }));
                 }
             }
             Message::StopAgent(id) => self.stop_agent(id),
+            Message::Worktree(action) => return self.worktree_action(action),
             Message::ToggleAgents => {
+                self.worktrees.panel = false;
+                self.worktrees.popup = None;
                 self.fork_panel = None;
                 self.agents_open = !self.agents_open;
                 if self.settings_open {
@@ -2227,6 +2270,8 @@ impl App {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
             }
             Message::ToggleSettings => {
+                self.worktrees.panel = false;
+                self.worktrees.popup = None;
                 if self.settings_open {
                     return self.update_inner(Message::CancelSettings);
                 }
@@ -2829,6 +2874,9 @@ impl App {
                     }
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    if self.worktrees.popup.is_some() {
+                        return self.worktree_key(key);
+                    }
                     if self.footer_menu_open {
                         if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
                             self.footer_menu_open = false;
@@ -2852,6 +2900,14 @@ impl App {
                             return self.update_inner(Message::CancelSettings);
                         } else if self.fork_panel.is_some() {
                             return self.show_forks(None);
+                        } else if self.worktrees.panel {
+                            if self.worktrees.bases {
+                                return self.worktree_action(worktrees::Action::Bases);
+                            }
+                            if self.worktrees.confirm.is_some() {
+                                return self.worktree_action(worktrees::Action::CancelRemove);
+                            }
+                            return self.worktree_action(worktrees::Action::Panel);
                         } else if self.agents_open {
                             self.agents_open = false;
                             self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -3139,7 +3195,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         pointer_input(
             self.content(),
-            self.footer_menu_open,
+            self.footer_menu_open || self.worktrees.popup.is_some(),
             self.chat_selection.clone(),
         )
     }
@@ -3197,6 +3253,8 @@ impl App {
         .height(Fill);
         if self.settings_open {
             body = body.push(self.divider(true)).push(self.settings_panel());
+        } else if self.worktrees.panel {
+            body = body.push(self.divider(true)).push(self.worktrees_panel());
         } else if self.agents_open {
             body = body.push(self.divider(true)).push(self.agents_panel());
         } else if let Some(panel) = &self.fork_panel {
@@ -3223,6 +3281,22 @@ impl App {
         }
         let rail = container(
             controls
+                .push(
+                    tooltip(
+                        theme::button(
+                            container(Icon::FolderOpen.view(22.))
+                                .center_x(Fill)
+                                .center_y(34),
+                        )
+                        .width(Fill)
+                        .padding(0)
+                        .style(theme::text_button)
+                        .on_press(Message::Worktree(worktrees::Action::Panel)),
+                        text("Worktrees").size(12),
+                        tooltip::Position::Left,
+                    )
+                    .style(card),
+                )
                 .push(
                     tooltip(
                         theme::button(
@@ -3344,6 +3418,23 @@ impl App {
             let y = position.y.min(self.window_height - 140.).max(0.);
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
             layers.push(dismiss).push(positioned).into()
+        } else if let Some(offset) = self.worktrees.popup {
+            let (left, center) = self.center_dimensions();
+            let width = (center - 2. * self.chat_inset()).min(self.catalog.settings.chat_width);
+            let popup_width = 235_f32.min(self.window_width);
+            let x =
+                (left + (center - width) / 2. + offset).clamp(0., self.window_width - popup_width);
+            let positioned = column![
+                space().height(Fill),
+                row![space().width(x), self.worktree_popup(popup_width)],
+                space().height(FOOTER_HEIGHT)
+            ];
+            layers
+                .push(dismiss_layer(Message::Worktree(
+                    worktrees::Action::ClosePopup,
+                )))
+                .push(positioned)
+                .into()
         } else if self.footer_menu_open {
             let dismiss = dismiss_layer(Message::CloseFooterMenu);
             let (left, center) = self.center_dimensions();
@@ -3466,7 +3557,7 @@ impl App {
             .unwrap_or(0)
     }
     fn right_panel_open(&self) -> bool {
-        self.settings_open || self.agents_open || self.fork_panel.is_some()
+        self.settings_open || self.agents_open || self.fork_panel.is_some() || self.worktrees.panel
     }
     fn panel_width(&self) -> f32 {
         self.catalog
@@ -4097,11 +4188,13 @@ impl App {
                         && self.modal.is_none()
                         && self.context_menu.is_none()
                         && !self.footer_menu_open
+                        && self.worktrees.popup.is_none()
                         && !self.search_active,
                     !self.settings_open
                         && !self.search_active
                         && self.modal.is_none()
                         && !self.footer_menu_open
+                        && self.worktrees.popup.is_none()
                         && self.context_menu.is_none(),
                 )
                 .map(move |message| Message::Questionnaire(id.clone(), message));
@@ -4280,6 +4373,7 @@ impl App {
             && self.context_menu.is_none()
             && self.active_questionnaire.is_none()
             && !self.footer_menu_open
+            && self.worktrees.popup.is_none()
             && !self.search_active
     }
     fn composer_editor(&self, running: bool) -> Element<'_, Message> {
@@ -5138,6 +5232,11 @@ impl App {
         let name_width = text_width(&name, 11.).ceil().min(160.);
         let rate_label = format!("TPS: {rate:.0}");
         let cache_label = format!("{cache:.0}% cache");
+        let draft = self.draft_session.is_some();
+        let branch_icon_size = 12.;
+        let chevron_size = 10.;
+        let icon_gap = 3.;
+        let pill_inset = 6.;
         let git = self.git_info().map(|git| {
             let (label, counts) = match git {
                 crate::git::Info::Changes {
@@ -5151,17 +5250,19 @@ impl App {
                 ),
                 crate::git::Info::Unavailable(message) => (message, None),
             };
-            let mut group = row![ellipsized_text(label, 11., Some(colors.muted))]
-                .spacing(4)
-                .align_y(iced::Center);
-            let mut width = text_width(label, 11.).ceil().min(126.);
-            if let Some((added, removed)) = counts {
-                width += 8. + text_width(&added, 11.).ceil() + text_width(&removed, 11.).ceil();
-                group = group
-                    .push(text(added).size(11).color(colors.success))
-                    .push(text(removed).size(11).color(colors.danger));
+            let label_width = text_width(label, 11.).ceil().min(126.);
+            let pill = matches!(git, crate::git::Info::Changes { .. });
+            let mut width = label_width;
+            if pill {
+                width += 2. * pill_inset + branch_icon_size + icon_gap;
+                if draft {
+                    width += chevron_size + icon_gap;
+                }
             }
-            (width, footer_tip(group.width(width), git.to_string()))
+            if let Some((added, removed)) = &counts {
+                width += 8. + text_width(added, 11.).ceil() + text_width(removed, 11.).ceil();
+            }
+            (width, label_width, label, counts, pill, git)
         });
 
         // Reserve from most to least important. Once an item doesn't fit, no
@@ -5172,7 +5273,7 @@ impl App {
             remaining >= 0.
         };
         let context = reserve(text_width(&tokens, 11.).ceil());
-        let show_git = git.as_ref().is_none_or(|(width, _)| reserve(10. + width));
+        let show_git = git.as_ref().is_none_or(|(width, ..)| reserve(10. + width));
         let project = reserve(10. + 16. + 4. + name_width);
         let cache = reserve(16. + text_width(&cache_label, 11.).ceil());
         let tps = reserve(16. + text_width(&rate_label, 11.).ceil());
@@ -5189,8 +5290,43 @@ impl App {
                 .push(footer_tip(badge, session.project.display().to_string()))
                 .push(space().width(10));
         }
-        if show_git && let Some((_, git)) = git {
-            info = info.push(git).push(space().width(10));
+        if show_git && let Some((width, label_width, label, counts, pill, git)) = git {
+            let label = container(ellipsized_text(label, 11., (!pill).then_some(colors.muted)))
+                .width(label_width);
+            let control: Element<_> = if pill {
+                let mut content = row![Icon::GitFork.view(branch_icon_size), label]
+                    .spacing(icon_gap)
+                    .align_y(iced::Center);
+                if draft {
+                    content = content.push(Icon::ChevronDown.view(chevron_size));
+                }
+                let offset = if project { 30. + name_width } else { 0. };
+                let open = self.worktrees.popup.is_some();
+                let button = theme::button(content)
+                    .padding([2., pill_inset])
+                    .style(if open { secondary } else { sidebar_control })
+                    .on_press_maybe(
+                        (draft && !self.io_busy && !open)
+                            .then_some(Message::Worktree(worktrees::Action::Popup(offset))),
+                    );
+                footer_tip(
+                    button,
+                    if draft {
+                        format!("Choose worktree · {git}")
+                    } else {
+                        format!("This chat stays on its original worktree · {git}")
+                    },
+                )
+            } else {
+                footer_tip(label, git.to_string())
+            };
+            let mut group = row![control].align_y(iced::Center).spacing(4.);
+            if let Some((added, removed)) = counts {
+                group = group
+                    .push(text(added).size(11).color(colors.success))
+                    .push(text(removed).size(11).color(colors.danger));
+            }
+            info = info.push(group.width(width)).push(space().width(10));
         }
         info = info.push(space().width(Fill));
         if context {
@@ -5229,15 +5365,40 @@ impl App {
         }
     }
 
+    fn footer_menu_choice(
+        &self,
+        label: &str,
+        checked: bool,
+        highlighted: bool,
+        message: Option<Message>,
+    ) -> Element<'static, Message> {
+        theme::button(
+            row![
+                ellipsized_text(label, FOOTER_MENU_TEXT_SIZE, None),
+                if checked {
+                    Icon::Check.colored(16., self.preset().colors.accent)
+                } else {
+                    space().width(16).height(16).into()
+                },
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .width(Fill)
+        .height(FOOTER_MENU_ROW_HEIGHT)
+        .padding([6, 8])
+        .on_press_maybe(message)
+        .style(move |theme, status| theme::menu_button(theme, status, highlighted))
+        .into()
+    }
     fn footer_popup(&self, available_width: f32) -> Element<'_, Message> {
-        let colors = &self.preset().colors;
         let session = self.current().expect("footer menu has a session");
         let enabled = !self.io_busy && !self.running();
         let list_height = (self.window_height - 170.).clamp(60., 240.);
         let heading_height = 28.;
         let column_spacing = 6.;
         let choices = |control, title| {
-            let mut options = column![].spacing(2);
+            let mut options = column![].spacing(FOOTER_MENU_ROW_GAP);
             for option in self.footer_options(control) {
                 let (label, chosen, message) = match control {
                     FooterControl::Model => (
@@ -5251,24 +5412,12 @@ impl App {
                         Message::SessionEffort(option.clone()),
                     ),
                 };
-                let item = theme::button(
-                    row![
-                        ellipsized_text(label, FOOTER_MENU_TEXT_SIZE, None),
-                        if chosen {
-                            Icon::Check.colored(16., colors.accent)
-                        } else {
-                            space().width(16).height(16).into()
-                        },
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Center),
-                )
-                .width(Fill)
-                .height(30)
-                .padding([6, 8])
-                .on_press_maybe(enabled.then_some(message))
-                .style(move |theme, status| theme::menu_button(theme, status, chosen));
-                options = options.push(item);
+                options = options.push(self.footer_menu_choice(
+                    label,
+                    chosen,
+                    chosen,
+                    enabled.then_some(message),
+                ));
             }
             column![
                 container(text(title).size(12).style(theme::muted))
@@ -6680,6 +6829,7 @@ fn window_events() -> Subscription<Message> {
 mod tests {
     mod import_probe;
     mod long_reply;
+    mod worktree_handoff;
     use super::*;
     use orbit_core::models::{ASTRA, LUNA};
     mod sqlite {

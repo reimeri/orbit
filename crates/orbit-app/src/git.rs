@@ -88,21 +88,42 @@ pub async fn info(path: PathBuf, counts: Arc<LineCounts>) -> Option<Info> {
     }
 }
 
-async fn git(path: &Path, args: &[&str]) -> Result<Output, String> {
-    tokio::process::Command::new("git")
-        .arg("--no-optional-locks")
+pub(crate) fn local_command(dir: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    // Launching Orbit from a hook or another checkout must not redirect
+    // mutations to that repository (or its index/object store).
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_SHALLOW_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_PREFIX",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_REPLACE_REF_BASE",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.kill_on_drop(true)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .current_dir(dir)
+        .args(["--no-optional-locks", "-c", "core.hooksPath=/dev/null"])
         .env("LC_ALL", "C")
-        .args(args)
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|e| {
-            format!(
-                "Could not run Git: {e}. Check that Git is installed; will retry automatically."
-            )
-        })
+        .stdin(Stdio::null());
+    cmd
+}
+async fn git(path: &Path, args: &[&str]) -> Result<Output, String> {
+    local_command(path).args(args).output().await.map_err(|e| {
+        format!("Could not run Git: {e}. Check that Git is installed; will retry automatically.")
+    })
 }
 fn successful(output: Output) -> Result<Vec<u8>, String> {
     if output.status.success() {

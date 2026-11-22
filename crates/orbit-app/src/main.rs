@@ -33,6 +33,7 @@ mod tool_output;
 mod transcript_viewport;
 mod ui;
 mod virtual_list;
+mod worktrees;
 use iced::window;
 use orbit_core::APP_ID;
 use std::{
