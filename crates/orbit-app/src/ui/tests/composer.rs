@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::sidebar::{FILED_KINDS, FILED_VISIBLE_ROWS, filed_scroll_id};
 
 #[tokio::test]
 async fn session_row_press_and_pending_load_keep_the_composer_focused() {

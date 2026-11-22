@@ -20,6 +20,7 @@ mod transcript_layout;
 mod worktree_handoff;
 
 use super::*;
+use orbit_core::agent::ConversationStatus;
 
 mod sqlite {
     include!(concat!(

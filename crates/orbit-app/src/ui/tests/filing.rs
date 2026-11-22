@@ -1,4 +1,7 @@
 use super::*;
+use crate::ui::sidebar::{
+    FILED_ROW_GAP, FILED_ROW_HEIGHT, FILED_VISIBLE_ROWS, SESSION_METADATA_GAP,
+};
 
 #[tokio::test]
 async fn deferring_keeps_selection_and_draft_and_requires_opening_unread_completion() {

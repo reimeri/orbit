@@ -1,11 +1,12 @@
-use super::{App, Message, SettingsTab};
-use crate::{ellipsized_text::ellipsized_text, icons::Icon, theme};
+use super::{App, Message, SettingsTab, right_panel_header};
+use crate::{ellipsized_text::ellipsized_text, icons::Icon, scrollbar::scroll, theme};
 use iced::theme::Base;
 use iced::{
     Center, Element, Fill, Right,
     widget::{Column, column, container, row, rule, slider, space, svg, text, text_input},
 };
 use orbit_core::{
+    agent::subagents::Profile,
     image_tools::{Backend, DEFAULT_API_MODEL, QUALITIES},
     models::{MODELS, model},
 };
@@ -26,7 +27,7 @@ impl std::fmt::Display for DictionaryChoice<'_> {
     }
 }
 
-pub(super) fn caption(label: &'static str) -> iced::widget::Text<'static> {
+fn caption(label: &'static str) -> iced::widget::Text<'static> {
     text(label)
         .size(10)
         .style(theme::muted)
@@ -37,9 +38,9 @@ fn section(label: &'static str) -> Element<'static, Message> {
     section_bar(caption(label))
 }
 
-pub(super) const SECTION_INSET: u16 = 10;
+const SECTION_INSET: u16 = 10;
 
-pub(super) fn section_bar<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+fn section_bar<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
         .width(Fill)
         .padding([6, SECTION_INSET])
@@ -64,7 +65,193 @@ fn status(label: &'static str, active: bool) -> Element<'static, Message> {
 }
 
 impl App {
-    pub(super) fn account_settings(&self) -> Column<'_, Message> {
+    pub(super) fn settings_panel(&self) -> Element<'_, Message> {
+        let colors = &self.preset().colors;
+        let mut tabs = row![].spacing(4);
+        for (tab, label) in [
+            (SettingsTab::Account, "Account"),
+            (SettingsTab::General, "General"),
+            (SettingsTab::Models, "Models"),
+            (SettingsTab::Images, "Images"),
+        ] {
+            let selected = self.settings_tab == tab;
+            let button = theme::button(text(label).size(13).width(Fill).align_x(Center))
+                .width(Fill)
+                .padding([8, 2])
+                .on_press(Message::SettingsTab(tab))
+                .style(move |theme, status| {
+                    let mut style = theme::text_button(theme, status);
+                    if selected {
+                        style.text_color = colors.accent;
+                    }
+                    style
+                });
+            let underline = container(space().width(Fill).height(2)).style(move |_| {
+                container::background(if selected {
+                    colors.accent
+                } else {
+                    colors.border
+                })
+            });
+            tabs = tabs.push(column![button, underline].width(Fill));
+        }
+        let header = column![
+            right_panel_header("Settings", Message::ToggleSettings),
+            tabs
+        ]
+        .spacing(12);
+        let header = container(header).padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER));
+        let settings = match self.settings_tab {
+            SettingsTab::Account => self.account_settings(),
+            SettingsTab::General => self.general_settings(),
+            SettingsTab::Images => self.image_settings(),
+            SettingsTab::Models => self.model_settings_table(),
+        };
+        let mut panel_content = column![header, scroll(settings).height(Fill)].spacing(14);
+        if self.settings_tab != SettingsTab::Account {
+            let save = theme::primary_action(if self.pending_settings.is_some() {
+                "Saving…"
+            } else {
+                "Save"
+            })
+            .on_press_maybe(
+                self.pending_settings
+                    .is_none()
+                    .then_some(Message::ApplySettings),
+            );
+            let actions = row![
+                space().width(Fill),
+                theme::cancel("Cancel").on_press(Message::CancelSettings),
+                save
+            ]
+            .spacing(8);
+            panel_content = panel_content.push(
+                container(column![rule::horizontal(1), actions].spacing(10))
+                    .padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER)),
+            );
+        }
+        self.panel_container(panel_content)
+    }
+
+    fn model_settings_table<'a>(&'a self) -> Column<'a, Message> {
+        let colors = &self.preset().colors;
+        let effort_width = (self.panel_width() * 0.30).clamp(84., 140.);
+        let tracks = |name: Element<'a, Message>, effort, fast| {
+            row![
+                container(name).width(Fill),
+                container(effort).width(effort_width),
+                container(fast).center_x(44),
+            ]
+            .spacing(6)
+            .align_y(Center)
+        };
+        let table_row = |name, effort, fast| tracks(name, effort, fast).padding([8, SECTION_INSET]);
+        let header = |name, effort, fast| section_bar(tracks(name, effort, fast));
+        let name_cell = |icon: Element<'a, Message>, label: &'static str| {
+            row![container(icon).center_x(16), text(label).size(16)]
+                .spacing(6)
+                .align_y(Center)
+        };
+        let heading = |label| caption(label).into();
+        let mut table = column![header(
+            heading("MODEL"),
+            heading("DEFAULT EFFORT"),
+            heading("FAST"),
+        )];
+        for model in MODELS {
+            let defaults = &self.settings.models[model.id];
+            let (mark, color) = match *model {
+                orbit_core::models::ASTRA => ("✦", colors.accent),
+                orbit_core::models::SOL => ("☼", colors.warning),
+                orbit_core::models::TERRA => ("◎", colors.success),
+                orbit_core::models::LUNA => ("☾", colors.accent),
+                _ => ("·", colors.muted),
+            };
+            let name = column![
+                name_cell(text(mark).size(16).color(color).into(), model.name),
+                ellipsized_text(model.id, 11., Some(colors.muted))
+            ]
+            .spacing(2);
+            table = table
+                .push(table_row(
+                    name.into(),
+                    theme::dropdown(
+                        model.efforts,
+                        Some(defaults.effort.as_str()),
+                        move |effort| Message::ModelEffort(model.id.into(), effort.into()),
+                    )
+                    .into(),
+                    theme::switch(defaults.fast)
+                        .on_toggle(move |on| Message::ModelFast(model.id.into(), on))
+                        .into(),
+                ))
+                .push(rule::horizontal(1));
+        }
+        // Reserve room for the role, Fast switch and gutters beside two equal selectors.
+        let compact = self.panel_width() - 2. * effort_width < 182.;
+        let role_and_model = |role: Element<'a, Message>, model: Element<'a, Message>| {
+            row![
+                container(role).width(Fill),
+                container(model).width(effort_width)
+            ]
+            .spacing(6)
+            .align_y(Center)
+            .into()
+        };
+        table = table.push(space().height(12));
+        if !compact {
+            table = table.push(header(
+                role_and_model(heading("SUBAGENT"), heading("MODEL")),
+                heading("EFFORT"),
+                heading("FAST"),
+            ));
+        }
+        for profile in Profile::ALL {
+            let config = &self.settings.subagents[&profile];
+            let selected = model(&config.model).expect("catalog model");
+            let (icon, color) = match profile {
+                Profile::Review => (Icon::BookOpen, colors.warning),
+                Profile::Explore => (Icon::Map, colors.accent),
+            };
+            let name = name_cell(icon.colored(14., color), profile.label());
+            let model = theme::dropdown(MODELS, Some(selected), move |m| {
+                Message::SubagentModel(profile, m)
+            });
+            let effort =
+                theme::dropdown(selected.efforts, Some(config.effort.as_str()), move |e| {
+                    Message::SubagentEffort(profile, e.into())
+                });
+            let fast =
+                theme::switch(config.fast).on_toggle(move |on| Message::SubagentFast(profile, on));
+            table = if compact {
+                table.push(
+                    column![
+                        row![
+                            name,
+                            space().width(Fill),
+                            text("Fast").size(12).style(theme::muted),
+                            container(fast).center_x(44)
+                        ]
+                        .align_y(Center)
+                        .spacing(6),
+                        row![model, effort].spacing(6),
+                    ]
+                    .spacing(7)
+                    .padding([8, SECTION_INSET]),
+                )
+            } else {
+                table.push(table_row(
+                    role_and_model(name.into(), model.into()),
+                    effort.into(),
+                    fast.into(),
+                ))
+            }
+            .push(rule::horizontal(1));
+        }
+        table
+    }
+
+    fn account_settings(&self) -> Column<'_, Message> {
         let subscription: Element<'_, Message> = if let Some(account) = &self.account {
             row![
                 column![
@@ -164,7 +351,7 @@ impl App {
         .align_y(Center)
     }
 
-    pub(super) fn general_settings<'a>(&'a self) -> Column<'a, Message> {
+    fn general_settings<'a>(&'a self) -> Column<'a, Message> {
         let number = |placeholder, value, message: fn(String) -> Message| {
             text_input(placeholder, value)
                 .on_input(message)

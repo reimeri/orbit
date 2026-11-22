@@ -1,4 +1,5 @@
 //! Native window capture workflow for smoke checks and marketing screenshots.
+use super::sidebar::FILED_VISIBLE_ROWS;
 use super::*;
 
 impl App {
