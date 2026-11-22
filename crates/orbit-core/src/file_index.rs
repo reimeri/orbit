@@ -724,7 +724,13 @@ fn read_git<T>(
             let status = child.try_wait();
             match status {
                 Ok(Some(status)) => break Ok(status),
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Ok(None) => {
+                    #[cfg(test)]
+                    if let Some(pending) = tests::PENDING_GIT_REAP.take() {
+                        pending.send(()).unwrap();
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 Err(error) => break Err(error),
             }
         };
@@ -1708,39 +1714,74 @@ mod tests {
         })
         .await;
     }
+    thread_local! {
+        // Only the fixture worker observes the reap; Service also runs its own Git probes.
+        pub(super) static PENDING_GIT_REAP: std::cell::Cell<Option<std::sync::mpsc::Sender<()>>> =
+            const { std::cell::Cell::new(None) };
+    }
+
     #[test]
     fn git_shutdown_kills_closed_stdout_and_inherited_pipe_children() {
-        for script in [
-            "exec 1>&-; echo ready >&2; sleep 10",
-            "sleep 10 & echo ready >&2; exit 0",
+        use std::{io::ErrorKind, os::unix::process::ExitStatusExt, sync::mpsc};
+
+        let timeout = Duration::from_secs(5);
+        for (script, inherited_pipe) in [
+            ("exec 1>&-; read -r line", false),
+            ("exec 3<&0; read -r line <&3 & exit 0", true),
         ] {
             let root = tempfile::tempdir().unwrap();
             let cache = tempfile::tempdir().unwrap();
             let service = Service::open(root.path().into(), cache.path().into()).unwrap();
             let mut child = Command::new("sh")
                 .args(["-c", script])
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
                 .process_group(0)
                 .spawn()
                 .unwrap();
-            let mut ready = String::new();
-            BufReader::new(child.stderr.take().unwrap())
-                .read_line(&mut ready)
-                .unwrap();
-            assert_eq!(ready, "ready\n");
+            // Neither reader can exit naturally while we hold its stdin open.
+            let _keep_open = child.stdin.take().unwrap();
             let shared = service.shared.clone();
-            let root = root.path().to_path_buf();
-            let cache = cache.path().to_path_buf();
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (pending, ready) = mpsc::channel();
+            let (done, result) = mpsc::channel();
             std::thread::spawn(move || {
-                let result = enumerate_git(child, &root, &shared, &cache);
-                let _ = tx.send(result.is_ok());
+                if inherited_pipe {
+                    // Only the descendant can still be holding the write end.
+                    assert!(child.wait().unwrap().success());
+                }
+                let status = read_git(child, &shared, |mut output| {
+                    let mut byte = [0];
+                    if inherited_pipe {
+                        use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+                        let flags = fcntl_getfl(&output)?;
+                        fcntl_setfl(&output, flags | OFlags::NONBLOCK)?;
+                        assert_eq!(
+                            output.read(&mut byte).unwrap_err().kind(),
+                            ErrorKind::WouldBlock
+                        );
+                        fcntl_setfl(&output, flags)?;
+                        pending.send(()).unwrap();
+                    } else {
+                        PENDING_GIT_REAP.set(Some(pending));
+                    }
+                    assert_eq!(output.read(&mut byte)?, 0, "expected EOF");
+                    Ok(())
+                });
+                done.send(status).unwrap();
             });
-            std::thread::sleep(Duration::from_millis(100));
+            ready
+                .recv_timeout(timeout)
+                .expect("Git read or reap did not become pending");
             drop(service);
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("Git cancellation must not wait for descendants or a mutex held by wait()");
+            let (status, ()) = result
+                .recv_timeout(timeout)
+                .expect("shutdown did not release the pending Git operation")
+                .unwrap();
+            if inherited_pipe {
+                assert!(status.success());
+            } else {
+                assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+            }
         }
     }
     #[test]
