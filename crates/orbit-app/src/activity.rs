@@ -140,7 +140,7 @@ fn wrapper(entry: &Entry) -> bool {
 }
 impl Projection {
     /// Re-project only the changed tail, including an earlier parent if its first
-    /// nested call arrives after a yield. Streaming never scans old prose.
+    /// nested call arrives after a yield.
     pub fn sync(&mut self, entries: &History<Entry>) -> Option<usize> {
         let mut first = None;
         for (i, next) in self.source.changes(entries) {

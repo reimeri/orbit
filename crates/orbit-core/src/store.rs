@@ -1164,7 +1164,6 @@ mod tests {
         catalog.settings.validate().unwrap();
         let mut expected = catalog.settings.models.clone();
         for model in MODELS {
-            // Also reject efforts that are valid for a different model.
             let unsupported = MODELS
                 .iter()
                 .flat_map(|other| other.efforts.iter().copied())
@@ -1197,7 +1196,6 @@ mod tests {
                 },
             );
         }
-        // Terra is new to the catalog and has no saved preferences yet.
         catalog.settings.models.remove(crate::models::TERRA.id);
         expected.insert(crate::models::TERRA.id.into(), ModelDefaults::default());
         catalog.settings.model = "gpt-6.1-sol".into();

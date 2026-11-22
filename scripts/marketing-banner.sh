@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Compose the README banner from the supplied artwork.
 set -euo pipefail
 if (( $# > 2 )); then
     echo "Usage: $0 [SCREENSHOT.png [BANNER.png]]" >&2

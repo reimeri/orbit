@@ -122,7 +122,6 @@ mod tests {
     fn vertical_gutter_is_stable_and_does_not_activate_content() {
         let mut renderer = crate::test_renderer::new(16.);
         let mut cache = Cache::new();
-        // Reuse widget state through overflow, shrinkage, and panel resizing.
         for width in [240., 137.] {
             for height in [30., 400., 30.] {
                 let content = container(column![
@@ -182,8 +181,6 @@ mod tests {
                     assert!(left >= content.x + content.width + theme::SCROLLBAR_GAP);
                 }
 
-                // Both the gap and scrollbar hit area stay outside the row;
-                // contrast with an actual click on its rightmost pixel.
                 let content_right = content.x + content.width;
                 for (x, expected) in [
                     (content_right + theme::SCROLLBAR_GAP / 2., 0),

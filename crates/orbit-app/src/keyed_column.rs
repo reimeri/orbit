@@ -103,8 +103,6 @@ impl<Key: Clone + Eq + Hash> State<Key> {
                     started: self.now,
                 });
                 if motion.to != target {
-                    // Typing again mid-transition starts at the current interpolated
-                    // position, not the previous destination.
                     motion = Motion {
                         from: motion.y(self.now),
                         to: target,
@@ -654,7 +652,6 @@ mod tests {
                     );
                 }
                 assert_eq!(messages, [3]);
-                // Exercise the same transformed layout through the drawing path.
                 content.as_widget().draw(
                     &tree,
                     &mut renderer,

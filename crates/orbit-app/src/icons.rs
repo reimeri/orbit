@@ -448,7 +448,6 @@ mod tests {
                         .map(move |x| &pixels[((y * width + x) * 4) as usize..][..4])
                 });
             if expected.a == 1. {
-                // Even when only the label is hovered, the SVG inherits the button's tint.
                 assert!(
                     strokes
                         .clone()

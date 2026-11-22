@@ -139,7 +139,6 @@ mod tests {
         assert!(h.take_notifications().is_empty());
         h.evict_inactive(None).unwrap();
         assert!(h.get(&id).is_none());
-        // Ordinary eviction saves the sidebar hint; no completion-specific commit.
         assert!(store.load_session(&id).unwrap().unchecked_completion);
         assert_eq!(store.load_session(&id).unwrap().updated, completed_at);
         let restarted = Harness::new(store.clone(), store.load().unwrap().1).unwrap();

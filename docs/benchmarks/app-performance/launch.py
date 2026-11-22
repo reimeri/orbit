@@ -107,7 +107,7 @@ def compositor(name):
         finally:
             weston.terminate()
 
-# Rotate order; discard round zero. Isolate GL compositor lifetimes because
+# Isolate GL compositor lifetimes because
 # clients are terminated without draining their outstanding presentation events.
 runs = [(cases[(i + j) % len(cases)], i) for i in range(4) for j in range(len(cases))]
 if args.hardware_icd:

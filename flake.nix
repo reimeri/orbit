@@ -25,7 +25,7 @@
       patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
       patchedIcedWinit = import ./patches/iced-winit { inherit pkgs; };
       patchedIcedWidget = import ./patches/iced-widget { inherit pkgs; };
-      # Never copy the reference implementation, target/, or session assets into Nix builds.
+      # Never copy target/ or session assets into Nix builds.
       projectSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [

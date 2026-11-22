@@ -174,8 +174,7 @@ struct Family {
     latest: HashMap<String, String>,
     running: usize,
     attention: usize,
-    // An inclusive acknowledgement cutoff per child with outstanding failures. Metadata stays
-    // in SQLite until a user action acknowledges this captured range.
+    // An inclusive acknowledgement cutoff per child with outstanding failures.
     unacknowledged: HashMap<String, usize>,
 }
 
@@ -1324,7 +1323,6 @@ mod tests {
                 .to_string()
                 .contains("Final sapphire finding")
         );
-        // Parent retrieves results through the same code-mode contract it is taught.
         wake.reply.send(crate::test_support::completed(json!([{"type":"custom_tool_call","call_id":"retrieve","name":"exec","input":format!("text(await tools.wait_subagent({{run_ids:[{:?}]}}));",explore.run_id)}]))).unwrap();
         let acknowledged = f.request().await;
         assert!(
@@ -1643,7 +1641,6 @@ await new Promise(r => setTimeout(r, 60000));"#,
             summaries.iter().map(|s| &s.id).collect::<Vec<_>>(),
             vec![&other_id]
         );
-        // Retrying a completed deletion is harmless.
         f.h.remove_project(&project).unwrap();
         assert!(f.h.store.load_session(&other_id).is_ok());
     }
@@ -2371,7 +2368,6 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 .subagent_notices
                 .is_empty()
         );
-        // A user turn delivers the retained observation, without resuming the child.
         recovered
             .send(
                 &f.parent,

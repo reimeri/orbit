@@ -155,8 +155,7 @@ impl Process {
         ))
     }
 }
-// The pinned Tokio only provides deprecated safe constructors. This private
-// wrapper owns a FileDescriptor whose number cannot change during registration.
+// The owned descriptor must stay open and keep the same number while registered.
 #[allow(deprecated)]
 fn register_pty(
     fd: filedescriptor::FileDescriptor,

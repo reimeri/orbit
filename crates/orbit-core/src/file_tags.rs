@@ -100,7 +100,6 @@ impl Attachment {
     }
 }
 
-/// ASCII-insensitive search keeps byte paths lossless; Unicode spelling remains intact.
 pub fn encode(path: &Path) -> String {
     let bytes = path.as_os_str().as_bytes();
     if let Ok(text) = std::str::from_utf8(bytes)

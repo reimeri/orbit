@@ -305,14 +305,11 @@ mod tests {
         let tiles = |app: &App| app.imports.tiles(app.draft_key()).collect::<Vec<_>>();
         assert!(tiles(&app).is_empty());
 
-        // Only the second offer is an image; it is visible even while the
-        // queue is still waiting on the text paste ahead of it.
         dispatch(&mut app, Message::ClipboardImageOffered(image_paste)).await;
         assert!(matches!(
             tiles(&app).as_slice(),
             [PendingAttachment::Queued]
         ));
-        // Do not run the native transfer here; deliver its result below.
         let _ = app.update(Message::AttachmentLoaded(Ok(Input::Text("hello".into()))));
         assert_eq!(app.editor.text(), "hello");
         assert!(matches!(

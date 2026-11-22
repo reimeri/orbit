@@ -863,8 +863,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             let y = p.y.clamp(bounds.y, bounds.y + bounds.height);
             let distance = (p.x - x).powi(2) + (p.y - y).powi(2);
             let mut selection = self.selection.borrow_mut();
-            // Equal-distance candidates cannot replace the first winner either.
-            // Reject before consulting the shaped text, including offscreen blocks.
+            // The first candidate wins ties.
             if selection
                 .candidate
                 .as_ref()

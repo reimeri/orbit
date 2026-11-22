@@ -119,7 +119,6 @@ async fn calls_execute_before_response_completion_exclusively_and_commit_in_mode
             .any(|v| v["call_id"] == "a")
     })
     .await;
-    // A is executing before even the rest of the calls have been delivered.
     assert!(result(&f.c.snapshot(), "a").is_none());
     let commentary = json!({"type":"message","id":"commentary","role":"assistant","content":[{"type":"output_text","text":"Still streaming"}]});
     let b = call("b", "text(load('a_finished')); text('B result');");
@@ -193,7 +192,7 @@ async fn missing_earlier_items_cannot_reverse_execution_order() {
     })
     .await;
     assert!(f.c.snapshot().entries.by_id("b").is_none());
-    // The final response supplies the missing earlier item, without repeating B.
+    // The final response supplies the missing earlier item.
     stream.reply.send(completed(json!([a, b]))).unwrap();
     let next = f.request().await;
     assert!(
@@ -671,7 +670,6 @@ async fn local_turn_benchmark() {
             .expect("local turns must finish");
             let elapsed = start.elapsed();
             assert_eq!(chained, n);
-            // Drain/print after the timed interval. One session is exactly one turn here.
             for (id, timing) in timings.try_iter() {
                 use crate::test_support::SaveTiming;
                 let turn = conversations.iter().position(|c| c.id == id).unwrap();

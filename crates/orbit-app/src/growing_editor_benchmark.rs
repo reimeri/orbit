@@ -166,7 +166,6 @@ fn editor_stage_benchmark() {
                         "type" => perform(Action::Edit(Edit::Insert('x'))),
                         "type-again" => perform(Action::Edit(Edit::Insert('z'))),
                         "backspace" => perform(Action::Edit(Edit::Backspace)),
-                        // Includes navigation to the start as well as insertion.
                         "type-start" => {
                             perform(Action::Move(Motion::DocumentStart));
                             perform(Action::Edit(Edit::Insert('y')));

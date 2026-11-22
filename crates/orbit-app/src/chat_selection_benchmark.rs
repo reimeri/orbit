@@ -91,7 +91,6 @@ fn selection_motion_benchmark() {
                 previous = Some(focus);
             }
             tests::HITS.set(0);
-            // Warm up once, then report the median of three batches.
             for sample in 0..4 {
                 let start = Instant::now();
                 for i in 0..events {

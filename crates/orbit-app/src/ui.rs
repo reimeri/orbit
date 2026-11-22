@@ -735,8 +735,6 @@ impl App {
         }
     }
     fn refresh(&mut self) -> bool {
-        // Later smoke stages render synthetic UI fixtures, not harness-owned asks.
-        // A delayed core notice must not replace them between captured frames.
         if self.smoke_dir.is_some() && self.smoke_stage >= 26 {
             return false;
         }
@@ -794,7 +792,7 @@ impl App {
             self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
             self.activity = activity::Projection::default();
         }
-        // Persistent-tree diffs only visit changed leaves, not the full transcript.
+        // The history diff skips shared subtrees.
         let empty = orbit_core::history::History::default();
         let old = previous.map_or(&empty, |session| &session.entries);
         for (index, entry) in old.changes(&snapshot.entries) {
@@ -1386,8 +1384,7 @@ impl App {
                         };
                         h.store.save_new_draft(&new_draft)?;
                         h.evict_inactive(id)?;
-                        // Recovery is the last fallible step: once saved, its notice
-                        // must reach the UI even if other selection work failed earlier.
+                        // Reconcile last so a later selection error cannot suppress the notice after recovery.
                         let replaced = match id {
                             Some(id) => h.reconcile_model(id, &settings)?,
                             None => false,
@@ -1596,8 +1593,6 @@ impl App {
                 {
                     self.notification_selection = Some(event.session_id);
                     if let Some(id) = self.window_id {
-                        // Native Wayland activation is compositor-controlled. Iced cannot
-                        // apply notification activation tokens to an existing surface.
                         return window::request_user_attention(
                             id,
                             Some(window::UserAttention::Informational),
@@ -4971,7 +4966,6 @@ impl App {
     }
     fn model_settings_table<'a>(&'a self) -> widget::Column<'a, Message> {
         let colors = &self.preset().colors;
-        // The model column absorbs resizing; header and data share the other two tracks.
         let effort_width = (self.panel_width() * 0.30).clamp(84., 140.);
         let tracks = |name: Element<'a, Message>, effort, fast| {
             row![
@@ -5027,7 +5021,6 @@ impl App {
         }
         // Reserve room for the role, Fast switch and gutters beside two equal selectors.
         let compact = self.panel_width() - 2. * effort_width < 182.;
-        // Let the name track absorb extra space, not the short model selector.
         let role_and_model = |role: Element<'a, Message>, model: Element<'a, Message>| {
             row![
                 container(role).width(Fill),
@@ -5693,9 +5686,6 @@ impl App {
                 h.insert(s);
                 self.select(Selection::Session(id));
                 let _ = self.update_inner(Message::ToggleEntry("smoke-tool".into()));
-                // Session loading is asynchronous, so ToggleEntry may run before
-                // its activity group is projected. Open the known fixture group
-                // explicitly so the later large-output frames really exercise it.
                 self.groups.insert("smoke-tool".into());
             }
             2 => {
@@ -5879,7 +5869,6 @@ impl App {
                 return Task::batch([bottom(), delayed_capture()]);
             }
             13 => {
-                // Force fresh equal-height measurements for a new list identity.
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
                 self.activity = activity::Projection::default();
@@ -7192,7 +7181,6 @@ mod tests {
             Message::Editor(text_editor::Action::Edit(text_editor::Edit::Enter)),
         )
         .await;
-        // Deliver text through the native clipboard completion path.
         let _ = app.update(Message::Paste);
         dispatch(
             &mut app,
@@ -7595,7 +7583,6 @@ mod tests {
                 } else {
                     assert!(!bounds.labels.iter().any(|(label, _)| label == "Command"));
                 }
-                // The original header remains the collapse/expand hit target.
                 assert!(
                     matches!(click_at(&mut ui, &mut renderer, current.0.center()).as_slice(), [Message::ToggleEntry(id)] if id == &entry.id)
                 );
@@ -8455,7 +8442,6 @@ mod tests {
             };
             let beside = iced::Point::new(button_left - 1., action.center_y());
             let defer = (!settled).then(|| {
-                // The nearest control to the left of Settle on the same line.
                 bounds
                     .containers
                     .iter()
@@ -8736,7 +8722,6 @@ mod tests {
             );
             cache = ui.into_cache();
         }
-        // Small lists shrink to their contents rather than reserving ten rows.
         app.sessions.truncate(2);
         app.prepare_sidebar();
         let mut ui = UserInterface::build(
@@ -8908,7 +8893,6 @@ mod tests {
                 .unchecked_completion
         );
 
-        // A new completion while focused needs no further focus or selection event.
         h.edit(&selected, |s| s.unchecked_completion = true)
             .unwrap();
         dispatch(&mut app, Message::Changed).await;
@@ -9129,7 +9113,6 @@ mod tests {
         ] {
             let mut app = app();
             let model = ASTRA.id;
-            // Exercise both the original default and a subsequently saved value.
             for saved_fast in [false, true] {
                 dispatch(&mut app, Message::ToggleSettings).await;
                 dispatch(&mut app, Message::ModelFast(model.into(), saved_fast)).await;
@@ -9955,7 +9938,6 @@ mod tests {
         assert!(app.attachments.is_empty());
         dispatch(&mut app, Message::Create(root.clone())).await;
         assert_eq!(app.attachments, images);
-        // Import completion follows the same path for clipboard image bytes.
         let _ = app.update(Message::Paste);
         dispatch(
             &mut app,
@@ -10218,7 +10200,6 @@ Then implement the fix.";
         assert!(h.summaries().is_empty());
         assert!(h.store.load().unwrap().1.is_empty());
 
-        // Leaving the draft and editing an existing conversation must not replace it.
         stored_session(&mut app, PathBuf::from("/existing")).await;
         let existing = app.selected.clone().unwrap();
         type_message(&mut app, "Existing conversation follow-up").await;
@@ -10233,7 +10214,6 @@ Then implement the fix.";
         dispatch(&mut app, Message::SaveDraft).await;
         assert_eq!(h.store.load_new_draft().unwrap(), app.new_draft);
 
-        // First send alone creates a session, in the final chosen project.
         dispatch(&mut app, Message::SessionEffort("low".into())).await;
         dispatch(&mut app, Message::Send).await;
         let id = app.selected.as_ref().unwrap();
@@ -10706,7 +10686,6 @@ Then implement the fix.";
                     min_height + (visible_lines - COMPOSER_MIN_LINES) as f32 * line_height,
                 );
             }
-            // Cursor scrolling must not grow the field or discard overflow.
             app.editor
                 .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
             assert_height(measure(&app, 400.), max_height);
@@ -11355,7 +11334,6 @@ Then implement the fix.";
                 ),
                 "{target}: {messages:?}"
             );
-            // Reopening, then clicking the selector itself, only closes it.
             assert!(matches!(
                 click_at(&mut ui, &mut renderer, selector).as_slice(),
                 [Message::ToggleFooterMenu]
@@ -11454,7 +11432,6 @@ Then implement the fix.";
             assert!(app.context_menu.is_none());
             assert!(!app.settings_open);
 
-            // One right-click should replace the old menu, not merely dismiss it.
             app.context_menu = original;
             let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
             let mut bounds = UiBounds::default();
@@ -11509,7 +11486,6 @@ Then implement the fix.";
                 let title = bounds.label(title);
                 let close = bounds.rightmost_control_at(title.center_y());
                 assert_eq!(title.x, RIGHT_PANEL_PADDING);
-                // The title is centered within the taller close-button row.
                 assert!(title.y >= RIGHT_PANEL_PADDING);
                 assert_eq!(title.center_y(), close.center_y());
                 headers.push((title, close));
@@ -11559,7 +11535,6 @@ Then implement the fix.";
         let file = repo.path().join("new.txt");
         std::fs::write(&file, "one\ntwo\n").unwrap();
 
-        // Selection must fetch without waiting for a timer or an agent turn.
         dispatch(&mut app, Message::Create(repo.path().to_owned())).await;
         assert!(!app.running());
         assert!(matches!(
@@ -11675,7 +11650,6 @@ Then implement the fix.";
             ),
             (None, false, None),
         ] {
-            // Apply refresh results so a non-repository result also clears old status.
             let path = app.current().unwrap().project.clone();
             let _ = app.update(Message::Git(path, status));
             let mut ui = iced_runtime::UserInterface::build(
@@ -11995,7 +11969,6 @@ Then implement the fix.";
                 }
                 wide_popup_height = Some(popup.height);
             }
-            // Clicking the selector again dismisses without reopening on release.
             let messages = click_at(&mut ui, &mut renderer, label.center());
             assert!(
                 matches!(messages.as_slice(), [Message::CloseFooterMenu]),
@@ -12289,7 +12262,6 @@ Then implement the fix.";
         assert!(menu.contains("Reasoning") && !menu.contains("None"));
         dispatch(&mut app, Message::SessionEffort("low".into())).await;
         dispatch(&mut app, Message::SessionFast(false)).await;
-        // Choosing the already-active speed must not toggle it.
         dispatch(&mut app, Message::SessionFast(false)).await;
         assert!(app.footer_menu_open);
         let saved = app
@@ -12730,7 +12702,6 @@ Then implement the fix.";
         );
         cache = check(&mut app, task, cache, offset).await;
 
-        // Move an existing session above the viewport while browsing.
         let mut moved = app.sessions.pop().unwrap();
         moved.needs_attention = true;
         app.sessions.insert(0, moved);
@@ -12806,7 +12777,6 @@ Then implement the fix.";
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
             );
-            // Execute the returned focus operation, then type without clicking the input.
             let mut actions = iced_runtime::task::into_stream(task).unwrap();
             while let Some(action) = actions.next().await {
                 if let iced_runtime::Action::Widget(mut operation) = action {
@@ -13368,7 +13338,6 @@ Then implement the fix.";
         let (next, count) = build(&app, cache, 900.);
         cache = next;
         assert_eq!(count, 0, "width changes resize existing paragraphs");
-        // Replacing a single entry identity must not reshape unrelated entries.
         let index = app.transcript.order[app.transcript.visible().start];
         let session = app.current_session.as_mut().unwrap();
         session.entries = session
@@ -13393,7 +13362,6 @@ Then implement the fix.";
             count <= 1,
             "only the replaced entry can require new shaping"
         );
-        // Changing sessions must not trigger work outside the mounted viewport.
         let id = orbit_core::store::id();
         app.current_session.as_mut().unwrap().id = id.clone();
         app.selected = Some(id);
@@ -13546,7 +13514,6 @@ Then implement the fix.";
                     );
                 }
             }
-            // Reflow into overflow, then back to a fitting pane without scrolling.
             cache = settle_chat(&mut app, cache, &mut renderer, iced::Size::new(930., 500.)).await;
             assert!(
                 app.transcript.total() > app.transcript.viewport,
@@ -13924,7 +13891,6 @@ Then implement the fix.";
             h.store.load_session(&first).is_ok(),
             "cancel is non-destructive"
         );
-        // Failed SQLite deletion leaves all sessions and the project available for retry.
         let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
         sqlite::fail_writes(&db, "sessions", "fixture project delete failure");
         dispatch(&mut app, Message::DeleteProject(path.clone())).await;

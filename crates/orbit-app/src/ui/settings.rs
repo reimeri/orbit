@@ -1,4 +1,3 @@
-//! Account connections, session preferences, and image generation settings.
 use super::{App, Message, SettingsTab};
 use crate::{ellipsized_text::ellipsized_text, icons::Icon, theme};
 use iced::theme::Base;

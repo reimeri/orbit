@@ -5,7 +5,6 @@ in
 pkgs.applyPatches {
   name = "orbit-winit-${version}-patched";
   src = pkgs.fetchurl {
-    # The official crates.io release archive, not a moving branch or tag.
     name = "winit-${version}.tar.gz";
     url = "https://static.crates.io/crates/winit/winit-${version}.crate";
     hash = "sha256-pnVfpYqfg1C9HkctTD/MJfgk7DWJM7ujMwbQtj31l40=";

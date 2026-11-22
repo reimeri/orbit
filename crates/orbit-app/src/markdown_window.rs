@@ -206,7 +206,6 @@ mod tests {
         let mut content = markdown::Content::parse("First\n\n[guide][later]\n\nThird\n\nTail");
         let tail = content.items().len() - 1;
         assert_eq!(content.push_str(" grows"), tail);
-        // Resolving an earlier reference is the exception to a tail-only edit.
         assert_eq!(
             content.push_str("\n\n[later]: https://example.org/guide\n"),
             1

@@ -84,7 +84,6 @@ mod tests {
 
     #[tokio::test]
     async fn first_message_naming_is_independent_durable_and_respects_late_changes() {
-        // Both send paths, plus races that would lose user work or resurrect a row.
         for scenario in [
             "new",
             "existing",
@@ -147,7 +146,6 @@ mod tests {
                 h.get(&id).is_some(),
                 "pending naming must prevent stale detached writes"
             );
-            // A repeated accepted submission must not create another naming request.
             h.send(&id, "first", first.into(), Settings::default())
                 .unwrap();
             let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();

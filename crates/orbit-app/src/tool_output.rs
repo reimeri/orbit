@@ -419,7 +419,6 @@ mod tests {
         assert!(output.visible().len() < output.rows.len());
         let expected = format!("Input\ncmd\n\nOutput\n{source}");
         assert_eq!(output.display, expected);
-        // Rendering a narrow viewport must not submit the million-byte line for shaping.
         let mounted_bytes: usize = output.rows[output.visible()].iter().map(Range::len).sum();
         assert!(mounted_bytes < 4096);
         let rebuilt = output

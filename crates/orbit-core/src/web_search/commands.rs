@@ -7,10 +7,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SearchCommands {
-    /// Query the internet search engine for a given list of queries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_query: Option<Vec<SearchQuery>>,
-    /// Query the image search engine for a given list of queries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_query: Option<Vec<SearchQuery>>,
     /// Open pages by reference id or URL.
@@ -28,7 +26,6 @@ pub struct SearchCommands {
     /// Look up prices for the given stock symbols.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finance: Option<Vec<FinanceOperation>>,
-    /// Look up weather forecasts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weather: Option<Vec<WeatherOperation>>,
     /// Look up sports schedules and standings.
@@ -37,7 +34,6 @@ pub struct SearchCommands {
     /// Get time for the given UTC offsets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<Vec<TimeOperation>>,
-    /// Set the length of the response to be returned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_length: Option<SearchResponseLength>,
 }
@@ -45,7 +41,6 @@ pub struct SearchCommands {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SearchQuery {
-    /// Search query.
     pub q: String,
     /// Whether to filter by recency, as a number of recent days.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,7 +55,6 @@ pub struct SearchQuery {
 pub struct OpenOperation {
     /// Reference id or URL to open.
     pub ref_id: String,
-    /// Line number to position the page at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lineno: Option<u64>,
 }
@@ -79,7 +73,6 @@ pub struct ClickOperation {
 pub struct FindOperation {
     /// Reference id or URL to search within.
     pub ref_id: String,
-    /// Text pattern to find.
     pub pattern: String,
 }
 
@@ -95,9 +88,7 @@ pub struct ScreenshotOperation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FinanceOperation {
-    /// Ticker symbol to look up.
     pub ticker: String,
-    /// Asset type to look up.
     pub r#type: FinanceAssetType,
     /// ISO 3166-1 alpha-3 country code, "OTC", or "" for cryptocurrency.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,12 +120,9 @@ pub struct WeatherOperation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SportsOperation {
-    /// Tool name for sports requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<SportsToolName>,
-    /// Sports function to call.
     pub r#fn: SportsFunction,
-    /// League to look up.
     pub league: SportsLeague,
     /// Team to look up, using the common 3 or 4 letter alias used in broadcasts.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,10 +136,8 @@ pub struct SportsOperation {
     /// End date in YYYY-MM-DD format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date_to: Option<String>,
-    /// Number of games to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_games: Option<u64>,
-    /// Locale for the lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
 }

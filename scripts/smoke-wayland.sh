@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Run an already-built binary on a private, native Wayland compositor.
 set -euo pipefail
 binary=${1:-./target/debug/orbit}
 app_args=(--smoke-test)

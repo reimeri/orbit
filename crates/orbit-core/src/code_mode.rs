@@ -922,7 +922,6 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
         .unwrap();
         assert!(!q.has_pending());
 
-        // Capability omission is enforced in JS and the native dispatcher.
         let child = self::mode();
         for source in [
             "text(ALL_TOOLS.some(t=>t.name==='ask_user'));",

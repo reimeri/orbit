@@ -253,7 +253,7 @@ mod tests {
         assert!(h.replay(&mut c, Undo));
         assert_eq!(c.text(), "");
         h.perform(&mut c, Action::Move(Motion::DocumentStart));
-        h.perform(&mut c, Action::Edit(Edit::Delete)); // no-op
+        h.perform(&mut c, Action::Edit(Edit::Delete));
         assert!(h.replay(&mut c, Redo));
         h.perform(&mut c, Action::Edit(Edit::Insert('?')));
         assert!(!h.replay(&mut c, Redo));

@@ -53,7 +53,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for DismissLayer {
             )
         {
             shell.publish(self.0.clone());
-            // Leave the event uncaptured so the same input reaches the UI below.
         }
     }
 
@@ -101,9 +100,6 @@ struct State {
     dragging: Cell<bool>,
 }
 
-// Buttons activate on release, but iced editors blur on the initial outside
-// press. Resolve the list hit in window coordinates before forwarding the
-// press, so holding a session row never paints an unfocused composer.
 struct SessionListPress {
     cursor: mouse::Cursor,
     over_list: bool,
@@ -253,8 +249,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
             self.selection.borrow_mut().begin_press();
             shell.request_redraw();
         }
-        // TextInput already supports Ctrl+Backspace. Normalize Ctrl+W here so
-        // every focused text field shares that behavior without tracking focus.
         let word_backspace = match event {
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,

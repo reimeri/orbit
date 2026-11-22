@@ -672,7 +672,6 @@ mod tests {
         ])
         .await;
         let mut session = Session::new(dir.path().into(), &crate::store::Settings::default());
-        // Use a non-default selection so accidentally routing with the default is caught.
         session.model = crate::models::MODELS
             .iter()
             .find(|m| m.id != session.model)

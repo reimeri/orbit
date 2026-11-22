@@ -9,7 +9,7 @@ use tokio::{
     sync::mpsc,
 };
 
-/// Wall-clock stages for the ignored local-turn probe, collected outside the DB lock.
+/// Wall-clock stages for the ignored local-turn probe.
 #[derive(Debug)]
 pub enum SaveTiming {
     WorkerQueue(Duration),

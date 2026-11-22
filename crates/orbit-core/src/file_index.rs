@@ -23,8 +23,7 @@ use std::{
 };
 
 pub const RESULTS: usize = 24;
-// Each service retains at most a current, building and in-flight snapshot. The app
-// keeps at most two services. Budget includes arena, entries and both sort indexes.
+// The app keeps at most two services. Budget includes arena, entries and both sort indexes.
 const SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
 const RECONCILE: Duration = Duration::from_secs(30);
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -439,7 +438,6 @@ fn search_worker(shared: Arc<Shared>, root: PathBuf) {
                         safe(&dir) && !internal(&dir),
                         "Ignored scope must be a workspace directory"
                     );
-                    // No directory symlinks, including ancestors, for explicit traversal.
                     let root_fd = File::open(&root)?;
                     let _scope = rustix::fs::openat2(
                         &root_fd,
@@ -655,7 +653,6 @@ fn discover(root: &Path, shared: &Shared, cache: &Path) -> Result<(Snapshot, Str
         })
     }
 }
-// Pipe reads and child reaping share a cancellable process-group supervisor.
 fn enumerate_git(
     child: std::process::Child,
     root: &Path,
@@ -705,7 +702,6 @@ fn read_git<T>(
     read: impl FnOnce(std::process::ChildStdout) -> Result<T>,
 ) -> Result<(std::process::ExitStatus, T)> {
     let output = child.stdout.take().expect("piped git output");
-    // A separate guard kills/reaps Git even if its pipe stalls during shutdown.
     let process_group = nix::unistd::Pid::from_raw(child.id() as i32);
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
@@ -1662,7 +1658,6 @@ mod tests {
         assert!(complete);
         assert!(update_watches(&mut watcher, &mut watched, desired, false).is_none());
         assert_eq!(watched, base);
-        // Check the actual watcher too, not just our bookkeeping.
         assert!(
             watcher
                 .unwatch(&root.path().join("generated/scoped-only"))
@@ -1707,7 +1702,6 @@ mod tests {
             r.paths == vec!["@replacement"] && r.phase != SearchPhase::Pending
         })
         .await;
-        // No manual refresh: this must be a watch on the replacement inode.
         fs::write(root.join("added"), "x").unwrap();
         until(&mut rx, |r| {
             r.paths == vec!["@added", "@replacement"] && r.phase != SearchPhase::Pending
@@ -1743,7 +1737,6 @@ mod tests {
                 let result = enumerate_git(child, &root, &shared, &cache);
                 let _ = tx.send(result.is_ok());
             });
-            // Let the supervisor enter its blocking pipe/reap path before shutdown.
             std::thread::sleep(Duration::from_millis(100));
             drop(service);
             rx.recv_timeout(Duration::from_secs(5))

@@ -93,7 +93,6 @@ impl Harness {
             .lock()
             .expect("session lock")
             .in_progress_response = Some(InProgressResponse::default());
-        // A failed stream cancels its work without masquerading as a user Stop.
         let work_cancel = cancel.child_token();
         let (items, mut received) = tokio::sync::mpsc::unbounded_channel();
         let emit = |delta| match delta {
@@ -344,7 +343,7 @@ async fn execute_call(
     if cancel.is_cancelled() {
         return Ok(());
     }
-    // The provider validates completed calls once, before emitting them.
+    // The provider validates completed calls before emitting them.
     let name = call["name"]
         .as_str()
         .expect("validated tool name")

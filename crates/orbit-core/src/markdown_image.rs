@@ -303,7 +303,6 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // Send the headers and an incomplete prefix of the pixel data.
             socket.write_all(&png[..1024]).await.unwrap();
             blocked.await.unwrap();
             socket.write_all(&png[1024..]).await.unwrap();

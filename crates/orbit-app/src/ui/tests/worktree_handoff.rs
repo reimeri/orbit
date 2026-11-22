@@ -130,7 +130,7 @@ async fn panel_selects_a_base_without_moving_the_original_chat_or_its_draft() {
     let before = git(path, &["worktree", "list", "--porcelain"]);
     click(&mut app, "New worktree").await;
     assert!(app.worktrees.bases);
-    dispatch(&mut app, Message::Worktree(Action::Bases)).await; // dismiss
+    dispatch(&mut app, Message::Worktree(Action::Bases)).await;
     assert_eq!(git(path, &["worktree", "list", "--porcelain"]), before);
     click(&mut app, "New worktree").await;
     click(&mut app, "candidate").await;

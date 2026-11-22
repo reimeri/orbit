@@ -451,7 +451,7 @@ mod tests {
         assert!(!from_topic.join("unsaved").exists());
         let repo = Repo::read(&from_default, &state).await.unwrap();
         assert_eq!(repo.trees.len(), 4);
-        assert_eq!(repo.branches.len(), 5); // both new branches plus the reserved fixture
+        assert_eq!(repo.branches.len(), 5);
         assert_eq!(repo.trees.iter().filter(|t| t.managed).count(), 2);
         assert!(repo.remove(&external, &state).await.is_err());
         assert!(repo.remove(&from_default, &state).await.is_err());

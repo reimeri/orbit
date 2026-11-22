@@ -184,7 +184,6 @@ mod tests {
             );
             let updated = capture(&check);
             let mut missing_text = updated.rgba.to_vec();
-            // Preserve the correctly updated marker, removing only the glyphs.
             for y in (PADDING * scale) as u32..((PADDING + TEXT_HEIGHT) * scale) as u32 {
                 for x in (PADDING * scale) as u32..((PADDING + TEXT_WIDTH) * scale) as u32 {
                     let offset = ((y * updated.size.width + x) * 4) as usize;

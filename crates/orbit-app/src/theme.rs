@@ -173,7 +173,6 @@ pub fn primary(theme: &Theme, status: button_widget::Status) -> button_widget::S
 
 pub fn danger(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let mut style = button_widget::danger(theme, status);
-    // Iced's strong accent is darker: use it at rest, not on hover.
     let palette = theme.extended_palette().danger;
     match status {
         button_widget::Status::Active | button_widget::Status::Pressed => {
@@ -517,7 +516,6 @@ pub fn card(theme: &Theme) -> container::Style {
     }
 }
 
-/// Clickable cards retain the surface border and gain a quiet hover highlight.
 pub fn card_button(theme: &Theme, status: button_widget::Status) -> button_widget::Style {
     let surface = card(theme);
     button_widget::Style {

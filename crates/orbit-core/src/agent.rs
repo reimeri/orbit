@@ -480,7 +480,6 @@ impl Harness {
         self.changes.send_replace(());
         conversation
     }
-    // Loading and eviction are called from the serialized UI worker, never view/update.
     pub fn load(&self, id: &str) -> Result<Arc<Conversation>> {
         let _loading = self.loading.lock().expect("loading lock");
         if let Some(c) = self.get(id) {
@@ -798,7 +797,6 @@ impl Harness {
                     candidate.checkpoint();
                 }
                 let points = candidate.points.clone();
-                // The durable and live copies record the same acceptance time.
                 let accepted_at = crate::store::now();
                 candidate.accept_submission_at(
                     submission.to_owned(),
@@ -1710,7 +1708,6 @@ mod tests {
             assert!(h.catalog_revision() > revision);
             assert_eq!(store.load().unwrap().1[0].filing, Some(filed));
             assert_eq!(store.load_session(&c.id).unwrap().updated, 77);
-            // Repeated clicks/retries must not restart the filing clock.
             h.edit(&c.id, |s| s.filing = Some(Filing { kind, at: 123 }))
                 .unwrap();
             assert_eq!(
@@ -2206,7 +2203,6 @@ mod tests {
     async fn questionnaire_blocks_model_continuation_until_all_answers_or_stop() {
         use crate::test_support::{completed, server_with};
 
-        // Exercise both top-level result boundaries, including Stop while held.
         for (tool, stop) in [
             ("exec", false),
             ("wait", false),

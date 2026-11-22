@@ -533,7 +533,6 @@ mod tests {
                         .abs()
                         < 0.001
                 );
-                // Seven pixels is the explicit spacing in this test's surrounding column.
                 assert!((actual.1 - actual.0.height - 7.).abs() < 0.001);
             }
             assert!(loading[1].0.width < loading[0].0.width);

@@ -105,7 +105,6 @@ fn cached_shaping_matches_fresh_for_bidi_clusters_attributes_and_wraps() {
                     .collect::<Vec<_>>()
             };
             let warm = layout(&mut fonts);
-            // Independent fresh shaping is the reference, not a stored snapshot.
             fonts.shape_run_cache = cosmic::ShapeRunCache::default();
             let cold = layout(&mut fonts);
             assert_eq!(

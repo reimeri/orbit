@@ -189,7 +189,7 @@ impl State {
             height: (bounds.height - 2. * PADDING).max(0.),
         };
         let max_offset = self.content_height - track.height;
-        // Ignore subpixel rounding at the exact ten-row boundary.
+        // Ignore subpixel rounding.
         if max_offset < 0.5 || track.height == 0. {
             return None;
         }
@@ -240,10 +240,6 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
     ) -> layout::Node {
         let node = self.editor.layout(&mut tree.children[0], renderer, limits);
         tree.state.downcast_mut::<State>().measure(self.content);
-        // iced 0.14 measures partially visible rows, clamps the content height,
-        // then adds padding again. Its viewport is correct, but its returned
-        // node can exceed the maximum. The editor is a leaf: constrain that
-        // node without changing its shaping, scrolling or input handling.
         layout::Node::new(Size::new(
             node.size().width,
             node.size()

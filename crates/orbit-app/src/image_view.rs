@@ -603,8 +603,6 @@ impl Viewer {
     }
 }
 
-/// A passive image/info pair. Unlike iced's general-purpose `hover`, this does
-/// not introduce a separately rounded scissor at the image's top/left edges.
 struct ImageInfo<'a> {
     picture: Element<'a, crate::ui::Message>,
     info: Element<'a, crate::ui::Message>,
@@ -687,8 +685,6 @@ impl Widget<crate::ui::Message, iced::Theme, iced::Renderer> for ImageInfo<'_> {
             && let Some(visible) = picture.bounds().intersection(viewport)
         {
             let info = children.next().expect("info layout");
-            // Use the same image primitive/snap rules as the picture. A container
-            // quad rounds half-pixels differently on WGPU and can leave a seam.
             static BACKGROUND: LazyLock<image::Handle> = LazyLock::new(|| {
                 image::Handle::from_rgba(1, 1, theme::SCRIM.into_rgba8().to_vec())
             });
