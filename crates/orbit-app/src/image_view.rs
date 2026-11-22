@@ -1443,8 +1443,10 @@ mod tests {
             let top = (clip.y * scale).round() as usize;
             let bottom = ((clip.y + clip.height) * scale).round() as usize;
             for (i, (before, after)) in plain_clip
-                .chunks_exact(4)
-                .zip(hover_clip.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(hover_clip.as_chunks::<4>().0)
                 .enumerate()
             {
                 let visible = (left..right).contains(&(i % physical.width as usize))
