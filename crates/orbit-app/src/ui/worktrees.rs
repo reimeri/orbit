@@ -6,6 +6,7 @@ use iced::widget::column;
 pub(super) struct State {
     pub panel: bool,
     pub popup: Option<f32>, // horizontal offset from the chat lane's left edge
+    pub slow_popup_load: bool,
     pub bases: bool,
     row: Option<PathBuf>,
     pub(super) confirm: Option<PathBuf>,
@@ -21,6 +22,7 @@ pub enum Action {
     Popup(f32),
     ClosePopup,
     RetryLoad,
+    SlowPopupLoad(u64),
     Loaded(u64, String, Result<Arc<Repo>, String>),
     Bases,
     Row(PathBuf),
@@ -53,6 +55,7 @@ impl App {
     pub(super) fn load_worktrees(&mut self) -> Task<Message> {
         self.worktrees.generation += 1;
         self.worktrees.repo = None;
+        self.worktrees.slow_popup_load = false;
         self.worktrees.row = None;
         self.worktrees.confirm = None;
         self.worktrees.cursor = 0;
@@ -61,7 +64,7 @@ impl App {
             return Task::none();
         };
         let (id, project, root) = (s.id.clone(), s.project.clone(), h.store.root().to_owned());
-        Task::future(async move {
+        let load = Task::future(async move {
             msg(Action::Loaded(
                 generation,
                 id,
@@ -70,17 +73,35 @@ impl App {
                     .map(Arc::new)
                     .map_err(|e| format!("{e:#}")),
             ))
-        })
+        });
+        if self.worktrees.popup.is_some() {
+            let timer = Task::future(async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                msg(Action::SlowPopupLoad(generation))
+            });
+            Task::batch([load, timer])
+        } else {
+            load
+        }
     }
 
     pub(super) fn worktree_action(&mut self, action: Action) -> Task<Message> {
         use Action::*;
         match action {
+            SlowPopupLoad(generation) => {
+                if generation == self.worktrees.generation
+                    && self.worktrees.popup.is_some()
+                    && self.worktrees.repo.is_none()
+                {
+                    self.worktrees.slow_popup_load = true;
+                }
+            }
             Loaded(generation, id, result) => {
                 if generation == self.worktrees.generation
                     && self.current().is_some_and(|s| s.id == id)
                 {
                     self.worktrees.repo = Some(result);
+                    self.worktrees.slow_popup_load = false;
                 }
             }
             Done(id, result) => {
@@ -232,18 +253,17 @@ impl App {
         )
     }
 
-    pub(super) fn worktree_popup(&self, width: f32) -> Element<'_, Message> {
+    pub(super) fn worktree_popup(&self, width: f32) -> Option<Element<'_, Message>> {
         let mut list = column![];
-        match &self.worktrees.repo {
-            None => list = list.push(text("Loading worktrees…").size(13)),
-            Some(Err(error)) => {
+        match self.worktrees.repo.as_ref()? {
+            Err(error) => {
                 list = list.push(text(error).size(13)).push(
                     theme::button(text("Retry"))
                         .style(theme::text_button)
                         .on_press(msg(Action::RetryLoad)),
                 )
             }
-            Some(Ok(repo)) => {
+            Ok(repo) => {
                 let option = |(i, tree): (usize, &Checkout)| {
                     self.footer_menu_choice(
                         &tree.label,
@@ -304,7 +324,7 @@ impl App {
                     });
             }
         }
-        opaque(container(list).width(width).padding(6).style(card))
+        Some(opaque(container(list).width(width).padding(6).style(card)))
     }
 
     pub(super) fn worktrees_panel(&self) -> Element<'_, Message> {

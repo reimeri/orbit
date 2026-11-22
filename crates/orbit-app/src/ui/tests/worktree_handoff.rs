@@ -50,6 +50,28 @@ async fn click(app: &mut App, label: &str) {
 }
 
 #[tokio::test]
+async fn pending_picker_stays_hidden_and_escape_cancels_the_open() {
+    let mut app = app();
+    let dir = repo_fixture();
+    dispatch(&mut app, Message::Create(dir.path().into())).await;
+
+    // Hold the request so rendering and dismissal don't depend on Git's speed.
+    let load = app.update(Message::Worktree(Action::Popup(0.)));
+    let labels =
+        |app: &App| displayed_text(app.view(), Size::new(app.window_width, app.window_height));
+    let pending = labels(&app);
+    assert!(pending.contains("main"));
+    assert!(!pending.contains("Loading worktrees") && !pending.contains("New worktree"));
+
+    dispatch(&mut app, footer_key(keyboard::key::Named::Escape)).await;
+    drain(&mut app, load).await;
+    assert!(
+        !labels(&app).contains("New worktree"),
+        "late completion reopened the picker"
+    );
+}
+
+#[tokio::test]
 async fn footer_selects_without_git_changes_and_quick_create_can_retry_only_the_handoff() {
     let mut app = app();
     let dir = repo_fixture();
@@ -237,7 +259,7 @@ async fn picker_pins_main_and_scrolls_four_rows_in_creation_not_commit_order() {
     dispatch(&mut app, Message::Worktree(Action::Popup(0.))).await;
     let mut renderer = header_renderer();
     let mut ui = iced_runtime::UserInterface::build(
-        app.worktree_popup(240.),
+        app.worktree_popup(240.).unwrap(),
         Size::new(240., 600.),
         Default::default(),
         &mut renderer,

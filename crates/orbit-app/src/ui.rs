@@ -3452,22 +3452,23 @@ impl App {
             let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
             layers.push(dismiss).push(positioned).into()
         } else if let Some(offset) = self.worktrees.popup {
+            let layers = layers.push(dismiss_layer(Message::Worktree(
+                worktrees::Action::ClosePopup,
+            )));
+            let popup_width = 235_f32.min(self.window_width);
+            let Some(popup) = self.worktree_popup(popup_width) else {
+                return layers.into();
+            };
             let (left, center) = self.center_dimensions();
             let width = (center - 2. * self.chat_inset()).min(self.catalog.settings.chat_width);
-            let popup_width = 235_f32.min(self.window_width);
             let x =
                 (left + (center - width) / 2. + offset).clamp(0., self.window_width - popup_width);
             let positioned = column![
                 space().height(Fill),
-                row![space().width(x), self.worktree_popup(popup_width)],
+                row![space().width(x), popup],
                 space().height(FOOTER_HEIGHT)
             ];
-            layers
-                .push(dismiss_layer(Message::Worktree(
-                    worktrees::Action::ClosePopup,
-                )))
-                .push(positioned)
-                .into()
+            layers.push(positioned).into()
         } else if self.footer_menu_open {
             let dismiss = dismiss_layer(Message::CloseFooterMenu);
             let (left, center) = self.center_dimensions();
@@ -5329,14 +5330,17 @@ impl App {
             let label = container(ellipsized_text(label, 11., (!pill).then_some(colors.muted)))
                 .width(label_width);
             let control: Element<_> = if pill {
-                let mut content = row![Icon::GitFork.view(branch_icon_size), label]
-                    .spacing(icon_gap)
-                    .align_y(iced::Center);
+                let open = self.worktrees.popup.is_some();
+                let icon = if open && self.worktrees.slow_popup_load {
+                    Icon::LoaderCircle.spinning(branch_icon_size, true)
+                } else {
+                    Icon::GitFork.view(branch_icon_size)
+                };
+                let mut content = row![icon, label].spacing(icon_gap).align_y(iced::Center);
                 if draft {
                     content = content.push(Icon::ChevronDown.view(chevron_size));
                 }
                 let offset = if project { 30. + name_width } else { 0. };
-                let open = self.worktrees.popup.is_some();
                 let button = theme::button(content)
                     .padding([2., pill_inset])
                     .style(if open { secondary } else { sidebar_control })
