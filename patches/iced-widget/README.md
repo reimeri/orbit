@@ -15,6 +15,10 @@ offscreen heights, and sends logical-line/fraction seeks for track/drag actions.
 It never shapes offscreen text just to draw the scrollbar, and seeking does not
 move the caret or selection. Wheel input and keyboard reveal remain native.
 
+editor-height.patch constrains the padded shrink height in the native editor.
+When the content fits at a smaller height, the renderer uses that fitted text
+viewport too, so caret and scrolling geometry agree with the returned node.
+
 ctrl-w.patch binds exact Ctrl+W in focused single-line inputs to their native
 Ctrl+Backspace action, including its selection and secure-input behavior.
 TextInput does not expose a custom key binding callback like TextEditor does.

@@ -32,7 +32,6 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
         content,
         marks,
         typing_at,
-        max_height,
         on_scroll: Box::new(on_scroll),
         scroll_lines,
     })
@@ -43,7 +42,6 @@ struct GrowingEditor<'a, Message> {
     content: &'a text_editor::Content,
     marks: &'a [Mark],
     typing_at: Option<text_editor::Position>,
-    max_height: f32,
     on_scroll: Box<dyn Fn(ScrollTo) -> Message + 'a>,
     scroll_lines: fn(&Message) -> Option<i32>,
 }
@@ -240,13 +238,7 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
     ) -> layout::Node {
         let node = self.editor.layout(&mut tree.children[0], renderer, limits);
         tree.state.downcast_mut::<State>().measure(self.content);
-        layout::Node::new(Size::new(
-            node.size().width,
-            node.size()
-                .height
-                .min(self.max_height)
-                .min(limits.max().height),
-        ))
+        node
     }
 
     fn operate(
@@ -1314,6 +1306,43 @@ mod tests {
                 editor.content.text(),
                 format!("prefix-{inserted}!-tail\nuntouched λ")
             );
+        }
+    }
+
+    #[test]
+    fn native_shrink_height_includes_padding_and_matches_the_text_viewport() {
+        let content = Content::with_text(&"wrap these words ".repeat(12));
+        let padding = iced::Padding::new(6.).bottom(11.);
+        let max_height = 4.5 * LINE_HEIGHT + padding.y();
+        let mut view: Element<'_, Action> = text_editor(&content)
+            .size(15)
+            .line_height(iced::widget::text::LineHeight::Absolute(LINE_HEIGHT.into()))
+            .padding(padding)
+            .height(Length::Shrink)
+            .max_height(max_height)
+            .into();
+        let mut tree = Tree::new(view.as_widget());
+        let renderer = crate::test_renderer::new(16.);
+        let parent_cap = 2.25 * LINE_HEIGHT + padding.y();
+        for (width, parent_height, expected_height) in [
+            (100., 500., max_height),
+            (100., parent_cap, parent_cap),
+            (100., 10., 10.), // not even enough space for the padding
+            (3000., 500., LINE_HEIGHT + padding.y()), // reflows to one row
+        ] {
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(width, parent_height)),
+            );
+            assert_eq!(node.size().height, expected_height);
+            let viewport = node.bounds().shrink(padding);
+            content.with_editor(|editor| {
+                assert_eq!(
+                    editor.buffer().size(),
+                    (Some(viewport.width), Some(viewport.height.max(0.)))
+                );
+            });
         }
     }
 

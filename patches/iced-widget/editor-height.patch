@@ -1,0 +1,68 @@
+--- a/src/text_editor.rs
++++ b/src/text_editor.rs
+@@ -656,33 +656,38 @@
+         let limits = limits
+             .width(self.width)
+             .height(self.height)
+-            .min_height(self.min_height)
+-            .max_height(self.max_height);
+-
+-        internal.editor.update(
+-            limits.shrink(self.padding).max(),
+-            self.font.unwrap_or_else(|| renderer.default_font()),
+-            self.text_size.unwrap_or_else(|| renderer.default_size()),
+-            self.line_height,
+-            self.wrapping,
+-            state.highlighter.borrow_mut().deref_mut(),
+-        );
+-
+-        match self.height {
+-            Length::Fill | Length::FillPortion(_) | Length::Fixed(_) => {
+-                layout::Node::new(limits.max())
+-            }
+-            Length::Shrink => {
+-                let min_bounds = internal.editor.min_bounds();
+-
+-                layout::Node::new(
+-                    limits
+-                        .height(min_bounds.height)
+-                        .max()
+-                        .expand(Size::new(0.0, self.padding.y())),
+-                )
+-            }
+-        }
++            .max_height(self.max_height)
++            .min_height(self.min_height);
++
++        let update = |editor: &mut Renderer::Editor, viewport| {
++            editor.update(
++                viewport,
++                self.font.unwrap_or_else(|| renderer.default_font()),
++                self.text_size.unwrap_or_else(|| renderer.default_size()),
++                self.line_height,
++                self.wrapping,
++                state.highlighter.borrow_mut().deref_mut(),
++            );
++        };
++
++        let viewport = limits.shrink(self.padding).max();
++        update(&mut internal.editor, viewport);
++
++        if self.height != Length::Shrink {
++            return layout::Node::new(limits.max());
++        }
++
++        // Include padding before resolving the outer height. Measuring a
++        // partially visible row can yield more than the viewport height.
++        let height = internal.editor.min_bounds().height.max(self.min_height)
++            + self.padding.y();
++        let limits = limits.height(height);
++        let fitted = limits.shrink(self.padding).max();
++
++        if fitted != viewport {
++            update(&mut internal.editor, fitted);
++        }
++        layout::Node::new(limits.max())
+     }
+ 
+     fn update(
