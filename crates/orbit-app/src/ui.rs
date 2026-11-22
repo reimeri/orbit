@@ -289,6 +289,7 @@ pub struct App {
     drag: Option<(bool, f32, f32)>,
     auto_scroll: bool,
     sidebar_follow_top: bool,
+    sidebar_branches: HashMap<PathBuf, String>,
     git: HashMap<PathBuf, crate::git::Info>,
     git_pending: HashSet<PathBuf>,
     git_counts: Arc<crate::git::LineCounts>,
@@ -483,6 +484,7 @@ pub enum Message {
     Account(Option<String>),
     CancelLogin,
     Logout,
+    SidebarBranch(PathBuf, Option<String>),
     Git(PathBuf, Option<crate::git::Info>),
     External(Result<(), String>),
     ErrorDismiss,
@@ -620,6 +622,7 @@ impl App {
             drag: None,
             auto_scroll: true,
             sidebar_follow_top: true,
+            sidebar_branches: HashMap::new(),
             git: HashMap::new(),
             git_pending: HashSet::new(),
             git_counts: Arc::default(),
@@ -2813,6 +2816,13 @@ impl App {
                 self.login_url = None;
             }
             Message::Logout => self.modal = Some(Modal::Logout),
+            Message::SidebarBranch(path, branch) => {
+                if let Some(branch) = branch {
+                    self.sidebar_branches.insert(path, branch);
+                } else {
+                    self.sidebar_branches.remove(&path);
+                }
+            }
             Message::Git(path, info) => {
                 self.git_pending.remove(&path);
                 if let Some(info) = info {
@@ -3201,6 +3211,16 @@ impl App {
                     .any(|row| matches!(row, SidebarRow::Session(_, SessionStatus::Working)))
             {
                 subscriptions.push(iced::time::every(ACTIVITY_INTERVAL).map(|_| Message::Tick));
+            }
+        }
+        // Poll each mounted checkout once, independent of which session is selected.
+        let mut checkouts = HashSet::new();
+        for row in &self.sidebar_rows[self.sidebar_list.visible()] {
+            if let SidebarRow::Session(index, _) = row {
+                let path = &self.sessions[*index].project;
+                if checkouts.insert(path) {
+                    subscriptions.push(sidebar_branch_subscription(path));
+                }
             }
         }
         if self.current().is_some() {
@@ -3714,7 +3734,11 @@ impl App {
                 SidebarRow::Session(session_index, status) => {
                     let session = &self.sessions[*session_index];
                     let active = self.parent_id() == Some(session.id.as_str());
-                    let (project, badge) = self.session_project_label(&session.project, 16.);
+                    let (mut project, badge) = self.session_project_label(&session.project, 16.);
+                    if let Some(branch) = self.sidebar_branches.get(&session.project) {
+                        project.push_str(" · ");
+                        project.push_str(branch);
+                    }
                     // Age restarts on accepted input and successful completion, not streaming.
                     let children = self
                         .child_statuses
@@ -6783,6 +6807,33 @@ fn effort_name(effort: &str) -> &'static str {
         "max" => "Max",
         _ => unreachable!("catalog effort"),
     }
+}
+
+fn sidebar_branch_subscription(path: &Path) -> Subscription<Message> {
+    Subscription::run_with(path.to_owned(), |path| {
+        let path = path.clone();
+        iced::stream::channel(1, async move |mut output| {
+            let mut previous = None;
+            loop {
+                let branch =
+                    tokio::time::timeout(Duration::from_secs(5), crate::git::sidebar_branch(&path))
+                        .await
+                        .ok()
+                        .flatten();
+                if previous.as_ref() != Some(&branch) {
+                    previous = Some(branch.clone());
+                    if output
+                        .send(Message::SidebarBranch(path.clone(), branch))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        })
+    })
 }
 
 #[derive(Clone)]

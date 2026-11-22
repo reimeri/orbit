@@ -125,6 +125,42 @@ async fn git(path: &Path, args: &[&str]) -> Result<Output, String> {
         format!("Could not run Git: {e}. Check that Git is installed; will retry automatically.")
     })
 }
+/// Sidebar rows need only refs, never a diff or an untracked-file scan.
+pub async fn sidebar_branch(path: &Path) -> Option<String> {
+    let head = git(path, &["symbolic-ref", "--quiet", "HEAD"]).await.ok()?;
+    let branch = head
+        .stdout
+        .strip_suffix(b"\n")?
+        .strip_prefix(b"refs/heads/")?;
+    let origin = git(
+        path,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    .ok()?;
+    let is_default = if let Some(default) = origin
+        .stdout
+        .strip_suffix(b"\n")
+        .and_then(|r| r.strip_prefix(b"refs/remotes/origin/"))
+    {
+        branch == default
+    } else {
+        match branch {
+            b"main" => true,
+            b"master" => !git(
+                path,
+                &["show-ref", "--verify", "--quiet", "refs/heads/main"],
+            )
+            .await
+            .ok()?
+            .status
+            .success(),
+            _ => false,
+        }
+    };
+    (!is_default).then(|| String::from_utf8_lossy(branch).into_owned())
+}
+
 fn successful(output: Output) -> Result<Vec<u8>, String> {
     if output.status.success() {
         Ok(output.stdout)
@@ -336,6 +372,22 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[tokio::test]
+    async fn sidebar_branch_falls_back_to_main_then_master_without_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        assert_eq!(sidebar_branch(path).await, None);
+        command(path, &["init", "--template=", "-b", "master"]);
+        command(path, &["commit", "--allow-empty", "-m", "base"]);
+        assert_eq!(sidebar_branch(path).await, None);
+        command(path, &["branch", "main"]);
+        assert_eq!(sidebar_branch(path).await.as_deref(), Some("master"));
+        command(path, &["switch", "main"]);
+        assert_eq!(sidebar_branch(path).await, None);
+        command(path, &["checkout", "--detach"]);
+        assert_eq!(sidebar_branch(path).await, None);
     }
 
     #[tokio::test]

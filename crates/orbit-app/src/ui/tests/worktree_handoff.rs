@@ -50,6 +50,70 @@ async fn click(app: &mut App, label: &str) {
 }
 
 #[tokio::test]
+async fn sidebar_labels_visible_checkouts_even_without_a_selected_session() {
+    use iced::futures::{StreamExt, stream};
+    use iced_runtime::futures::subscription;
+
+    let mut app = app();
+    let dir = repo_fixture();
+    let root = dir.path();
+    git(root, &["branch", "-m", "trunk"]);
+    git(root, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+    git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+    );
+    let linked = root.join("linked");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "topic/map",
+            linked.to_str().unwrap(),
+        ],
+    );
+    app.catalog.projects.push(Project {
+        path: root.into(),
+        display_name: Some("Atlas".into()),
+        favorite: false,
+        stashed: false,
+    });
+    app.catalog
+        .worktree_origins
+        .insert(linked.clone(), root.into());
+    for path in [root, &linked] {
+        app.sessions.push(SessionSummary::from(&Session::new(
+            path.into(),
+            &app.catalog.settings,
+        )));
+    }
+    app.prepare_sidebar();
+    assert!(app.current().is_none());
+    let mut messages = stream::select_all(
+        subscription::into_recipes(app.subscription())
+            .into_iter()
+            .map(|recipe| recipe.stream(stream::pending().boxed())),
+    )
+    .filter(|msg| std::future::ready(matches!(msg, Message::SidebarBranch(..))));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for _ in 0..2 {
+            let _ = app.update(messages.next().await.unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    let labels = displayed_text(app.sidebar(), Size::new(320., 640.));
+    assert!(labels.contains("Atlas · topic/map"));
+    assert!(!labels.contains("Atlas · trunk"));
+}
+
+#[tokio::test]
 async fn pending_picker_stays_hidden_and_escape_cancels_the_open() {
     let mut app = app();
     let dir = repo_fixture();
