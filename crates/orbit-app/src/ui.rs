@@ -210,6 +210,7 @@ pub struct App {
     transcript: crate::virtual_list::List,
     activity: activity::Projection,
     execution: HashSet<String>,
+    session_list_focus: crate::session_list_focus::SessionListFocus,
     sidebar_rows: Vec<SidebarRow>,
     child_statuses: HashMap<String, ChildStatus>,
     sidebar_list: crate::virtual_list::List,
@@ -539,6 +540,7 @@ impl App {
             transcript: crate::virtual_list::List::with_overscan(CHAT_OVERSCAN),
             activity: activity::Projection::default(),
             execution: HashSet::new(),
+            session_list_focus: Default::default(),
             sidebar_rows: vec![],
             child_statuses: HashMap::new(),
             sidebar_list: crate::virtual_list::List::default(),
@@ -3832,14 +3834,13 @@ impl App {
             ));
         }
         let rows = crate::keyed_column::animated_column(rows);
-        list = list.push(
-            scroll(rows)
-                .id("sessions")
-                .height(Fill)
-                .on_scroll(move |v| {
-                    Message::SidebarScroll(epoch, v.absolute_offset().y, v.bounds().height)
-                }),
-        );
+        let sessions = scroll(rows)
+            .id("sessions")
+            .height(Fill)
+            .on_scroll(move |v| {
+                Message::SidebarScroll(epoch, v.absolute_offset().y, v.bounds().height)
+            });
+        list = list.push(self.session_list_focus.list(sessions));
         // Keep the close spacing between adjacent labels without changing
         // Settled's header or hit target when Deferred opens above it.
         let adjacent_headers = !self.filed_list_visible(FilingKind::Deferred);
@@ -3983,14 +3984,13 @@ impl App {
                     .into(),
             ));
             let epoch = self.sidebar_epoch;
-            section = section.push(
-                scroll(crate::keyed_column::keyed_column(rows))
-                    .id(filed_scroll_id(kind))
-                    .height(self.filed_list_height(kind))
-                    .on_scroll(move |v| {
-                        Message::FiledScroll(kind, epoch, v.absolute_offset().y, v.bounds().height)
-                    }),
-            );
+            let sessions = scroll(crate::keyed_column::keyed_column(rows))
+                .id(filed_scroll_id(kind))
+                .height(self.filed_list_height(kind))
+                .on_scroll(move |v| {
+                    Message::FiledScroll(kind, epoch, v.absolute_offset().y, v.bounds().height)
+                });
+            section = section.push(self.session_list_focus.list(sessions));
         }
         section.into()
     }
@@ -4414,7 +4414,7 @@ impl App {
             .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
             .min_height(COMPOSER_MIN_LINES as f32 * line_height)
             .size(self.catalog.settings.font_size);
-        crate::growing_editor::growing_editor(
+        let editor = crate::growing_editor::growing_editor(
             editor,
             &self.editor,
             &self.spellcheck.marks,
@@ -4425,7 +4425,8 @@ impl App {
                 Message::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
                 _ => None,
             },
-        )
+        );
+        self.session_list_focus.composer(editor)
     }
 
     fn activity_row(&self, projected: ActivityRow) -> Element<'_, Message> {
@@ -9499,6 +9500,9 @@ mod tests {
                 &mut iced::advanced::clipboard::Null,
                 &mut messages,
             );
+            if matches!(event, mouse::Event::ButtonPressed(_)) {
+                assert!(messages.is_empty(), "holding the row must not activate it");
+            }
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
             assert_eq!(bounds.focused, Some(Id::new("composer")));
@@ -9533,6 +9537,70 @@ mod tests {
         let mut bounds = UiBounds::default();
         ui.operate(&renderer, &mut bounds);
         assert_eq!(bounds.focused, Some(Id::new("composer")));
+
+        // The section header captures presses too, but is not part of a session list.
+        let messages = click_at(&mut ui, &mut renderer, bounds.label("Deferred").center());
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::ToggleFiled(FilingKind::Deferred)]
+        ));
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        assert_eq!(bounds.focused, None);
+
+        let messages = click_at(&mut ui, &mut renderer, bounds.label("Destination").center());
+        assert!(matches!(messages.as_slice(), [Message::Select(id)] if id == &target));
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        assert_eq!(
+            bounds.focused, None,
+            "a row must not give an unfocused composer focus"
+        );
+    }
+
+    #[tokio::test]
+    async fn filed_list_scrollbars_do_not_blur_the_composer() {
+        use iced::advanced::widget::{Id, operation::focusable};
+        use iced_runtime::{UserInterface, user_interface::Cache};
+
+        let mut app = app();
+        let project = app.smoke_dir.clone().unwrap();
+        stored_session(&mut app, project.clone()).await;
+        for kind in FILED_KINDS {
+            app.filed[kind as usize].open = true;
+            for _ in 0..FILED_VISIBLE_ROWS * 2 {
+                let mut session = Session::new(project.clone(), &app.catalog.settings);
+                session.filing = Some(Filing {
+                    kind,
+                    at: session.updated,
+                });
+                app.sessions.push(SessionSummary::from(&session));
+            }
+        }
+        app.prepare_sidebar();
+        let mut renderer = header_renderer();
+        let size = iced::Size::new(app.window_width, app.window_height);
+        let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+        ui.operate(&renderer, &mut focusable::focus("composer".into()));
+        for kind in FILED_KINDS {
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            let list = bounds.scroll(filed_scroll_id(kind));
+            let track = iced::Point::new(
+                list.x + list.width - theme::SCROLLBAR_WIDTH / 2.,
+                list.y + list.height - 1.,
+            );
+            let messages = click_at(&mut ui, &mut renderer, track);
+            assert!(
+                messages.iter().any(|message| {
+                    matches!(message, Message::FiledScroll(k, _, offset, _) if *k == kind && *offset > 0.)
+                }),
+                "track click must scroll {kind:?}: {messages:?}"
+            );
+            let mut bounds = UiBounds::default();
+            ui.operate(&renderer, &mut bounds);
+            assert_eq!(bounds.focused, Some(Id::new("composer")));
+        }
     }
 
     #[tokio::test]
