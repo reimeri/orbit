@@ -92,6 +92,7 @@ pub struct Conversation {
     code: CodeMode,
     last_settings: Mutex<Settings>,
     persisted: Mutex<Option<Session>>,
+    pending_activity: Mutex<Vec<crate::store::activity::Sample>>,
     submissions: AtomicU64,
     turn_generation: AtomicU64,
     loaded: AtomicBool,
@@ -121,8 +122,24 @@ impl Conversation {
         if self.deleted.load(Ordering::Acquire) || !self.loaded.load(Ordering::Acquire) {
             return Ok(());
         }
-        let snapshot = self.snapshot();
-        self.store.save_changes(saved.as_ref(), &snapshot)?;
+        let (snapshot, samples) = {
+            let state = self.state.lock().expect("session lock");
+            let samples =
+                std::mem::take(&mut *self.pending_activity.lock().expect("activity lock"));
+            (state.clone(), samples)
+        };
+        if let Err(error) = self.store.save_session_transaction(
+            saved.as_ref(),
+            &snapshot,
+            crate::store::Checkpoint::Save(&samples),
+        ) {
+            // A normal save or flush retries the measurements as well as the transcript.
+            self.pending_activity
+                .lock()
+                .expect("activity lock")
+                .extend(samples);
+            return Err(error);
+        }
         *saved = Some(snapshot);
         Ok(())
     }
@@ -466,6 +483,7 @@ impl Harness {
                 cancel: Mutex::new(CancellationToken::new()),
                 deleted: AtomicBool::new(false),
                 persisted: Mutex::new(saved),
+                pending_activity: Mutex::default(),
                 submissions: AtomicU64::new(0),
                 turn_generation: AtomicU64::new(0),
                 loaded: AtomicBool::new(true),
@@ -2599,6 +2617,7 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
                         output,
                         ..Default::default()
                     },
+                    first_output_latency: None,
                     streaming_time: Duration::from_secs(seconds),
                 });
             }

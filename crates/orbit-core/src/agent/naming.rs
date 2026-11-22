@@ -168,6 +168,11 @@ mod tests {
                 })
                 .unwrap();
             until(&h, || !c.naming.load(Ordering::Acquire)).await;
+            assert_eq!(
+                store.activity_summary().unwrap().tokens[0].output,
+                11,
+                "count only the ordinary response, even after deletion"
+            );
             if scenario == "delete" {
                 assert!(store.load_session(&id).is_err());
                 assert!(h.summaries().is_empty());

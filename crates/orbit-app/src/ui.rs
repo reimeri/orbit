@@ -2,6 +2,7 @@ mod forks;
 mod imports;
 mod marketing;
 mod settings;
+mod usage_panel;
 mod worktrees;
 
 use crate::activity::{self, Row as ActivityRow};
@@ -216,6 +217,7 @@ pub struct App {
     draft_session: Option<Session>,
     new_draft: NewSessionDraft,
     new_draft_dirty: bool,
+    usage_summary: Option<Result<Arc<orbit_core::store::activity::Summary>, String>>,
     transcript: crate::virtual_list::List,
     activity: activity::Projection,
     execution: HashSet<String>,
@@ -393,6 +395,7 @@ pub enum Message {
     GitTick,
     SaveDraft,
     AgeTick,
+    UsageSummary(Result<Arc<orbit_core::store::activity::Summary>, String>),
     Press(Press),
     SessionMenu(String, iced::Point),
     ProjectMenu(PathBuf, iced::Point),
@@ -549,6 +552,7 @@ impl App {
             draft_session: None,
             new_draft,
             new_draft_dirty: false,
+            usage_summary: None,
             transcript: crate::virtual_list::List::with_overscan(CHAT_OVERSCAN),
             activity: activity::Projection::default(),
             execution: HashSet::new(),
@@ -1941,7 +1945,22 @@ impl App {
                 }
             },
             Message::Tick => self.tick += 1,
-            Message::AgeTick => {}
+            Message::UsageSummary(result) => self.usage_summary = Some(result),
+            Message::AgeTick => {
+                // While the picker is mounted its periodic summary read also prunes.
+                if self.current().is_some()
+                    && let Some(h) = &self.harness
+                {
+                    let store = h.store.clone();
+                    return self.io.run(move || {
+                        Message::External(
+                            store.prune_activity().map_err(|e| {
+                                format!("Could not expire activity measurements: {e:#}")
+                            }),
+                        )
+                    });
+                }
+            }
             Message::SaveDraft => {
                 self.imports.retry_on_save = false;
                 self.save_draft();
@@ -3227,6 +3246,12 @@ impl App {
         ];
         if let Some(harness) = &self.harness {
             subscriptions.push(Subscription::run_with(Updates(harness.clone()), updates));
+            if self.current().is_none() {
+                subscriptions.push(Subscription::run_with(
+                    Updates(harness.clone()),
+                    usage_panel::summaries,
+                ));
+            }
             // Waves reuse this clock, including Working rows whose own turn is
             // no longer running (terminal persistence or active children).
             if harness.all().iter().any(|c| c.is_running())
@@ -5016,6 +5041,33 @@ impl App {
     }
 
     fn new_session(&self) -> Element<'_, Message> {
+        widget::responsive(|size| {
+            const INSET: f32 = 36.;
+            const GAP: f32 = 36.;
+            const MIN_PICKER: f32 = 300.;
+            let wide = self.harness.is_some()
+                && size.width >= INSET * 2. + MIN_PICKER + GAP + usage_panel::WIDTH;
+            let mut columns = row![container(self.project_picker()).width(Fill)];
+            let mut max_width = 650.;
+            if wide {
+                columns = columns
+                    .spacing(GAP)
+                    .push(usage_panel::view(self.usage_summary.as_ref()));
+                max_width += GAP + usage_panel::WIDTH;
+            }
+            container(scroll(
+                container(columns)
+                    .max_width(max_width - crate::scrollbar::GUTTER)
+                    .padding(iced::Padding::new(INSET).right(INSET - crate::scrollbar::GUTTER)),
+            ))
+            .center_x(Fill)
+            .height(Fill)
+            .into()
+        })
+        .into()
+    }
+
+    fn project_picker(&self) -> Element<'_, Message> {
         let mut projects = column![].spacing(2);
         let mut stashed = column![].spacing(2);
         let mut ordered: Vec<_> = self.catalog.projects.iter().collect();
@@ -5069,15 +5121,7 @@ impl App {
         if self.account.is_none() {
             content=content.push(container(column![text("Connect your ChatGPT subscription").size(16),text("Sign in from Settings. Your login is saved securely in your private orbit configuration directory.").size(13).style(theme::muted),theme::button(Icon::Settings.label("Open Settings", 16.)).on_press(Message::ToggleSettings).style(theme::text_button)].spacing(10)).padding(18).style(card));
         }
-        container(scroll(
-            container(content)
-                .max_width(650. - crate::scrollbar::GUTTER)
-                .padding(iced::Padding::new(36.).right(36. - crate::scrollbar::GUTTER)),
-        ))
-        .center_x(Fill)
-        .height(Fill)
-        .width(Fill)
-        .into()
+        content.into()
     }
     fn model_settings_table<'a>(&'a self) -> widget::Column<'a, Message> {
         let colors = &self.preset().colors;
@@ -14399,16 +14443,90 @@ Then implement the fix.";
             .collect();
         let mut renderer = header_renderer();
         let mut heading_y = None;
-        for (width, height) in [(350., 700.), (650., 700.), (650., 1000.)] {
+        let mut summary = orbit_core::store::activity::Summary::default();
+        let recent = summary.days.last_mut().unwrap();
+        recent.total = 1200;
+        recent.models.insert("fixture-model".into(), 1200);
+        for period in &mut summary.tokens {
+            period.input = 1000;
+            period.output = 200;
+            period.cached = 500;
+        }
+        summary
+            .generation
+            .push(orbit_core::store::activity::Generation {
+                model: "fixture-model".into(),
+                fast: true,
+                tokens_per_second: Some(50.),
+                latency_seconds: Some(1.25),
+            });
+        app.usage_summary = Some(Ok(Arc::new(summary)));
+        let mut cache = Cache::new();
+        for (width, height, wide) in [
+            (1000., 700., true),
+            (350., 700., false),
+            (650., 1000., false),
+            (1100., 700., true),
+        ] {
             let mut ui = UserInterface::build(
                 pointer_input(app.new_session(), false, app.chat_selection.clone()),
                 iced::Size::new(width, height),
-                Cache::new(),
+                cache,
                 &mut renderer,
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
             let heading = bounds.label("New session");
+            let activity = bounds.labels.iter().find(|(s, _)| s == "ACTIVITY");
+            assert_eq!(activity.is_some(), wide);
+            if let Some((_, activity)) = activity {
+                assert!(
+                    activity.x
+                        > bounds.label("Alpha project").x + bounds.label("Alpha project").width
+                );
+                assert!((activity.y - heading.y).abs() < 1.);
+                assert!(
+                    bounds.label("Last 30 days").x + bounds.label("Last 30 days").width <= width
+                );
+                assert!(bounds.label("50 tok/s").x > activity.x);
+                // An empty day's entire slot, not just its one-pixel baseline, opens a tip.
+                // Iced tooltips do not expose their contents to widget operations.
+                let caption = bounds.label("Daily usage");
+                let cursor =
+                    mouse::Cursor::Available(iced::Point::new(caption.x + 2., caption.y - 20.));
+                let mut captures = Vec::new();
+                for cursor in [mouse::Cursor::Unavailable, cursor] {
+                    ui.update(
+                        &[iced::Event::Window(window::Event::RedrawRequested(
+                            iced::time::Instant::now(),
+                        ))],
+                        cursor,
+                        &mut renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut vec![],
+                    );
+                    let colors = theme::default_colors();
+                    ui.draw(
+                        &mut renderer,
+                        &theme::app(),
+                        &iced::advanced::renderer::Style {
+                            text_color: colors.text,
+                        },
+                        cursor,
+                    );
+                    let pixels = crate::test_renderer::screenshot(
+                        &mut renderer,
+                        iced::Size::new(width as u32, height as u32),
+                        1.,
+                        colors.background,
+                    );
+                    captures.push(pixels);
+                }
+                assert!(
+                    captures[0] != captures[1],
+                    "hovering empty chart space must paint details"
+                );
+            }
             if let Some(y) = heading_y {
                 assert_eq!(
                     heading.y, y,
@@ -14455,6 +14573,7 @@ Then implement the fix.";
             );
             assert!(matches!(messages.as_slice(),
                 [Message::ProjectMenu(path, position)] if path == Path::new("/project-0") && *position == alpha.center()));
+            cache = ui.into_cache();
         }
         dispatch(&mut app, Message::ToggleStashed).await;
         assert!(

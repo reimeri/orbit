@@ -61,6 +61,7 @@ pub enum Delta {
 }
 #[derive(Debug)]
 pub struct Response {
+    pub first_output_latency: Option<Duration>,
     pub streaming_time: Duration,
     pub output: Vec<Value>,
     pub usage: Usage,
@@ -358,8 +359,8 @@ fn request_base(session: &Session, instructions: &str) -> Value {
     body["reasoning"] = json!({"effort":session.effort,"summary":"auto"});
     body
 }
-#[derive(Default)]
 struct ResponseStream<'a> {
+    sent_at: Instant,
     previous_calls: std::collections::HashSet<&'a str>,
     first_token: Option<Instant>,
     summary_indices: std::collections::HashMap<String, u64>,
@@ -401,6 +402,16 @@ fn validate_output_item(item: &Value) -> Result<()> {
 }
 
 impl ResponseStream<'_> {
+    fn new(sent_at: Instant) -> Self {
+        Self {
+            sent_at,
+            first_token: None,
+            previous_calls: Default::default(),
+            summary_indices: Default::default(),
+            completed_items: Default::default(),
+        }
+    }
+
     fn complete_item(
         &mut self,
         index: usize,
@@ -527,6 +538,7 @@ impl ResponseStream<'_> {
                     self.complete_item(index, item.clone(), emit)?;
                 }
                 return Ok(Some(Response {
+                    first_output_latency: self.first_token.map(|first| first - self.sent_at),
                     streaming_time: self.first_token.map_or(Duration::ZERO, |start| now - start),
                     output,
                     usage: Usage {
@@ -1237,7 +1249,7 @@ mod tests {
     }
     #[test]
     fn streamed_summary_parts_keep_boundaries_without_splitting_chunks() {
-        let mut stream = ResponseStream::default();
+        let mut stream = ResponseStream::new(Instant::now());
         let texts = std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
         let emit = |delta| {
             if let Delta::Text { id, text, .. } = delta {
@@ -1291,7 +1303,7 @@ mod tests {
             "response.function_call_arguments.delta",
             "response.custom_tool_call_input.delta",
         ] {
-            let mut stream = ResponseStream::default();
+            let mut stream = ResponseStream::new(start);
             stream
                 .event(json!({"type":"response.created"}), &|_| {}, start)
                 .unwrap();
@@ -1321,12 +1333,14 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(response.streaming_time, Duration::from_secs(5), "{kind}");
+            assert_eq!(response.first_output_latency, Some(Duration::from_secs(10)));
         }
-        let response = ResponseStream::default()
+        let response = ResponseStream::new(start)
             .event(completed, &|_| {}, start)
             .unwrap()
             .unwrap();
         assert_eq!(response.streaming_time, Duration::ZERO);
+        assert_eq!(response.first_output_latency, None);
     }
 
     #[test]
@@ -1340,7 +1354,7 @@ mod tests {
         let now = Instant::now();
         let call = json!({"type":"function_call","id":"wait-item","call_id":"wait",
             "name":"wait","arguments":"{\"cell_id\":\"cell\"}","status":"completed"});
-        let mut stream = ResponseStream::default();
+        let mut stream = ResponseStream::new(Instant::now());
         // Even complete-looking arguments are inert until the output item is done.
         stream
             .event(
@@ -1389,7 +1403,7 @@ mod tests {
             json!({"type":"custom_tool_call","call_id":"bad","name":"exec","input":"text('partial')","status":"in_progress"}),
             json!({"type":"function_call","call_id":"bad","name":"wait","arguments":{}}),
         ] {
-            assert!(ResponseStream::default().event(json!({"type":"response.output_item.done","output_index":0,"item":malformed}), &emit, now).is_err());
+            assert!(ResponseStream::new(Instant::now()).event(json!({"type":"response.output_item.done","output_index":0,"item":malformed}), &emit, now).is_err());
         }
         assert_eq!(events.lock().unwrap().len(), 1);
     }
@@ -1397,12 +1411,12 @@ mod tests {
     fn terminal_failure_cannot_release_tool_calls() {
         let event = json!({"type":"response.completed", "response":{"status":"incomplete","output":[{"type":"function_call","call_id":"a","name":"wait"}]}});
         assert!(
-            ResponseStream::default()
+            ResponseStream::new(Instant::now())
                 .event(event, &|_| {}, Instant::now())
                 .is_err()
         );
         assert!(
-            ResponseStream::default()
+            ResponseStream::new(Instant::now())
                 .event(json!({"type":"response.failed"}), &|_| {}, Instant::now())
                 .is_err()
         );

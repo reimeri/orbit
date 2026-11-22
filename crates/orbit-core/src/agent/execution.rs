@@ -160,6 +160,8 @@ impl Harness {
                             conversation.turn_usage.lock().expect("turn usage lock")
                                 .record_response(&completed);
                             session.usage.record_response(completed.usage.clone());
+                            conversation.pending_activity.lock().expect("activity lock")
+                                .push(crate::store::activity::Sample::new(snapshot, &completed));
                             reconcile_text(&mut session, &completed.output);
                             conversation.changed();
                         }

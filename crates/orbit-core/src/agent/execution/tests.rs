@@ -132,6 +132,11 @@ async fn manual_compaction_is_exclusive_and_does_not_start_a_turn() {
     let saved = f.saved();
     assert_eq!(saved.input[0], compacted);
     assert!(saved.usage.total_output > before.usage.total_output);
+    assert_eq!(
+        f.h.store.activity_summary().unwrap().tokens[0].output,
+        turn_output,
+        "compaction updates session totals, not picker activity"
+    );
     assert_eq!(f.c.turn_usage.lock().unwrap().output, turn_output);
     assert_eq!(saved.entries.len(), before.entries.len() + 1);
     assert!(
@@ -545,6 +550,31 @@ async fn stream_failure_stop_and_invalid_completion_preserve_results_without_rep
         );
         assert!(!f.dir.path().join("forbidden").exists());
     }
+}
+
+#[tokio::test]
+async fn failed_response_checkpoint_retries_activity_once_and_notifies_only_on_commit() {
+    let mut f = Fixture::new().await;
+    let mut changes = f.h.store.subscribe_activity();
+    let request = f.request().await;
+    sqlite::fail_writes(
+        &f.h.store.db.lock().unwrap(),
+        "response_activity",
+        "activity disk failure",
+    );
+    request.reply.send(completed(json!([]))).unwrap();
+    until(|| !f.c.is_turn_active()).await;
+    assert!(f.c.snapshot().needs_attention);
+    assert_eq!(f.h.store.activity_summary().unwrap().tokens[0].output, 0);
+    assert!(!changes.has_changed().unwrap());
+
+    sqlite::allow_writes(&f.h.store.db.lock().unwrap(), "response_activity");
+    f.h.flush().unwrap();
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    f.h.flush().unwrap();
+    assert!(!changes.has_changed().unwrap());
+    assert_eq!(f.h.store.activity_summary().unwrap().tokens[0].output, 11);
 }
 
 #[tokio::test]

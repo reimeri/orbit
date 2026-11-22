@@ -1,4 +1,5 @@
 //! Durable V2 state. Provider context and the complete visible transcript are separate.
+pub mod activity;
 mod forks;
 use crate::{
     agent::subagents::Profile,
@@ -683,10 +684,17 @@ impl From<&Session> for SessionSummary {
     }
 }
 
+pub(crate) enum Checkpoint<'a> {
+    Save(&'a [activity::Sample]),
+    ConsumeDraft,
+    StartRun(&'a crate::agent::subagents::RunInfo),
+}
+
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
     pub(crate) db: Arc<Mutex<Connection>>,
+    activity_changes: tokio::sync::watch::Sender<()>,
     _lock: Arc<nix::fcntl::Flock<File>>,
     #[cfg(test)]
     pub(crate) save_trace:
@@ -719,6 +727,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS fork_media_owner ON fork_media(owner);
             CREATE TABLE IF NOT EXISTS fork_points (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, state TEXT NOT NULL, entries TEXT NOT NULL, input TEXT NOT NULL, PRIMARY KEY(session,position));
             CREATE TABLE IF NOT EXISTS context (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));")?;
+        activity::initialize(&db)?;
         use crate::agent::subagents::{ORDINAL, PENDING, UNACKNOWLEDGED};
         db.execute_batch(&format!("
             CREATE INDEX IF NOT EXISTS subagent_child_assignment ON subagent_runs(session, {ORDINAL} DESC);
@@ -728,6 +737,7 @@ impl Store {
         Ok(Self {
             root,
             db: Arc::new(Mutex::new(db)),
+            activity_changes: tokio::sync::watch::channel(()).0,
             _lock: Arc::new(lock),
             #[cfg(test)]
             save_trace: None,
@@ -834,20 +844,19 @@ impl Store {
     }
     /// Commit the first message and consume its shared draft in one transaction.
     pub fn commit_new_session(&self, session: &Session) -> Result<()> {
-        self.save_session_transaction(None, session, true, None)
+        self.save_session_transaction(None, session, Checkpoint::ConsumeDraft)
     }
     pub fn save_session(&self, session: &Session) -> Result<()> {
         self.save_changes(None, session)
     }
     pub fn save_changes(&self, before: Option<&Session>, session: &Session) -> Result<()> {
-        self.save_session_transaction(before, session, false, None)
+        self.save_session_transaction(before, session, Checkpoint::Save(&[]))
     }
     pub(crate) fn save_session_transaction(
         &self,
         before: Option<&Session>,
         session: &Session,
-        consume_draft: bool,
-        run: Option<&crate::agent::subagents::RunInfo>,
+        checkpoint: Checkpoint<'_>,
     ) -> Result<()> {
         Uuid::parse_str(&session.id)?;
         #[cfg(test)]
@@ -873,15 +882,28 @@ impl Store {
             &session.input,
         )?;
         forks::save(&tx, before, session)?;
-        if let Some(run) = run {
-            tx.execute("INSERT INTO subagent_runs (id,parent,session,request,metadata) VALUES (?1,?2,?3,?4,?5)", params![run.run_id,run.parent_id,run.session_id,run.request_id,serde_json::to_string(run)?])?;
-        }
-        if consume_draft {
-            tx.execute("DELETE FROM new_session_draft", [])?;
+        match checkpoint {
+            Checkpoint::StartRun(run) => {
+                tx.execute("INSERT INTO subagent_runs (id,parent,session,request,metadata) VALUES (?1,?2,?3,?4,?5)", params![run.run_id,run.parent_id,run.session_id,run.request_id,serde_json::to_string(run)?])?;
+            }
+            Checkpoint::Save(samples) => {
+                for sample in samples {
+                    sample.insert(&tx)?;
+                }
+                if !samples.is_empty() {
+                    activity::prune(&tx, now())?;
+                }
+            }
+            Checkpoint::ConsumeDraft => {
+                tx.execute("DELETE FROM new_session_draft", [])?;
+            }
         }
         #[cfg(test)]
         let committing = std::time::Instant::now();
         tx.commit()?;
+        if matches!(checkpoint, Checkpoint::Save(samples) if !samples.is_empty()) {
+            self.activity_changes.send_replace(());
+        }
         #[cfg(test)]
         if let Some(trace) = &self.save_trace {
             let commit = committing.elapsed();

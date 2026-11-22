@@ -279,6 +279,7 @@ impl Provider {
                 self.connect(session_id, &hint, &mut credentials, &mut attempts, emit)
                     .await?
             };
+            let sent_at = Instant::now();
             timeout(Duration::from_secs(90), send_create(&mut socket, frame))
                 .await
                 .map_err(|_| StreamInterrupted)?
@@ -290,7 +291,7 @@ impl Provider {
                     .filter(|item| is_tool_call(item))
                     .filter_map(|item| item["call_id"].as_str())
                     .collect(),
-                ..Default::default()
+                ..ResponseStream::new(sent_at)
             };
             loop {
                 let msg = timeout(Duration::from_secs(120), socket.next())

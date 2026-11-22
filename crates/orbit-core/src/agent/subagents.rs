@@ -543,14 +543,20 @@ impl Harness {
         session.accept_submission(run.run_id.clone(), args.task.into(), false);
         if let Some(child) = &existing {
             let mut saved = child.persisted.lock().expect("persistence lock");
-            self.store
-                .save_session_transaction(saved.as_ref(), &session, false, Some(&run))?;
+            self.store.save_session_transaction(
+                saved.as_ref(),
+                &session,
+                crate::store::Checkpoint::StartRun(&run),
+            )?;
             *child.state.lock().expect("session lock") = session.clone();
             *saved = Some(session);
             child.changed();
         } else {
-            self.store
-                .save_session_transaction(None, &session, false, Some(&run))?;
+            self.store.save_session_transaction(
+                None,
+                &session,
+                crate::store::Checkpoint::StartRun(&run),
+            )?;
             self.make_conversation(session, true);
         }
         self.run_index().record(run.clone());
@@ -1316,6 +1322,11 @@ mod tests {
             {"type":"message","id":"final","phase":"final_answer","content":[{"type":"output_text","text":"Final sapphire finding"}]}
         ]))).unwrap();
         let wake = f.request().await;
+        assert_eq!(
+            f.h.store.activity_summary().unwrap().tokens[0].output,
+            22,
+            "one main response and one child response; waking the parent does not recount the child"
+        );
         assert_eq!(wake.body["prompt_cache_key"], f.parent);
         assert!(wake.body["input"].to_string().contains(&explore.run_id));
         assert!(
@@ -2207,7 +2218,11 @@ await new Promise(r => setTimeout(r, 60000));"#,
             ..lookup(RunKey::Id("run-31"))
         };
         store
-            .save_session_transaction(Some(&child), &child, false, Some(&later))
+            .save_session_transaction(
+                Some(&child),
+                &child,
+                crate::store::Checkpoint::StartRun(&later),
+            )
             .unwrap();
         h.run_index().record(later);
         let error = h.acknowledge_attention(seen).unwrap_err();
@@ -2264,7 +2279,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 attention_acknowledged: false,
             };
             store
-                .save_session_transaction(None, &child, false, Some(&run))
+                .save_session_transaction(None, &child, crate::store::Checkpoint::StartRun(&run))
                 .unwrap();
             children.push((child, run));
         }
