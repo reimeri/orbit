@@ -6800,6 +6800,9 @@ fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Bin
             direction,
         )));
     }
+    if questionnaire::word_delete(&event) {
+        return Some(text_editor::Binding::Custom(Message::DeletePreviousWord));
+    }
     if matches!(event.status, text_editor::Status::Focused { .. }) {
         if event.key == keyboard::Key::Named(keyboard::key::Named::Tab)
             && matches!(
@@ -6821,13 +6824,6 @@ fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Bin
                 && event.key == keyboard::Key::Named(keyboard::key::Named::Insert))
         {
             return Some(text_editor::Binding::Custom(Message::Paste));
-        }
-        if event.key == keyboard::Key::Named(keyboard::key::Named::Backspace)
-            && event.modifiers.control()
-            && !event.modifiers.alt()
-            && !event.modifiers.logo()
-        {
-            return Some(text_editor::Binding::Custom(Message::DeletePreviousWord));
         }
         if event.key == keyboard::Key::Named(keyboard::key::Named::Enter)
             && !event.modifiers.shift()
@@ -10838,6 +10834,94 @@ Then implement the fix.";
                     "Ctrl+{} on {value:?}: {messages:?}",
                     if ctrl_w { "W" } else { "Backspace" }
                 );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_w_follows_focus_and_repeats_without_rewriting_keys() {
+        use iced::advanced::widget::operation::{focusable, text_input as input};
+        use keyboard::{
+            Key, Modifiers,
+            key::{Code, Physical},
+        };
+
+        let app = app();
+        let content = text_editor::Content::new();
+        // Non-Latin layout: shortcut lookup falls back to the physical W key.
+        let key = Key::Character("ц".into());
+        let physical = Physical::Code(Code::KeyW);
+        let recorder = text_editor(&content)
+            .id("recorder")
+            .on_action(Message::Editor)
+            .key_binding(|press| {
+                if !matches!(press.status, text_editor::Status::Focused { .. }) {
+                    return None;
+                }
+                assert_eq!(press.key, key);
+                assert_eq!(press.physical_key, physical);
+                Some(text_editor::Binding::Custom(Message::Changed))
+            });
+        let view = pointer_input(
+            widget::column![
+                text_input("", "one two three")
+                    .id("field")
+                    .on_input(Message::Search),
+                app.composer_editor(false),
+                recorder
+            ]
+            .into(),
+            false,
+            Default::default(),
+        );
+        let mut renderer = header_renderer();
+        let mut ui = iced_runtime::UserInterface::build(
+            view,
+            iced::Size::new(400., 300.),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        ui.operate(&renderer, &mut input::move_cursor_to_end("field".into()));
+        for focus in ["field", "composer", "recorder"] {
+            ui.operate(&renderer, &mut focusable::focus(focus.into()));
+            for (extra, repeat) in [
+                (Modifiers::NONE, false),
+                (Modifiers::NONE, true),
+                (Modifiers::SHIFT, false),
+                (Modifiers::ALT, false),
+                (Modifiers::LOGO, false),
+            ] {
+                let modifiers = Modifiers::CTRL | extra;
+                let mut messages = Vec::new();
+                ui.update(
+                    &[
+                        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)),
+                        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                            key: key.clone(),
+                            modified_key: key.clone(),
+                            physical_key: physical,
+                            location: keyboard::Location::Standard,
+                            modifiers,
+                            text: None,
+                            repeat,
+                        }),
+                    ],
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                match focus {
+                    "recorder" => assert!(matches!(messages.as_slice(), [Message::Changed])),
+                    _ if extra != Modifiers::NONE => assert!(messages.is_empty(), "{messages:?}"),
+                    "field" => {
+                        let expected = if repeat { "one " } else { "one two " };
+                        assert!(
+                            matches!(messages.as_slice(), [Message::Search(s)] if s == expected)
+                        );
+                    }
+                    _ => assert!(matches!(messages.as_slice(), [Message::DeletePreviousWord])),
+                }
             }
         }
     }

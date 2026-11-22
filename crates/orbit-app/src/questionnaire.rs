@@ -475,9 +475,7 @@ Shift+Tab goes back · Shift+Enter adds a line";
                             Some(text_editor::Binding::Custom(message(Action::History(
                                 direction,
                             ))))
-                        } else if matches!(event.status, text_editor::Status::Focused { .. })
-                            && word_delete(&event.key, event.modifiers)
-                        {
+                        } else if word_delete(&event) {
                             Some(text_editor::Binding::Custom(message(Action::DeleteWord)))
                         } else {
                             text_editor::Binding::from_key_press(event)
@@ -544,12 +542,17 @@ Shift+Tab goes back · Shift+Enter adds a line";
         })
     }
 }
-fn word_delete(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
-    modifiers.control()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && (key == &keyboard::Key::Named(Named::Backspace)
-            || key.as_ref() == keyboard::Key::Character("w"))
+pub fn word_delete(event: &text_editor::KeyPress) -> bool {
+    matches!(event.status, text_editor::Status::Focused { .. })
+        && match event.key {
+            keyboard::Key::Named(Named::Backspace) => {
+                event.modifiers.control() && !event.modifiers.alt() && !event.modifiers.logo()
+            }
+            _ => {
+                event.modifiers == keyboard::Modifiers::CTRL
+                    && event.key.to_latin(event.physical_key) == Some('w')
+            }
+        }
 }
 /// Shared by composer and questionnaires, using logical Unicode word boundaries.
 pub fn delete_previous_word(editor: &mut text_editor::Content) {
