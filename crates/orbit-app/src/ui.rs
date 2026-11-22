@@ -116,6 +116,7 @@ pub enum SettingsSave {
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
 const SETTLE_FONT_SIZE: f32 = 12.;
+const SESSION_METADATA_GAP: f32 = 6.;
 const SIDEBAR_VERTICAL_INSET: f32 = 4.;
 const SIDEBAR_CONTENT_PADDING: f32 = crate::session_action::RIGHT;
 const FILED_ROW_HEIGHT: f32 = crate::session_action::HEIGHT + 2. * crate::session_action::PADDING;
@@ -3734,7 +3735,9 @@ impl App {
                 SidebarRow::Session(session_index, status) => {
                     let session = &self.sessions[*session_index];
                     let active = self.parent_id() == Some(session.id.as_str());
-                    let (mut project, badge) = self.session_project_label(&session.project, 16.);
+                    const BADGE_SIZE: f32 = 16.;
+                    let (mut project, badge) =
+                        self.session_project_label(&session.project, BADGE_SIZE);
                     if let Some(branch) = self.sidebar_branches.get(&session.project) {
                         project.push_str(" · ");
                         project.push_str(branch);
@@ -3754,22 +3757,37 @@ impl App {
                         age(session.updated)
                     };
                     let status = *status;
-                    let trailing: Element<'_, Message> = if status == SessionStatus::Unchecked {
-                        container(container(space().width(8).height(8)).style(move |_| {
-                            container::Style::default()
-                                .background(colors.accent)
-                                .border(iced::Border {
-                                    radius: 4.into(),
-                                    ..Default::default()
-                                })
-                        }))
-                        .width(12)
-                        .center_y(14)
-                        .into()
-                    } else if status == SessionStatus::Idle {
-                        crate::session_action::slot(crate::session_action::WIDTH)
+                    let project_line = |leading, trailing: Element<'static, Message>| {
+                        row![
+                            leading,
+                            ellipsized_text(&project, 11., Some(colors.muted)),
+                            trailing
+                        ]
+                        .spacing(SESSION_METADATA_GAP)
+                        .align_y(iced::Center)
+                    };
+                    let metadata: Element<'_, Message> = if status == SessionStatus::Idle {
+                        // The row-local hover widget paints the rest of this line.
+                        container(badge)
+                            .center_y(crate::session_action::HEIGHT)
+                            .into()
                     } else {
-                        text(age.clone()).size(10).style(theme::muted).into()
+                        let trailing: Element<'_, Message> = if status == SessionStatus::Unchecked {
+                            container(container(space().width(8).height(8)).style(move |_| {
+                                container::Style::default()
+                                    .background(colors.accent)
+                                    .border(iced::Border {
+                                        radius: 4.into(),
+                                        ..Default::default()
+                                    })
+                            }))
+                            .width(12)
+                            .center_y(14)
+                            .into()
+                        } else {
+                            crate::session_action::age(age.clone())
+                        };
+                        project_line(badge, trailing).into()
                     };
                     let phase_offset = match (&self.launch, status) {
                         (crate::Launch::Marketing(_), SessionStatus::Working) => 0.125,
@@ -3779,17 +3797,8 @@ impl App {
                     let content = mouse_area(
                         theme::button(session_wave::wave(
                             container(
-                                column![
-                                    ellipsized_text(&session.title, 13., None),
-                                    row![
-                                        badge,
-                                        ellipsized_text(&project, 11., Some(colors.muted)),
-                                        trailing
-                                    ]
-                                    .spacing(6)
-                                    .align_y(iced::Center)
-                                ]
-                                .spacing(3),
+                                column![ellipsized_text(&session.title, 13., None), metadata]
+                                    .spacing(3),
                             )
                             .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
                             .width(Fill),
@@ -3807,37 +3816,41 @@ impl App {
                     )
                     .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
                     if status == SessionStatus::Idle {
+                        // Fit the project label separately beside the age and the controls.
+                        // Switching between the two layouts needs only a redraw.
+                        let line =
+                            |trailing| project_line(space().width(BADGE_SIZE).into(), trailing);
+                        let actions = row![
+                            crate::session_action::control(
+                                container(Icon::Clock.view(SETTLE_FONT_SIZE))
+                                    .center_x(crate::session_action::HEIGHT)
+                                    .center_y(crate::session_action::HEIGHT),
+                                Message::FileSession(
+                                    session.id.clone(),
+                                    FilingAction::File(FilingKind::Deferred)
+                                ),
+                                "Defer session",
+                            ),
+                            crate::session_action::control(
+                                row![
+                                    Icon::Check.view(SETTLE_FONT_SIZE),
+                                    text("Settle").size(SETTLE_FONT_SIZE)
+                                ]
+                                .spacing(4)
+                                .align_y(iced::Center),
+                                Message::FileSession(
+                                    session.id.clone(),
+                                    FilingAction::File(FilingKind::Settled)
+                                ),
+                                "Settle session",
+                            )
+                        ]
+                        .spacing(crate::session_action::GAP)
+                        .align_y(iced::Center);
                         crate::session_action::row(
                             content,
-                            age,
-                            crate::session_action::WIDTH,
-                            row![
-                                crate::session_action::control(
-                                    container(Icon::Clock.view(SETTLE_FONT_SIZE))
-                                        .center_x(crate::session_action::HEIGHT)
-                                        .center_y(crate::session_action::HEIGHT),
-                                    Message::FileSession(
-                                        session.id.clone(),
-                                        FilingAction::File(FilingKind::Deferred)
-                                    ),
-                                    "Defer session",
-                                ),
-                                crate::session_action::control(
-                                    row![
-                                        Icon::Check.view(SETTLE_FONT_SIZE),
-                                        text("Settle").size(SETTLE_FONT_SIZE)
-                                    ]
-                                    .spacing(4)
-                                    .align_y(iced::Center),
-                                    Message::FileSession(
-                                        session.id.clone(),
-                                        FilingAction::File(FilingKind::Settled)
-                                    ),
-                                    "Settle session",
-                                )
-                            ]
-                            .spacing(crate::session_action::GAP)
-                            .align_y(iced::Center),
+                            line(crate::session_action::age(age)),
+                            line(actions.into()),
                         )
                     } else {
                         content.into()
@@ -4005,8 +4018,7 @@ impl App {
                 .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
                 let row = crate::session_action::row(
                     content,
-                    age,
-                    trailing_width,
+                    crate::session_action::age(age),
                     crate::session_action::control(
                         Icon::Undo2.view(crate::session_action::UNDO_SIZE),
                         Message::FileSession(session.id.clone(), FilingAction::Undo),
@@ -8402,7 +8414,9 @@ mod tests {
         use iced_runtime::{UserInterface, user_interface::Cache};
         let mut app = app();
         let path = app.smoke_dir.clone().unwrap();
-        stored_session(&mut app, path).await;
+        stored_session(&mut app, path.clone()).await;
+        const BRANCH: &str = "fix/sidebar-session-row-hover-truncation";
+        app.sidebar_branches.insert(path, BRANCH.into());
         let id = app.selected.clone().unwrap();
         let mut renderer = header_renderer();
         let size = iced::Size::new(180., 600.);
@@ -8494,6 +8508,22 @@ mod tests {
                     1.,
                     theme::default_colors().background,
                 );
+                if !settled && matches!(phase, 0 | 3) {
+                    // The long project/branch should paint text in the space
+                    // normally occupied by Settle, without counting the timer.
+                    let left = action.x.ceil() as usize;
+                    let right = bounds.label("now").x.floor() as usize;
+                    assert!(
+                        (action.y.ceil() as usize..(action.y + action.height).floor() as usize)
+                            .any(|y| {
+                                let row = &pixels[(y * size.width as usize + left) * 4
+                                    ..(y * size.width as usize + right) * 4];
+                                let (pixels, _) = row.as_chunks::<4>();
+                                pixels.iter().any(|pixel| pixel != &pixels[0])
+                            }),
+                        "hidden controls must leave room for project text"
+                    );
+                }
                 if !settled && matches!(phase, 1 | 2) {
                     let expected = if phase == 1 {
                         theme::default_colors().muted
@@ -8522,8 +8552,7 @@ mod tests {
                     );
                 }
                 // Sample just the trailing slot, not the row's hover background.
-                let left =
-                    (action.x + action.width - crate::session_action::WIDTH).floor() as usize;
+                let left = action.x.floor() as usize;
                 let right = (action.x + action.width).ceil() as usize;
                 let top = action.y.floor() as usize;
                 let bottom = (action.y + action.height).ceil() as usize;
@@ -8550,13 +8579,22 @@ mod tests {
             };
             let beside = iced::Point::new(button_left - 1., action.center_y());
             let defer = (!settled).then(|| {
-                bounds
+                let clock = bounds
                     .containers
                     .iter()
                     .filter(|b| b.center_y() == action.center_y() && b.x + b.width < action.x)
                     .max_by(|a, b| (a.x + a.width).total_cmp(&(b.x + b.width)))
-                    .expect("defer icon button")
-                    .center()
+                    .expect("defer icon button");
+                assert!(
+                    bounds
+                        .labels
+                        .iter()
+                        .any(|(text, label)| text.ends_with(BRANCH)
+                            && (clock.x - label.x - label.width - SESSION_METADATA_GAP).abs()
+                                < 0.01),
+                    "hovered project text should reach the Defer button with only the row gap"
+                );
+                clock.center()
             });
             let mut no_tip = None;
             for (point, show_tip) in [

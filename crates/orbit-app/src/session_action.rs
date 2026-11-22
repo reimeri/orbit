@@ -12,7 +12,6 @@ use iced::{
 use crate::theme;
 
 pub const GAP: f32 = 4.;
-pub const WIDTH: f32 = 64. + HEIGHT + GAP;
 pub const AGE_SIZE: f32 = 10.;
 pub const UNDO_SIZE: f32 = 16.;
 pub const HEIGHT: f32 = 18.;
@@ -37,29 +36,30 @@ pub fn control<'a, Message: Clone + 'a>(
         .into()
 }
 
+pub fn age<'a, Message: 'a>(value: String) -> Element<'a, Message> {
+    text(value).size(AGE_SIZE).style(theme::muted).into()
+}
+
 pub fn row<'a, Message: Clone + 'a>(
     content: impl Into<Element<'a, Message>>,
-    age: String,
-    width: f32,
+    resting: impl Into<Element<'a, Message>>,
     action: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let age = container(text(age).size(AGE_SIZE).style(theme::muted))
-        .align_right(width)
+    let resting = container(resting)
+        .align_right(Length::Fill)
         .center_y(HEIGHT);
-    let action = container(action).align_right(width).center_y(HEIGHT);
+    let action = container(action).align_right(Length::Fill).center_y(HEIGHT);
     Element::new(SessionAction {
         content: content.into(),
-        age: age.into(),
+        resting: resting.into(),
         action: action.into(),
-        width,
     })
 }
 
 struct SessionAction<'a, Message> {
     content: Element<'a, Message>,
-    age: Element<'a, Message>,
+    resting: Element<'a, Message>,
     action: Element<'a, Message>,
-    width: f32,
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SessionAction<'_, Message> {
@@ -70,12 +70,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SessionAction<'_,
         tree::State::new(false)
     }
     fn children(&self) -> Vec<Tree> {
-        [&self.content, &self.age, &self.action]
+        [&self.content, &self.resting, &self.action]
             .map(Tree::new)
             .into()
     }
     fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&[&self.content, &self.age, &self.action]);
+        tree.diff_children(&[&self.content, &self.resting, &self.action]);
     }
     fn size(&self) -> Size<Length> {
         self.content.as_widget().size()
@@ -91,13 +91,13 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SessionAction<'_,
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits);
         let size = content.size();
-        let position = iced::Point::new(
-            size.width - RIGHT - self.width,
-            size.height - PADDING - HEIGHT,
+        let position = iced::Point::new(RIGHT, size.height - PADDING - HEIGHT);
+        let slot_limits = layout::Limits::new(
+            Size::ZERO,
+            Size::new((size.width - 2. * RIGHT).max(0.), HEIGHT),
         );
-        let slot_limits = layout::Limits::new(Size::ZERO, Size::new(self.width, HEIGHT));
-        let age = self
-            .age
+        let resting = self
+            .resting
             .as_widget_mut()
             .layout(&mut tree.children[1], renderer, &slot_limits)
             .move_to(position);
@@ -106,7 +106,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SessionAction<'_,
             .as_widget_mut()
             .layout(&mut tree.children[2], renderer, &slot_limits)
             .move_to(position);
-        layout::Node::with_children(size, vec![content, age, action])
+        layout::Node::with_children(size, vec![content, resting, action])
     }
     fn operate(
         &mut self,
@@ -115,7 +115,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SessionAction<'_,
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        for ((element, tree), layout) in [&mut self.content, &mut self.age, &mut self.action]
+        for ((element, tree), layout) in [&mut self.content, &mut self.resting, &mut self.action]
             .into_iter()
             .zip(&mut tree.children)
             .zip(layout.children())
@@ -221,7 +221,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for SessionAction<'_,
         let (element, index) = if hovered {
             (&self.action, 2)
         } else {
-            (&self.age, 1)
+            (&self.resting, 1)
         };
         element.as_widget().draw(
             &tree.children[index],
