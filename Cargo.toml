@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/orbit-app", "crates/orbit-core"]
 default-members = ["crates/orbit-app"]
-exclude = [".build-deps/pulldown-cmark", ".build-deps/cosmic-text", ".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-winit", ".build-deps/iced-runtime", ".build-deps/iced-graphics", ".build-deps/rquickjs-sys", ".build-deps/rquickjs-core"]
+exclude = [".build-deps/pulldown-cmark", ".build-deps/cosmic-text", ".build-deps/winit", ".build-deps/iced-widget", ".build-deps/iced-winit", ".build-deps/iced-runtime", ".build-deps/iced-graphics", ".build-deps/iced-wgpu", ".build-deps/rquickjs-sys", ".build-deps/rquickjs-core"]
 resolver = "3"
 
 [workspace.package]
@@ -24,6 +24,7 @@ iced_widget = { path = ".build-deps/iced-widget" }
 iced_runtime = { path = ".build-deps/iced-runtime" }
 iced_winit = { path = ".build-deps/iced-winit" }
 iced_graphics = { path = ".build-deps/iced-graphics" }
+iced_wgpu = { path = ".build-deps/iced-wgpu" }
 rquickjs-sys = { path = ".build-deps/rquickjs-sys" }
 rquickjs-core = { path = ".build-deps/rquickjs-core" }
 cosmic-text = { path = ".build-deps/cosmic-text" }
