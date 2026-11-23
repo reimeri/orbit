@@ -34,7 +34,9 @@ pub fn tools(child: bool) -> Value {
 const DESCRIPTION: &str = r#"Run JavaScript tool calls in a fresh async QuickJS module; no Node, filesystem, network or console APIs.
 Only emitted output is returned. Await tool calls; unawaited work ends with the cell. Independent calls can use Promise.all.
 Optional first line: // @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000}
-Running cells return a cell_id for wait. Oversized text is saved in full to /tmp with its path and byte size.
+Shell max_output_tokens limits what exec_command or write_stdin returns to JavaScript; @exec max_output_tokens separately limits what the cell emits inline. Raise both for larger inline shell output.
+Oversized text is saved in full under /tmp with its path and byte size. Read or search that file with exec_command; wait does not replay it.
+For new output, use wait with a running cell_id or write_stdin with a running shell session_id.
 Globals:
 - text(value): emit text or JSON.
 - image(value), audio(value): emit a base64 data URL, URL object or MCP media block.
