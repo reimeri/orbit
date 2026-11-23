@@ -95,6 +95,29 @@ For file locations, backup and format compatibility, see
   source. A single giant paragraph, code fence or nested structure can still
   be expensive to lay out; see the [long-reply measurements](benchmarks/session-and-rendering.md#layout-within-a-long-markdown-reply).
 
+## Conversation Find
+
+Ctrl+F searches the loaded transcript, not the sidebar catalog, hidden activity,
+or files on disk. Literal Unicode case-insensitive matches use rendered Markdown
+text (including code lines) and literal user text. Find retains a plain-text
+projection only while open. A cancellable background scan coalesces edits;
+unchanged entries share their results during streaming. Only the tail reply
+keeps an incremental Markdown parser. A changed reference can invalidate earlier
+blocks in that reply. Match ordinals use cumulative counts rather than walking
+the history for each Next/Previous.
+
+A jump mounts the target entry and Markdown item directly, then uses shaped glyph
+bounds to reveal the occurrence vertically and, in wide code or tables,
+horizontally. This does not expand activity groups or shape intervening replies.
+
+To measure the search worker, run
+`nix develop --command cargo test --release --locked -p orbit find_20k_entries -- --ignored --nocapture`.
+The fixture contains 20,000 short formatted replies with code. In one local run
+the first query took 51 ms, a different query over the cached text took 6 ms,
+and updating one reply took 20–26 µs. These are index timings, not end-to-end
+input or frame latency. A single very large, unfinished Markdown block can still
+require reparsing that block when text arrives.
+
 ## Background work
 
 - Composer imports queue file paths and prepare one image at a time on a blocking

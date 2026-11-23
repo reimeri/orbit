@@ -118,7 +118,25 @@ impl Icon {
             glyph: self.glyph(),
             size,
             color: None,
-            spinning,
+            motion: if spinning {
+                Motion::Rotate
+            } else {
+                Motion::Still
+            },
+        })
+    }
+
+    /// Keep the idle icon until the deadline without polling or rebuilding the UI.
+    pub fn loader_after<'a, Message: 'a>(
+        self,
+        size: f32,
+        deadline: Instant,
+    ) -> Element<'a, Message> {
+        Element::new(IconWidget {
+            glyph: self.glyph(),
+            size,
+            color: None,
+            motion: Motion::LoaderAfter(deadline),
         })
     }
 
@@ -127,7 +145,7 @@ impl Icon {
             glyph: self.glyph(),
             size,
             color: Some(color),
-            spinning: false,
+            motion: Motion::Still,
         })
     }
 
@@ -158,16 +176,22 @@ enum Glyph {
     LoaderCircle,
 }
 
+enum Motion {
+    Still,
+    Rotate,
+    LoaderAfter(Instant),
+}
+
 struct IconWidget {
     glyph: Glyph,
     size: f32,
     color: Option<Color>,
-    spinning: bool,
+    motion: Motion,
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for IconWidget {
     fn tag(&self) -> tree::Tag {
-        if self.spinning {
+        if matches!(self.motion, Motion::Rotate) {
             tree::Tag::of::<Instant>()
         } else {
             tree::Tag::stateless()
@@ -175,7 +199,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for IconWidget {
     }
 
     fn state(&self) -> tree::State {
-        if self.spinning {
+        if matches!(self.motion, Motion::Rotate) {
             tree::State::new(Instant::now())
         } else {
             tree::State::None
@@ -193,11 +217,15 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for IconWidget {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if self.spinning
-            && matches!(event, Event::Window(window::Event::RedrawRequested(_)))
-            && layout.bounds().intersects(viewport)
-        {
-            shell.request_redraw();
+        if let Event::Window(window::Event::RedrawRequested(now)) = event {
+            let redraw = match self.motion {
+                Motion::Still => return,
+                Motion::LoaderAfter(at) if *now < at => window::RedrawRequest::At(at),
+                Motion::LoaderAfter(_) | Motion::Rotate => window::RedrawRequest::NextFrame,
+            };
+            if layout.bounds().intersects(viewport) {
+                shell.request_redraw_at(redraw);
+            }
         }
     }
 
@@ -225,18 +253,21 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for IconWidget {
         viewport: &Rectangle,
     ) {
         let color = self.color.unwrap_or(style.text_color);
-        let angle = if self.spinning {
-            tree.state
-                .downcast_ref::<Instant>()
-                .elapsed()
-                .as_secs_f32()
-                .fract()
-                * std::f32::consts::TAU
-        } else {
-            0.
+        let (glyph, elapsed) = match self.motion {
+            Motion::LoaderAfter(at) => match Instant::now().checked_duration_since(at) {
+                Some(elapsed) => (&Glyph::LoaderCircle, elapsed),
+                None => (&self.glyph, iced::time::Duration::ZERO),
+            },
+            Motion::Rotate => (&self.glyph, tree.state.downcast_ref::<Instant>().elapsed()),
+            Motion::Still => (&self.glyph, iced::time::Duration::ZERO),
         };
-        self.glyph
-            .draw(renderer, layout.bounds(), *viewport, color, angle);
+        glyph.draw(
+            renderer,
+            layout.bounds(),
+            *viewport,
+            color,
+            elapsed.as_secs_f32().fract() * std::f32::consts::TAU,
+        );
     }
 }
 

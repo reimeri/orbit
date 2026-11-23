@@ -6,6 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 tempfile = "3"
+im = "15.1"
+regex = "1"
 rustix = { version = "1", features = ["fs"] }
 anyhow = "1"
 sha2 = "0.10"

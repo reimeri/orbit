@@ -87,7 +87,52 @@ async fn questionnaires_preserve_session_drafts_queue_and_modal_priority() {
     .await;
     assert!(app.modal.is_none());
     assert_eq!(service.pending().len(), 2);
-    dispatch(&mut app, q("first-ask", questionnaire::Action::Next)).await;
+    // Opening Find by shortcut (rather than clicking outside the panel) must
+    // release questionnaire keyboard focus without disabling its buttons.
+    let mut renderer = header_renderer();
+    let size = Size::new(830., 600.);
+    let cache =
+        iced_runtime::UserInterface::build(app.center(), size, Default::default(), &mut renderer)
+            .into_cache();
+    let open = app.update(Message::Find(find::Action::Open));
+    let messages = {
+        use iced::futures::StreamExt;
+        let mut ui = iced_runtime::UserInterface::build(app.center(), size, cache, &mut renderer);
+        let mut stream = iced_runtime::task::into_stream(open).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Widget(mut op) = action {
+                ui.operate(&renderer, op.as_mut());
+            }
+        }
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        assert_eq!(bounds.focused, Some("conversation-find".into()));
+        let Message::Event(enter) = footer_key(keyboard::key::Named::Enter) else {
+            unreachable!()
+        };
+        let mut messages = Vec::new();
+        ui.update(
+            &[enter],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Questionnaire(..))),
+            "Find's Enter must not submit an answer"
+        );
+        click_at(&mut ui, &mut renderer, bounds.label("Submit").center())
+    };
+    for message in messages {
+        dispatch(&mut app, message).await
+    }
+    assert!(
+        app.find.is_some(),
+        "answering doesn't dismiss the floating popup"
+    );
     assert_eq!(app.active_questionnaire.as_deref(), Some("second-ask"));
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&tasks.remove(0).await.unwrap().unwrap())

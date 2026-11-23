@@ -17,6 +17,7 @@ codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage
 - Subagents
 - File tags and attachements
 - Spell checking
+- **Ctrl+F** finds text in the current conversation’s messages and code blocks. Find floats in the upper-right corner without moving the conversation or blocking questionnaire answers. Typing selects a nearby match; only **Enter** / **Shift+Enter** or the navigation buttons wrap around. **Esc** closes Find.
 - Markdown and LaTEX rendering
 - Git worktrees for parallel sessions
 - Skill support

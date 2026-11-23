@@ -1,4 +1,5 @@
 mod changes;
+pub(crate) mod find;
 mod forks;
 mod imports;
 mod marketing;
@@ -222,6 +223,8 @@ pub struct App {
     selected: Option<String>,
     search: String,
     search_active: bool,
+    find: Option<find::Find>,
+    find_serial: u64,
     editor: text_editor::Content,
     histories: DraftHistories,
     spellcheck: spellcheck::State,
@@ -315,6 +318,7 @@ pub enum Selection {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    Find(find::Action),
     FileCompletion(crate::file_completion::Message),
     Notification(crate::notifications::Message),
     Image(crate::image_view::Message),
@@ -561,6 +565,8 @@ impl App {
             selected,
             search: String::new(),
             search_active: false,
+            find: None,
+            find_serial: 0,
             editor: text_editor::Content::new(),
             histories: DraftHistories::default(),
             spellcheck: spellcheck::State::new(),
@@ -707,6 +713,7 @@ impl App {
             if let Some(id) = &active
                 && !self.settings_open
                 && !self.search_active
+                && self.find.is_none()
                 && self.modal.is_none()
                 && !self.footer_menu_open
                 && self.worktrees.popup.is_none()
@@ -750,6 +757,7 @@ impl App {
         let h = self.harness.as_ref().expect("harness");
         let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
             if self.current_session.take().is_some() {
+                self.find = None;
                 self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
                 self.activity = activity::Projection::default();
                 self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -828,6 +836,7 @@ impl App {
             }
         }
         self.current_session = Some(snapshot);
+        self.find_sync();
         self.acknowledge_focused_completion();
         self.append_transcript();
         if self.auto_scroll {
@@ -929,8 +938,7 @@ impl App {
         let mut image_urls = HashSet::new();
         if let Some(session) = &self.current_session {
             let visible: Vec<_> = self
-                .transcript
-                .visible()
+                .chat_range()
                 .filter_map(
                     |pos| match ActivityRow::from_id(self.transcript.order[pos]) {
                         ActivityRow::Entry(i) => Some((pos, i)),
@@ -1007,6 +1015,11 @@ impl App {
                         markdown.refresh_images();
                         markdown
                     });
+                    // A value-equal final reconciliation is invisible to the
+                    // history diff, but geometry messages carry the Arc identity.
+                    if !std::ptr::eq(entry, markdown.source.as_ref()) {
+                        markdown.source = session.entries.shared(index);
+                    }
                     image_urls.extend(markdown.images.iter().cloned());
                 }
                 if let EntryKind::Tool {
@@ -1216,6 +1229,7 @@ impl App {
         if self.io_busy {
             return;
         }
+        self.find = None;
         if let Some(id) = &self.selected {
             self.chat_positions
                 .insert(id.clone(), (self.transcript.offset, self.auto_scroll));
@@ -1973,7 +1987,11 @@ impl App {
                 self.prepare_sidebar();
                 return widget::operation::snap_to("sessions", scrollable::RelativeOffset::START);
             }
+            Message::Find(action) => return self.find_action(action),
             Message::ToggleSearch => {
+                if self.find.take().is_some() {
+                    self.prepare_visible();
+                }
                 self.histories.active.separate();
                 self.search_active = !self.search_active;
                 if self.search_active {
@@ -2200,6 +2218,9 @@ impl App {
                     return self.update_inner(Message::CancelSettings);
                 }
                 self.view_epoch = self.view_epoch.wrapping_add(1);
+                if self.find.take().is_some() {
+                    self.prepare_visible();
+                }
                 self.settings_open = true;
                 self.agents_open = false;
                 self.fork_panel = None;
@@ -2498,7 +2519,7 @@ impl App {
                 if epoch != self.view_epoch {
                     return Task::none();
                 }
-                self.auto_scroll = at_bottom;
+                self.auto_scroll = at_bottom && self.find.is_none();
                 self.transcript.offset = (offset - 20.).max(0.);
                 self.transcript.viewport = height;
                 self.prepare_visible();
@@ -2825,6 +2846,8 @@ impl App {
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
                             return self.update_inner(Message::Dismiss);
+                        } else if self.find.is_some() && !self.settings_open {
+                            return self.find_action(find::Action::Close);
                         } else if self.search_active {
                             return self.update_inner(Message::ToggleSearch);
                         } else if self.settings_open {
@@ -2853,6 +2876,29 @@ impl App {
                             }
                             self.acknowledge_selected_attention();
                         }
+                    } else if key.as_ref() == keyboard::Key::Character("f")
+                        && modifiers == keyboard::Modifiers::CTRL
+                    {
+                        return self.find_action(find::Action::Open);
+                    } else if self.find.is_some()
+                        && self.modal.is_none()
+                        && !self.settings_open
+                        && self.context_menu.is_none()
+                        && key == keyboard::Key::Named(keyboard::key::Named::Enter)
+                        && matches!(
+                            modifiers,
+                            keyboard::Modifiers::NONE | keyboard::Modifiers::SHIFT
+                        )
+                    {
+                        return widget::operation::is_focused("conversation-find").then(
+                            move |focused| {
+                                if focused {
+                                    Task::done(Message::Find(find::Action::Step(modifiers.shift())))
+                                } else {
+                                    Task::none()
+                                }
+                            },
+                        );
                     } else if self.modal.is_none()
                         && self.context_menu.is_none()
                         && modifiers.control()
@@ -3537,7 +3583,7 @@ impl App {
             .into()
         } else {
             let epoch = self.view_epoch;
-            let range = self.transcript.visible();
+            let range = self.chat_range();
             let mut children: Vec<(TranscriptKey, Element<'_, Message>)> = vec![(
                 TranscriptKey::Top,
                 space().height(self.transcript.prefix(range.start)).into(),
@@ -3606,6 +3652,7 @@ impl App {
                     crate::scrollbar::GUTTER,
                 ),
                 epoch,
+                self.find.as_ref().map(|f| f.frame.clone()),
                 move |offset, height, content_height| {
                     Message::Scroll(
                         epoch,
@@ -3617,6 +3664,13 @@ impl App {
             );
             scroll(content).id("chat").height(Fill).into()
         };
+        // Keep the scrollable at the base of the same stack even when Find is closed.
+        let chat = stack![chat].width(Fill).height(Fill);
+        let chat: Element<'_, Message> = match &self.find {
+            Some(find) => chat.push(find.popup()),
+            None => chat,
+        }
+        .into();
         let running = self.running();
         if let Some(child) = &session.child {
             use orbit_core::agent::subagents::RunStatus;
@@ -3710,6 +3764,7 @@ impl App {
                         && !self.search_active,
                     !self.settings_open
                         && !self.search_active
+                        && self.find.is_none()
                         && self.modal.is_none()
                         && !self.footer_menu_open
                         && self.worktrees.popup.is_none()
@@ -4349,20 +4404,26 @@ impl App {
                         }
                     }
                 }
+                let paint = self
+                    .find
+                    .as_ref()
+                    .map(|f| f.paint(index, entry))
+                    .unwrap_or_default();
                 if let Some(markdown) = self.markdown.get(&entry.id) {
-                    content = content.push(
-                        markdown.view(
-                            markdown::Settings::with_text_size(
-                                self.catalog.settings.font_size,
-                                theme::markdown_style(&self.preset().theme),
-                            ),
-                            &chat_selection::Viewer::new(self.chat_selection.clone(), index)
-                                .with_images(&self.markdown_images)
-                                .with_equations(&self.equations, &entry.id),
+                    let mut viewer =
+                        chat_selection::Viewer::new(self.chat_selection.clone(), index)
+                            .with_images(&self.markdown_images)
+                            .with_equations(&self.equations, &entry.id);
+                    viewer.find = paint;
+                    content = content.push(markdown.view(
+                        markdown::Settings::with_text_size(
+                            self.catalog.settings.font_size,
+                            theme::markdown_style(&self.preset().theme),
                         ),
-                    );
+                        &viewer,
+                    ));
                 } else {
-                    content = content.push(chat_selection::plain(
+                    content = content.push(chat_selection::plain_find(
                         &entry.text,
                         self.catalog.settings.font_size,
                         None,
@@ -4372,6 +4433,7 @@ impl App {
                             block: 0,
                             byte: 0,
                         },
+                        paint,
                     ));
                 }
                 if matches!(entry.kind, EntryKind::User { .. }) {

@@ -135,12 +135,18 @@ impl Draft {
     fn scroll_id(&self) -> String {
         format!("questionnaire-body-{}", self.pending.id)
     }
-    pub fn focus(&self) -> Task<Message> {
-        if self.uses_editor() && !self.collapsed && self.answers[self.current].replace.is_none() {
-            widget::operation::focus(self.editor_id())
+    fn focus_target(&self) -> Option<widget::Id> {
+        if self.collapsed {
+            None
+        } else if self.uses_editor() && self.answers[self.current].replace.is_none() {
+            Some(self.editor_id().into())
         } else {
-            Task::none()
+            Some("questionnaire-panel".into())
         }
+    }
+    pub fn focus(&self) -> Task<Message> {
+        self.focus_target()
+            .map_or_else(Task::none, widget::operation::focus)
     }
     pub fn update(&mut self, message: Message) -> Update {
         let mut result = Update {
@@ -651,6 +657,19 @@ struct Focus {
     question: usize,
     focused: bool,
 }
+// Programmatic focus (not just a mouse press) can transfer shortcuts to Find.
+impl operation::Focusable for Focus {
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+    fn focus(&mut self) {
+        self.focused = true;
+    }
+    fn unfocus(&mut self) {
+        self.focused = false;
+    }
+}
+
 impl Input<'_> {
     // The active answer can remain custom after the native editor loses focus.
     // Use native focus for both shortcut routing and the footer outline.
@@ -667,11 +686,11 @@ impl Input<'_> {
             renderer,
             &mut operation::black_box(&mut query),
         );
-        self.editor_focused.set(
-            self.enabled
-                && tree.state.downcast_ref::<Focus>().focused
-                && matches!(query.finish(), operation::Outcome::Some(true)),
-        );
+        let focused = matches!(query.finish(), operation::Outcome::Some(true));
+        if focused {
+            tree.state.downcast_mut::<Focus>().focused = false;
+        }
+        self.editor_focused.set(self.enabled && focused);
     }
 }
 impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
@@ -727,6 +746,11 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
+        operation.focusable(
+            Some(&"questionnaire-panel".into()),
+            layout.bounds(),
+            tree.state.downcast_mut::<Focus>(),
+        );
         self.content
             .as_widget_mut()
             .operate(&mut tree.children[0], layout, renderer, operation);
@@ -752,7 +776,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             _ => {}
         }
         if matches!(event, Event::Keyboard(_) | Event::InputMethod(_)) {
-            if !self.enabled || self.collapsed || !focus.focused {
+            if !self.enabled || self.collapsed || !(focus.focused || self.editor_focused.get()) {
                 return;
             }
             if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event {
@@ -926,8 +950,8 @@ mod tests {
                 user_interface::Cache::new(),
                 &mut renderer,
             );
-            if draft.uses_editor() {
-                ui.operate(&renderer, &mut focusable::focus(draft.editor_id().into()));
+            if let Some(target) = draft.focus_target() {
+                ui.operate(&renderer, &mut focusable::focus(target));
             }
             if outside {
                 ui.update(

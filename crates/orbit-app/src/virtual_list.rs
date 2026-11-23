@@ -121,7 +121,7 @@ impl List {
     pub fn total(&self) -> f32 {
         self.prefix(self.order.len())
     }
-    fn at(&self, offset: f32) -> usize {
+    pub fn at(&self, offset: f32) -> usize {
         let mut index = 0;
         let mut sum = 0.;
         let mut bit = self.order.len().next_power_of_two();

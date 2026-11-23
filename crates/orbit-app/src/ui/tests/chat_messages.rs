@@ -218,3 +218,150 @@ async fn steering_labels_live_only_in_queued_bubbles_not_the_composer() {
     }
     conversation.running.store(false, Ordering::Release);
 }
+
+#[tokio::test]
+async fn find_discards_obsolete_queries_and_sessions_without_touching_drafts() {
+    let mut app = app();
+    let path = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, path.clone()).await;
+    let id = app.selected.clone().unwrap();
+    let h = app.harness.clone().unwrap();
+    h.edit(&id, |s| {
+        s.entries
+            .push(Entry::new(EntryKind::Assistant, "old **needle** new"))
+    })
+    .unwrap();
+    dispatch(&mut app, Message::Changed).await;
+    type_message(&mut app, "keep this draft").await;
+    let open = || {
+        Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("f".into()),
+            modified_key: keyboard::Key::Character("f".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyF),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::CTRL,
+            text: None,
+            repeat: false,
+        }))
+    };
+    dispatch(&mut app, open()).await;
+    let old = app.update(Message::Find(find::Action::Query("old".into())));
+    dispatch(
+        &mut app,
+        Message::Find(find::Action::Query("needle".into())),
+    )
+    .await;
+    drain(&mut app, old).await;
+    let session = app.current().unwrap();
+    let paint = app.find.as_ref().unwrap().paint(0, &session.entries[0]);
+    let active = paint.active.unwrap();
+    assert_eq!((active.start, active.end), (4, 10));
+    h.edit(&id, |s| s.entries[0].text.push_str(" needle"))
+        .unwrap();
+    dispatch(&mut app, Message::Changed).await;
+    let paint = app
+        .find
+        .as_ref()
+        .unwrap()
+        .paint(0, &app.current().unwrap().entries[0]);
+    assert_eq!(paint.block(0).len(), 2);
+    assert_eq!(paint.active, Some(active));
+    dispatch(&mut app, footer_key(keyboard::key::Named::Escape)).await;
+    assert!(app.find.is_none());
+    assert_eq!(app.editor.text(), "keep this draft");
+    dispatch(&mut app, open()).await;
+    let stale = app.update(Message::Find(find::Action::Query("needle".into())));
+    stored_session(&mut app, path).await;
+    dispatch(&mut app, open()).await;
+    drain(&mut app, stale).await;
+    let mut renderer = header_renderer();
+    let mut ui = iced_runtime::UserInterface::build(
+        app.center(),
+        Size::new(650., 420.),
+        Default::default(),
+        &mut renderer,
+    );
+    let mut labels = UiBounds::default();
+    ui.operate(&renderer, &mut labels);
+    assert!(
+        !labels
+            .labels
+            .iter()
+            .any(|(text, _)| text.contains(" of ") || text == "No matches"),
+        "a newly opened Find has no previous results"
+    );
+}
+
+#[tokio::test]
+async fn find_keeps_last_count_and_only_animates_slow_queries() {
+    use iced::{advanced::clipboard, time::Instant, window::RedrawRequest};
+    use iced_runtime::{UserInterface, user_interface::State};
+
+    let mut app = app();
+    let mut session = Session::new("/chat".into(), &app.catalog.settings);
+    session.accept("cat cat cat".to_owned().into());
+    app.current_session = Some(session);
+    app.rebuild_transcript();
+    let query = |s: &str| Message::Find(find::Action::Query(s.into()));
+    dispatch(&mut app, Message::Find(find::Action::Open)).await;
+    dispatch(&mut app, query("cat")).await;
+    dispatch(&mut app, Message::Find(find::Action::Step(false))).await;
+
+    let mut renderer = header_renderer();
+    let mut frame = |app: &App, now| {
+        let mut ui = UserInterface::build(
+            app.find.as_ref().unwrap().popup(),
+            Size::new(600., 90.),
+            Default::default(),
+            &mut renderer,
+        );
+        let mut labels = UiBounds::default();
+        ui.operate(&renderer, &mut labels);
+        let (State::Updated { redraw_request, .. }, _) = ui.update(
+            &[iced::Event::Window(window::Event::RedrawRequested(now))],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut vec![],
+        ) else {
+            panic!("popup should not need rebuilding")
+        };
+        (
+            labels
+                .labels
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect::<String>(),
+            redraw_request,
+        )
+    };
+
+    // Hold the worker task and drive redraw time directly instead of racing a sleep.
+    let delay = Duration::from_millis(250);
+    let start = Instant::now();
+    let worker = app.update(query("absent"));
+    let issued = Instant::now();
+    let (count, RedrawRequest::At(deadline)) = frame(&app, start) else {
+        panic!("expected a single delayed redraw")
+    };
+    assert!((start + delay..=issued + delay).contains(&deadline));
+    assert_eq!(count, "2 of 3");
+    assert_eq!(
+        frame(&app, deadline - Duration::from_millis(1)).1,
+        RedrawRequest::At(deadline)
+    );
+    assert_eq!(frame(&app, deadline), (count, RedrawRequest::NextFrame));
+    drain(&mut app, worker).await;
+    assert_eq!(
+        frame(&app, deadline),
+        ("No matches".into(), RedrawRequest::Wait)
+    );
+
+    let cancelled = app.update(query("cat"));
+    dispatch(&mut app, query("")).await;
+    drain(&mut app, cancelled).await;
+    assert_eq!(
+        frame(&app, deadline + delay),
+        (String::new(), RedrawRequest::Wait)
+    );
+}

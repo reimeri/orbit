@@ -130,7 +130,17 @@ impl Window {
         settings: markdown::Settings,
         viewer: &Viewer<'a>,
     ) -> Element<'a, Message> {
-        let range = self.list.visible();
+        let mut range = self.list.visible();
+        if viewer.find.reveal.is_some()
+            && let Some(hit) = viewer.find.active
+        {
+            let item = self.starts.partition_point(|&n| n <= hit.block) - 1;
+            if !range.contains(&item) {
+                range = self
+                    .list
+                    .visible_at(self.list.prefix(item), self.list.viewport);
+            }
+        }
         viewer.start_block(self.starts[range.start]);
         let mut rows = vec![(None, space().height(self.list.prefix(range.start)).into())];
         for i in range.clone() {

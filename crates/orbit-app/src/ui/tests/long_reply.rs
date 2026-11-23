@@ -82,7 +82,10 @@ async fn settle(
         for message in messages {
             if !matches!(
                 message,
-                Message::MarkdownGeometry(..) | Message::RowSize(..) | Message::Scroll(..)
+                Message::MarkdownGeometry(..)
+                    | Message::RowSize(..)
+                    | Message::Scroll(..)
+                    | Message::Find(find::Action::Located { .. })
             ) {
                 continue;
             }
@@ -348,5 +351,299 @@ async fn streaming_into_windowed_layout_keeps_the_reader_at_the_same_text() {
     assert!(
         !app.auto_scroll,
         "layout changes must not resume following the tail"
+    );
+}
+
+#[tokio::test]
+async fn find_reveals_offscreen_occurrence_inside_a_virtual_reply_and_wide_code() {
+    let filler = "ordinary paragraph with **formatting**.\n\n".repeat(300);
+    let wide = format!("{}second NEEDLE", "abcdef".repeat(80));
+    let source = format!("first **needle**\n\n{filler}```txt\n{wide}\n```\n\n{filler}");
+    let mut app = fixture("a different message");
+    let session = app.current_session.as_mut().unwrap();
+    for i in 0..250 {
+        session
+            .entries
+            .push(Entry::new(EntryKind::Assistant, format!("unrelated {i}")));
+    }
+    session
+        .entries
+        .push(Entry::new(EntryKind::Assistant, source));
+    app.rebuild_transcript();
+    app.prepare_visible();
+    let size = Size::new(680., 460.);
+    let mut renderer = header_renderer();
+    let mut cache = Cache::new();
+    // Drive both native widget handling and the window keyboard subscription.
+    async fn key(
+        app: &mut App,
+        renderer: &mut iced::Renderer,
+        cache: &mut Cache,
+        size: Size,
+        key: keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) {
+        let event = iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            modifiers,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            text: None,
+            repeat: false,
+        });
+        let mut ui = UserInterface::build(app.center(), size, std::mem::take(cache), renderer);
+        let mut messages = vec![];
+        ui.update(
+            std::slice::from_ref(&event),
+            mouse::Cursor::Unavailable,
+            renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        *cache = ui.into_cache();
+        messages.push(Message::Event(event));
+        let mut pending: std::collections::VecDeque<_> = messages.into();
+        while let Some(message) = pending.pop_front() {
+            let task = app.update(message);
+            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    match action {
+                        iced_runtime::Action::Widget(mut op) => {
+                            let mut ui = UserInterface::build(
+                                app.center(),
+                                size,
+                                std::mem::take(cache),
+                                renderer,
+                            );
+                            ui.operate(renderer, op.as_mut());
+                            let _ = op.finish();
+                            *cache = ui.into_cache();
+                        }
+                        iced_runtime::Action::Output(msg) => pending.push_back(msg),
+                        _ => (),
+                    }
+                }
+            }
+        }
+    }
+    key(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        keyboard::Key::Character("f".into()),
+        keyboard::Modifiers::CTRL,
+    )
+    .await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    dispatch(
+        &mut app,
+        Message::Find(find::Action::Query("needle".into())),
+    )
+    .await;
+    let shaped = crate::chat_selection::tests::shaped_paragraphs();
+    for (step, label, count) in [
+        (None, "first needle", "1 of 2"),
+        (Some(false), wide.as_str(), "2 of 2"),
+        (Some(false), "first needle", "1 of 2"),
+        (Some(true), wide.as_str(), "2 of 2"),
+    ] {
+        if let Some(back) = step {
+            key(
+                &mut app,
+                &mut renderer,
+                &mut cache,
+                size,
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                if back {
+                    keyboard::Modifiers::SHIFT
+                } else {
+                    keyboard::Modifiers::NONE
+                },
+            )
+            .await;
+        }
+        settle(&mut app, &mut renderer, &mut cache, size, None).await;
+        let mut ui = UserInterface::build(
+            app.center(),
+            size,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut labels = UiBounds::default();
+        let mut viewport = Viewport::default();
+        ui.operate(&renderer, &mut labels);
+        ui.operate(&renderer, &mut viewport);
+        let target = labels.label(label);
+        assert!(labels.labels.iter().any(|(s, _)| s == count));
+        assert!(
+            (viewport.bounds.y..viewport.bounds.y + viewport.bounds.height)
+                .contains(&(target.center_y() - viewport.dy)),
+            "target {label} outside chat: {target:?}, offset {}",
+            viewport.dy
+        );
+        if label == wide {
+            // The occurrence ends at the last glyph of a line far wider than the viewport.
+            #[derive(Default)]
+            struct Horizontal(Vec<(iced::Rectangle, f32)>);
+            impl Operation for Horizontal {
+                fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+                    visit(self)
+                }
+                fn scrollable(
+                    &mut self,
+                    _: Option<&iced::advanced::widget::Id>,
+                    bounds: iced::Rectangle,
+                    content: iced::Rectangle,
+                    t: iced::Vector,
+                    _: &mut dyn iced::advanced::widget::operation::Scrollable,
+                ) {
+                    if content.width > bounds.width {
+                        self.0.push((bounds, t.x))
+                    }
+                }
+            }
+            let mut horizontal = Horizontal::default();
+            ui.operate(&renderer, &mut horizontal);
+            assert!(
+                horizontal.0.iter().any(|(b, dx)| *dx > 0.
+                    && (b.x..=b.x + b.width).contains(&(target.x + target.width - dx))),
+                "end of code line not visible"
+            );
+        }
+        cache = ui.into_cache();
+        if step.is_none() {
+            // Final response reconciliation can replace the Arc without changing
+            // the text. Subsequent inner-window measurements must still apply.
+            let history = &mut app.current_session.as_mut().unwrap().entries;
+            let last = history.len() - 1;
+            history[last] = history[last].clone();
+            app.prepare_visible();
+            app.find_sync();
+            let task = Task::batch(app.tasks.drain(..));
+            drain(&mut app, task).await;
+        }
+    }
+    assert!(
+        crate::chat_selection::tests::shaped_paragraphs() - shaped < 300,
+        "jumping should not shape the whole reply"
+    );
+}
+
+#[tokio::test]
+async fn find_open_and_close_preserve_scrolled_transcript_and_typing_does_not_wrap() {
+    let source: String = (0..150)
+        .map(|i| {
+            format!(
+                "Paragraph {i}{}\n\n",
+                if matches!(i, 2 | 70) {
+                    " contains a needle"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    let mut app = fixture(&source);
+    app.prepare_visible();
+    let size = Size::new(620., 470.);
+    let mut cache = Cache::new();
+    let mut renderer = header_renderer();
+    settle(&mut app, &mut renderer, &mut cache, size, Some(0.85)).await;
+    let (offset, (before, _)) = visible_text(&app, &mut renderer, &mut cache, size);
+    // Use an absolute scroll (as after wheel/drag), not a relative snap that
+    // intentionally moves as the viewport height changes.
+    move_to(&app, &mut renderer, &mut cache, size, offset);
+    assert!(
+        before
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 70
+    );
+    dispatch(&mut app, Message::Find(find::Action::Open)).await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    let (opened, (first, _)) = visible_text(&app, &mut renderer, &mut cache, size);
+    assert_eq!(
+        first, before,
+        "opening Find must not replace the scrollable"
+    );
+    assert!((opened - offset).abs() < 1.);
+    dispatch(
+        &mut app,
+        Message::Find(find::Action::Query("needle".into())),
+    )
+    .await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    let mut ui = UserInterface::build(
+        app.center(),
+        size,
+        std::mem::take(&mut cache),
+        &mut renderer,
+    );
+    let mut labels = UiBounds::default();
+    let mut viewport = Viewport::default();
+    ui.operate(&renderer, &mut labels);
+    ui.operate(&renderer, &mut viewport);
+    assert!(labels.labels.iter().any(|(s, _)| s == "2 of 2"));
+    let y = labels.label("Paragraph 70 contains a needle").center_y() - viewport.dy;
+    assert!((viewport.bounds.y..viewport.bounds.y + viewport.bounds.height).contains(&y));
+    cache = ui.into_cache();
+    let (_, (before_close, _)) = visible_text(&app, &mut renderer, &mut cache, size);
+    dispatch(&mut app, Message::Find(find::Action::Close)).await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    assert_eq!(
+        visible_text(&app, &mut renderer, &mut cache, size).1.0,
+        before_close
+    );
+}
+
+#[tokio::test]
+async fn find_popup_overlays_the_upper_right_and_fits_narrow_transcripts() {
+    let mut app = fixture("An existing reply");
+    app.prepare_visible();
+    let mut renderer = header_renderer();
+    let mut layout = |app: &App, width| {
+        let mut ui = UserInterface::build(
+            app.center(),
+            Size::new(width, 520.),
+            Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        (bounds.scroll("chat"), bounds.find_input)
+    };
+    let widths = [980., 790., 320.];
+    let closed = widths.map(|width| layout(&app, width).0);
+    dispatch(&mut app, Message::Find(find::Action::Open)).await;
+    let fields: [iced::Rectangle; 3] = std::array::from_fn(|i| {
+        let (chat, field) = layout(&app, widths[i]);
+        let field = field.unwrap();
+        assert_eq!(
+            chat, closed[i],
+            "opening Find must not take space from the transcript"
+        );
+        assert!(field.is_within(&chat) && field.center_y() < chat.center_y());
+        field
+    });
+    assert!(
+        fields[0].x > closed[0].center_x(),
+        "popup should not occupy the left half of a wide transcript"
+    );
+    assert_eq!(fields[0].width, fields[1].width);
+    assert_eq!(
+        widths[0] - fields[0].x,
+        widths[1] - fields[1].x,
+        "popup should follow the right edge"
+    );
+    assert!(
+        fields[2].width > 0. && fields[2].width < fields[1].width,
+        "input should shrink in a narrow pane"
     );
 }

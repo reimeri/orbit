@@ -1,5 +1,6 @@
 //! Logical transcript positions survive virtualized widgets being unmounted.
 //! Only mounted text is shaped; copy reconstructs the selected entries on demand.
+use crate::conversation_find::Paint;
 use crate::scrollbar::horizontal;
 use crate::ui::Message;
 use iced::{
@@ -303,6 +304,7 @@ pub fn copy_blocks(
 }
 
 pub struct Viewer<'a> {
+    pub find: Paint,
     images: Option<&'a crate::markdown_images::Cache>,
     equations: Option<(&'a crate::equations::Cache, &'a str)>,
     selection: Shared,
@@ -313,6 +315,7 @@ pub struct Viewer<'a> {
 impl<'a> Viewer<'a> {
     pub fn new(selection: Shared, entry: usize) -> Self {
         Self {
+            find: Paint::default(),
             images: None,
             equations: None,
             selection,
@@ -360,6 +363,7 @@ impl<'a> Viewer<'a> {
                 byte: 0,
             },
             SelectableText::Block,
+            self.find.clone(),
         )
     }
 }
@@ -388,6 +392,9 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
             Font::MONOSPACE,
             "\n\n",
         );
+        if !self.find.block(block).is_empty() {
+            return literal;
+        }
         match self.equations {
             Some((cache, entry_id)) => {
                 cache.view((entry_id, block), source, settings.text_size, literal)
@@ -484,6 +491,17 @@ pub fn plain(
     selection: Shared,
     at: Position,
 ) -> Element<'static, Message> {
+    plain_find(value, size, color, selection, at, Paint::default())
+}
+
+pub fn plain_find(
+    value: &str,
+    size: f32,
+    color: Option<Color>,
+    selection: Shared,
+    at: Position,
+    find: Paint,
+) -> Element<'static, Message> {
     let mut span = Span::new(value.to_owned());
     span.color = color;
     selectable(
@@ -493,6 +511,7 @@ pub fn plain(
         selection,
         at,
         SelectableText::Plain,
+        find,
     )
 }
 
@@ -519,6 +538,7 @@ pub fn tool_row(
         selection,
         at,
         SelectableText::Row { height, units },
+        Paint::default(),
     );
     if heading {
         container(row)
@@ -542,6 +562,7 @@ fn selectable(
     selection: Shared,
     at: Position,
     kind: SelectableText,
+    find: Paint,
 ) -> Element<'static, Message> {
     let row_height = match &kind {
         SelectableText::Row { height, .. } => Some(*height),
@@ -556,6 +577,7 @@ fn selectable(
         SelectableText::Block | SelectableText::Plain => text::Wrapping::WordOrGlyph,
     };
     Element::new(Selectable {
+        find,
         height: row_height.map_or(Length::Shrink, Length::Fixed),
         spans,
         kind,
@@ -569,6 +591,7 @@ fn selectable(
 }
 
 struct Selectable {
+    find: Paint,
     height: Length,
     spans: Arc<[Span<'static, String>]>,
     kind: SelectableText,
@@ -851,6 +874,71 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             .position()
             .filter(|p| viewport.contains(*p) && bounds.contains(*p))
             .map(|p| p - bounds.position());
+        if let Event::Window(iced::window::Event::RedrawRequested(_)) = event
+            && let Some(frame) = &self.find.frame
+        {
+            let chat = frame.viewport.get();
+            if bounds.y + bounds.height > chat.y && bounds.y < chat.y + chat.height {
+                let start = Position {
+                    byte: if bounds.y >= chat.y {
+                        0
+                    } else {
+                        self.hit(state, Point::new(0., chat.y - bounds.y))
+                            .map_or(0, |hit| hit.byte)
+                    },
+                    ..self.at
+                };
+                let end = Position {
+                    byte: if bounds.y + bounds.height <= chat.y + chat.height {
+                        state.content.len()
+                    } else {
+                        self.hit(
+                            state,
+                            Point::new(bounds.width, chat.y + chat.height - bounds.y),
+                        )
+                        .map_or(state.content.len(), |hit| hit.byte)
+                    },
+                    ..self.at
+                };
+                let (first, last) = frame.visible.get().unwrap_or((start, end));
+                frame.visible.set(Some((first.min(start), last.max(end))));
+            }
+            if let Some(token) = self.find.reveal
+                && let Some(hit) = self.find.active.filter(|h| h.block == self.at.block)
+            {
+                // Reveal the first visual line of the match, not the paragraph's origin.
+                let target = state
+                    .paragraph
+                    .buffer()
+                    .layout_runs()
+                    .find_map(|run| {
+                        let line = state.index.lines[run.line_i].start;
+                        let mut glyphs = run
+                            .glyphs
+                            .iter()
+                            .filter(|g| line + g.end > hit.start && line + g.start < hit.end);
+                        let g = glyphs.next()?;
+                        let (left, right) = glyphs
+                            .fold((g.x, g.x + g.w), |(l, r), g| (l.min(g.x), r.max(g.x + g.w)));
+                        Some(Rectangle {
+                            x: bounds.x + left,
+                            y: bounds.y + run.line_top,
+                            width: right - left,
+                            height: run.line_height,
+                        })
+                    })
+                    .unwrap_or(bounds);
+                let geometry = Some((token, target, chat, *viewport));
+                if frame.located.replace(geometry) != geometry {
+                    shell.publish(Message::Find(crate::ui::find::Action::Located {
+                        token,
+                        target,
+                        chat,
+                        inner: *viewport,
+                    }));
+                }
+            }
+        }
         // Re-hit after a wheel scroll/reflow even if the pointer is stationary,
         // and once more on release before the root ends the drag.
         if self.selection.borrow().dragging
@@ -1003,6 +1091,70 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                     }
                 }
             }
+        }
+        let hits = self.find.block(self.at.block);
+        if !hits.is_empty() {
+            let colors = crate::theme::colors(theme);
+            renderer.with_layer(clip, |renderer| {
+                for run in paragraph.buffer().layout_runs() {
+                    let y = layout.position().y + run.line_top;
+                    if y + run.line_height <= clip.y {
+                        continue;
+                    }
+                    if y >= clip.y + clip.height {
+                        break;
+                    }
+                    let line = state.index.lines[run.line_i].start;
+                    // Glyphs are in visual order (including bidi). Never rescan
+                    // the paragraph for each individual occurrence.
+                    let mut area: Option<(bool, Rectangle)> = None;
+                    let mut fill = |(active, bounds)| {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds,
+                                ..Default::default()
+                            },
+                            if active {
+                                colors.warning.scale_alpha(0.8)
+                            } else {
+                                colors.accent.scale_alpha(0.32)
+                            },
+                        )
+                    };
+                    for g in run.glyphs {
+                        let byte = line + g.start;
+                        let i = hits.partition_point(|h| h.end <= byte);
+                        if let Some(h) = hits.get(i).filter(|h| h.start < line + g.end) {
+                            let active = self.find.active == Some(*h);
+                            let x = layout.position().x + g.x;
+                            if let Some((a, rect)) = &mut area
+                                && *a == active
+                                && (rect.x + rect.width - x).abs() < 0.5
+                            {
+                                rect.width = x + g.w - rect.x;
+                            } else {
+                                if let Some(prev) = area.take() {
+                                    fill(prev)
+                                }
+                                area = Some((
+                                    active,
+                                    Rectangle {
+                                        x,
+                                        y,
+                                        width: g.w,
+                                        height: run.line_height,
+                                    },
+                                ));
+                            }
+                        } else if let Some(prev) = area.take() {
+                            fill(prev)
+                        }
+                    }
+                    if let Some(prev) = area {
+                        fill(prev)
+                    }
+                }
+            });
         }
         iced::widget::text::draw(
             renderer,
@@ -1202,6 +1354,7 @@ pub(crate) mod tests {
                     byte: 0,
                 },
                 kind,
+                Paint::default(),
             );
             let mut tree = Tree::new(view.as_widget());
             let mut previous_height = 0.;
@@ -1346,6 +1499,7 @@ pub(crate) mod tests {
                     Paragraphs::Block => SelectableText::Block,
                     _ => SelectableText::Plain,
                 },
+                Paint::default(),
             );
             let mut ui = UserInterface::build(
                 pointer_input(view, false, selection.clone()),
@@ -1546,6 +1700,7 @@ pub(crate) mod tests {
                         byte: 0,
                     },
                     SelectableText::Block,
+                    Paint::default(),
                 ),
                 false,
                 selection.clone(),
@@ -1978,6 +2133,7 @@ pub(crate) mod tests {
                                 byte: 0,
                             },
                             SelectableText::Block,
+                            Paint::default(),
                         )
                     };
                     let mut ui = UserInterface::build(

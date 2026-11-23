@@ -16,9 +16,11 @@ use iced::{
 pub fn observe<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     epoch: u64,
+    frame: Option<std::rc::Rc<crate::conversation_find::Frame>>,
     on_change: impl Fn(f32, f32, f32) -> Message + 'a,
 ) -> Element<'a, Message> {
     Element::new(Viewport {
+        frame,
         content: content.into(),
         observer: Observer::Viewport(epoch, Box::new(on_change)),
     })
@@ -31,6 +33,7 @@ pub fn observe_layout<'a, Message: 'a>(
     probe: impl Fn(Layout<'_>, &Rectangle) -> Option<Message> + 'a,
 ) -> Element<'a, Message> {
     Element::new(Viewport {
+        frame: None,
         content,
         observer: Observer::Layout(Box::new(probe)),
     })
@@ -42,6 +45,7 @@ enum Observer<'a, Message> {
     Layout(Box<Probe<'a, Message>>),
 }
 struct Viewport<'a, Message> {
+    frame: Option<std::rc::Rc<crate::conversation_find::Frame>>,
     content: Element<'a, Message>,
     observer: Observer<'a, Message>,
 }
@@ -100,6 +104,10 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Viewport<'_, Mess
     ) {
         let redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_)));
         if redraw && let Observer::Viewport(epoch, on_change) = &self.observer {
+            if let Some(frame) = &self.frame {
+                frame.viewport.set(*viewport);
+                frame.visible.set(None);
+            }
             let bounds = layout.bounds();
             let geometry = (*epoch, *viewport, bounds);
             let state = tree.state.downcast_mut::<State>();
@@ -220,6 +228,7 @@ mod tests {
             let content = observe(
                 space().height(content_height).width(Length::Fill),
                 epoch,
+                None,
                 |offset, height, content| (offset, height, content),
             );
             // Nonzero origin ensures offsets are content-relative, not window Y.

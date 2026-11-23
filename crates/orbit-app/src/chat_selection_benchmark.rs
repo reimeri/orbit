@@ -186,6 +186,7 @@ fn selection_scroll_benchmark() {
                 crate::scrollbar::scroll(crate::transcript_viewport::observe(
                     container(element).width(Length::Fill),
                     0,
+                    None,
                     |offset, height, _| Message::Scroll(0, offset, height, false),
                 ))
                 .width(Length::Fill)
