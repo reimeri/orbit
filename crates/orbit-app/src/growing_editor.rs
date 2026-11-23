@@ -1544,6 +1544,42 @@ mod tests {
     }
 
     #[test]
+    fn wheeling_at_the_end_of_a_wrapped_draft_keeps_the_viewport_stable() {
+        // Most rows belong to the first logical line, even at the bottom.
+        let last_line = "Plan the skill.";
+        let draft = format!(
+            "{}\n\n{last_line}",
+            "Select the friendly units. ".repeat(24)
+        );
+        let mut editor = Editor::new(&draft);
+        for (width, overflows) in [(240., true), (1200., false)] {
+            editor.layout(width);
+            editor.content.perform(Action::Move(Motion::DocumentEnd));
+            let node = editor.layout(width);
+            assert_eq!(editor.bar(&node).is_some(), overflows);
+            let height = node.size().height;
+            for _ in 0..2 {
+                editor.events(
+                    &node,
+                    &[(
+                        Event::Mouse(mouse::Event::WheelScrolled {
+                            delta: mouse::ScrollDelta::Lines { x: 0., y: -1. },
+                        }),
+                        node.bounds().center(),
+                    )],
+                );
+                let next = editor.layout(width);
+                assert_eq!(next.size().height, height);
+                editor.content.with_editor(|native| {
+                    let row = native.buffer().layout_runs().last().unwrap();
+                    assert_eq!(row.text, last_line);
+                    assert_eq!(row.line_top + row.line_height, height - 2. * PADDING);
+                });
+            }
+        }
+    }
+
+    #[test]
     fn scrollbar_uses_wrapped_rows_and_disappears_at_the_limit_or_after_reflow() {
         let mut editor = Editor::new(&["line"; VISIBLE_ROWS].join("\n"));
         let node = editor.layout(400.);

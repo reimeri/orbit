@@ -73,3 +73,13 @@ when a deletion is reversed (re-parsing the flattened text could otherwise
 coalesce lines, invalidating later byte offsets). It collects removed text only
 while recording and drains removed lines together rather than repeatedly moving
 the suffix when undoing a large paste. See the app's `editor_history` tests.
+
+## Wrapped scrolling at the end of a draft
+
+`wrapped-scroll-limit.patch` clamps the viewport at the end of the text even when
+it starts inside the first wrapped paragraph. Upstream only corrects overscroll
+when there is a preceding logical line. Scrolling farther down could therefore
+expose blank space and make iced's shrink-to-fit editor measure fewer visible
+rows. The clamp uses the row heights already measured for scrolling; it does not
+shape offscreen text. The growing-editor wheel regression covers both an
+overflowing draft and the same text reflowed to fit.

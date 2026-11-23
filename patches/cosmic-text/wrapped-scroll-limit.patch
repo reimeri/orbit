@@ -1,0 +1,34 @@
+--- a/src/buffer.rs
++++ b/src/buffer.rs
+@@ -438,7 +438,8 @@
+             }
+ 
+             let scroll_start = self.scroll.vertical;
+-            let scroll_end = scroll_start + self.height_opt.unwrap_or(f32::INFINITY);
++            let viewport_height = self.height_opt.unwrap_or(f32::INFINITY);
++            let scroll_end = scroll_start + viewport_height;
+ 
+             let mut total_height = 0.0;
+             for line_i in 0..self.lines.len() {
+@@ -473,13 +474,16 @@
+                 }
+             }
+ 
+-            if total_height < scroll_end && self.scroll.line > 0 {
+-                // Need to scroll up to stay inside of buffer
+-                self.scroll.vertical -= scroll_end - total_height;
+-            } else {
+-                // Done adjusting scroll
++            if total_height >= scroll_end {
+                 break;
+             }
++            if self.scroll.line == 0 {
++                // Even the first logical line can scroll vertically when it wraps.
++                self.scroll.vertical = (total_height - viewport_height).max(0.0);
++                break;
++            }
++            // Move back through preceding lines until the viewport is filled.
++            self.scroll.vertical -= scroll_end - total_height;
+         }
+ 
+         if old_scroll != self.scroll {
