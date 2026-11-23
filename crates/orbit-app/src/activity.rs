@@ -112,6 +112,8 @@ pub struct Block {
 #[derive(Default)]
 pub struct Projection {
     source: History<Entry>,
+    /// Chronological prompt ordinals map directly to stable source rows.
+    pub prompts: Vec<usize>,
     pub blocks: BTreeMap<usize, Block>,
     children: HashMap<String, usize>,
     cells: HashMap<String, String>,
@@ -206,10 +208,16 @@ impl Projection {
                 }
             });
         self.blocks.split_off(&start);
+        self.prompts
+            .truncate(self.prompts.partition_point(|&i| i < start));
         let mut index = start;
         while index < entries.len() {
             let begin = index;
-            let activity = is_activity(&entries[index]);
+            let entry = &entries[index];
+            if matches!(entry.kind, EntryKind::User { .. }) {
+                self.prompts.push(index);
+            }
+            let activity = is_activity(entry);
             index += 1;
             if activity {
                 while index < entries.len() && is_activity(&entries[index]) {

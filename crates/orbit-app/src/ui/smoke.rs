@@ -337,7 +337,7 @@ impl App {
                         "chat",
                         scrollable::AbsoluteOffset {
                             x: 0.,
-                            y: self.transcript.offset + 20.,
+                            y: self.transcript.offset + CHAT_VERTICAL_PADDING,
                         },
                     ),
                     widget::operation::scroll_to(

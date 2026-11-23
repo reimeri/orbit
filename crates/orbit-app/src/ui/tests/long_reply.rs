@@ -805,3 +805,224 @@ async fn find_popup_overlays_the_upper_right_and_fits_narrow_transcripts() {
         "input should shrink in a narrow pane"
     );
 }
+
+#[tokio::test]
+async fn prompt_rail_browses_independently_and_jumps_across_virtualized_history() {
+    let mut app = app();
+    let mut session = Session::new("/chat".into(), &app.catalog.settings);
+    for i in 0..10_000 {
+        session.accept(format!("Question {i}").into());
+        session
+            .entries
+            .push(Entry::new(EntryKind::Assistant, "Answer"));
+    }
+    app.selected = Some(session.id.clone());
+    app.current_session = Some(session);
+    app.rebuild_transcript();
+    app.prepare_visible();
+    let mut renderer = header_renderer();
+    let mut cache = Cache::new();
+    // Leave half a panel of spare room. Opening the panel consumes that margin,
+    // without any change to the width of the window itself.
+    app.window_width +=
+        app.catalog.settings.chat_width - app.center_dimensions().1 + app.panel_width() / 2.;
+    let wide = app.window_width;
+    let mut target = None;
+    for (width, panel, shown) in [
+        (wide, false, true),
+        (wide, true, false),
+        (wide - app.panel_width(), false, false),
+        (wide, false, true),
+    ] {
+        app.window_width = width;
+        app.agents_open = panel;
+        let size = Size::new(width, 700.);
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        let mut before = Viewport::default();
+        ui.operate(&renderer, &mut before);
+        let point = iced::Point::new(before.bounds.x + 4., before.bounds.center_y());
+        let click = |ui: &mut UserInterface<'_, Message, Theme, iced::Renderer>,
+                     renderer: &mut iced::Renderer| {
+            click_at(ui, renderer, point)
+                .into_iter()
+                .find_map(|m| match m {
+                    Message::JumpToPrompt(id) => Some(id),
+                    _ => None,
+                })
+        };
+        let hit = click(&mut ui, &mut renderer);
+        assert_eq!(hit.is_some(), shown, "panel={panel}, width={width}");
+        if shown && target.is_none() {
+            let mut messages = vec![];
+            ui.update(
+                &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Lines { x: 0., y: -150. },
+                })],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+            assert!(messages.is_empty(), "wheel input stays local to the rail");
+            let mut after = Viewport::default();
+            ui.operate(&renderer, &mut after);
+            assert_eq!(before.dy, after.dy);
+            target = click(&mut ui, &mut renderer);
+            assert_ne!(hit, target);
+        } else if shown {
+            assert_eq!(
+                hit, target,
+                "temporarily hiding the rail should not reset its position"
+            );
+        }
+        cache = ui.into_cache();
+    }
+    let id = target.unwrap();
+    let s = app.current().unwrap();
+    let i = s.entries.index_of(&id).unwrap();
+    let label = s.entries[i].text.clone();
+    assert!(matches!(s.entries[i].kind, EntryKind::User { .. }));
+    assert!(!app.transcript.order[app.chat_range()].contains(&i));
+    // Drive the actual jump and settle the newly mounted row measurements.
+    let size = Size::new(app.center_dimensions().1, 700.);
+    cache = Cache::new();
+    drive_messages(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![Message::JumpToPrompt(id)],
+    )
+    .await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+    let mut viewport = Viewport::default();
+    ui.operate(&renderer, &mut viewport);
+    let mut bounds = UiBounds::default();
+    ui.operate(&renderer, &mut bounds);
+    let prompt = bounds.label(&label) - iced::Vector::new(0., viewport.dy);
+    assert!(
+        viewport.bounds.contains(prompt.center()),
+        "jump reveals the clicked prompt: {prompt:?}, view={:?}, dy={}, indexed y={}",
+        viewport.bounds,
+        viewport.dy,
+        app.transcript.offset
+    );
+    assert!(!app.auto_scroll);
+}
+
+#[tokio::test]
+async fn prompt_rail_jump_clamped_to_bottom_stays_put_as_reply_grows() {
+    let mut app = app();
+    let mut session = Session::new("/chat".into(), &app.catalog.settings);
+    session.accept("Explain the result".into());
+    let prompt = session.entries[0].id.clone();
+    session
+        .entries
+        .push(Entry::new(EntryKind::Assistant, "Working…"));
+    app.selected = Some(session.id.clone());
+    let h = app.harness.as_ref().unwrap().clone();
+    h.insert(session);
+    app.refresh();
+    let mut renderer = header_renderer();
+    let mut cache = Cache::new();
+    let size = Size::new(app.catalog.settings.chat_width + 200., 700.);
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    drive_messages(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![Message::JumpToPrompt(prompt)],
+    )
+    .await;
+    // Resize while the entire conversation still fits: another at-bottom
+    // observation must not override the explicit jump.
+    let size = Size::new(size.width, size.height - 50.);
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    h.edit(app.selected.as_ref().unwrap(), |s| {
+        s.entries[1].text.push_str(
+            &"
+
+More detail."
+                .repeat(150),
+        )
+    })
+    .unwrap();
+    drive_messages(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![Message::Changed],
+    )
+    .await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+    let mut viewport = Viewport::default();
+    ui.operate(&renderer, &mut viewport);
+    let mut bounds = UiBounds::default();
+    ui.operate(&renderer, &mut bounds);
+    assert!(viewport.bounds.contains(
+        bounds.label("Explain the result").center() - iced::Vector::new(0., viewport.dy)
+    ));
+    assert!(!app.auto_scroll);
+}
+
+#[tokio::test]
+async fn last_prompt_jump_keeps_the_whole_bottom_viewport_rendered() {
+    let mut app = app();
+    let mut session = Session::new("/chat".into(), &app.catalog.settings);
+    for i in 0..30 {
+        session.accept(format!("Question {i}").into());
+    }
+    let last = session.entries[29].id.clone();
+    session
+        .entries
+        .push(Entry::new(EntryKind::Assistant, "Short final reply."));
+    app.selected = Some(session.id.clone());
+    app.current_session = Some(session);
+    app.rebuild_transcript();
+    app.prepare_visible();
+    let size = Size::new(app.catalog.settings.chat_width + 200., 1000.);
+    let mut renderer = header_renderer();
+    let mut cache = Cache::new();
+    settle(&mut app, &mut renderer, &mut cache, size, Some(1.)).await;
+
+    let visible = |app: &App, renderer: &mut iced::Renderer, cache: &mut Cache| {
+        let mut ui = UserInterface::build(app.center(), size, std::mem::take(cache), renderer);
+        let mut viewport = Viewport::default();
+        let mut labels = UiBounds::default();
+        ui.operate(renderer, &mut viewport);
+        ui.operate(renderer, &mut labels);
+        *cache = ui.into_cache();
+        assert!(viewport.dy > 0., "the transcript overflows");
+        labels
+            .labels
+            .into_iter()
+            .filter_map(|(label, bounds)| {
+                (label.starts_with("Question ")
+                    && viewport
+                        .bounds
+                        .contains(bounds.center() - iced::Vector::new(0., viewport.dy)))
+                .then_some(label)
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = visible(&app, &mut renderer, &mut cache);
+    assert!(before.len() > 3 && before.last().unwrap() == "Question 29");
+    drive_messages(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![Message::JumpToPrompt(last)],
+    )
+    .await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    assert_eq!(
+        visible(&app, &mut renderer, &mut cache),
+        before,
+        "the clamped jump does not scroll, so earlier visible prompts must not become blank space"
+    );
+}

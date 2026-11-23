@@ -333,23 +333,4 @@ impl App {
             .spacing(14),
         )
     }
-    pub(super) fn jump_to_prompt(&mut self, entry: &str) -> Task<Message> {
-        let Some(index) = self.current().and_then(|s| s.entries.index_of(entry)) else {
-            return Task::none();
-        };
-        let Some(pos) = self.transcript.order.iter().position(|&id| id == index) else {
-            return Task::none();
-        };
-        let offset = self.transcript.prefix(pos);
-        self.auto_scroll = false;
-        self.transcript.offset = offset;
-        self.prepare_visible();
-        widget::operation::scroll_to(
-            "chat",
-            scrollable::AbsoluteOffset {
-                x: 0.,
-                y: offset + 20.,
-            },
-        )
-    }
 }

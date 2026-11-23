@@ -76,6 +76,13 @@ For file locations, backup and format compatibility, see
   append is incremental; full visibility rebuilding is reserved for group changes.
   Measured sidebar heights and the visible anchor follow stable session identity.
   Epoch-qualified measurements reject stale events after a switch/reflow.
+- Wide conversations use the spare left margin for a clickable prompt rail. Its
+  ordered user-entry index follows the projection's changed tail. A single
+  widget draws only the ticks that fit, handles hover and wheel input locally,
+  and shapes a bounded preview only when its source changes. A narrower pane
+  hides the rail without changing the transcript's padding or scroll state.
+  To compare hover and wheel CPU work at 200 and 20,000 entries, run
+  `just test prompt_rail_hover_and_wheel_cost -- --ignored --nocapture`.
 - Markdown is cached only around the viewport; visible streaming Markdown uses
   iced's incremental `Content::push_str`. Collapsed reasoning is not parsed.
   Tool output retains its fixed-row shaping window. Transcript entries and tool

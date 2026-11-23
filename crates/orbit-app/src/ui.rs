@@ -3,6 +3,7 @@ pub(crate) mod find;
 mod forks;
 mod imports;
 mod marketing;
+mod prompt_rail;
 mod settings;
 mod sidebar;
 mod smoke;
@@ -104,6 +105,7 @@ const FOOTER_HEIGHT: f32 = 36.;
 const FOOTER_MENU_TEXT_SIZE: f32 = 12.;
 const FOOTER_MENU_ROW_HEIGHT: f32 = 30.;
 const FOOTER_MENU_ROW_GAP: f32 = 2.;
+const CHAT_VERTICAL_PADDING: f32 = 20.;
 const CHAT_OVERSCAN: f32 = 120.;
 const COMPOSER_LINE_HEIGHT_FACTOR: f32 = 1.3;
 const COMPOSER_MIN_LINES: usize = 1;
@@ -268,6 +270,7 @@ pub struct App {
     window_height: f32,
     drag: Option<(bool, f32, f32)>,
     auto_scroll: bool,
+    hold_prompt_at_bottom: bool,
     sidebar_follow_top: bool,
     sidebar_branches: HashMap<PathBuf, String>,
     git: HashMap<PathBuf, crate::git::Info>,
@@ -450,6 +453,7 @@ pub enum Message {
     ToggleExecution(String),
     Scroll(u64, f32, f32, bool),
     JumpToLatest,
+    JumpToPrompt(String),
     RowSize(u64, usize, f32),
     MarkdownGeometry(
         u64,
@@ -609,6 +613,7 @@ impl App {
             window_height: 800.,
             drag: None,
             auto_scroll: true,
+            hold_prompt_at_bottom: false,
             sidebar_follow_top: true,
             sidebar_branches: HashMap::new(),
             git: HashMap::new(),
@@ -790,6 +795,7 @@ impl App {
         self.current_revision = revision;
         let snapshot = conversation.snapshot();
         if previous.is_none() {
+            self.hold_prompt_at_bottom = false;
             self.outputs.clear();
             self.historical_runs.clear();
             self.markdown.clear();
@@ -913,6 +919,29 @@ impl App {
                 .rows(0, &self.groups, &self.execution, &self.expanded),
         );
     }
+    fn jump_to_prompt(&mut self, entry: &str) -> Task<Message> {
+        let Some(index) = self.current().and_then(|s| s.entries.index_of(entry)) else {
+            return Task::none();
+        };
+        let Some(pos) = self.transcript.position(index) else {
+            return Task::none();
+        };
+        // Near the tail the prompt may not reach the top of the pane. Mount
+        // the rows for the reachable viewport: if already at the bottom, iced
+        // won't report any scroll change to correct an overshooting row window.
+        let max_scroll = (self.transcript.total() + 2. * CHAT_VERTICAL_PADDING
+            - self.transcript.viewport)
+            .max(0.);
+        let scroll_y = (self.transcript.prefix(pos) + CHAT_VERTICAL_PADDING).min(max_scroll);
+        if let Some(find) = &mut self.find {
+            find.reveal = None;
+        }
+        self.hold_prompt_at_bottom = true;
+        self.auto_scroll = false;
+        self.transcript.offset = (scroll_y - CHAT_VERTICAL_PADDING).max(0.);
+        self.prepare_visible();
+        widget::operation::scroll_to("chat", scrollable::AbsoluteOffset { x: 0., y: scroll_y })
+    }
     fn measure_row(&mut self, index: usize, height: f32, inner: Option<f32>) -> Task<Message> {
         let spacing = self
             .current()
@@ -945,7 +974,7 @@ impl App {
                 "chat",
                 scrollable::AbsoluteOffset {
                     x: 0.,
-                    y: self.transcript.offset + 20.,
+                    y: self.transcript.offset + CHAT_VERTICAL_PADDING,
                 },
             );
         }
@@ -1749,7 +1778,7 @@ impl App {
                                     y: if self.transcript.offset == 0. {
                                         0.
                                     } else {
-                                        self.transcript.offset + 20.
+                                        self.transcript.offset + CHAT_VERTICAL_PADDING
                                     },
                                 },
                             );
@@ -2557,6 +2586,7 @@ impl App {
                 self.rebuild_transcript();
                 self.prepare_visible();
             }
+            Message::JumpToPrompt(entry) => return self.jump_to_prompt(&entry),
             Message::JumpToLatest => {
                 if let Some(find) = &mut self.find {
                     find.reveal = None;
@@ -2570,8 +2600,11 @@ impl App {
                 if epoch != self.view_epoch {
                     return Task::none();
                 }
-                self.auto_scroll = at_bottom;
-                self.transcript.offset = (offset - 20.).max(0.);
+                // A jump to a recent prompt can be clamped to the bottom. That
+                // geometry report isn't a request to follow a growing reply.
+                self.hold_prompt_at_bottom &= at_bottom && !self.auto_scroll;
+                self.auto_scroll = at_bottom && !self.hold_prompt_at_bottom;
+                self.transcript.offset = (offset - CHAT_VERTICAL_PADDING).max(0.);
                 self.transcript.viewport = height;
                 self.prepare_visible();
             }
@@ -3699,7 +3732,7 @@ impl App {
             let transcript = crate::keyed_column::keyed_column(children);
             let content = crate::transcript_viewport::observe(
                 self.chat_lane(
-                    container(transcript).padding([20, 0]),
+                    container(transcript).padding([CHAT_VERTICAL_PADDING, 0.]),
                     crate::scrollbar::GUTTER,
                 ),
                 epoch,
@@ -3717,6 +3750,13 @@ impl App {
         };
         // Keep the scrollable at the base of the same stack even when Find is closed.
         let mut chat = stack![chat].width(Fill).height(Fill);
+        if !self.activity.prompts.is_empty() {
+            chat = chat.push(prompt_rail::rail(
+                session,
+                &self.activity.prompts,
+                self.catalog.settings.chat_width,
+            ));
+        }
         if let Some(find) = &self.find {
             chat = chat.push(find.popup());
         }
