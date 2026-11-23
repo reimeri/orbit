@@ -111,6 +111,7 @@ impl Process {
         id: i32,
         wait: u64,
         tokens: usize,
+        is_poll: bool,
         cancel: &CancellationToken,
     ) -> Result<(CommandOutput, bool)> {
         self.runtime.block_on(async {
@@ -144,10 +145,15 @@ impl Process {
         } else {
             format!("Process running with session ID {id}")
         };
+        let hint = if is_poll && !complete && body.is_empty() {
+            "\nNo new output. Do independent work before polling again. If you only need the exit result, set yield_time_ms to 300000 on both write_stdin and the enclosing @exec cell; the wait returns early on exit. Use shorter polls for intermediate output."
+        } else {
+            ""
+        };
         Ok((
             CommandOutput {
                 text: format!(
-                    "Wall time: {:.3} seconds\n{status}\nOutput:\n{body}",
+                    "Wall time: {:.3} seconds\n{status}{hint}\nOutput:\n{body}",
                     self.started.elapsed().as_secs_f64()
                 ),
                 failed: complete && (stopped || exit.as_ref().is_some_and(|(_, failed)| *failed)),
@@ -431,6 +437,7 @@ impl Shell {
             id,
             args.yield_time_ms,
             args.max_output_tokens.unwrap_or(10_000),
+            false,
             cancel,
         );
         let cancelled = cancel.is_cancelled();
@@ -483,6 +490,7 @@ impl Shell {
             args.session_id,
             args.yield_time_ms,
             args.max_output_tokens.unwrap_or(10_000),
+            args.chars.is_empty(),
             cancel,
         );
         let cancelled = cancel.is_cancelled();
@@ -858,6 +866,21 @@ mod tests {
             before.push_str(output(&next.text));
         }
         assert_eq!(before, "before");
+        let empty = shell
+            .write(
+                StdinArgs {
+                    session_id,
+                    chars: String::new(),
+                    yield_time_ms: 0,
+                    max_output_tokens: None,
+                },
+                &cancel,
+            )
+            .unwrap();
+        assert!(empty.text.contains("write_stdin") && empty.text.contains("@exec"));
+        assert_eq!(output(&empty.text), "");
+        assert!(!first.text.contains("@exec"));
+
         std::fs::write(dir.path().join("release"), "").unwrap();
         let second = shell
             .write(
@@ -873,6 +896,7 @@ mod tests {
         assert!(second.failed);
         assert!(!first.failed);
         assert!(second.text.contains("code 7"));
+        assert!(!second.text.contains("@exec"));
         assert_eq!(
             output(&second.text),
             "after",

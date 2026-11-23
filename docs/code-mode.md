@@ -59,6 +59,10 @@ Defaults: project working directory, `$SHELL` (or `/bin/sh`), login shell enable
 TTY disabled, exec yield 10,000 ms, stdin yield 250 ms. A running command returns
 a numeric session ID; empty `chars` polls it. TTY mode keeps input open and accepts
 control characters such as `\u0003`. Non-TTY commands have closed stdin.
+An empty poll on a still-running command suggests doing other work first. If only
+the exit result matters, set `yield_time_ms: 300000` on both `write_stdin` and
+the enclosing `@exec` cell. The shell wait returns early on exit, not on new
+output; use shorter polls for prompts or readiness messages.
 
 Orbit resource policy: 256 MiB JS heap and 1 MiB stack per cell, 16 MiB serializable
 session store, 32 open cells, 64 concurrent nested calls and 64 shell sessions per
