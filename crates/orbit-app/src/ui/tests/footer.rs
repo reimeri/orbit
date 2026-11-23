@@ -813,3 +813,134 @@ async fn quit_confirmation_releases_footer_keyboard_ownership() {
     assert!(app.modal.is_none());
     running.running.store(false, Ordering::Release);
 }
+
+#[tokio::test]
+async fn changes_counts_toggle_panel_and_refresh_expanded_file_after_same_size_edit() {
+    use super::changes::Action;
+    let mut app = app();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q", "--template="])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let directory = "src/nested/component/with/a/long/directory/name";
+    std::fs::create_dir_all(root.join(directory)).unwrap();
+    let path = Path::new(directory).join("new.txt");
+    std::fs::write(root.join(&path), "first version\nline 2\n").unwrap();
+    dispatch(&mut app, Message::Create(root.to_owned())).await;
+    let click_count = |app: &App, label: &str| {
+        let mut renderer = header_renderer();
+        let mut ui = iced_runtime::UserInterface::build(
+            app.footer_content(900.),
+            Size::new(900., 100.),
+            Default::default(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        click_at(&mut ui, &mut renderer, bounds.label(label).center())
+            .pop()
+            .unwrap()
+    };
+    for (label, expected_open) in [("+2", true), ("−0", false), ("+2", true)] {
+        let click = click_count(&app, label);
+        dispatch(&mut app, click).await;
+        assert_eq!(app.changes.open, expected_open);
+    }
+    let expand = {
+        use iced::advanced::Renderer as _;
+        let size = Size::new(app.panel_width(), 440.);
+        let mut renderer = header_renderer();
+        let mut ui = iced_runtime::UserInterface::build(
+            app.changes_panel(),
+            size,
+            Default::default(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let badge = bounds.label("A");
+        let name = bounds.label("new.txt");
+        let parent = bounds.label(directory);
+        let count = bounds
+            .labels
+            .iter()
+            .find(|(value, rect)| {
+                value == "+2" && rect.contains(iced::Point::new(rect.center_x(), name.center_y()))
+            })
+            .unwrap()
+            .1;
+        assert!(
+            badge.x + badge.width <= name.x
+                && name.x + name.width <= parent.x
+                && parent.x + parent.width <= count.x
+        );
+        assert!(
+            [badge, parent, count]
+                .iter()
+                .all(|rect| (rect.center_y() - name.center_y()).abs() <= 1.)
+        );
+        let mut painted_badge = |cursor| {
+            renderer.reset(iced::Rectangle::with_size(size));
+            ui.draw(
+                &mut renderer,
+                &theme::app(),
+                &iced::advanced::renderer::Style {
+                    text_color: theme::default_colors().text,
+                },
+                cursor,
+            );
+            let pixels = crate::test_renderer::screenshot(
+                &mut renderer,
+                Size::new(size.width as u32, size.height as u32),
+                1.,
+                theme::default_colors().background,
+            );
+            (badge.y.ceil() as usize..(badge.y + badge.height).floor() as usize)
+                .flat_map(|y| {
+                    let start = (y * size.width as usize + badge.x.ceil() as usize) * 4;
+                    &pixels[start..start + badge.width.floor() as usize * 4]
+                })
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            painted_badge(mouse::Cursor::Unavailable),
+            painted_badge(mouse::Cursor::Available(count.center())),
+            "hovering the far end of the row must swap the badge glyph"
+        );
+        click_at(&mut ui, &mut renderer, count.center())
+            .pop()
+            .unwrap()
+    };
+    assert!(matches!(&expand,Message::Changes(Action::File(clicked)) if clicked == &path));
+    dispatch(&mut app, expand).await;
+    let panel = |app: &App| displayed_text(app.changes_panel(), Size::new(480., 800.));
+    assert!(panel(&app).contains("first version"));
+    let mut watcher = inotify::Inotify::init().unwrap();
+    watcher
+        .watches()
+        .add(root.join(&path), inotify::WatchMask::ACCESS)
+        .unwrap();
+    dispatch(&mut app, Message::GitTick).await;
+    assert!(
+        matches!(watcher.read_events(&mut [0;1024]),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock),
+        "an unchanged open patch and its cached line count need no content read"
+    );
+    std::fs::write(root.join(&path), "other version\nline 2\n").unwrap();
+    dispatch(&mut app, Message::GitTick).await;
+    assert!(
+        panel(&app).contains("other version"),
+        "expanded patch must follow edits even with identical counts"
+    );
+    std::fs::remove_file(root.join(path)).unwrap();
+    dispatch(&mut app, Message::GitTick).await;
+    assert!(panel(&app).contains("No changed files"));
+    dispatch(&mut app, Message::ToggleSettings).await;
+    assert!(!app.changes.open && app.settings_open);
+}

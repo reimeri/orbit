@@ -115,6 +115,7 @@ impl App {
             })
             .unwrap_or(0);
         self.worktrees.panel = false;
+        self.changes.close();
         self.worktrees.popup = None;
         self.fork_panel = Some(panel);
         self.agents_open = false;

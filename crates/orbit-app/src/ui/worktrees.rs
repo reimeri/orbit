@@ -136,6 +136,7 @@ impl App {
             }
             _ if self.io_busy || self.close_requested || self.closing => {}
             Panel => {
+                self.changes.close();
                 self.worktrees.popup = None;
                 self.worktrees.bases = false;
                 self.worktrees.panel = !self.worktrees.panel;

@@ -1,3 +1,4 @@
+pub mod changes;
 use std::{
     ffi::OsStr,
     fmt,
@@ -41,7 +42,7 @@ impl fmt::Display for Info {
 // Counts are properties of a file version, not of a branch or a path. Device
 // and inode distinguish replacements; ctime also catches rewrites with a
 // restored mtime. No paths or file contents are retained.
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 struct FileVersion {
     dev: u64,
     ino: u64,
@@ -77,14 +78,29 @@ impl Default for LineCounts {
     }
 }
 
+#[cfg(test)]
 pub async fn info(path: PathBuf, counts: Arc<LineCounts>) -> Option<Info> {
+    capture(path, counts, false).await.0
+}
+
+type Capture = (Option<Info>, Option<Arc<changes::Files>>);
+
+pub async fn capture(path: PathBuf, counts: Arc<LineCounts>, detailed: bool) -> Capture {
     let deadline = Instant::now() + Duration::from_secs(15);
-    match tokio::time::timeout_at(deadline.into(), read_info(&path, deadline, counts)).await {
-        Ok(Ok(info)) => info,
-        Ok(Err(error)) => Some(Info::Unavailable(error)),
-        Err(_) => Some(Info::Unavailable(
-            "Git status timed out; will retry automatically".into(),
-        )),
+    match tokio::time::timeout_at(
+        deadline.into(),
+        read_info(&path, deadline, counts, detailed),
+    )
+    .await
+    {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(error)) => (Some(Info::Unavailable(error)), None),
+        Err(_) => (
+            Some(Info::Unavailable(
+                "Git status timed out; will retry automatically".into(),
+            )),
+            None,
+        ),
     }
 }
 
@@ -175,7 +191,8 @@ async fn read_info(
     path: &Path,
     deadline: Instant,
     counts: Arc<LineCounts>,
-) -> Result<Option<Info>, String> {
+    detailed: bool,
+) -> Result<Capture, String> {
     let root = git(path, &["rev-parse", "--show-toplevel"]).await?;
     // Not being a repository is normal for a workspace. Keep other failures
     // (permissions, unsafe ownership, missing Git, etc.) visible and retryable.
@@ -184,7 +201,7 @@ async fn read_info(
             .stderr
             .starts_with(b"fatal: not a git repository (or any")
     {
-        return Ok(None);
+        return Ok((None, None));
     }
     let root = successful(root)?;
     let root = Path::new(OsStr::from_bytes(root.strip_suffix(b"\n").unwrap_or(&root)));
@@ -205,41 +222,50 @@ async fn read_info(
     } else {
         successful(git(root, &["hash-object", "-t", "tree", "--stdin"]).await?)?
     };
-    let base = String::from_utf8_lossy(&base);
-    let diff = successful(
-        git(
-            root,
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--numstat",
-                "-z",
-                base.trim_end(),
-                "--",
-            ],
-        )
-        .await?,
-    )?;
-    let (mut added, removed) = numstat(&diff)?;
+    let base = String::from_utf8(base)
+        .map_err(|e| e.to_string())?
+        .trim_end()
+        .to_owned();
+    let mut args = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--numstat",
+        "-z",
+    ];
+    if detailed {
+        args.push("--raw");
+    }
+    args.extend([base.as_str(), "--"]);
+    let diff = successful(git(root, &args).await?)?;
     let untracked =
         successful(git(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?)?;
     let root = root.to_owned();
-    added +=
-        tokio::task::spawn_blocking(move || untracked_lines(&root, &untracked, deadline, &counts))
-            .await
-            .map_err(|e| {
-                format!("Could not count untracked lines: {e}; will retry automatically")
-            })??;
-    Ok(Some(Info::Changes {
-        branch,
-        added,
-        removed,
-    }))
+    let (added, removed, files) = tokio::task::spawn_blocking(move || {
+        let mut files = detailed.then(|| changes::Files::new(root.clone(), base));
+        let stats = if let Some(files) = files.as_mut() {
+            files.read_status(&diff)?
+        } else {
+            &diff
+        };
+        let (mut added, removed) = numstat(stats, files.as_mut())?;
+        added += untracked_lines(&root, &untracked, deadline, &counts, files.as_mut())?;
+        Ok::<_, String>((added, removed, files.map(Arc::new)))
+    })
+    .await
+    .map_err(|e| format!("Could not read changed files: {e}; will retry automatically"))??;
+    Ok((
+        Some(Info::Changes {
+            branch,
+            added,
+            removed,
+        }),
+        files,
+    ))
 }
 
-fn numstat(bytes: &[u8]) -> Result<(u64, u64), String> {
+fn numstat(bytes: &[u8], mut files: Option<&mut changes::Files>) -> Result<(u64, u64), String> {
     let mut added = 0;
     let mut removed = 0;
     for record in bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
@@ -254,8 +280,13 @@ fn numstat(bytes: &[u8]) -> Result<(u64, u64), String> {
                 .and_then(|v| v.parse().ok())
                 .ok_or_else(|| "Invalid Git diff count; will retry automatically".into())
         };
-        added += count()?;
-        removed += count()?;
+        let (a, d) = (count()?, count()?);
+        added += a;
+        removed += d;
+        if let Some(files) = files.as_mut() {
+            let name = fields.next().ok_or("Missing Git diff path")?;
+            files.set_counts(Path::new(OsStr::from_bytes(name)), a, d)?;
+        }
     }
     Ok((added, removed))
 }
@@ -265,7 +296,9 @@ fn untracked_lines(
     paths: &[u8],
     deadline: Instant,
     counts: &LineCounts,
+    mut files: Option<&mut changes::Files>,
 ) -> Result<u64, String> {
+    let root_fd = std::fs::File::open(root).map_err(|e| e.to_string())?;
     let scan_start = Instant::now();
     let mut total = 0;
     for name in paths.split(|b| *b == 0).filter(|name| !name.is_empty()) {
@@ -273,20 +306,22 @@ fn untracked_lines(
             return Err("Git status timed out; will retry automatically".into());
         }
         let path = root.join(OsStr::from_bytes(name));
-        let count = || -> std::io::Result<u64> {
-            let metadata = std::fs::symlink_metadata(&path)?;
+        let relative = Path::new(OsStr::from_bytes(name));
+        let count = || -> std::io::Result<(u64, FileVersion)> {
+            let pinned = pin_untracked(&root_fd, relative)?;
+            let metadata = pinned.metadata()?;
+            let version = FileVersion::from(&metadata);
             if metadata.file_type().is_symlink() {
-                return Ok(1); // Git stores the link target as a single line.
+                return Ok((1, version)); // Git stores the link target as a single line.
             }
             if !metadata.is_file() {
-                return Ok(0);
+                return Ok((0, version));
             }
-            let version = FileVersion::from(&metadata);
             if let Some(hit) = counts.0.lock().expect("line counts").get_mut(&version) {
                 hit.last_used = Instant::now();
-                return Ok(hit.lines);
+                return Ok((hit.lines, version));
             }
-            let file = std::fs::File::open(&path)?;
+            let file = read_pinned(&pinned)?;
             let lines = count_lines(&file, deadline)?;
             // Never memoize a partial scan or a file replaced/edited while we
             // read it. Check the open descriptor, not a new lookup by pathname.
@@ -309,10 +344,15 @@ fn untracked_lines(
                     );
                 }
             }
-            Ok(lines)
+            Ok((lines, version))
         };
         match count() {
-            Ok(lines) => total += lines,
+            Ok((lines, stamp)) => {
+                total += lines;
+                if let Some(files) = files.as_mut() {
+                    files.add_untracked(relative, lines, stamp);
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // Removed during refresh.
             Err(e) => {
                 return Err(format!(
@@ -323,6 +363,24 @@ fn untracked_lines(
         }
     }
     Ok(total)
+}
+
+// Pin the directory entry itself. In particular, a symlink replacement of an
+// ancestor must not redirect a refresh or a diff to a file outside this checkout.
+fn pin_untracked(root: &std::fs::File, path: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+    Ok(openat2(
+        root,
+        path,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+    )?
+    .into())
+}
+fn read_pinned(file: &std::fs::File) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    std::fs::File::open(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 
 fn count_lines(file: &std::fs::File, deadline: Instant) -> std::io::Result<u64> {
@@ -529,6 +587,7 @@ mod tests {
                 paths,
                 Instant::now() + Duration::from_secs(15),
                 &counts,
+                None,
             )
             .unwrap();
             assert_eq!(total, expected);

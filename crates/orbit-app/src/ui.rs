@@ -1,3 +1,4 @@
+mod changes;
 mod forks;
 mod imports;
 mod marketing;
@@ -236,6 +237,7 @@ pub struct App {
     groups: HashSet<String>,
     settings_open: bool,
     agents_open: bool,
+    changes: changes::State,
     worktrees: worktrees::State,
     chat_positions: HashMap<String, (f32, bool)>,
     settings_tab: SettingsTab,
@@ -396,6 +398,7 @@ pub enum Message {
     Send,
     ToggleSettings,
     ToggleAgents,
+    Changes(changes::Action),
     Worktree(worktrees::Action),
     StopAgent(String),
     ApplySettings,
@@ -572,6 +575,7 @@ impl App {
             settings_open: false,
             pending_settings: None,
             agents_open: false,
+            changes: Default::default(),
             worktrees: Default::default(),
             chat_positions: HashMap::new(),
             settings_tab: SettingsTab::Account,
@@ -655,13 +659,15 @@ impl App {
             return Task::none();
         }
         let counts = self.git_counts.clone();
-        Task::perform(
-            async move {
-                let info = crate::git::info(path.clone(), counts).await;
-                (path, info)
-            },
-            |(path, info)| Message::Git(path, info),
-        )
+        let detailed = self.changes.open;
+        Task::future(async move {
+            let (info, files) = crate::git::capture(path.clone(), counts, detailed).await;
+            if detailed {
+                Message::Changes(changes::Action::Snapshot(path, info, files))
+            } else {
+                Message::Git(path, info)
+            }
+        })
     }
     fn running(&self) -> bool {
         self.selected
@@ -1656,6 +1662,11 @@ impl App {
                         {
                             self.tasks.push(widget::operation::focus("composer"));
                         }
+                        if self.changes.project.as_deref()
+                            != self.current().map(|s| s.project.as_path())
+                        {
+                            self.changes.clear();
+                        }
                         let git = self.refresh_git();
                         self.tasks.push(git);
                         if self.worktrees.panel {
@@ -2169,7 +2180,9 @@ impl App {
             }
             Message::StopAgent(id) => self.stop_agent(id),
             Message::Worktree(action) => return self.worktree_action(action),
+            Message::Changes(action) => return self.changes_action(action),
             Message::ToggleAgents => {
+                self.changes.close();
                 self.worktrees.panel = false;
                 self.worktrees.popup = None;
                 self.fork_panel = None;
@@ -2180,6 +2193,7 @@ impl App {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
             }
             Message::ToggleSettings => {
+                self.changes.close();
                 self.worktrees.panel = false;
                 self.worktrees.popup = None;
                 if self.settings_open {
@@ -2714,11 +2728,11 @@ impl App {
                 }
             }
             Message::Git(path, info) => {
-                self.git_pending.remove(&path);
-                if let Some(info) = info {
-                    self.git.insert(path, info);
-                } else {
-                    self.git.remove(&path);
+                let needs_details =
+                    self.changes.open && self.current().is_some_and(|s| s.project == path);
+                self.store_git(path, info);
+                if needs_details {
+                    return self.refresh_git();
                 }
             }
             Message::External(result) => self.fail(result),
@@ -2817,6 +2831,8 @@ impl App {
                             return self.update_inner(Message::CancelSettings);
                         } else if self.fork_panel.is_some() {
                             return self.show_forks(None);
+                        } else if self.changes.open {
+                            return self.changes_action(changes::Action::Toggle);
                         } else if self.worktrees.panel {
                             if self.worktrees.bases {
                                 return self.worktree_action(worktrees::Action::Bases);
@@ -3144,6 +3160,8 @@ impl App {
         .height(Fill);
         if self.settings_open {
             body = body.push(self.divider(true)).push(self.settings_panel());
+        } else if self.changes.open {
+            body = body.push(self.divider(true)).push(self.changes_panel());
         } else if self.worktrees.panel {
             body = body.push(self.divider(true)).push(self.worktrees_panel());
         } else if self.agents_open {
@@ -3172,6 +3190,22 @@ impl App {
         }
         let rail = container(
             controls
+                .push(
+                    tooltip(
+                        theme::button(container(Icon::Diff.view(22.)).center_x(Fill).center_y(34))
+                            .width(Fill)
+                            .padding(0)
+                            .style(if self.changes.open {
+                                secondary
+                            } else {
+                                theme::text_button
+                            })
+                            .on_press(Message::Changes(changes::Action::Toggle)),
+                        text("Changes").size(12),
+                        tooltip::Position::Left,
+                    )
+                    .style(card),
+                )
                 .push(
                     tooltip(
                         theme::button(
@@ -3372,7 +3406,11 @@ impl App {
             .unwrap_or(0)
     }
     fn right_panel_open(&self) -> bool {
-        self.settings_open || self.agents_open || self.fork_panel.is_some() || self.worktrees.panel
+        self.settings_open
+            || self.agents_open
+            || self.fork_panel.is_some()
+            || self.worktrees.panel
+            || self.changes.open
     }
     fn panel_width(&self) -> f32 {
         self.catalog
@@ -4592,7 +4630,10 @@ impl App {
                 }
             }
             if let Some((added, removed)) = &counts {
-                width += 8. + text_width(added, 11.).ceil() + text_width(removed, 11.).ceil();
+                width += 8.
+                    + 2. * pill_inset
+                    + text_width(added, 11.).ceil()
+                    + text_width(removed, 11.).ceil();
             }
             (width, label_width, label, counts, pill, git)
         });
@@ -4657,9 +4698,22 @@ impl App {
             };
             let mut group = row![control].align_y(iced::Center).spacing(4.);
             if let Some((added, removed)) = counts {
-                group = group
-                    .push(text(added).size(11).color(colors.success))
-                    .push(text(removed).size(11).color(colors.danger));
+                group = group.push(
+                    theme::button(
+                        row![
+                            text(added).size(11).color(colors.success),
+                            text(removed).size(11).color(colors.danger)
+                        ]
+                        .spacing(4.),
+                    )
+                    .padding([2., pill_inset])
+                    .style(if self.changes.open {
+                        secondary
+                    } else {
+                        theme::text_button
+                    })
+                    .on_press(Message::Changes(changes::Action::Toggle)),
+                );
             }
             info = info.push(group.width(width)).push(space().width(10));
         }
