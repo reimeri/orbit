@@ -319,7 +319,7 @@ impl App {
                                     })
                             }))
                             .width(12)
-                            .center_y(14)
+                            .center_y(crate::session_action::HEIGHT)
                             .into()
                         } else {
                             crate::session_action::age(age.clone())
