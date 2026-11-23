@@ -403,6 +403,45 @@ async fn append_text(
 }
 
 #[tokio::test]
+async fn image_paste_preserves_tail_following_and_scrolled_up_position() {
+    let source: String = (0..60).map(|i| format!("Paragraph {i}\n\n")).collect();
+    let mut app = streaming_fixture(&source);
+    let image = orbit_core::media::MediaStore::new(app.smoke_dir.as_ref().unwrap().join("images"))
+        .image(include_bytes!("../../fixtures/media.png"))
+        .unwrap();
+    let size = Size::new(620., 520.);
+    let mut renderer = header_renderer();
+    let mut cache = Cache::new();
+    settle(&mut app, &mut renderer, &mut cache, size, Some(1.)).await;
+    let (end, _) = visible_text(&app, &mut renderer, &mut cache, size);
+    let full_height = app.transcript.viewport;
+
+    for (offset, following) in [(end, true), (end / 2., false)] {
+        // Wheel scrolling leaves an absolute offset, even at the bottom.
+        move_to(&app, &mut renderer, &mut cache, size, offset);
+        settle(&mut app, &mut renderer, &mut cache, size, None).await;
+        assert_eq!(app.auto_scroll, following);
+
+        let _ = app.update(Message::Paste);
+        dispatch(
+            &mut app,
+            Message::AttachmentLoaded(Ok(crate::attachments::Input::Image(image.clone()))),
+        )
+        .await;
+        settle(&mut app, &mut renderer, &mut cache, size, None).await;
+        let (after, _) = visible_text(&app, &mut renderer, &mut cache, size);
+        let shrink = full_height - app.transcript.viewport;
+        assert!(shrink > 0., "the image strip must shrink the chat viewport");
+        assert_eq!(app.auto_scroll, following);
+        let expected = if following { end + shrink } else { offset };
+        assert!((after - expected).abs() <= 1.);
+
+        dispatch(&mut app, Message::RemoveAttachment(0)).await;
+        settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    }
+}
+
+#[tokio::test]
 async fn streaming_pauses_on_scroll_and_resumes_on_jump() {
     let source: String = (0..12)
         .map(|i| {

@@ -2600,13 +2600,19 @@ impl App {
                 if epoch != self.view_epoch {
                     return Task::none();
                 }
+                // Composer growth can leave the old absolute offset above the
+                // new bottom without the reader having scrolled away.
+                let follow_resize = self.auto_scroll && height < self.transcript.viewport;
                 // A jump to a recent prompt can be clamped to the bottom. That
                 // geometry report isn't a request to follow a growing reply.
                 self.hold_prompt_at_bottom &= at_bottom && !self.auto_scroll;
-                self.auto_scroll = at_bottom && !self.hold_prompt_at_bottom;
+                self.auto_scroll = follow_resize || (at_bottom && !self.hold_prompt_at_bottom);
                 self.transcript.offset = (offset - CHAT_VERTICAL_PADDING).max(0.);
                 self.transcript.viewport = height;
                 self.prepare_visible();
+                if follow_resize {
+                    return bottom();
+                }
             }
             Message::MarkdownGeometry(epoch, index, source, height, geometry) => {
                 if epoch != self.view_epoch
