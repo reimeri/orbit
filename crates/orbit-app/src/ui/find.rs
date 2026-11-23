@@ -34,7 +34,7 @@ pub(super) struct Find {
     busy: Option<(u64, CancellationToken)>,
     results: Option<Arc<Results>>,
     active: Option<usize>,
-    reveal: Option<u64>,
+    pub(super) reveal: Option<u64>,
     error: Option<String>,
     pub(super) frame: Rc<Frame>,
 }
@@ -165,7 +165,6 @@ impl App {
                 error: None,
                 frame: Default::default(),
             });
-            self.auto_scroll = false;
             return widget::operation::focus(INPUT).chain(widget::operation::select_all(INPUT));
         }
         let Some(find) = &mut self.find else {
@@ -192,10 +191,13 @@ impl App {
                 if query.is_empty() {
                     find.count.clear();
                 }
+                // Arm the reveal now so jumping to latest can cancel it even
+                // while the search worker is still finding the first match.
+                self.find_serial += 1;
+                find.reveal = (!query.is_empty()).then_some(self.find_serial);
                 find.query = query;
                 find.results = None;
                 find.active = None;
-                find.reveal = None;
                 find.error = None;
                 self.prepare_visible();
                 self.find_sync();
@@ -233,10 +235,7 @@ impl App {
                                 });
                             find.select_match(results.nearest(first, last), results.len());
                             find.results = Some(results);
-                            if initial && find.active.is_some() {
-                                self.find_serial += 1;
-                                find.reveal = Some(self.find_serial);
-                            } else if old != find.position() {
+                            if find.active.is_none() || (!initial && old != find.position()) {
                                 // A streaming reparse may remove the current occurrence.
                                 // Update the counter, but do not take over scrolling.
                                 find.reveal = None;
@@ -264,7 +263,6 @@ impl App {
                 );
                 self.find_serial += 1;
                 find.reveal = Some(self.find_serial);
-                self.auto_scroll = false;
                 self.prepare_visible();
                 return widget::operation::focus(INPUT);
             }
@@ -291,6 +289,11 @@ impl App {
                     find.reveal = None;
                     self.prepare_visible();
                 } else {
+                    if y != 0. {
+                        // Let the reveal move the viewport before row measurements
+                        // can snap it back. Scroll reports whether we land at the end.
+                        self.auto_scroll = false;
+                    }
                     return iced_runtime::task::effect(iced_runtime::Action::widget(Reveal {
                         chat,
                         inner,

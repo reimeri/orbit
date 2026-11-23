@@ -376,8 +376,34 @@ fn visible_text(
     (viewport.dy, first)
 }
 
+fn streaming_fixture(source: &str) -> App {
+    let mut app = fixture(source);
+    let session = app.current_session.take().unwrap();
+    app.harness.as_ref().unwrap().insert(session);
+    app.refresh();
+    app
+}
+
+async fn append_text(
+    app: &mut App,
+    renderer: &mut iced::Renderer,
+    cache: &mut Cache,
+    size: Size,
+    text: &str,
+) {
+    app.harness
+        .as_ref()
+        .unwrap()
+        .edit(app.selected.as_ref().unwrap(), |s| {
+            s.entries[0].text.push_str(text)
+        })
+        .unwrap();
+    drive_messages(app, renderer, cache, size, vec![Message::Changed]).await;
+    settle(app, renderer, cache, size, None).await;
+}
+
 #[tokio::test]
-async fn streaming_into_windowed_layout_keeps_the_reader_at_the_same_text() {
+async fn streaming_pauses_on_scroll_and_resumes_on_jump() {
     let source: String = (0..12)
         .map(|i| {
             format!(
@@ -386,30 +412,125 @@ async fn streaming_into_windowed_layout_keeps_the_reader_at_the_same_text() {
             )
         })
         .collect();
-    let mut app = fixture(&source);
-    let h = app.harness.as_ref().unwrap().clone();
-    let session = app.current_session.take().unwrap();
-    let id = session.id.clone();
-    h.insert(session);
-    app.refresh();
+    let mut app = streaming_fixture(&source);
     let mut cache = Cache::new();
     let mut renderer = header_renderer();
     let size = Size::new(525., 540.);
-    settle(&mut app, &mut renderer, &mut cache, size, Some(0.65)).await;
-    let (offset, (label, y)) = visible_text(&app, &mut renderer, &mut cache, size);
-    move_to(&app, &mut renderer, &mut cache, size, offset);
-    h.edit(&id, |s| {
-        s.entries[0].text.push_str(&"Next block.\n\n".repeat(160))
-    })
-    .unwrap();
-    app.refresh();
+    settle(&mut app, &mut renderer, &mut cache, size, Some(1.)).await;
+    let (bottom, _) = visible_text(&app, &mut renderer, &mut cache, size);
+    move_to(&app, &mut renderer, &mut cache, size, bottom / 2.);
     settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    let (_, (label, y)) = visible_text(&app, &mut renderer, &mut cache, size);
+    append_text(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        &"Next block.\n\n".repeat(160),
+    )
+    .await;
     let (_, (now, screen_y)) = visible_text(&app, &mut renderer, &mut cache, size);
     assert_eq!(label, now);
     assert!((screen_y - y).abs() < 1.);
     assert!(
         !app.auto_scroll,
         "layout changes must not resume following the tail"
+    );
+
+    let mut ui = UserInterface::build(
+        app.center(),
+        size,
+        std::mem::take(&mut cache),
+        &mut renderer,
+    );
+    let mut bounds = UiBounds::default();
+    ui.operate(&renderer, &mut bounds);
+    let chat = bounds.scroll("chat");
+    let jump = bounds
+        .containers
+        .iter()
+        .find(|b| {
+            b.width == b.height
+                && b.width > 0.
+                && b.is_within(&chat)
+                && (b.center_x() - chat.center_x()).abs() < 1.
+                && b.center_y() > chat.center_y()
+        })
+        .expect("round control centered above composer")
+        .center();
+    let messages = click_at(&mut ui, &mut renderer, jump);
+    cache = ui.into_cache();
+    drive_messages(&mut app, &mut renderer, &mut cache, size, messages).await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    assert!(app.auto_scroll);
+
+    append_text(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        &format!("{}Stream tail.", "New tokens.\n\n".repeat(80)),
+    )
+    .await;
+    let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+    let mut bounds = UiBounds::default();
+    let mut viewport = Viewport::default();
+    ui.operate(&renderer, &mut bounds);
+    ui.operate(&renderer, &mut viewport);
+    let tail = bounds.label("Stream tail.").center() - iced::Vector::new(0., viewport.dy);
+    assert!(chat.contains(tail), "newly streamed text must be visible");
+    assert!(
+        !click_at(&mut ui, &mut renderer, jump)
+            .iter()
+            .any(|m| matches!(m, Message::JumpToLatest))
+    );
+}
+
+#[tokio::test]
+async fn find_refresh_keeps_the_selection_without_scrolling_back() {
+    let mut app = streaming_fixture(&format!(
+        "Older match.\n\n{}",
+        "Conversation.\n\n".repeat(150)
+    ));
+    let size = Size::new(620., 470.);
+    let mut renderer = header_renderer();
+    let mut cache = Cache::new();
+    settle(&mut app, &mut renderer, &mut cache, size, Some(1.)).await;
+    dispatch(&mut app, Message::Find(find::Action::Open)).await;
+    assert!(
+        app.auto_scroll,
+        "opening Find should not detach from the stream"
+    );
+    dispatch(&mut app, Message::Find(find::Action::Query("match".into()))).await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    assert!(
+        !app.auto_scroll,
+        "revealing the older match should pause following"
+    );
+
+    // Return to the stream without changing Find's selection.
+    settle(&mut app, &mut renderer, &mut cache, size, Some(1.)).await;
+    append_text(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        &format!("{}New match.", "New tokens.\n\n".repeat(80)),
+    )
+    .await;
+    let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+    let mut bounds = UiBounds::default();
+    let mut viewport = Viewport::default();
+    ui.operate(&renderer, &mut bounds);
+    ui.operate(&renderer, &mut viewport);
+    assert!(
+        bounds.labels.iter().any(|(s, _)| s == "1 of 2"),
+        "Find should count the new match but keep the old selection"
+    );
+    let tail = bounds.label("New match.").center() - iced::Vector::new(0., viewport.dy);
+    assert!(
+        viewport.bounds.contains(tail),
+        "updating matches must not pull the reader back"
     );
 }
 

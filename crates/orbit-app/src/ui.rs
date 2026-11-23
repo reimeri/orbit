@@ -449,6 +449,7 @@ pub enum Message {
     ToggleGroup(String),
     ToggleExecution(String),
     Scroll(u64, f32, f32, bool),
+    JumpToLatest,
     RowSize(u64, usize, f32),
     MarkdownGeometry(
         u64,
@@ -2556,11 +2557,20 @@ impl App {
                 self.rebuild_transcript();
                 self.prepare_visible();
             }
+            Message::JumpToLatest => {
+                if let Some(find) = &mut self.find {
+                    find.reveal = None;
+                }
+                self.auto_scroll = true;
+                self.transcript.end();
+                self.prepare_visible();
+                return bottom();
+            }
             Message::Scroll(epoch, offset, height, at_bottom) => {
                 if epoch != self.view_epoch {
                     return Task::none();
                 }
-                self.auto_scroll = at_bottom && self.find.is_none();
+                self.auto_scroll = at_bottom;
                 self.transcript.offset = (offset - 20.).max(0.);
                 self.transcript.viewport = height;
                 self.prepare_visible();
@@ -3706,12 +3716,27 @@ impl App {
             scroll(content).id("chat").height(Fill).into()
         };
         // Keep the scrollable at the base of the same stack even when Find is closed.
-        let chat = stack![chat].width(Fill).height(Fill);
-        let chat: Element<'_, Message> = match &self.find {
-            Some(find) => chat.push(find.popup()),
-            None => chat,
+        let mut chat = stack![chat].width(Fill).height(Fill);
+        if let Some(find) = &self.find {
+            chat = chat.push(find.popup());
         }
-        .into();
+        if !self.auto_scroll {
+            let diameter = 32.;
+            let jump = theme::button(container(Icon::ArrowDown.view(16.)).center(diameter))
+                .padding(0)
+                .style(move |theme, status| {
+                    let mut style = secondary(theme, status);
+                    style.border.radius = (diameter / 2.).into();
+                    style
+                })
+                .on_press(Message::JumpToLatest);
+            chat = chat.push(
+                container(footer_tip(jump, "Jump to latest".into()))
+                    .padding(8)
+                    .center_x(Fill)
+                    .align_bottom(Fill),
+            );
+        }
         let running = self.running();
         if let Some(child) = &session.child {
             use orbit_core::agent::subagents::RunStatus;
