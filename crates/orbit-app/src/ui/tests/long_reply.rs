@@ -242,14 +242,21 @@ async fn returning_to_measured_reply_preserves_visible_text_and_scroll_anchor() 
             )
         })
         .collect();
-    let mut app = fixture(&source);
+    // A measured prefix that will revert to an estimate on a session switch.
+    let mut app = fixture(&"Earlier line.  \n".repeat(24));
     let session = app.current_session.as_mut().unwrap();
-    let id = session.entries[0].id.clone();
+    let reply = Entry::new(EntryKind::Assistant, source);
+    let id = reply.id.clone();
+    session.entries.push(reply);
     for i in 0..90 {
         session
             .entries
             .push(Entry::new(EntryKind::Assistant, format!("Following {i}")));
     }
+    let session_id = session.id.clone();
+    let h = app.harness.as_ref().unwrap().clone();
+    h.store.save_session(session).unwrap();
+    h.insert(session.clone());
     app.rebuild_transcript();
     app.prepare_visible();
     let mut renderer = header_renderer();
@@ -275,6 +282,58 @@ async fn returning_to_measured_reply_preserves_visible_text_and_scroll_anchor() 
         (restored_y - y).abs() < 1.,
         "same text moved from {y} to {restored_y}"
     );
+
+    // Unlike scrolling away, switching sessions tears down the height indexes.
+    let other = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+    let other_id = other.id.clone();
+    h.store.save_session(&other).unwrap();
+    for id in [other_id, session_id] {
+        drive_messages(
+            &mut app,
+            &mut renderer,
+            &mut cache,
+            size,
+            vec![Message::Select(id)],
+        )
+        .await;
+        settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    }
+    assert!(!app.auto_scroll);
+    let (_, (restored, restored_y)) = visible_text(&app, &mut renderer, &mut cache, size);
+    assert_eq!(restored, label);
+    assert!((restored_y - y).abs() < 1.);
+}
+
+async fn drive_messages(
+    app: &mut App,
+    renderer: &mut iced::Renderer,
+    cache: &mut Cache,
+    size: Size,
+    messages: Vec<Message>,
+) {
+    let mut pending: std::collections::VecDeque<_> = messages.into();
+    while let Some(message) = pending.pop_front() {
+        let task = app.update(message);
+        if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+            while let Some(action) = stream.next().await {
+                match action {
+                    iced_runtime::Action::Widget(mut op) => {
+                        let mut ui = UserInterface::build(
+                            app.center(),
+                            size,
+                            std::mem::take(cache),
+                            renderer,
+                        );
+                        ui.operate(renderer, op.as_mut());
+                        let _ = op.finish();
+                        *cache = ui.into_cache();
+                    }
+                    iced_runtime::Action::Output(msg) => pending.push_back(msg),
+                    _ => (),
+                }
+            }
+        }
+    }
 }
 
 fn move_to(app: &App, renderer: &mut iced::Renderer, cache: &mut Cache, size: Size, y: f32) {
@@ -405,29 +464,7 @@ async fn find_reveals_offscreen_occurrence_inside_a_virtual_reply_and_wide_code(
         );
         *cache = ui.into_cache();
         messages.push(Message::Event(event));
-        let mut pending: std::collections::VecDeque<_> = messages.into();
-        while let Some(message) = pending.pop_front() {
-            let task = app.update(message);
-            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
-                while let Some(action) = stream.next().await {
-                    match action {
-                        iced_runtime::Action::Widget(mut op) => {
-                            let mut ui = UserInterface::build(
-                                app.center(),
-                                size,
-                                std::mem::take(cache),
-                                renderer,
-                            );
-                            ui.operate(renderer, op.as_mut());
-                            let _ = op.finish();
-                            *cache = ui.into_cache();
-                        }
-                        iced_runtime::Action::Output(msg) => pending.push_back(msg),
-                        _ => (),
-                    }
-                }
-            }
-        }
+        drive_messages(app, renderer, cache, size, messages).await;
     }
     key(
         &mut app,

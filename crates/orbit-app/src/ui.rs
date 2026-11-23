@@ -75,6 +75,14 @@ enum TranscriptKey {
     Bottom,
 }
 
+// Only keep geometry for the row being read, not an inactive transcript.
+struct ChatPosition {
+    row: usize,
+    inside: f32,
+    height: f32,
+    markdown: Option<(String, crate::markdown_window::Heights)>,
+}
+
 struct PendingSettings {
     submitted: Settings,
     close_on_success: bool,
@@ -242,7 +250,7 @@ pub struct App {
     agents_open: bool,
     changes: changes::State,
     worktrees: worktrees::State,
-    chat_positions: HashMap<String, (f32, bool)>,
+    chat_positions: HashMap<String, ChatPosition>,
     settings_tab: SettingsTab,
     notice: Option<(String, std::time::Instant)>,
     settings: Settings,
@@ -835,11 +843,23 @@ impl App {
                 markdown.refresh_images();
             }
         }
+        let bookmark = self.chat_positions.remove(&snapshot.id);
         self.current_session = Some(snapshot);
         self.find_sync();
         self.acknowledge_focused_completion();
         self.append_transcript();
-        if self.auto_scroll {
+        if let Some(bookmark) = bookmark
+            && let Some(pos) = self.transcript.position(bookmark.row)
+        {
+            // The rest of the rebuilt index uses estimates. Seed the actual
+            // row height before seeking, so even a deep offset stays in its row.
+            self.transcript.measure(bookmark.row, bookmark.height);
+            self.transcript.offset = self.transcript.prefix(pos) + bookmark.inside;
+            if let Some((id, heights)) = bookmark.markdown {
+                self.markdown_heights.insert(id, heights);
+            }
+            self.auto_scroll = false;
+        } else if self.auto_scroll {
             self.transcript.end();
         }
         self.prepare_visible();
@@ -1219,6 +1239,34 @@ impl App {
             && !self.footer_menu_open
             && self.worktrees.popup.is_none()
     }
+    fn remember_chat_position(&mut self) {
+        if self.auto_scroll {
+            return;
+        }
+        let pos = self.transcript.at(self.transcript.offset);
+        if let Some(&row) = self.transcript.order.get(pos) {
+            let session = self.current_session.as_ref().expect("mounted transcript");
+            let markdown = match ActivityRow::from_id(row) {
+                ActivityRow::Entry(i) => {
+                    let id = &session.entries[i].id;
+                    self.markdown
+                        .get_mut(id)
+                        .and_then(|md| md.window.as_mut())
+                        .map(|window| (id.clone(), std::mem::take(&mut window.known)))
+                }
+                _ => None,
+            };
+            self.chat_positions.insert(
+                session.id.clone(),
+                ChatPosition {
+                    row,
+                    inside: self.transcript.offset - self.transcript.prefix(pos),
+                    height: self.transcript.height(pos),
+                    markdown,
+                },
+            );
+        }
+    }
     fn select(&mut self, selection: Selection) {
         self.select_with_fork(selection, None);
     }
@@ -1230,10 +1278,6 @@ impl App {
             return;
         }
         self.find = None;
-        if let Some(id) = &self.selected {
-            self.chat_positions
-                .insert(id.clone(), (self.transcript.offset, self.auto_scroll));
-        }
         self.file_completion.dismiss();
         let draft = self.take_draft();
         let settings = self.catalog.settings.clone();
@@ -1664,7 +1708,10 @@ impl App {
                         self.smoke_fixtures = SmokeFixtures::default();
                         self.view_epoch = self.view_epoch.wrapping_add(1);
                         self.context_menu = None;
-                        self.auto_scroll = true;
+                        if self.current_session.as_ref().map(|s| &s.id) != self.selected.as_ref() {
+                            self.remember_chat_position();
+                            self.auto_scroll = true;
+                        }
                         self.refresh();
                         self.acknowledge_selected_attention();
                         self.restore_draft();
@@ -1693,24 +1740,18 @@ impl App {
                         {
                             return self.jump_to_prompt(&entry);
                         }
-                        if let Some((offset, follow)) = self
-                            .selected
-                            .as_ref()
-                            .and_then(|id| self.chat_positions.get(id))
-                            .copied()
-                        {
-                            self.auto_scroll = follow;
-                            if !follow {
-                                self.transcript.offset = offset;
-                                self.prepare_visible();
-                                return widget::operation::scroll_to(
-                                    "chat",
-                                    scrollable::AbsoluteOffset {
-                                        x: 0.,
-                                        y: offset + 20.,
+                        if !self.auto_scroll {
+                            return widget::operation::scroll_to(
+                                "chat",
+                                scrollable::AbsoluteOffset {
+                                    x: 0.,
+                                    y: if self.transcript.offset == 0. {
+                                        0.
+                                    } else {
+                                        self.transcript.offset + 20.
                                     },
-                                );
-                            }
+                                },
+                            );
                         }
                         return bottom();
                     }

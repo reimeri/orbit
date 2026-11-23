@@ -91,8 +91,11 @@ For file locations, backup and format compatibility, see
   the entire history. Inside a long assistant/reasoning entry, a second height
   index mounts top-level Markdown items around the same scroll viewport; only
   their image URLs are requested. Sparse numeric height measurements can outlive
-  the mounted entry within the selected session. Copy still walks the complete
-  source. A single giant paragraph, code fence or nested structure can still
+  the mounted entry within the selected session. When switching away from a
+  scrolled-up chat, Orbit keeps an in-memory bookmark for the visible row,
+  including its offset and any measured Markdown item heights. Returning restores
+  that reading position; chats left at the bottom still follow new messages.
+  Copy still walks the complete source. A single giant paragraph, code fence or nested structure can still
   be expensive to lay out; see the [long-reply measurements](benchmarks/session-and-rendering.md#layout-within-a-long-markdown-reply).
 
 ## Conversation Find
