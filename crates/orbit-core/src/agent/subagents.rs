@@ -150,12 +150,13 @@ struct Spawn {
     title: Option<String>,
     session_id: Option<String>,
 }
+const WAIT_OUTPUT_TOKENS: usize = 10_000;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wait {
     run_ids: Vec<String>,
     timeout_ms: Option<u64>,
-    max_output_tokens: Option<usize>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -595,7 +596,7 @@ impl Harness {
                         }
                         results.push(result);
                     }
-                    return Ok(crate::output::preserve_text(&serde_json::to_string(&json!({"runs":results}))?, crate::output::character_budget(args.max_output_tokens.unwrap_or(10_000))));
+                    return Ok(crate::output::preserve_text(&serde_json::to_string(&json!({"runs":results}))?, crate::output::character_budget(WAIT_OUTPUT_TOKENS)));
                 }
                 tokio::select! { _ = cancel.cancelled() => bail!("Wait cancelled; child assignments are unchanged"), _ = tokio::time::sleep_until(deadline) => {}, result = changes.changed() => { result.context("Harness closed")?; } }
             }
@@ -970,24 +971,25 @@ mod tests {
                 &CancellationToken::new(),
             )
         }
-        async fn wait(&self, ids: Vec<String>, timeout: u64) -> Value {
+        async fn wait_raw(&self, ids: Vec<String>, timeout: u64) -> String {
             let h = self.h.clone();
             let parent = self.parent.clone();
-            let out = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 h.wait_subagent(
                     &parent,
                     Wait {
                         run_ids: ids,
                         timeout_ms: Some(timeout),
-                        max_output_tokens: None,
                     },
                     &CancellationToken::new(),
                 )
             })
             .await
             .unwrap()
-            .unwrap();
-            serde_json::from_str(&out).unwrap()
+            .unwrap()
+        }
+        async fn wait(&self, ids: Vec<String>, timeout: u64) -> Value {
+            serde_json::from_str(&self.wait_raw(ids, timeout).await).unwrap()
         }
     }
     async fn assert_tool_catalog(f: &Fixture, session: &str, request: &Value, expected: &[&str]) {
@@ -1729,25 +1731,26 @@ await new Promise(r => setTimeout(r, 60000));"#,
             f.requests.try_recv().is_err(),
             "saving must not replay child or wake idle parent"
         );
-        let h = f.h.clone();
-        let parent = f.parent.clone();
-        let run_id = run.run_id.clone();
-        let spill = tokio::task::spawn_blocking(move || {
-            h.wait_subagent(
-                &parent,
-                Wait {
-                    run_ids: vec![run_id],
-                    timeout_ms: Some(0),
-                    max_output_tokens: Some(0),
-                },
-                &CancellationToken::new(),
-            )
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        let saved = crate::test_support::saved_output(&spill);
-        assert_eq!(serde_json::from_slice::<Value>(&saved).unwrap(), result);
+    }
+
+    #[tokio::test]
+    async fn wait_preserves_oversized_result_without_a_budget_argument() {
+        let mut f = Fixture::new().await;
+        let run = f.spawn(Profile::Explore, None, "large result").unwrap();
+        let response = format!(
+            "begin:{}:end",
+            "λ".repeat(crate::output::character_budget(WAIT_OUTPUT_TOKENS))
+        );
+        f.request().await.reply.send(answer(&response)).unwrap();
+        let notice = f.wait_raw(vec![run.run_id.clone()], 5000).await;
+        let saved = crate::test_support::saved_output(&notice);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&saved).unwrap(),
+            json!({
+                "runs": [{"run_id": run.run_id, "session_id": run.session_id,
+                          "status": "completed", "final_response": response}]
+            })
+        );
     }
 
     #[tokio::test]
@@ -2182,7 +2185,6 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 Wait {
                     run_ids: vec!["run-1".into(), "run-2".into()],
                     timeout_ms: Some(0),
-                    max_output_tokens: None,
                 },
                 &CancellationToken::new(),
             )
@@ -2365,7 +2367,6 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 Wait {
                     run_ids: vec![run_id],
                     timeout_ms: Some(0),
-                    max_output_tokens: None,
                 },
                 &CancellationToken::new(),
             )

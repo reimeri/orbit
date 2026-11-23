@@ -39,8 +39,7 @@ spawn_subagent({
 
 wait_subagent({
   run_ids: string[],
-  timeout_ms?: number,
-  max_output_tokens?: number
+  timeout_ms?: number
 }): Promise<string>
 
 list_subagents({}): Promise<string>
@@ -81,7 +80,7 @@ timeout. It returns the status of each requested run and terminal results:
 ```
 
 - Default timeout: 10,000 ms; capped at 300,000 ms. Zero polls immediately.
-- Default output budget: 10,000 approximate tokens, using the existing lossless
+- Fixed inline output budget: 10,000 approximate tokens, using the existing lossless
   output mechanism. Oversized results are saved completely in private `/tmp`
   files with absolute paths and exact byte sizes, never truncated.
 - Results can be retrieved repeatedly, including after continuing the same child

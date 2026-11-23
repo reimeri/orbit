@@ -135,8 +135,7 @@ pub(super) fn definitions(capabilities: Capabilities) -> Vec<Tool> {
                 description: "Wait for any requested subagent assignment's final result.",
                 input_schema: json!({"type":"object","properties":{
                     "run_ids":{"type":"array","items":{"type":"string"},"description":"Assignment IDs returned by spawn_subagent."},
-                    "timeout_ms":{"type":"integer","description":"Wait timeout; default 10000 ms, maximum 300000 ms."},
-                    "max_output_tokens":{"type":"integer","description":"Inline output token budget."}
+                    "timeout_ms":{"type":"integer","description":"Wait timeout; default 10000 ms, maximum 300000 ms."}
                 },"required":["run_ids"],"additionalProperties":false}),
                 output_schema: json!({"type":"string"}),
             },
