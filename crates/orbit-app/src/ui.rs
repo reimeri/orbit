@@ -2081,7 +2081,6 @@ impl App {
                     || self.modal.is_some()
                     || self.context_menu.is_some()
                     || self.footer_menu_open
-                    || self.search_active
                     || self.active_questionnaire.as_ref() != Some(&id)
                 {
                     return Task::none();
@@ -2289,9 +2288,6 @@ impl App {
                     return self.update_inner(Message::CancelSettings);
                 }
                 self.view_epoch = self.view_epoch.wrapping_add(1);
-                if self.find.take().is_some() {
-                    self.prepare_visible();
-                }
                 self.settings_open = true;
                 self.agents_open = false;
                 self.fork_panel = None;
@@ -2929,17 +2925,35 @@ impl App {
                         self.histories.active.separate();
                         // One central Escape handler preserves modal/search shortcuts
                         // even when their native text inputs capture the key.
+                        let close_search = if self.find.is_some() {
+                            Some(Message::Find(find::Action::Close))
+                        } else {
+                            self.search_active.then_some(Message::ToggleSearch)
+                        };
                         if self.file_completion_enabled() && self.file_completion.is_open() {
+                            if let Some(close_search) = close_search {
+                                // Both controls are visible. The composer keeps focus on
+                                // Escape, whereas a native search input releases it.
+                                return widget::operation::is_focused("composer").map(
+                                    move |focused| {
+                                        if focused {
+                                            Message::FileCompletion(
+                                                crate::file_completion::Message::Dismiss,
+                                            )
+                                        } else {
+                                            close_search.clone()
+                                        }
+                                    },
+                                );
+                            }
                             self.file_completion.dismiss();
                             return Task::none();
                         }
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
                             return self.update_inner(Message::Dismiss);
-                        } else if self.find.is_some() && !self.settings_open {
-                            return self.find_action(find::Action::Close);
-                        } else if self.search_active {
-                            return self.update_inner(Message::ToggleSearch);
+                        } else if let Some(close_search) = close_search {
+                            return self.update_inner(close_search);
                         } else if self.settings_open {
                             return self.update_inner(Message::CancelSettings);
                         } else if self.fork_panel.is_some() {
@@ -2972,7 +2986,6 @@ impl App {
                         return self.find_action(find::Action::Open);
                     } else if self.find.is_some()
                         && self.modal.is_none()
-                        && !self.settings_open
                         && self.context_menu.is_none()
                         && key == keyboard::Key::Named(keyboard::key::Named::Enter)
                         && matches!(
@@ -3872,8 +3885,7 @@ impl App {
                         && self.modal.is_none()
                         && self.context_menu.is_none()
                         && !self.footer_menu_open
-                        && self.worktrees.popup.is_none()
-                        && !self.search_active,
+                        && self.worktrees.popup.is_none(),
                     !self.settings_open
                         && !self.search_active
                         && self.find.is_none()
@@ -4071,7 +4083,6 @@ impl App {
             && self.active_questionnaire.is_none()
             && !self.footer_menu_open
             && self.worktrees.popup.is_none()
-            && !self.search_active
     }
     fn composer_editor(&self, running: bool) -> Element<'_, Message> {
         let line_height = self.catalog.settings.font_size * COMPOSER_LINE_HEIGHT_FACTOR;

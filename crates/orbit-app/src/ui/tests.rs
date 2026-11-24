@@ -69,6 +69,40 @@ async fn drain(app: &mut App, task: Task<Message>) {
         }
     }
 }
+async fn drive_ui_messages(
+    view: fn(&App) -> Element<'_, Message>,
+    app: &mut App,
+    renderer: &mut iced::Renderer,
+    cache: &mut iced_runtime::user_interface::Cache,
+    size: Size,
+    messages: Vec<Message>,
+) {
+    use iced::futures::StreamExt;
+    let mut pending: std::collections::VecDeque<_> = messages.into();
+    while let Some(message) = pending.pop_front() {
+        let task = app.update(message);
+        if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+            while let Some(action) = stream.next().await {
+                match action {
+                    iced_runtime::Action::Widget(mut op) => {
+                        let mut ui = iced_runtime::UserInterface::build(
+                            view(app),
+                            size,
+                            std::mem::take(cache),
+                            renderer,
+                        );
+                        ui.operate(renderer, op.as_mut());
+                        let _ = op.finish();
+                        *cache = ui.into_cache();
+                    }
+                    iced_runtime::Action::Output(msg) => pending.push_back(msg),
+                    _ => (),
+                }
+            }
+        }
+    }
+}
+
 async fn copied_text(task: Task<Message>) -> String {
     use iced::futures::StreamExt;
     let mut stream = iced_runtime::task::into_stream(task).expect("copy action");

@@ -384,3 +384,40 @@ async fn panel_checkout_details_align_and_the_creation_button_leaves_the_gutter_
         assert_eq!(bounds.label(label).x, heading_x, "{label}");
     }
 }
+
+#[tokio::test]
+async fn worktree_picker_waits_for_the_draft_attachment_import() {
+    let mut app = app();
+    let repo = repo_fixture();
+    dispatch(&mut app, Message::Create(repo.path().into())).await;
+    let path = repo.path().join("attachment.png");
+    std::fs::write(&path, include_bytes!("../../fixtures/media.png")).unwrap();
+    let import = app.update(Message::Event(iced::Event::Window(
+        window::Event::FileDropped(path),
+    )));
+    dispatch(&mut app, Message::Worktree(Action::Popup(0.))).await;
+
+    let mut renderer = header_renderer();
+    let mut check_choices = |app: &App, enabled| {
+        let mut ui = iced_runtime::UserInterface::build(
+            app.worktree_popup(240.).unwrap(),
+            Size::new(240., 600.),
+            Default::default(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        for label in ["main", "New worktree"] {
+            let messages = click_at(&mut ui, &mut renderer, bounds.label(label).center());
+            assert_eq!(
+                matches!(messages.as_slice(), [Message::Worktree(Action::Run(_))]),
+                enabled,
+                "{label}"
+            );
+        }
+    };
+    check_choices(&app, false);
+    drain(&mut app, import).await;
+    assert_eq!(app.attachments.len(), 1);
+    check_choices(&app, true);
+}

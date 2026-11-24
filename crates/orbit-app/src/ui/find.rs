@@ -143,11 +143,7 @@ impl App {
             let Some(session) = self.current_session.as_ref() else {
                 return Task::none();
             };
-            if self.modal.is_some()
-                || self.settings_open
-                || self.context_menu.is_some()
-                || self.switching_session
-            {
+            if self.modal.is_some() || self.context_menu.is_some() || self.switching_session {
                 return Task::none();
             }
             self.histories.active.separate();

@@ -311,29 +311,7 @@ async fn drive_messages(
     size: Size,
     messages: Vec<Message>,
 ) {
-    let mut pending: std::collections::VecDeque<_> = messages.into();
-    while let Some(message) = pending.pop_front() {
-        let task = app.update(message);
-        if let Some(mut stream) = iced_runtime::task::into_stream(task) {
-            while let Some(action) = stream.next().await {
-                match action {
-                    iced_runtime::Action::Widget(mut op) => {
-                        let mut ui = UserInterface::build(
-                            app.center(),
-                            size,
-                            std::mem::take(cache),
-                            renderer,
-                        );
-                        ui.operate(renderer, op.as_mut());
-                        let _ = op.finish();
-                        *cache = ui.into_cache();
-                    }
-                    iced_runtime::Action::Output(msg) => pending.push_back(msg),
-                    _ => (),
-                }
-            }
-        }
-    }
+    drive_ui_messages(App::center, app, renderer, cache, size, messages).await;
 }
 
 fn move_to(app: &App, renderer: &mut iced::Renderer, cache: &mut Cache, size: Size, y: f32) {

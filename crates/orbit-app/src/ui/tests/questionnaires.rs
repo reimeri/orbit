@@ -146,3 +146,55 @@ async fn questionnaires_preserve_session_drafts_queue_and_modal_priority() {
     assert!(app.questionnaires.is_empty());
     assert_eq!(app.editor.text(), "Unsent composer draft");
 }
+
+#[tokio::test]
+async fn sidebar_search_leaves_questionnaire_interactive() {
+    let mut app = app();
+    stored_session(&mut app, PathBuf::from("/project")).await;
+    dispatch(&mut app, Message::ToggleSearch).await;
+    app.stage_smoke_questionnaire(
+        orbit_core::questionnaire::Request::parse(
+            r#"{"questions":[{"id":"target","question":"Which target?","kind":"select","options":["Desktop","Mobile"]},{"id":"notes","question":"Any constraints?","kind":"text"}]}"#,
+        )
+        .unwrap(),
+    );
+
+    let mut renderer = header_renderer();
+    let size = Size::new(830., 600.);
+    let (cache, selection) = {
+        let mut ui = iced_runtime::UserInterface::build(
+            app.center(),
+            size,
+            Default::default(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let selection = click_at(&mut ui, &mut renderer, bounds.label("Mobile").center());
+        (ui.into_cache(), selection)
+    };
+    for message in selection {
+        dispatch(&mut app, message).await;
+    }
+
+    // Enter now belongs to the clicked panel, not the still-open sidebar.
+    let mut messages = Vec::new();
+    {
+        let mut ui = iced_runtime::UserInterface::build(app.center(), size, cache, &mut renderer);
+        let Message::Event(enter) = footer_key(keyboard::key::Named::Enter) else {
+            unreachable!()
+        };
+        ui.update(
+            &[enter],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+    }
+    for message in messages {
+        dispatch(&mut app, message).await;
+    }
+    assert!(app.search_active);
+    assert!(chat_text(&app).contains("Any constraints?"));
+}

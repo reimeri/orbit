@@ -471,6 +471,7 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
         .unwrap();
     };
     wait_for_picker(&mut app).await;
+    dispatch(&mut app, Message::ToggleSearch).await;
     // Clicking a picker row takes focus away from the editor before acceptance.
     // Exercise the returned focus operation on the retained native editor tree.
     use iced_runtime::{UserInterface, user_interface::Cache};
@@ -486,6 +487,24 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
         &renderer,
         &mut iced::advanced::widget::operation::focusable::focus("composer".into()),
     );
+    // With search still open, Enter in the focused composer must accept the
+    // file, never submit the unfinished message.
+    let Message::Event(enter) = footer_key(keyboard::key::Named::Enter) else {
+        unreachable!()
+    };
+    let mut messages = Vec::new();
+    ui.update(
+        &[enter],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut messages,
+    );
+    let [accept @ Message::FileCompletion(crate::file_completion::Message::Accept { .. })] =
+        messages.as_slice()
+    else {
+        panic!("expected file acceptance, got {messages:?}");
+    };
     ui.update(
         &[iced::Event::Mouse(mouse::Event::ButtonPressed(
             mouse::Button::Left,
@@ -496,8 +515,7 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
         &mut Vec::new(),
     );
     let cache = ui.into_cache();
-    let accept = app.file_completion.accept_selected();
-    let task = app.update(Message::FileCompletion(accept));
+    let task = app.update(accept.clone());
     let mut ui = UserInterface::build(app.composer_editor(false), size, cache, &mut renderer);
     if let Some(mut stream) = iced_runtime::task::into_stream(task) {
         while let Some(action) = stream.next().await {
@@ -1034,4 +1052,68 @@ async fn empty_workspace_welcome_centers_above_composer_and_fits_long_names() {
         !text.contains("What are we building?"),
         "the welcome must disappear once the conversation starts"
     );
+}
+
+#[tokio::test]
+async fn sidebar_search_shares_the_window_with_composer_completions() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, root).await;
+    type_message(&mut app, "/com").await;
+    let size = Size::new(app.window_width, app.window_height);
+    let mut renderer = header_renderer();
+    let mut cache = Default::default();
+    let escape = footer_key(keyboard::key::Named::Escape);
+
+    // Escape in the search input closes search, not the visible suggestion.
+    drive_ui_messages(
+        App::view,
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![Message::ToggleSearch, escape.clone()],
+    )
+    .await;
+    assert!(!app.search_active);
+    assert!(app.file_completion.is_open());
+
+    drive_ui_messages(
+        App::view,
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![Message::ToggleSearch],
+    )
+    .await;
+    let clicks = {
+        let mut ui = iced_runtime::UserInterface::build(app.view(), size, cache, &mut renderer);
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        assert_eq!(bounds.focused, Some("session-search".into()));
+        let messages = click_at(&mut ui, &mut renderer, bounds.label("/compact").center());
+        cache = ui.into_cache();
+        messages
+    };
+    drive_ui_messages(App::view, &mut app, &mut renderer, &mut cache, size, clicks).await;
+    assert_eq!(app.editor.text(), "/compact");
+    assert!(app.search_active);
+
+    // Undo restores the partial command. The clicked suggestion returned focus
+    // to the composer, so this Escape dismisses only its picker.
+    dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
+    assert_eq!(app.editor.text(), "/com");
+    assert!(app.file_completion.is_open());
+    drive_ui_messages(
+        App::view,
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![escape],
+    )
+    .await;
+    assert!(app.search_active);
+    assert!(!app.file_completion.is_open());
 }

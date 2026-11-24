@@ -25,6 +25,7 @@ pub enum Message {
     Results(Response),
     Skills(u64, Result<orbit_core::skills::Catalog, String>),
     Move(bool),
+    Dismiss,
     Accept {
         request: u64,
         generation: u64,
@@ -281,6 +282,7 @@ impl Completion {
     /// Returns whether the editor was mutated; drafts use the normal autosave path.
     pub fn update(&mut self, message: Message, editor: &mut text_editor::Content) -> bool {
         match message {
+            Message::Dismiss => self.dismiss(),
             Message::Skills(epoch, result) => {
                 if self.is_open() && self.picking_skill() && epoch == self.skill_epoch {
                     self.catalog = Some(result);

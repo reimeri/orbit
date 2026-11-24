@@ -219,6 +219,18 @@ async fn steering_labels_live_only_in_queued_bubbles_not_the_composer() {
     conversation.running.store(false, Ordering::Release);
 }
 
+fn ctrl_f() -> Message {
+    Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Character("f".into()),
+        modified_key: keyboard::Key::Character("f".into()),
+        physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyF),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::CTRL,
+        text: None,
+        repeat: false,
+    }))
+}
+
 #[tokio::test]
 async fn find_discards_obsolete_queries_and_sessions_without_touching_drafts() {
     let mut app = app();
@@ -233,18 +245,7 @@ async fn find_discards_obsolete_queries_and_sessions_without_touching_drafts() {
     .unwrap();
     dispatch(&mut app, Message::Changed).await;
     type_message(&mut app, "keep this draft").await;
-    let open = || {
-        Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
-            key: keyboard::Key::Character("f".into()),
-            modified_key: keyboard::Key::Character("f".into()),
-            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyF),
-            location: keyboard::Location::Standard,
-            modifiers: keyboard::Modifiers::CTRL,
-            text: None,
-            repeat: false,
-        }))
-    };
-    dispatch(&mut app, open()).await;
+    dispatch(&mut app, ctrl_f()).await;
     let old = app.update(Message::Find(find::Action::Query("old".into())));
     dispatch(
         &mut app,
@@ -269,10 +270,10 @@ async fn find_discards_obsolete_queries_and_sessions_without_touching_drafts() {
     dispatch(&mut app, footer_key(keyboard::key::Named::Escape)).await;
     assert!(app.find.is_none());
     assert_eq!(app.editor.text(), "keep this draft");
-    dispatch(&mut app, open()).await;
+    dispatch(&mut app, ctrl_f()).await;
     let stale = app.update(Message::Find(find::Action::Query("needle".into())));
     stored_session(&mut app, path).await;
-    dispatch(&mut app, open()).await;
+    dispatch(&mut app, ctrl_f()).await;
     drain(&mut app, stale).await;
     let mut renderer = header_renderer();
     let mut ui = iced_runtime::UserInterface::build(
@@ -364,4 +365,55 @@ async fn find_keeps_last_count_and_only_animates_slow_queries() {
         frame(&app, deadline + delay),
         (String::new(), RedrawRequest::Wait)
     );
+}
+
+#[tokio::test]
+async fn settings_and_find_can_open_in_either_order() {
+    let mut app = app();
+    let path = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, path).await;
+    app.harness
+        .as_ref()
+        .unwrap()
+        .edit(app.selected.as_ref().unwrap(), |s| {
+            s.entries
+                .push(Entry::new(EntryKind::Assistant, "needle and needle"));
+        })
+        .unwrap();
+    dispatch(&mut app, Message::Changed).await;
+    let size = Size::new(app.window_width, app.window_height);
+    let mut cache = Default::default();
+    let mut renderer = header_renderer();
+    let enter = footer_key(keyboard::key::Named::Enter);
+    let escape = footer_key(keyboard::key::Named::Escape);
+
+    // Opening Settings must not discard an existing query.
+    dispatch(&mut app, ctrl_f()).await;
+    dispatch(
+        &mut app,
+        Message::Find(find::Action::Query("needle".into())),
+    )
+    .await;
+    dispatch(&mut app, Message::ToggleSettings).await;
+    assert!(chat_text(&app).contains("1 of 2"));
+    dispatch(&mut app, escape.clone()).await;
+    assert!(app.find.is_none() && app.settings_open);
+
+    // Ctrl+F from Settings focuses Find, so Enter advances its match.
+    drive_ui_messages(
+        App::view,
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![
+            ctrl_f(),
+            Message::Find(find::Action::Query("needle".into())),
+            enter,
+        ],
+    )
+    .await;
+    assert!(chat_text(&app).contains("2 of 2"));
+    dispatch(&mut app, escape).await;
+    assert!(app.find.is_none() && app.settings_open);
 }

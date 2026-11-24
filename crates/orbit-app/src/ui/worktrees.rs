@@ -254,6 +254,10 @@ impl App {
         )
     }
 
+    fn worktree_operations_enabled(&self) -> bool {
+        !self.io_busy && !self.composer_importing()
+    }
+
     pub(super) fn worktree_popup(&self, width: f32) -> Option<Element<'_, Message>> {
         let mut list = column![];
         match self.worktrees.repo.as_ref()? {
@@ -265,12 +269,13 @@ impl App {
                 )
             }
             Ok(repo) => {
+                let enabled = self.worktree_operations_enabled();
                 let option = |(i, tree): (usize, &Checkout)| {
                     self.footer_menu_choice(
                         &tree.label,
                         tree.path == repo.current,
                         i == self.worktrees.cursor,
-                        (tree.available && !self.io_busy)
+                        (tree.available && enabled)
                             .then(|| msg(Action::Run(Operation::Open(tree.path.clone())))),
                     )
                 };
@@ -304,7 +309,7 @@ impl App {
                     .on_press_maybe(
                         repo.base
                             .clone()
-                            .filter(|_| !self.io_busy)
+                            .filter(|_| enabled)
                             .map(|b| msg(Action::Run(Operation::Create(b)))),
                     )
                     .style(move |t, s| {
@@ -348,7 +353,7 @@ impl App {
             }
             Some(Ok(repo)) => repo,
         };
-        let enabled = !self.io_busy && !self.composer_importing();
+        let enabled = self.worktree_operations_enabled();
         let mut rows = column![].spacing(8);
         if self.worktrees.bases {
             rows = rows.push(text("Base branch").size(14));
