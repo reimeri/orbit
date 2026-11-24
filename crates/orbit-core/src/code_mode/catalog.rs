@@ -124,7 +124,7 @@ pub(super) fn definitions(capabilities: Capabilities) -> Vec<Tool> {
                 description: "Start or resume an asynchronous read-only subagent.",
                 input_schema: json!({"type":"object","properties":{
                     "type":{"type":"string","enum":["review","explore"],"description":"Review changes or explore the project."},
-                    "task":{"type":"string","description":"Complete briefing; children have no parent conversation context."},
+                    "task":{"type":"string","description":"Children cannot see the parent conversation. State the question you need answered and include any case-specific evidence or constraints needed to answer it. If work is split, say what this child should verify and what others are handling."},
                     "title":{"type":"string","description":"Short assignment title."},
                     "session_id":{"type":"string","description":"Resume this parent's idle child, retaining its profile."}
                 },"required":["type","task"],"additionalProperties":false}),
