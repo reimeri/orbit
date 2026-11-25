@@ -4057,11 +4057,11 @@ impl App {
             .height(TOOLBAR_BUTTON_HEIGHT)
             .padding([4, 6])
             .style(|theme, status| {
+                if self.footer_menu_open {
+                    return secondary(theme, widget::button::Status::Pressed);
+                }
                 let mut style = secondary(theme, status);
-                if matches!(
-                    status,
-                    widget::button::Status::Active | widget::button::Status::Disabled
-                ) {
+                if status != widget::button::Status::Pressed {
                     style.background = None;
                 }
                 style
