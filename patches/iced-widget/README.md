@@ -45,11 +45,10 @@ The app's context menus and model/reasoning selector use the same policy through
 The `settings_dropdown_outside_click_activates_controls` regression exercises
 controls on both sides of the selector in widget traversal order.
 
-markdown-table-wrap.patch gives Markdown table columns a share of the actual
-viewport width. The table can shrink around short cells; when the viewport is
-too narrow, its layout budget stops shrinking at eight ems of text per column
-plus padding, and the existing horizontal scrollbar handles any overflow. The
-width constraint is opt-in: code blocks and other scrollers remain unbounded.
+markdown-table-wrap.patch divides the full chat viewport width evenly among the
+Markdown table columns, even when all cells are short. Below eight ems of text
+per column plus padding, the table keeps that minimum width and scrolls
+horizontally instead. Code blocks and other scrollers remain unbounded.
 Keeping it in the native Markdown widget (which owns the private row cells)
 preserves the same viewer traversal for rendering, selection and copy.
 

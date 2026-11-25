@@ -289,16 +289,39 @@ async fn retired_model_recovery_retries_failed_selection_without_losing_notice()
     let id = session.id.clone();
     h.store.save_session(&session).unwrap();
     let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
-    for table in ["new_session_draft", "sessions"] {
-        sqlite::fail_writes(&db, table, "fixture failure");
-        dispatch(&mut app, Message::Select(id.clone())).await;
-        assert!(app.error.as_ref().unwrap().contains("fixture failure"));
-        assert!(app.selected.is_none());
-        assert!(app.notice.is_none());
-        assert_eq!(h.store.load_session(&id).unwrap().model, "retired-model");
-        assert_eq!(h.get(&id).unwrap().snapshot().model, "retired-model");
-        sqlite::allow_writes(&db, table);
-    }
+    // An unchanged shared draft no longer needs a write on navigation.
+    dispatch(&mut app, Message::Create(session.project.clone())).await;
+    type_message(&mut app, "Unsaved outgoing draft").await;
+    sqlite::fail_writes(&db, "new_session_draft", "fixture draft failure");
+    let pending_autosave = app.update(Message::SaveDraft);
+    dispatch(&mut app, Message::Select(id.clone())).await;
+    assert!(
+        app.error
+            .as_ref()
+            .unwrap()
+            .contains("fixture draft failure")
+    );
+    assert!(app.selected.is_none() && app.notice.is_none());
+    assert_eq!(app.editor.text(), "Unsaved outgoing draft");
+    assert_eq!(h.store.load_session(&id).unwrap().model, "retired-model");
+    drain(&mut app, pending_autosave).await;
+    sqlite::allow_writes(&db, "new_session_draft");
+
+    stored_session(&mut app, session.project.clone()).await;
+    let outgoing = app.selected.clone().unwrap();
+    sqlite::fail_writes(&db, "sessions", "fixture model failure");
+    dispatch(&mut app, Message::Select(id.clone())).await;
+    assert!(
+        app.error
+            .as_ref()
+            .unwrap()
+            .contains("fixture model failure")
+    );
+    dispatch(&mut app, Message::Changed).await;
+    assert_eq!(app.current().unwrap().id, outgoing);
+    assert!(app.notice.is_none());
+    assert_eq!(h.store.load_session(&id).unwrap().model, "retired-model");
+    sqlite::allow_writes(&db, "sessions");
     dispatch(&mut app, Message::ErrorDismiss).await;
     dispatch(&mut app, Message::Select(id.clone())).await;
     assert_eq!(app.selected.as_ref(), Some(&id));

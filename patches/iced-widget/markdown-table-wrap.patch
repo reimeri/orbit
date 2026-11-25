@@ -8,15 +8,7 @@
              .align_x(match column.alignment {
                  pulldown_cmark::Alignment::None
                  | pulldown_cmark::Alignment::Left => {
-@@ -1526,6 +1527,7 @@
-         }),
-         rows,
-     )
-+    .width(Length::Shrink)
-     .padding_x(settings.spacing.0)
-     .padding_y(settings.spacing.0 / 2.0)
-     .separator_x(0);
-@@ -1534,6 +1536,11 @@
+@@ -1534,6 +1535,11 @@
          .direction(scrollable::Direction::Horizontal(
              scrollable::Scrollbar::default(),
          ))

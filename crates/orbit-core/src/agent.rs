@@ -128,6 +128,9 @@ impl Conversation {
                 std::mem::take(&mut *self.pending_activity.lock().expect("activity lock"));
             (state.clone(), samples)
         };
+        if samples.is_empty() && saved.as_ref() == Some(&snapshot) {
+            return Ok(());
+        }
         if let Err(error) = self.store.save_session_transaction(
             saved.as_ref(),
             &snapshot,
@@ -506,15 +509,14 @@ impl Harness {
     pub fn load(&self, id: &str) -> Result<Arc<Conversation>> {
         let _loading = self.loading.lock().expect("loading lock");
         if let Some(c) = self.get(id) {
-            let mut saved = c.persisted.lock().expect("persistence lock");
             if !c.loaded.load(Ordering::Acquire) {
+                let mut saved = c.persisted.lock().expect("persistence lock");
                 let session = self.store.load_session(id)?;
                 *saved = Some(session.clone());
                 *c.state.lock().expect("session lock") = session;
                 c.loaded.store(true, Ordering::Release);
                 c.changed();
             }
-            drop(saved);
             return Ok(c);
         }
         let session = self.store.load_session(id)?;
@@ -618,6 +620,9 @@ impl Harness {
     }
     pub fn reconcile_model(&self, id: &str, settings: &Settings) -> Result<bool> {
         let conversation = self.load(id)?;
+        if crate::models::model(&conversation.state.lock().expect("session lock").model).is_some() {
+            return Ok(false);
+        }
         let mut saved = conversation.persisted.lock().expect("persistence lock");
         let mut session = conversation.snapshot();
         if !session.reconcile_model(settings) {

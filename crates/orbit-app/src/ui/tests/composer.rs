@@ -55,8 +55,7 @@ async fn session_row_press_and_pending_load_keep_the_composer_focused() {
     };
     assert_eq!(id, &target);
     let pending = app.update(select.clone());
-    // A core change can arrive after eviction but before the UI receives
-    // the selection result. It must not unmount the outgoing editor.
+    // A core change can arrive before the UI receives the selection result. It must not unmount the outgoing editor.
     let mut actions = iced_runtime::task::into_stream(pending).unwrap();
     let selected = loop {
         if let iced_runtime::Action::Output(message @ Message::Selected(_)) =

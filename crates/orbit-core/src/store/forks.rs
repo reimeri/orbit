@@ -13,13 +13,13 @@ pub struct ForkOrigin {
     pub inherited: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Point {
     entries: History<Entry>,
     input: History<Value>,
     context: ContextState,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ContextState {
     effort_baseline: Option<EffortBaseline>,
     summary: String,

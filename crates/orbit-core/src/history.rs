@@ -18,6 +18,12 @@ pub struct History<T: Record> {
     rows: OrdMap<usize, Arc<T>>,
     ids: HashMap<String, usize>,
 }
+impl<T: Record> PartialEq for History<T> {
+    fn eq(&self, other: &Self) -> bool {
+        // The ID index derives from the rows. OrdMap equality skips shared subtrees.
+        self.rows == other.rows
+    }
+}
 impl<T: Record> Default for History<T> {
     fn default() -> Self {
         Self {

@@ -17,6 +17,13 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   before writing and does not hold the conversation state lock across disk I/O.
   Agent async tasks offload saves to blocking workers. Message acceptance commits
   before it is published; tool-start boundaries commit before commands launch.
+- Cold session loads use a separate read-only WAL connection. Metadata,
+  transcript, provider context and fork points come from a single committed
+  snapshot, even during a turn save. Loading an already-resident session does
+  not take its persistence lock. Clean switches skip unchanged session and
+  shared-draft writes; draft edits, recovery and acknowledgements still commit.
+  Inactive-session cleanup is queued after the destination is ready, so it
+  doesn't hold up display or evict the outgoing session if the switch fails.
 - Startup loads lightweight session summaries, not transcript bodies. Selected
   and executing conversations load bodies on demand. Idle unselected bodies are
   released; runtime stubs retain unread cell/process results and JS store values
@@ -65,6 +72,22 @@ successfully accepted submission uses its identity and does not queue or start i
 again once it has been delivered. Failed ordinary edits stay in memory for retry.
 Cancellation frees inaccessible command slots; actual cell-thread lifetime is
 tracked independently of retrievable cell IDs so eviction cannot race callbacks.
+
+### Diagnosing a slow session switch
+
+Run `ORBIT_TRACE_SESSION_SWITCH=1 orbit` from a terminal. Each sidebar switch
+prints elapsed times for the storage queue, outgoing and shared drafts, load,
+completion acknowledgement, model reconciliation, and applying the
+selection in the UI. It prints no session content. UI update time does not
+include layout, drawing or frame presentation. A long queue wait can be a
+previous storage job rather than a slow destination read.
+
+The regression test `just test clean_cold_switch -- --nocapture` keeps a SQLite
+writer transaction open throughout a switch between two clean sessions. Before
+the change the switch failed after the 5 s busy timeout. With the writer still
+held, one local debug run took 0.5 ms from the selection request to the
+destination composer being ready. This is not a frame-presentation time or a
+latency bound for large transcripts or switches that have unsaved work.
 
 For file locations, backup and format compatibility, see
 [State and recovery](../README.md#state-and-recovery).

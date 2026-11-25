@@ -193,6 +193,8 @@ pub struct App {
     draft_session: Option<Session>,
     new_draft: NewSessionDraft,
     new_draft_dirty: bool,
+    saving_new_draft: bool,
+    saving_session_draft: Option<String>,
     usage_summary: Option<Result<Arc<orbit_core::store::activity::Summary>, String>>,
     transcript: crate::virtual_list::List,
     activity: activity::Projection,
@@ -537,6 +539,8 @@ impl App {
             draft_session: None,
             new_draft,
             new_draft_dirty: false,
+            saving_new_draft: false,
+            saving_session_draft: None,
             usage_summary: None,
             transcript: crate::virtual_list::List::with_overscan(CHAT_OVERSCAN),
             activity: activity::Projection::default(),
@@ -765,8 +769,7 @@ impl App {
                 self.prepare_sidebar();
             }
         }
-        // The worker may already have evicted the outgoing conversation.
-        // Keep its view mounted until Selected commits the incoming snapshot.
+        // Keep the outgoing view mounted until Selected commits the destination.
         if self.switching_session || self.smoke_fixtures.transcript {
             return false;
         }
@@ -1159,19 +1162,23 @@ impl App {
             return;
         }
         if self.new_draft_dirty
+            && !self.saving_new_draft
             && let Some(h) = &self.harness
         {
             let h = h.clone();
             let draft = self.new_draft.clone();
             self.new_draft_dirty = false;
+            self.saving_new_draft = true;
             self.tasks.push(self.io.run(move || Message::NewDraftSaved(
                 h.store.save_new_draft(&draft).map_err(|e| format!("Could not save new-session draft: {e:#}. Keep Orbit open and retry after fixing storage."))
             )));
         }
-        if let Some((id, draft)) = self.take_draft()
+        if self.saving_session_draft.is_none()
+            && let Some((id, draft)) = self.take_draft()
             && let Some(h) = &self.harness
         {
             let h = h.clone();
+            self.saving_session_draft = Some(id.clone());
             self.tasks.push(self.io.run(move || {
                 let result = h.edit(&id, |s| {
                     s.draft = draft.text;
@@ -1311,52 +1318,92 @@ impl App {
         }
         self.find = None;
         self.file_completion.dismiss();
-        let draft = self.take_draft();
+        // A queued autosave can still fail. Keep the current draft until selection
+        // succeeds and flush it here if its last save hasn't been acknowledged.
+        let draft = self
+            .selected
+            .as_ref()
+            .filter(|id| self.draft_dirty || self.saving_session_draft.as_ref() == Some(id))
+            .map(|id| (id.clone(), self.composer_message()));
         let settings = self.catalog.settings.clone();
-        let mut new_draft = self.new_draft.clone();
-        match &selection {
-            Selection::Picker => new_draft.project = None,
-            Selection::Draft(path) => new_draft.project = Some(path.clone()),
-            Selection::Session(_) => {}
-        }
+        let project = match &selection {
+            Selection::Picker => None,
+            Selection::Draft(path) => Some(path),
+            Selection::Session(_) => self.new_draft.project.as_ref(),
+        };
+        let new_draft = (self.new_draft_dirty
+            || self.saving_new_draft
+            || project != self.new_draft.project.as_ref())
+        .then(|| NewSessionDraft {
+            project: project.cloned(),
+            ..self.new_draft.clone()
+        });
         if let Some(h) = &self.harness {
             let h = h.clone();
             self.io_busy = true;
             self.switching_session = true;
+            let mut timer =
+                std::env::var_os("ORBIT_TRACE_SESSION_SWITCH").map(|_| std::time::Instant::now());
             self.tasks.push(self.io.run(move || {
+                let mut mark = |phase: &str| {
+                    if let Some(last) = &mut timer {
+                        let now = std::time::Instant::now();
+                        eprintln!("orbit session switch: {phase}: {:?}", now - *last);
+                        *last = now;
+                    }
+                };
+                mark("storage queue");
                 Message::Selected(
                     (|| {
                         if let Some((old, draft)) = draft {
                             h.edit(&old, |s| { s.draft = draft.text; s.draft_images = draft.images; })?;
                         }
-                        if let (Selection::Session(source), Some(entry)) = (&selection, fork_entry) {
-                            h.store.save_new_draft(&new_draft)?;
-                            h.evict_inactive(Some(source))?;
-                            // Create last: a failed switch must never leave a hidden duplicate fork.
-                            let fork = h.fork(source, &entry, &settings)?;
-                            return Ok((Selection::Session(fork), None));
-                        }
+                        mark("outgoing draft");
                         let id = if let Selection::Session(id) = &selection {
-                            if h.load(id)?.snapshot().unchecked_completion {
-                                h.edit(id, |s| s.unchecked_completion = false)?;
+                            if fork_entry.is_none() {
+                                let conversation = h.load(id)?;
+                                mark("load");
+                                if conversation.state.lock().expect("session lock").unchecked_completion {
+                                    h.edit(id, |s| s.unchecked_completion = false)?;
+                                }
+                                mark("completion acknowledgement");
                             }
                             Some(id.as_str())
                         } else {
                             None
                         };
-                        h.store.save_new_draft(&new_draft)?;
-                        h.evict_inactive(id)?;
+                        if let Some(draft) = new_draft {
+                            h.store.save_new_draft(&draft)?;
+                        }
+                        mark("shared draft");
+                        if let (Some(source), Some(entry)) = (id, fork_entry) {
+                            // Create last: a failed switch must never leave a hidden duplicate fork.
+                            let fork = h.fork(source, &entry, &settings)?;
+                            return Ok((Selection::Session(fork), None));
+                        }
                         // Reconcile last so a later selection error cannot suppress the notice after recovery.
                         let replaced = match id {
                             Some(id) => h.reconcile_model(id, &settings)?,
                             None => false,
                         };
+                        mark("model reconciliation");
                         let notice = replaced.then(|| format!("The previous model is no longer available. This session now uses {} with its default effort and Fast setting.", model(&settings.model).expect("catalog model")));
                         Ok::<_, orbit_core::Error>((selection, notice))
                     })()
                     .map_err(|e| {
                         format!("Could not switch sessions: {e:#}. Fix storage and retry.")
                     }),
+                )
+            }));
+        }
+    }
+    fn release_inactive_sessions(&mut self) {
+        if let Some(h) = self.harness.clone() {
+            let selected = self.selected.clone();
+            self.tasks.push(self.io.run(move || {
+                Message::External(
+                    h.evict_inactive(selected.as_deref())
+                        .map_err(|e| format!("Could not release inactive session: {e:#}")),
                 )
             }));
         }
@@ -1403,6 +1450,9 @@ impl App {
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let apply_timer = (matches!(message, Message::Selected(_))
+            && std::env::var_os("ORBIT_TRACE_SESSION_SWITCH").is_some())
+        .then(std::time::Instant::now);
         let geometry = (
             self.view_epoch,
             self.transcript.offset,
@@ -1465,6 +1515,9 @@ impl App {
         } else {
             Task::none()
         };
+        if let Some(start) = apply_timer {
+            eprintln!("orbit session switch: UI update: {:?}", start.elapsed());
+        }
         Task::batch([task, close].into_iter().chain(self.tasks.drain(..)))
     }
     fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -1732,6 +1785,9 @@ impl App {
                             }
                         }
                         self.new_draft_dirty = false;
+                        // Cleanup may wait for other turns. Queue it only once the
+                        // destination is ready; failed loads keep the old chat resident.
+                        self.release_inactive_sessions();
                         // Selection hands the view back to the harness, even when no
                         // catalog revision changed while a fixture owned the sidebar.
                         if self.smoke_fixtures.sidebar {
@@ -1799,17 +1855,18 @@ impl App {
                             self.worktrees.bases = false;
                         }
                         self.error = Some(error);
-                        self.draft_dirty = self.selected.is_some();
                     }
                 }
             }
             Message::NewDraftSaved(result) => {
+                self.saving_new_draft = false;
                 if let Err(error) = result {
                     self.error = Some(error);
                     self.new_draft_dirty = true;
                 }
             }
             Message::DraftSaved(id, result) => {
+                self.saving_session_draft = None;
                 if let Err(error) = result {
                     self.error = Some(error);
                     if self.selected.as_ref() == Some(&id) {
@@ -1916,19 +1973,8 @@ impl App {
                 if changed {
                     self.image_view.invalidate_return();
                 }
-                if before != self.catalog_revision
-                    && !self.io_busy
-                    && !self.closing
-                    && let Some(h) = &self.harness
-                {
-                    let h = h.clone();
-                    let selected = self.selected.clone();
-                    self.tasks.push(self.io.run(move || {
-                        Message::External(
-                            h.evict_inactive(selected.as_deref())
-                                .map_err(|e| format!("Could not release inactive session: {e:#}")),
-                        )
-                    }));
+                if before != self.catalog_revision && !self.io_busy && !self.closing {
+                    self.release_inactive_sessions();
                 }
                 if changed && self.auto_scroll {
                     return bottom();

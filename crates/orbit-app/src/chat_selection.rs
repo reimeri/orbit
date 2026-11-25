@@ -2277,6 +2277,35 @@ pub(crate) mod tests {
             );
         }
     }
+
+    #[test]
+    fn short_markdown_table_columns_share_the_full_chat_width() {
+        let content = markdown::Content::parse("| ID | Status |\n| --- | --- |\n| 7 | Ready |");
+        let viewer = Viewer::new(Shared::default(), 0);
+        let view = markdown::view_with(
+            content.items(),
+            markdown::Settings::from(iced::Theme::Dark),
+            &viewer,
+        );
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            view,
+            Size::new(600., 300.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        for width in [600., 1000.] {
+            ui = ui.relayout(Size::new(width, 300.), &mut renderer);
+            let mut cells = TextBounds::default();
+            ui.operate(&renderer, &mut cells);
+            assert_eq!(cells.0.len(), 4);
+            for [left, right] in cells.0.as_chunks::<2>().0 {
+                let column_width = right.1.x - left.1.x;
+                assert!((column_width - width / 2.).abs() < 1.);
+            }
+        }
+    }
+
     #[test]
     fn markdown_table_reflows_before_resorting_to_horizontal_scroll() {
         let markdown = format!(

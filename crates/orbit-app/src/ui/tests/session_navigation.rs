@@ -335,3 +335,40 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn clean_cold_switch_does_not_wait_for_a_database_writer() {
+    let mut app = app();
+    let store = app.harness.as_ref().unwrap().store.clone();
+    let root = app.smoke_dir.clone().unwrap();
+    let outgoing = Session::new(root.clone(), &app.catalog.settings);
+    let mut incoming = Session::new(root, &app.catalog.settings);
+    incoming.draft = "destination draft".into();
+    store.save_session(&outgoing).unwrap();
+    store.save_session(&incoming).unwrap();
+    dispatch(&mut app, Message::Select(outgoing.id)).await;
+
+    // WAL readers can see the last committed version while another writer is active.
+    let writer = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let start = std::time::Instant::now();
+    let pending = app.update(Message::Select(incoming.id.clone()));
+    use iced::futures::StreamExt;
+    let mut actions = iced_runtime::task::into_stream(pending).unwrap();
+    while let Some(action) = actions.next().await {
+        if let iced_runtime::Action::Output(message) = action {
+            let selected = matches!(message, Message::Selected(_));
+            let task = app.update(message);
+            if selected {
+                assert_eq!(app.selected.as_ref(), Some(&incoming.id), "{:?}", app.error);
+                eprintln!(
+                    "cold switch to destination composer with SQLite writer held: {:?}",
+                    start.elapsed()
+                );
+            }
+            drain(&mut app, task).await;
+        }
+    }
+    assert_eq!(app.editor.text(), "destination draft");
+    assert!(app.error.is_none(), "{:?}", app.error);
+}

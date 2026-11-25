@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 pub use forks::ForkOrigin;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -368,7 +368,7 @@ impl Entry {
         }
     }
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub input: u64,
     pub output: u64,
@@ -392,14 +392,14 @@ impl Usage {
 }
 /// A response may execute tools before its final output arrives. Keep the raw
 /// completed items and results durable until they can be committed in model order.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InProgressResponse {
     pub items: im::OrdMap<usize, Value>,
     pub results: im::OrdMap<usize, Value>,
 }
 
 /// Request-level effort for this model's context. Later changes live in ordered input.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct EffortBaseline {
     model: String,
     pub(crate) effort: String,
@@ -418,7 +418,7 @@ pub struct Filing {
     pub at: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
     pub origin: Option<ForkOrigin>,
@@ -694,6 +694,7 @@ pub(crate) enum Checkpoint<'a> {
 pub struct Store {
     root: PathBuf,
     pub(crate) db: Arc<Mutex<Connection>>,
+    session_reader: Arc<Mutex<Connection>>,
     activity_changes: tokio::sync::watch::Sender<()>,
     _lock: Arc<nix::fcntl::Flock<File>>,
     #[cfg(test)]
@@ -715,7 +716,7 @@ impl Store {
             .map_err(|(_, error)| anyhow::anyhow!("Another Orbit instance is using {} ({error}). Close it before starting another instance.", root.display()))?;
         let path = root.join("sessions.sqlite3");
         let db = Connection::open(&path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS new_session_draft (singleton INTEGER PRIMARY KEY CHECK(singleton=1), data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, updated INTEGER NOT NULL, summary TEXT NOT NULL, metadata TEXT NOT NULL);
@@ -737,6 +738,10 @@ impl Store {
         Ok(Self {
             root,
             db: Arc::new(Mutex::new(db)),
+            session_reader: Arc::new(Mutex::new(Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?)),
             activity_changes: tokio::sync::watch::channel(()).0,
             _lock: Arc::new(lock),
             #[cfg(test)]
@@ -792,7 +797,9 @@ impl Store {
         )?)
     }
     pub fn load_session(&self, id: &str) -> Result<Session> {
-        let db = self.db.lock().expect("database lock");
+        // Read one committed WAL snapshot without serializing with turn saves.
+        let mut reader = self.session_reader.lock().expect("session reader lock");
+        let db = reader.transaction()?;
         let metadata: String = db
             .query_row("SELECT metadata FROM sessions WHERE id=?1", [id], |r| {
                 r.get(0)
@@ -806,6 +813,7 @@ impl Store {
         session.entries = read_history(&db, "entries", id)?;
         session.input = read_history(&db, "context", id)?;
         forks::load(&db, &mut session)?;
+        db.commit()?;
         Ok(session)
     }
     pub fn read_optional<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
@@ -1040,6 +1048,40 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cold_load_sees_committed_history_while_store_writer_is_busy() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path().into()).unwrap();
+        let mut session = Session::new(root.path().into(), &Settings::default());
+        session.accept("committed".into());
+        store.save_session(&session).unwrap();
+
+        std::thread::scope(|scope| {
+            let mut db = store.db.lock().unwrap();
+            let writer = db.transaction().unwrap();
+            writer
+                .execute("DELETE FROM entries WHERE session=?1", [&session.id])
+                .unwrap();
+            let (read, result) = std::sync::mpsc::channel();
+            let (store, id) = (&store, &session.id);
+            scope.spawn(move || {
+                let _ = read.send(store.load_session(id));
+            });
+            // Release the writer on failure too: a regression should fail, not deadlock.
+            let snapshot = result.recv_timeout(std::time::Duration::from_secs(5));
+            writer.rollback().unwrap();
+            drop(db);
+            assert_eq!(
+                snapshot
+                    .expect("read before writer release")
+                    .unwrap()
+                    .entries[0]
+                    .text,
+                "committed"
+            );
+        });
+    }
+
     #[test]
     fn default_looking_titles_do_not_erase_manual_or_first_message_names() {
         let dir = tempfile::tempdir().unwrap();
