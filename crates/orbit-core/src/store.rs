@@ -694,7 +694,6 @@ pub(crate) enum Checkpoint<'a> {
 pub struct Store {
     root: PathBuf,
     pub(crate) db: Arc<Mutex<Connection>>,
-    session_reader: Arc<Mutex<Connection>>,
     activity_changes: tokio::sync::watch::Sender<()>,
     _lock: Arc<nix::fcntl::Flock<File>>,
     #[cfg(test)]
@@ -738,10 +737,6 @@ impl Store {
         Ok(Self {
             root,
             db: Arc::new(Mutex::new(db)),
-            session_reader: Arc::new(Mutex::new(Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?)),
             activity_changes: tokio::sync::watch::channel(()).0,
             _lock: Arc::new(lock),
             #[cfg(test)]
@@ -789,11 +784,17 @@ impl Store {
         }
         Ok((catalog, summaries, warnings))
     }
+    /// Independent WAL reader: statistics and historical lookups neither take
+    /// the writer mutex nor serialize unrelated transcript hydration.
+    pub(crate) fn read_connection(&self) -> Result<Connection> {
+        Ok(Connection::open_with_flags(
+            self.root.join("sessions.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?)
+    }
     pub(crate) fn contains_session(&self, id: &str) -> Result<bool> {
-        crate::send_trace::phase("database mutex");
-        let db = self.db.lock().expect("database lock");
         crate::send_trace::phase("session existence query");
-        Ok(db.query_row(
+        Ok(self.read_connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
             [id],
             |row| row.get(0),
@@ -801,7 +802,7 @@ impl Store {
     }
     pub fn load_session(&self, id: &str) -> Result<Session> {
         // Read one committed WAL snapshot without serializing with turn saves.
-        let mut reader = self.session_reader.lock().expect("session reader lock");
+        let mut reader = self.read_connection()?;
         let db = reader.transaction()?;
         let metadata: String = db
             .query_row("SELECT metadata FROM sessions WHERE id=?1", [id], |r| {
@@ -902,9 +903,6 @@ impl Store {
             Checkpoint::Save(samples) => {
                 for sample in samples {
                     sample.insert(&tx)?;
-                }
-                if !samples.is_empty() {
-                    activity::prune(&tx, now())?;
                 }
             }
             Checkpoint::ConsumeDraft => {
@@ -1072,7 +1070,12 @@ mod tests {
             let (read, result) = std::sync::mpsc::channel();
             let (store, id) = (&store, &session.id);
             scope.spawn(move || {
-                let _ = read.send(store.load_session(id));
+                let snapshot = (|| -> Result<Session> {
+                    assert!(store.contains_session(id)?);
+                    assert_eq!(store.activity_summary()?.tokens[0].total(), 0);
+                    store.load_session(id)
+                })();
+                let _ = read.send(snapshot);
             });
             // Release the writer on failure too: a regression should fail, not deadlock.
             let snapshot = result.recv_timeout(std::time::Duration::from_secs(5));

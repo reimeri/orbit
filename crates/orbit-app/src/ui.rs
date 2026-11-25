@@ -14,6 +14,7 @@ use sidebar::{FiledSection, SidebarRow};
 
 use crate::activity::{self, Row as ActivityRow};
 use crate::editor_history::{Direction, Draft as DraftKey, DraftHistories};
+use crate::io_worker::Lane;
 use crate::scrollbar::scroll;
 use crate::session_wave::Status as SessionStatus;
 use crate::theme::{self, card, footer_surface, panel, right_panel, secondary, sidebar_control};
@@ -195,6 +196,7 @@ pub struct App {
     new_draft_dirty: bool,
     saving_new_draft: bool,
     saving_session_draft: Option<String>,
+    pruning_activity: bool,
     usage_summary: Option<Result<Arc<orbit_core::store::activity::Summary>, String>>,
     transcript: crate::virtual_list::List,
     activity: activity::Projection,
@@ -209,6 +211,11 @@ pub struct App {
     sidebar_epoch: u64,
     sidebar_keys: HashMap<String, usize>,
     io: crate::io_worker::Worker,
+    // One pending cleanup per body; the bit records a sweep requested since enqueue.
+    evictions: HashMap<String, bool>,
+    // Present until project deletion is acknowledged: newer snapshots must
+    // incorporate its outcome instead of writing the old project list.
+    catalog_save_after_delete: Option<bool>,
     tasks: Vec<Task<Message>>,
     io_busy: bool,
     switching_session: bool,
@@ -379,7 +386,6 @@ pub enum Message {
     Changed,
     GitTick,
     SaveDraft,
-    AgeTick,
     UsageSummary(Result<Arc<orbit_core::store::activity::Summary>, String>),
     Press(Press),
     SessionMenu(String, iced::Point),
@@ -480,6 +486,9 @@ pub enum Message {
     SidebarBranch(PathBuf, Option<String>),
     Git(PathBuf, Option<crate::git::Info>),
     External(Result<(), String>),
+    Evicted(String, Result<(), String>),
+    AgeTick,
+    ActivityPruned(Result<(), String>),
     ErrorDismiss,
     ResizeStart(bool, iced::Point),
     Event(iced::Event),
@@ -543,6 +552,7 @@ impl App {
             new_draft_dirty: false,
             saving_new_draft: false,
             saving_session_draft: None,
+            pruning_activity: false,
             usage_summary: None,
             transcript: crate::virtual_list::List::with_overscan(CHAT_OVERSCAN),
             activity: activity::Projection::default(),
@@ -557,6 +567,8 @@ impl App {
             sidebar_epoch: 0,
             sidebar_keys: HashMap::new(),
             io,
+            evictions: HashMap::new(),
+            catalog_save_after_delete: None,
             tasks: vec![],
             io_busy: false,
             switching_session: false,
@@ -642,7 +654,7 @@ impl App {
         };
         if let Some(h) = &app.harness {
             let h = h.clone();
-            app.tasks.push(app.io.run(move || {
+            app.tasks.push(app.io.run_in([Lane::ApiKey], move || {
                 Message::ApiKeyStatus(
                     h.store
                         .api_key()
@@ -1032,19 +1044,23 @@ impl App {
                     && !self.historical_runs.contains_key(&entry.id)
                     && h.resident_subagent(&session.id, key).is_none()
                 {
-                    // One lookup at a time: scrolling cannot queue obsolete reads ahead of saves.
+                    // Bound historical reads independently of the foreground job lanes.
                     self.historical_read_pending = true;
                     let parent = session.id.clone();
                     let entry = session.entries.shared(index);
                     let h = h.clone();
-                    self.tasks.push(self.io.run(move || {
-                        let result = h
-                            .subagent_run(
-                                &parent,
-                                transcript_run_key(&entry).expect("assignment row"),
-                            )
-                            .map_err(|e| format!("{e:#}"));
-                        Message::HistoricalRun(parent, entry.id.clone(), result)
+                    self.tasks.push(Task::future(async move {
+                        tokio::task::spawn_blocking(move || {
+                            let result = h
+                                .subagent_run(
+                                    &parent,
+                                    transcript_run_key(&entry).expect("assignment row"),
+                                )
+                                .map_err(|e| format!("{e:#}"));
+                            Message::HistoricalRun(parent, entry.id.clone(), result)
+                        })
+                        .await
+                        .expect("historical run reader")
                     }));
                 }
                 if let EntryKind::User { images, files, .. } = &entry.kind {
@@ -1128,12 +1144,20 @@ impl App {
             let h = h.clone();
             let id = id.clone();
             self.io_busy = true;
-            self.tasks.push(self.io.run(move || {
-                Message::SessionSettingsEdited(h.edit(&id, edit).map_err(|e| format!("{e:#}")))
-            }));
+            self.tasks
+                .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
+                    Message::SessionSettingsEdited(h.edit(&id, edit).map_err(|e| format!("{e:#}")))
+                }));
         }
     }
     fn save_catalog(&mut self) {
+        if self.closing {
+            return;
+        }
+        if let Some(deferred) = &mut self.catalog_save_after_delete {
+            *deferred = true;
+            return;
+        }
         self.catalog.selected = self.selected.clone();
         if let Some(h) = &self.harness {
             let store = h.store.clone();
@@ -1172,7 +1196,7 @@ impl App {
             let draft = self.new_draft.clone();
             self.new_draft_dirty = false;
             self.saving_new_draft = true;
-            self.tasks.push(self.io.run(move || Message::NewDraftSaved(
+            self.tasks.push(self.io.run_in([Lane::NewDraft], move || Message::NewDraftSaved(
                 h.store.save_new_draft(&draft).map_err(|e| format!("Could not save new-session draft: {e:#}. Keep Orbit open and retry after fixing storage."))
             )));
         }
@@ -1182,7 +1206,7 @@ impl App {
         {
             let h = h.clone();
             self.saving_session_draft = Some(id.clone());
-            self.tasks.push(self.io.run(move || {
+            self.tasks.push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
                 let result = h.edit(&id, |s| {
                     s.draft = draft.text;
                     s.draft_images = draft.images;
@@ -1347,7 +1371,17 @@ impl App {
             self.switching_session = true;
             let mut timer =
                 std::env::var_os("ORBIT_TRACE_SESSION_SWITCH").map(|_| std::time::Instant::now());
-            self.tasks.push(self.io.run(move || {
+            let mut lanes = Vec::new();
+            if new_draft.is_some() || !matches!(selection, Selection::Session(_)) {
+                lanes.push(Lane::NewDraft);
+            }
+            if let Some((id, _)) = &draft {
+                lanes.push(Lane::Family(h.family_id(id)));
+            }
+            if let Selection::Session(id) = &selection {
+                lanes.push(Lane::Family(h.family_id(id)));
+            }
+            self.tasks.push(self.io.run_in(lanes, move || {
                 let mut mark = |phase: &str| {
                     if let Some(last) = &mut timer {
                         let now = std::time::Instant::now();
@@ -1402,14 +1436,29 @@ impl App {
     }
     fn release_inactive_sessions(&mut self) {
         if let Some(h) = self.harness.clone() {
-            let selected = self.selected.clone();
-            self.tasks.push(self.io.run(move || {
-                Message::External(
-                    h.evict_inactive(selected.as_deref())
-                        .map_err(|e| format!("Could not release inactive session: {e:#}")),
-                )
-            }));
+            for c in h.all() {
+                self.release_idle_session(&h, &c);
+            }
         }
+    }
+    fn release_idle_session(&mut self, h: &Arc<Harness>, c: &orbit_core::agent::Conversation) {
+        if self.selected.as_ref() == Some(&c.id) || !c.idle_body() {
+            return;
+        }
+        if let Some(recheck) = self.evictions.get_mut(&c.id) {
+            *recheck = true;
+            return;
+        }
+        self.evictions.insert(c.id.clone(), false);
+        let h = h.clone();
+        let id = c.id.clone();
+        self.tasks
+            .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
+                let result = h
+                    .evict_idle(&id)
+                    .map_err(|e| format!("Could not release inactive session: {e:#}"));
+                Message::Evicted(id, result)
+            }));
     }
     fn send(&mut self, owner: String) {
         let Some(session) = self.current().filter(|s| s.id == owner) else {
@@ -1475,10 +1524,11 @@ impl App {
                 );
                 return;
             }
-            self.tasks.push(self.io.run(move || {
-                let result = h.compact(&id, settings).map_err(|e| format!("{e:#}"));
-                Message::Sent(id, message, result)
-            }));
+            self.tasks
+                .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
+                    let result = h.compact(&id, settings).map_err(|e| format!("{e:#}"));
+                    Message::Sent(id, message, result)
+                }));
             return;
         }
         self.sending_message = true;
@@ -1491,7 +1541,11 @@ impl App {
         }
         let submission = submission.1.clone();
         let queued = orbit_core::send_trace::queued();
-        self.tasks.push(self.io.run(move || {
+        let mut lanes = vec![Lane::Family(h.family_id(&id))];
+        if draft.is_some() {
+            lanes.push(Lane::NewDraft);
+        }
+        self.tasks.push(self.io.run_in(lanes, move || {
             let result = orbit_core::send_trace::run(queued, || {
                 if !workspace.is_dir() {
                     anyhow::ensure!(!workspace.starts_with(h.store.root().canonicalize()?.join("worktrees")),
@@ -1514,7 +1568,7 @@ impl App {
         {
             let h = h.clone();
             let id = session.id.clone();
-            self.tasks.push(self.io.run(move || {
+            self.tasks.push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
                 Message::Edited(h.edit(&id, |s| s.unchecked_completion = false).map_err(|e| {
                     format!("Could not save completion acknowledgement: {e:#}. Keep Orbit open, fix storage, then retry saving or revisit the session.")
                 }))
@@ -1523,11 +1577,12 @@ impl App {
     }
     fn stop_agent(&mut self, id: String) {
         if let Some(h) = self.harness.clone() {
-            // Queue with Send and File: waiting for the lifecycle lock must not stall input.
-            self.tasks.push(self.io.run(move || {
-                h.stop(&id);
-                Message::Changed
-            }));
+            // Queue behind earlier actions on this family, never an unrelated filing wait.
+            self.tasks
+                .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
+                    h.stop(&id);
+                    Message::Changed
+                }));
         }
     }
     fn acknowledge_selected_attention(&mut self) {
@@ -1535,7 +1590,7 @@ impl App {
             && let Some(attention) = h.attention(id)
         {
             let h = h.clone();
-            self.tasks.push(self.io.run(move || {
+            self.tasks.push(self.io.run_in([Lane::Family(h.family_id(id))], move || {
                 Message::Edited(h.acknowledge_attention(attention).map_err(|e| {
                     format!("Could not save attention acknowledgement: {e:#}. Keep Orbit open, fix storage, then retry saving or revisit the session.")
                 }))
@@ -1630,6 +1685,19 @@ impl App {
         Task::batch([task, close].into_iter().chain(self.tasks.drain(..)))
     }
     fn update_inner(&mut self, message: Message) -> Task<Message> {
+        if self.closing
+            && matches!(
+                message,
+                Message::Event(_)
+                    | Message::SaveApiKey
+                    | Message::RemoveApiKey
+                    | Message::StopAgent(_)
+                    | Message::FileSession(..)
+                    | Message::Worktree(_)
+            )
+        {
+            return Task::none();
+        }
         if self.io_busy && matches!(message, Message::Favorite(_) | Message::StashProject(_)) {
             return Task::none();
         }
@@ -1846,7 +1914,7 @@ impl App {
                     } else {
                         self.api_key_draft.clone()
                     };
-                    self.tasks.push(self.io.run(move || {
+                    self.tasks.push(self.io.run_in([Lane::ApiKey], move || {
                         Message::ApiKeySaved(
                             h.store
                                 .save_api_key(&key)
@@ -2060,21 +2128,6 @@ impl App {
             },
             Message::Tick => self.tick += 1,
             Message::UsageSummary(result) => self.usage_summary = Some(result),
-            Message::AgeTick => {
-                // While the picker is mounted its periodic summary read also prunes.
-                if self.current().is_some()
-                    && let Some(h) = &self.harness
-                {
-                    let store = h.store.clone();
-                    return self.io.run(move || {
-                        Message::External(
-                            store.prune_activity().map_err(|e| {
-                                format!("Could not expire activity measurements: {e:#}")
-                            }),
-                        )
-                    });
-                }
-            }
             Message::SaveDraft => {
                 self.imports.retry_on_save = false;
                 self.save_draft();
@@ -2158,6 +2211,9 @@ impl App {
                 }
                 if selected_deleted {
                     self.restore_draft();
+                }
+                if self.catalog_save_after_delete.take() == Some(true) {
+                    self.save_catalog();
                 }
                 self.fail(result);
             }
@@ -2981,6 +3037,40 @@ impl App {
                     return self.refresh_git();
                 }
             }
+            Message::AgeTick => {
+                if !self.closing
+                    && !self.pruning_activity
+                    && let Some(h) = &self.harness
+                {
+                    self.pruning_activity = true;
+                    let store = h.store.clone();
+                    return self.io.run_in([Lane::Maintenance], move || {
+                        Message::ActivityPruned(
+                            store.prune_activity().map_err(|e| {
+                                format!("Could not expire activity measurements: {e:#}")
+                            }),
+                        )
+                    });
+                }
+            }
+            Message::ActivityPruned(result) => {
+                self.pruning_activity = false;
+                self.fail(result);
+            }
+            Message::Evicted(id, result) => {
+                let recheck = self.evictions.remove(&id) == Some(true);
+                // It may have been reloaded and left again before this acknowledgement.
+                if recheck
+                    && result.is_ok()
+                    && !self.io_busy
+                    && !self.closing
+                    && let Some(h) = self.harness.clone()
+                    && let Some(c) = h.get(&id)
+                {
+                    self.release_idle_session(&h, &c);
+                }
+                self.fail(result);
+            }
             Message::External(result) => self.fail(result),
             Message::ErrorDismiss => self.error = None,
             Message::ResizeStart(right, position) => {
@@ -3168,12 +3258,14 @@ impl App {
     fn change_filing(&mut self, id: String, action: FilingAction) {
         if let Some(h) = self.harness.clone() {
             self.tasks
-                .push(self.io.run(move || match h.file_session(&id, action) {
-                    Ok(FilingOutcome::RunningCommands(kind)) => {
-                        Message::RunningCommandsAtFile(id, kind)
+                .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
+                    match h.file_session(&id, action) {
+                        Ok(FilingOutcome::RunningCommands(kind)) => {
+                            Message::RunningCommandsAtFile(id, kind)
+                        }
+                        Ok(FilingOutcome::Applied) => Message::Edited(Ok(())),
+                        Err(error) => Message::Edited(Err(format!("{error:#}"))),
                     }
-                    Ok(FilingOutcome::Applied) => Message::Edited(Ok(())),
-                    Err(error) => Message::Edited(Err(format!("{error:#}"))),
                 }));
         }
     }
@@ -3224,7 +3316,8 @@ impl App {
                         draft.project = None;
                     }
                     self.io_busy = true;
-                    self.tasks.push(self.io.run_catalog(move |writer| {
+                    self.catalog_save_after_delete = Some(false);
+                    self.tasks.push(self.io.barrier_catalog(move |writer| {
                         let result = (|| {
                             h.remove_project(&path)?;
                             h.store.save_new_draft(&draft)?;
@@ -3243,12 +3336,13 @@ impl App {
                     && let Some(h) = &self.harness
                 {
                     let h = h.clone();
-                    self.tasks.push(self.io.run(move || {
-                        Message::Edited(
-                            h.edit(&id, |s| s.rename(title))
-                                .map_err(|e| format!("{e:#}")),
-                        )
-                    }));
+                    self.tasks
+                        .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
+                            Message::Edited(
+                                h.edit(&id, |s| s.rename(title))
+                                    .map_err(|e| format!("{e:#}")),
+                            )
+                        }));
                     self.modal = None;
                 }
             }
@@ -3256,10 +3350,11 @@ impl App {
                 if let Some(h) = &self.harness {
                     let h = h.clone();
                     self.io_busy = true;
-                    self.tasks.push(self.io.run(move || {
-                        let result = h.remove(&id).map_err(|e| format!("{e:#}"));
-                        Message::Deleted(id, result)
-                    }));
+                    self.tasks
+                        .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
+                            let result = h.remove(&id).map_err(|e| format!("{e:#}"));
+                            Message::Deleted(id, result)
+                        }));
                 }
             }
             Some(Modal::Logout) => {
@@ -3317,7 +3412,7 @@ impl App {
         }
         if let Some(h) = &self.harness {
             let h = h.clone();
-            return self.io.run_catalog(move |writer| {
+            return self.io.barrier_catalog(move |writer| {
                 // Ordered after earlier jobs: no queued Send can start behind this barrier.
                 h.stop_all();
                 let result=(|| {
@@ -3337,10 +3432,11 @@ impl App {
         let mut subscriptions = vec![
             window_events(),
             window::open_events().map(Message::WindowOpened),
-            iced::time::every(Duration::from_secs(60)).map(|_| Message::AgeTick),
         ];
         if let Some(harness) = &self.harness {
             subscriptions.push(Subscription::run_with(Updates(harness.clone()), updates));
+            subscriptions
+                .push(iced::time::every(Duration::from_secs(60)).map(|_| Message::AgeTick));
             if self.current().is_none() {
                 subscriptions.push(Subscription::run_with(
                     Updates(harness.clone()),

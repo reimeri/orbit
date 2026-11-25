@@ -21,7 +21,7 @@ pub(super) fn summaries(data: &Updates) -> iced::futures::stream::BoxStream<'sta
             if output.send(Message::UsageSummary(result)).await.is_err() {
                 break;
             }
-            // Re-bucket and expire old activity even if there are no new responses.
+            // Re-bucket visible activity even if there are no new responses.
             tokio::select! {
                 result = changes.changed() => if result.is_err() { break },
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {}

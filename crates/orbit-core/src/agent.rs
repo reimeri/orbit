@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Mutex, RwLock, RwLockReadGuard, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -96,7 +96,7 @@ pub struct Conversation {
     submissions: AtomicU64,
     turn_generation: AtomicU64,
     loaded: AtomicBool,
-    stopped: Condvar,
+    restart_after_stop: AtomicBool,
     store: Store,
 }
 impl Conversation {
@@ -169,6 +169,13 @@ impl Conversation {
         })
         .await?
     }
+    /// Scheduling hint only. In particular, do not acquire shell/process locks
+    /// on the UI thread to decide whether to enqueue housekeeping.
+    pub fn idle_body(&self) -> bool {
+        self.loaded.load(Ordering::Acquire)
+            && !self.naming.load(Ordering::Acquire)
+            && !self.is_turn_active()
+    }
     /// The main turn includes terminal persistence, not just model/tool execution.
     pub fn is_turn_active(&self) -> bool {
         self.is_running() || self.finishing.load(Ordering::Acquire)
@@ -183,6 +190,7 @@ impl Conversation {
     }
     pub fn cancel(&self) {
         let _state = self.state.lock().expect("session lock");
+        self.restart_after_stop.store(false, Ordering::Release);
         self.cancel.lock().expect("cancel lock").cancel();
         self.code.stop_all();
         self.notifications.clear(&self.id);
@@ -214,6 +222,14 @@ impl TurnUsage {
     }
 }
 
+#[derive(Default)]
+struct FamilyRegistry {
+    gates: HashMap<String, Arc<Mutex<subagents::Coordinator>>>,
+    // After Stop All, only an explicit start may reopen a family, including
+    // one that wasn't resident when shutdown began.
+    stopped_by_default: bool,
+}
+
 pub struct Harness {
     home: Option<std::path::PathBuf>,
     notifications: Arc<notifications::Notifications>,
@@ -227,8 +243,11 @@ pub struct Harness {
     conversations: Mutex<HashMap<String, Arc<Conversation>>>,
     summaries: Mutex<HashMap<String, SessionSummary>>,
     catalog_revision: AtomicU64,
-    loading: Mutex<()>,
-    subagents: Mutex<subagents::Coordinator>,
+    // Lock order: library (shared except global barriers), family lifecycle,
+    // per-ID hydration, conversation persistence, then the short-lived state lock.
+    library: RwLock<()>,
+    families: Mutex<FamilyRegistry>,
+    loading: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     run_index: Mutex<subagents::RunIndex>,
     /// Recoverable problems opening individual records, for the startup UI.
     pub startup_warnings: Vec<String>,
@@ -267,8 +286,9 @@ impl Harness {
             image_client,
             web_client,
             weak: weak.clone(),
-            loading: Mutex::new(()),
-            subagents: Mutex::default(),
+            library: RwLock::default(),
+            families: Mutex::default(),
+            loading: Mutex::default(),
             run_index: Mutex::new(run_index),
             startup_warnings,
             changes: tokio::sync::watch::channel(()).0,
@@ -490,7 +510,7 @@ impl Harness {
                 submissions: AtomicU64::new(0),
                 turn_generation: AtomicU64::new(0),
                 loaded: AtomicBool::new(true),
-                stopped: Condvar::new(),
+                restart_after_stop: AtomicBool::new(false),
                 store: self.store.clone(),
             }
         });
@@ -506,8 +526,56 @@ impl Harness {
         self.changes.send_replace(());
         conversation
     }
+    /// Children share admission with their parent (including stop and deletion).
+    /// Only consult in-memory metadata here; the registry lock never spans I/O.
+    pub fn family_id(&self, id: &str) -> String {
+        if let Some(s) = self.summaries.lock().expect("summary lock").get(id) {
+            return s
+                .child
+                .as_ref()
+                .map_or_else(|| id.to_owned(), |child| child.parent_id.clone());
+        }
+        // Recovery can skip a damaged child summary but retain its assignment.
+        self.run_index().parent_of(id).unwrap_or(id).to_owned()
+    }
+    fn family(&self, id: &str) -> Arc<Mutex<subagents::Coordinator>> {
+        let root = self.family_id(id);
+        let mut registry = self.families.lock().expect("family registry");
+        let stopped = registry.stopped_by_default;
+        registry
+            .gates
+            .entry(root)
+            .or_insert_with(|| Arc::new(Mutex::new(subagents::Coordinator::new(stopped))))
+            .clone()
+    }
+    fn admit(&self, id: &str) -> (RwLockReadGuard<'_, ()>, Arc<Mutex<subagents::Coordinator>>) {
+        let library = self.library.read().expect("library lock");
+        (library, self.family(id))
+    }
+
+    // Key by session ID, not summary metadata: even a child whose summary was
+    // damaged must not republish a cold WAL snapshot across family deletion.
+    // Weak slots keep the gate stable for all waiters without retaining every
+    // cold session (or invalid lookup) for the lifetime of the library.
+    fn load_gate(&self, id: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.loading.lock().expect("load registry");
+        if let Some(gate) = gates.get(id).and_then(Weak::upgrade) {
+            return gate;
+        }
+        // Reap on growth, not once per ID while deleting a large project.
+        if gates.len() == gates.capacity() {
+            gates.retain(|_, gate| gate.strong_count() != 0);
+        }
+        let gate = Arc::new(Mutex::new(()));
+        gates.insert(id.to_owned(), Arc::downgrade(&gate));
+        gate
+    }
     pub fn load(&self, id: &str) -> Result<Arc<Conversation>> {
-        let _loading = self.loading.lock().expect("loading lock");
+        let gate = self.load_gate(id);
+        let _loading = gate.lock().expect("loading lock");
+        self.load_locked(id)
+    }
+    fn load_locked(&self, id: &str) -> Result<Arc<Conversation>> {
         if let Some(c) = self.get(id) {
             if !c.loaded.load(Ordering::Acquire) {
                 let mut saved = c.persisted.lock().expect("persistence lock");
@@ -554,50 +622,57 @@ impl Harness {
         }
         summaries.values().cloned().collect()
     }
+    #[cfg(test)]
     pub fn evict_inactive(&self, selected: Option<&str>) -> Result<()> {
-        let _coordinator = self.subagents.lock().expect("subagent lock");
-        let _loading = self.loading.lock().expect("loading lock");
         for c in self.all() {
-            if Some(c.id.as_str()) == selected {
-                continue;
-            }
-            if c.naming.load(Ordering::Acquire)
-                || c.is_executing()
-                || self.active_children(&c.id) > 0
-                || !c.loaded.load(Ordering::Acquire)
-            {
-                continue;
-            }
-            // The coordinator/loading guards exclude new starts and eviction.
-            // Skip running/finalizing work before waiting on its storage lock,
-            // otherwise a slow save would delay Stop and new turns.
-            let mut saved = c.persisted.lock().expect("persistence lock");
-            c.save_locked(&mut saved)?;
-            let mut state = c.state.lock().expect("session lock");
-            self.summaries
-                .lock()
-                .expect("summary lock")
-                .insert(c.id.clone(), SessionSummary::from(&*state));
-            // Keep runtime IDs, unread results and JS store values, not the full transcript.
-            state.points = Default::default();
-            state.entries = Default::default();
-            state.input = Default::default();
-            c.loaded.store(false, Ordering::Release);
-            drop(state);
-            // Free the last saved history outside the lock used by UI summary reads.
-            *saved = None;
-            if !c.code.has_work() {
-                self.conversations
-                    .lock()
-                    .expect("conversations lock")
-                    .remove(&c.id);
+            if Some(c.id.as_str()) != selected {
+                self.evict_idle(&c.id)?;
             }
         }
         Ok(())
     }
+    pub fn evict_idle(&self, id: &str) -> Result<()> {
+        let (_library, family) = self.admit(id);
+        let _coordinator = family.lock().expect("family lifecycle");
+        let body = self.load_gate(id);
+        let _loading = body.lock().expect("loading lock");
+        let Some(c) = self.get(id) else { return Ok(()) };
+        if !c.idle_body()
+            || c.code.is_executing()
+            || c.questionnaires.as_ref().is_some_and(|q| q.has_pending())
+            || self.active_children(id) > 0
+        {
+            return Ok(());
+        }
+        // The coordinator/loading guards exclude new starts and eviction.
+        // Skip running/finalizing work before waiting on its storage lock,
+        // otherwise a slow save would delay Stop and new turns.
+        let mut saved = c.persisted.lock().expect("persistence lock");
+        c.save_locked(&mut saved)?;
+        let mut state = c.state.lock().expect("session lock");
+        self.summaries
+            .lock()
+            .expect("summary lock")
+            .insert(c.id.clone(), SessionSummary::from(&*state));
+        // Keep runtime IDs, unread results and JS store values, not the full transcript.
+        state.points = Default::default();
+        state.entries = Default::default();
+        state.input = Default::default();
+        c.loaded.store(false, Ordering::Release);
+        drop(state);
+        // Free the last saved history outside the lock used by UI summary reads.
+        *saved = None;
+        if !c.code.has_work() {
+            self.conversations
+                .lock()
+                .expect("conversations lock")
+                .remove(&c.id);
+        }
+        Ok(())
+    }
     pub fn flush(&self) -> Result<()> {
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
-        let results = self.flush_results(&mut coordinator);
+        let _library = self.library.write().expect("library lock");
+        let results = self.flush_results();
         for c in self.all() {
             c.save()?;
         }
@@ -619,11 +694,14 @@ impl Harness {
             .collect()
     }
     pub fn reconcile_model(&self, id: &str, settings: &Settings) -> Result<bool> {
-        let conversation = self.load(id)?;
+        let body = self.load_gate(id);
+        let loading = body.lock().expect("loading lock");
+        let conversation = self.load_locked(id)?;
         if crate::models::model(&conversation.state.lock().expect("session lock").model).is_some() {
             return Ok(false);
         }
         let mut saved = conversation.persisted.lock().expect("persistence lock");
+        drop(loading);
         let mut session = conversation.snapshot();
         if !session.reconcile_model(settings) {
             return Ok(false);
@@ -639,8 +717,11 @@ impl Harness {
         Ok(true)
     }
     pub fn edit(&self, id: &str, edit: impl FnOnce(&mut Session)) -> Result<()> {
-        let conversation = self.load(id)?;
+        let body = self.load_gate(id);
+        let loading = body.lock().expect("loading lock");
+        let conversation = self.load_locked(id)?;
         let mut saved = conversation.persisted.lock().expect("persistence lock");
+        drop(loading);
         let metadata_changed = {
             let mut state = conversation.state.lock().expect("session lock");
             let before = SessionSummary::from(&*state);
@@ -660,7 +741,8 @@ impl Harness {
     }
     /// Serialize filing with submissions, turn starts, child starts and eviction.
     pub fn file_session(&self, id: &str, action: FilingAction) -> Result<FilingOutcome> {
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        let (_library, family) = self.admit(id);
+        let mut coordinator = family.lock().expect("family lifecycle");
         let conversation = self.load(id)?;
         let state = conversation.snapshot();
         if state.child.is_some() {
@@ -699,6 +781,7 @@ impl Harness {
                     // exit/pipe EOF. Recheck all guards before filing.
                     let stopped = shell.stop_running_commands();
                     drop(coordinator);
+                    drop(_library);
                     shell.runtime().block_on(stopped).context(match kind {
                         FilingKind::Deferred => {
                             "Session not deferred. Check its activity and retry Defer."
@@ -729,9 +812,12 @@ impl Harness {
     /// Forking publishes a new, idle main conversation only after the complete
     /// independently restorable session has committed.
     pub fn fork(&self, source: &str, entry: &str, settings: &Settings) -> Result<String> {
-        let _coordinator = self.subagents.lock().expect("subagent lock");
+        let (_library, family) = self.admit(source);
+        let _coordinator = family.lock().expect("family lifecycle");
         let session = self.load(source)?.snapshot().fork(entry, settings)?;
         let id = session.id.clone();
+        let body = self.load_gate(&id);
+        let _publishing = body.lock().expect("loading lock");
         self.store.save_session(&session)?;
         self.make_conversation(session, true);
         Ok(id)
@@ -746,7 +832,15 @@ impl Harness {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
+        crate::send_trace::phase("lifecycle lock");
+        let (library, family) = self.admit(&session.id);
+        let mut coordinator = family.lock().expect("family lifecycle");
+        let body = self.load_gate(&session.id);
+        let publishing = body.lock().expect("loading lock");
         if self.store.contains_session(&session.id)? {
+            drop(publishing);
+            drop(coordinator);
+            drop(library);
             return self.send(&session.id, submission, message, settings);
         }
         crate::send_trace::phase("prepare submission");
@@ -762,12 +856,13 @@ impl Harness {
         session.accept_submission(submission.to_owned(), message, false);
         self.store.commit_new_session(&session)?;
         crate::send_trace::phase("publish acceptance");
-        let id = session.id.clone();
         let conversation = self.make_conversation(session, true);
+        drop(publishing);
         if let Some(message) = naming_message {
             self.name_session(&conversation, message);
         }
-        self.start(&id, settings)
+        coordinator.parent_stopped = false;
+        self.start_inner(conversation, settings)
     }
     pub fn send(
         self: &Arc<Self>,
@@ -779,6 +874,9 @@ impl Harness {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
+        crate::send_trace::phase("lifecycle lock");
+        let (_library, family) = self.admit(id);
+        let mut coordinator = family.lock().expect("family lifecycle");
         crate::send_trace::phase("session load");
         let conversation = self.load(id)?;
         crate::send_trace::phase("prepare submission");
@@ -796,8 +894,6 @@ impl Harness {
                 &message.text,
             )?;
         }
-        crate::send_trace::phase("lifecycle lock");
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
         anyhow::ensure!(
             !conversation.deleted.load(Ordering::Acquire),
             "Session deleted before file attachments could be accepted"
@@ -860,41 +956,64 @@ impl Harness {
             }
         };
         if needs_start {
-            coordinator.stopped.remove(id);
-            coordinator.closing = false;
-            self.start_inner(id, settings)?;
+            coordinator.parent_stopped = false;
+            self.start_inner(conversation, settings)?;
         }
         Ok(())
     }
     pub fn start(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
         crate::send_trace::phase("lifecycle lock");
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
-        coordinator.stopped.remove(id);
-        coordinator.closing = false;
-        self.start_inner(id, settings)
-    }
-    fn start_inner(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
-        crate::send_trace::phase("turn start");
+        let (_library, family) = self.admit(id);
+        let mut coordinator = family.lock().expect("family lifecycle");
         let conversation = self.load(id)?;
+        anyhow::ensure!(
+            conversation
+                .state
+                .lock()
+                .expect("session lock")
+                .child
+                .is_none(),
+            "Start child assignments through their parent"
+        );
+        self.start_inner(conversation, settings)?;
+        coordinator.parent_stopped = false;
+        Ok(())
+    }
+    fn start_inner(
+        self: &Arc<Self>,
+        conversation: Arc<Conversation>,
+        settings: Settings,
+    ) -> Result<()> {
+        crate::send_trace::phase("turn start");
         anyhow::ensure!(
             !conversation.is_manually_compacting(),
             "Wait for compaction to finish before starting a turn"
         );
+        self.start_turn(conversation, settings);
+        Ok(())
+    }
+    fn start_turn(self: &Arc<Self>, conversation: Arc<Conversation>, settings: Settings) {
         *conversation.last_settings.lock().expect("settings lock") = settings.clone();
         let cancel = {
             let mut state = conversation.state.lock().expect("session lock");
-            while conversation.is_running()
-                && conversation
+            if conversation.is_running() {
+                // A stopping tool may itself need family admission to settle.
+                // Record a restart instead of waiting here with admission held.
+                if conversation
                     .cancel
                     .lock()
                     .expect("cancel lock")
                     .is_cancelled()
-            {
-                state = conversation.stopped.wait(state).expect("stopping turn");
+                {
+                    conversation
+                        .restart_after_stop
+                        .store(true, Ordering::Release);
+                }
+                return;
             }
-            if conversation.is_running() {
-                return Ok(());
-            }
+            conversation
+                .restart_after_stop
+                .store(false, Ordering::Release);
             let cancel = CancellationToken::new();
             *conversation.cancel.lock().expect("cancel lock") = cancel.clone();
             *conversation.turn_usage.lock().expect("turn usage lock") = TurnUsage::default();
@@ -971,12 +1090,10 @@ impl Harness {
                     }
                     conversation.finishing.store(true, Ordering::Release);
                     conversation.running.store(false, Ordering::Release);
-                    conversation.stopped.notify_all();
                 }
                 if !is_child {
-                    // start_inner can wait for a cancelled turn while holding the
-                    // coordinator. Publish only after marking idle and waking it.
-                    let _coordinator = harness.subagents.lock().expect("subagent lock");
+                    let (_library, family) = harness.admit(&conversation.id);
+                    let _coordinator = family.lock().expect("family lifecycle");
                     let mut state = conversation.state.lock().expect("session lock");
                     if conversation.turn_generation.load(Ordering::Acquire) == generation {
                         if !cancel.is_cancelled() {
@@ -995,6 +1112,11 @@ impl Harness {
                         // A newer turn may already be finishing. An old task must
                         // not clear its eviction/deletion guard after releasing this lock.
                         conversation.finishing.store(false, Ordering::Release);
+                        drop(state);
+                        if conversation.restart_after_stop.swap(false, Ordering::AcqRel) {
+                            let settings = conversation.last_settings.lock().expect("settings lock").clone();
+                            harness.start_turn(conversation.clone(), settings);
+                        }
                     }
                 }
                 if is_child {
@@ -1012,11 +1134,11 @@ impl Harness {
                 break;
             }
         });
-        Ok(())
     }
     /// Compact the current context without accepting a submission or starting an agent turn.
     pub fn compact(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
-        let _coordinator = self.subagents.lock().expect("subagent lock");
+        let (_library, family) = self.admit(id);
+        let _coordinator = family.lock().expect("family lifecycle");
         let conversation = self.load(id)?;
         anyhow::ensure!(
             !conversation.is_executing() && self.active_children(id) == 0,
@@ -1348,8 +1470,17 @@ impl Harness {
         Ok(size)
     }
     pub fn stop_all(&self) {
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
-        coordinator.closing = true;
+        let _library = self.library.write().expect("library lock");
+        // A failed shutdown can be resumed per parent. An explicit send to B
+        // must not allow a late child completion to restart stopped parent A.
+        let families: Vec<_> = {
+            let mut registry = self.families.lock().expect("family registry");
+            registry.stopped_by_default = true;
+            registry.gates.values().cloned().collect()
+        };
+        for family in families {
+            family.lock().expect("family lifecycle").parent_stopped = true;
+        }
         for conversation in self.all() {
             conversation.cancel();
         }
@@ -1545,6 +1676,57 @@ impl Drop for Harness {
 mod tests {
     use super::*;
     use std::time::Instant;
+    #[test]
+    fn unrelated_send_and_stop_do_not_wait_for_session_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(Store::open(dir.path().into()).unwrap(), vec![]).unwrap();
+        let make = || {
+            let mut s = Session::new(dir.path().into(), &Settings::default());
+            s.rename("Probe".into());
+            h.insert(s)
+        };
+        let a = make();
+        let b = make();
+        std::thread::scope(|scope| {
+            let disk = a.persisted.lock().unwrap();
+            let send = |id: &str| {
+                crate::send_trace::run(crate::send_trace::queued(), || {
+                    h.send(id, "request", "Hello".into(), Settings::default())
+                })
+            };
+            let a = &a;
+            let first = scope.spawn(move || send(&a.id));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let family = h.family(&a.id);
+            while family.try_lock().is_ok() {
+                assert!(
+                    Instant::now() < deadline,
+                    "first send never entered acceptance"
+                );
+                std::thread::yield_now();
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let b = &b;
+            let h = &h;
+            let second = scope.spawn(move || {
+                send(&b.id).unwrap();
+                h.stop(&b.id);
+                tx.send(()).unwrap();
+            });
+            let independent = rx.recv_timeout(Duration::from_secs(2));
+            drop(disk);
+            first.join().unwrap().unwrap();
+            second.join().unwrap();
+            independent.expect("unrelated submission and Stop should finish before releasing A");
+        });
+        for c in [a, b] {
+            assert_eq!(
+                h.store.load_session(&c.id).unwrap().entries[0].text,
+                "Hello"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn selected_skill_is_user_content_and_catalog_changes_append_after_reload() -> Result<()>
     {

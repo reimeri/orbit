@@ -270,6 +270,13 @@ async fn offscreen_paste_retries_save_without_appending_twice_or_quitting_early(
     dispatch(&mut app, Message::SaveDraft).await;
     assert_eq!(store.load_session(&id).unwrap().draft, "original + paste");
     assert_eq!(store.load_new_draft().unwrap().message, "unrelated");
+    dispatch(&mut app, Message::Changed).await;
+    assert_eq!(
+        app.current().unwrap().id,
+        id,
+        "retry must not evict the open draft"
+    );
+    assert_eq!(app.editor.text(), "original + paste");
 }
 
 #[tokio::test]

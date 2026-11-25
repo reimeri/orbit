@@ -65,7 +65,11 @@ async fn project_management_persists_names_stash_and_retries_deletion_without_to
     assert!(h.store.load_session(&second).is_ok());
     sqlite::allow_writes(&db, "sessions");
     dispatch(&mut app, Message::ErrorDismiss).await;
-    dispatch(&mut app, Message::Confirm).await;
+    let delete = app.update(Message::Confirm);
+    let resume = !app.catalog.settings.resume_last;
+    dispatch(&mut app, Message::Resume(resume)).await;
+    drain(&mut app, delete).await;
+    assert_eq!(h.store.load().unwrap().0.settings.resume_last, resume);
     assert!(app.catalog.projects.is_empty());
     assert!(h.store.load().unwrap().0.projects.is_empty());
     assert!(h.store.load_session(&first).is_err());

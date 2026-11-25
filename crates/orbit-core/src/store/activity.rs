@@ -129,7 +129,19 @@ impl Store {
     }
 
     pub fn prune_activity(&self) -> Result<()> {
-        prune(&self.db.lock().expect("database lock"), now())
+        self.prune_activity_at(now())
+    }
+
+    fn prune_activity_at(&self, at: u64) -> Result<()> {
+        // Most ticks have nothing to delete. Do not claim the single writer.
+        if self.read_connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM response_activity WHERE completed <= ?1)",
+            [at as i64 - WINDOW as i64],
+            |r| r.get::<_, bool>(0),
+        )? {
+            prune(&self.db.lock().expect("database lock"), at)?;
+        }
+        Ok(())
     }
 
     pub fn activity_summary(&self) -> Result<Summary> {
@@ -140,8 +152,7 @@ impl Store {
         let mut summary = Summary::default();
         let mut samples = BTreeMap::<(String, bool), (Vec<f64>, Vec<f64>)>::new();
         {
-            let db = self.db.lock().expect("database lock");
-            prune(&db, at)?;
+            let db = self.read_connection()?;
             let mut stmt = db.prepare("SELECT completed, model, fast, input, output, cached, stream_seconds, latency_seconds
                 FROM response_activity WHERE completed > ?1 AND completed <= ?2")?;
             let mut rows = stmt.query(params![at as i64 - WINDOW as i64, at])?;
@@ -207,7 +218,7 @@ mod tests {
             .insert(&store.db.lock().unwrap())
             .unwrap();
         };
-        // The clock advances without another response: a summary read must also expire rows.
+        // Reads exclude expired rows even before the periodic deletion.
         add(0, "alpha", false, 90, 18, 45, 2., Some(1.));
         add(DAY - 1, "beta", false, 5, 7, 0, 0., None);
         add(DAY, "alpha", true, 71, 20, 40, 0.5, Some(0.2));
@@ -242,6 +253,7 @@ mod tests {
                 ("beta", false, None, None),
             ]
         );
+        store.prune_activity_at(at).unwrap();
         // Move the reporting clock back: a filtered-but-not-deleted row would reappear.
         assert!(
             !store

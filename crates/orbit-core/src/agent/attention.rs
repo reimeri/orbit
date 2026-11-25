@@ -21,14 +21,7 @@ impl Harness {
             drop(state);
             needs_attention.then_some((c, generation))
         });
-        let parent = self
-            .summaries
-            .lock()
-            .expect("summary lock")
-            .get(session)
-            .and_then(|s| s.child.as_ref())
-            .map(|c| c.parent_id.clone())
-            .unwrap_or_else(|| session.to_owned());
+        let parent = self.family_id(session);
         let ranges = self.run_index().attention_ranges(&parent, session);
         (conversation.is_some() || !ranges.is_empty()).then_some(Attention {
             conversation,
@@ -37,10 +30,11 @@ impl Harness {
         })
     }
 
-    /// Called on the serialized storage worker, never the UI thread.
+    /// Ordered on the affected family’s storage lane, never on the UI thread.
     pub fn acknowledge_attention(&self, attention: Attention) -> Result<()> {
         use subagents::{ORDINAL, RUN_COLUMNS, RunInfo, UNACKNOWLEDGED};
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        let (_library, family) = self.admit(&attention.parent);
+        let mut coordinator = family.lock().expect("family lifecycle");
         let mut skipped = Vec::new();
         if !attention.ranges.is_empty() {
             // Unsaved terminal results must become durable before this query.

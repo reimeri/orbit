@@ -117,8 +117,8 @@ impl RunInfo {
             RunKey::Id(id) => ("id", id),
             RunKey::Request(request) => ("request", request),
         };
-        let db = store.db.lock().expect("database lock");
-        let mut query = db.prepare_cached(&format!(
+        let db = store.read_connection()?;
+        let mut query = db.prepare(&format!(
             "SELECT {RUN_COLUMNS} FROM subagent_runs WHERE parent=?1 AND {column}=?2"
         ))?;
         query.query([parent, value])?.next()?.map(RunInfo::from_row).transpose()
@@ -225,12 +225,18 @@ impl Family {
 
 type AssignmentResult = (Option<String>, Option<String>);
 
-#[derive(Default)]
 pub(super) struct Coordinator {
     // Retain complete terminal text on storage failure, without rerunning work.
-    unsaved: HashMap<String, HashMap<String, AssignmentResult>>,
-    pub stopped: HashSet<String>,
-    pub closing: bool,
+    unsaved: HashMap<String, AssignmentResult>,
+    pub parent_stopped: bool,
+}
+impl Coordinator {
+    pub(super) fn new(parent_stopped: bool) -> Self {
+        Self {
+            parent_stopped,
+            unsaved: HashMap::new(),
+        }
+    }
 }
 /// Resident assignment metadata. Its lock never spans I/O or lifecycle operations:
 /// rendering the open conversation must not wait for a different session to load.
@@ -264,6 +270,15 @@ impl RunIndex {
             .map(Family::status)
             .unwrap_or_default()
     }
+    pub(super) fn parent_of(&self, session: &str) -> Option<&str> {
+        self.families.iter().find_map(|(parent, family)| {
+            family
+                .latest
+                .contains_key(session)
+                .then_some(parent.as_str())
+        })
+    }
+
     pub(super) fn latest_runs(&self, parent: &str) -> Vec<RunInfo> {
         let Some(family) = self.families.get(parent) else {
             return vec![];
@@ -438,7 +453,8 @@ impl Harness {
         if args.task.trim().is_empty() {
             bail!("Provide a complete, nonempty task briefing");
         }
-        let coordinator = self.subagents.lock().expect("subagent lock");
+        let (_library, family) = self.admit(parent);
+        let coordinator = family.lock().expect("family lifecycle");
         let key = RunKey::Request(request);
         if let Some(run) = self.resident_subagent(parent, key) {
             return Ok(run);
@@ -446,7 +462,7 @@ impl Harness {
         if let Some(run) = RunInfo::stored(&self.store, parent, key)? {
             return Ok(run);
         }
-        if cancel.is_cancelled() || coordinator.closing || coordinator.stopped.contains(parent) {
+        if cancel.is_cancelled() || coordinator.parent_stopped {
             bail!("Parent stopped; no child was started");
         }
         let owner = self.load(parent)?;
@@ -524,9 +540,7 @@ impl Harness {
             // Skipped, unreadable assignments still occupy their original positions.
             assignment: if existing.is_some() {
                 self.store
-                    .db
-                    .lock()
-                    .expect("database lock")
+                    .read_connection()?
                     .query_row(
                         "SELECT COUNT(*) + 1 FROM subagent_runs WHERE session=?1",
                         [&session.id],
@@ -553,6 +567,8 @@ impl Harness {
             *saved = Some(session);
             child.changed();
         } else {
+            let body = self.load_gate(&session.id);
+            let _publishing = body.lock().expect("loading lock");
             self.store.save_session_transaction(
                 None,
                 &session,
@@ -562,7 +578,7 @@ impl Harness {
         }
         self.run_index().record(run.clone());
         // start_inner only schedules work; its worker cannot finish under this lock.
-        self.start_inner(&run.session_id, settings)?;
+        self.start_inner(self.load(&run.session_id)?, settings)?;
         self.catalog_revision.fetch_add(1, Ordering::Release);
         self.changes.send_replace(());
         Ok(run)
@@ -587,9 +603,9 @@ impl Harness {
                     for run in runs {
                         let mut result = json!({"run_id":run.run_id,"session_id":run.session_id,"status":run.status});
                         if run.status != RunStatus::Running {
-                            let unsaved = self.subagents.lock().expect("subagent lock").unsaved.get(parent).and_then(|results| results.get(&run.run_id)).cloned();
+                            let unsaved = self.family(parent).lock().expect("family lifecycle").unsaved.get(&run.run_id).cloned();
                             let (text,error) = if let Some(result) = unsaved { result } else {
-                                self.store.db.lock().expect("database lock").query_row("SELECT result,error FROM subagent_runs WHERE id=?1",[&run.run_id],|r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?)))?
+                                self.store.read_connection()?.query_row("SELECT result,error FROM subagent_runs WHERE id=?1",[&run.run_id],|r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?)))?
                             };
                             if run.status == RunStatus::Completed { result["final_response"] = json!(text.context("Completed assignment result is missing; database preserved. Restore it from a backup or repair it before retrying")?); }
                             else { result["error"] = json!(error); }
@@ -608,7 +624,6 @@ impl Harness {
         result: Result<String>,
         cancelled: bool,
     ) -> Result<()> {
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
         let parent = child
             .state
             .lock()
@@ -618,6 +633,8 @@ impl Harness {
             .expect("child assignment")
             .parent_id
             .clone();
+        let (_library, family) = self.admit(&parent);
+        let mut coordinator = family.lock().expect("family lifecycle");
         let Some(mut run) = self
             .run_index()
             .latest_run(&parent, &child.id)
@@ -648,25 +665,23 @@ impl Harness {
         self.run_index().record(run.clone());
         coordinator
             .unsaved
-            .entry(parent.clone())
-            .or_default()
             .insert(run.run_id.clone(), (text, error));
         self.retry_results(&mut coordinator, &parent)?;
         self.deliver_notices(&mut coordinator, &run.parent_id)?;
-        if !coordinator.closing && !coordinator.stopped.contains(&run.parent_id) {
+        if !coordinator.parent_stopped {
             let parent = self.load(&run.parent_id)?;
             let settings = parent.last_settings.lock().expect("settings lock").clone();
-            self.start_inner(&run.parent_id, settings)?;
+            self.start_inner(parent, settings)?;
         }
         Ok(())
     }
     pub(super) fn retry_results(&self, coordinator: &mut Coordinator, parent: &str) -> Result<()> {
-        let Some(results) = coordinator.unsaved.get(parent) else {
+        if coordinator.unsaved.is_empty() {
             return Ok(());
-        };
+        }
         let mut db = self.store.db.lock().expect("database lock");
         let tx = db.transaction()?;
-        for (id, (text, error)) in results {
+        for (id, (text, error)) in &coordinator.unsaved {
             let metadata = serde_json::to_string(
                 self.run_index()
                     .run(parent, id)
@@ -678,18 +693,20 @@ impl Harness {
             )?;
         }
         tx.commit()?;
-        coordinator.unsaved.remove(parent);
+        coordinator.unsaved.clear();
         Ok(())
     }
     /// Explicit flush is global. A broken family must not stop another family's
     /// results and notices from becoming durable.
-    pub(super) fn flush_results(&self, coordinator: &mut Coordinator) -> Result<()> {
+    pub(super) fn flush_results(&self) -> Result<()> {
         let parents: Vec<_> = self.run_index().families.keys().cloned().collect();
         let mut failures = Vec::new();
         for parent in parents {
+            let family = self.family(&parent);
+            let mut coordinator = family.lock().expect("family lifecycle");
             if let Err(error) = self
-                .retry_results(coordinator, &parent)
-                .and_then(|()| self.deliver_notices(coordinator, &parent))
+                .retry_results(&mut coordinator, &parent)
+                .and_then(|()| self.deliver_notices(&mut coordinator, &parent))
             {
                 failures.push(format!("{parent}: {error:#}"));
             }
@@ -755,8 +772,11 @@ impl Harness {
         Ok(())
     }
     pub fn stop(&self, session: &str) {
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
-        coordinator.stopped.insert(session.into());
+        let (_library, family) = self.admit(session);
+        let mut coordinator = family.lock().expect("family lifecycle");
+        if self.family_id(session) == session {
+            coordinator.parent_stopped = true;
+        }
         if let Some(c) = self.get(session) {
             c.cancel();
         }
@@ -784,14 +804,17 @@ impl Harness {
     }
 
     /// Delete every conversation in a project as one database transaction.
-    /// The coordinator guard excludes turn/child starts for the entire operation.
+    /// The library barrier excludes creation of new families during discovery.
     pub fn remove_project(&self, project: &std::path::Path) -> Result<()> {
         self.remove_sessions(Deletion::Project(project))
     }
 
     fn remove_sessions(&self, target: Deletion<'_>) -> Result<()> {
-        let mut coordinator = self.subagents.lock().expect("subagent lock");
+        // A project spans an open-ended set of families; close admission while
+        // discovering and deleting it. A single-family deletion is local.
         let project_deletion = matches!(target, Deletion::Project(_));
+        let global = project_deletion.then(|| self.library.write().expect("library lock"));
+        let local = (!project_deletion).then(|| self.library.read().expect("library lock"));
         let parents: HashSet<String> = match target {
             Deletion::Session(session) => {
                 if self.load(session)?.snapshot().child.is_some() {
@@ -806,6 +829,11 @@ impl Harness {
                 .map(|s| s.id)
                 .collect(),
         };
+        let gates: Vec<_> = parents.iter().map(|id| self.family(id)).collect();
+        let mut reservations: Vec<_> = gates
+            .iter()
+            .map(|f| f.lock().expect("family lifecycle"))
+            .collect();
         let mut ids = parents.clone();
         let index = self.run_index();
         ids.extend(
@@ -841,7 +869,13 @@ impl Harness {
         {
             bail!("Stop all running sessions and their subagents before deleting. Then retry.");
         }
-        let _loading = self.loading.lock().expect("loading lock");
+        let mut order: Vec<_> = ids.iter().collect();
+        order.sort_unstable();
+        let bodies: Vec<_> = order.iter().map(|id| self.load_gate(id)).collect();
+        let loading: Vec<_> = bodies
+            .iter()
+            .map(|gate| gate.lock().expect("loading lock"))
+            .collect();
         let family: Vec<_> = ids.iter().filter_map(|id| self.get(id)).collect();
         // Exclude late native callbacks: none can recreate a just-deleted row.
         let _saved: Vec<_> = family
@@ -859,7 +893,6 @@ impl Harness {
             **lease = false;
         }
         drop(media_leases);
-        let mut cleanup_errors = Vec::new();
         for id in &ids {
             if let Some(c) = self.get(id) {
                 c.deleted.store(true, Ordering::Release);
@@ -873,14 +906,36 @@ impl Harness {
                 .remove(id);
             self.summaries.lock().expect("summary lock").remove(id);
         }
+        for parent in &parents {
+            self.run_index().families.remove(parent);
+        }
+        drop(_saved);
+        drop(loading);
+        for state in &mut reservations {
+            state.unsaved.clear();
+            state.parent_stopped = true;
+        }
+        drop(reservations);
+        drop(gates);
+        // Never replace a family gate underneath an already-admitted waiter.
+        let mut registry = self.families.lock().expect("family registry");
+        for parent in parents {
+            if registry
+                .gates
+                .get(&parent)
+                .is_some_and(|gate| Arc::strong_count(gate) == 1)
+            {
+                registry.gates.remove(&parent);
+            }
+        }
+        drop(registry);
+        drop(local);
+        drop(global);
+        let mut cleanup_errors = Vec::new();
         for owner in unused_media {
             if let Err(e) = crate::media::remove(&self.store.root().join("media").join(&owner)) {
                 cleanup_errors.push(format!("{owner}: {e:#}"));
             }
-        }
-        for parent in parents {
-            self.run_index().families.remove(&parent);
-            coordinator.unsaved.remove(&parent);
         }
         self.catalog_revision.fetch_add(1, Ordering::Release);
         self.changes.send_replace(());
@@ -1921,11 +1976,13 @@ await new Promise(r => setTimeout(r, 60000));"#,
 
         // Stall the actual cold load rather than assuming a large transcript is slow.
         std::thread::scope(|scope| {
-            let db = h.store.db.lock().unwrap();
+            let body = h.load_gate(&cold.id);
+            let blocked_load = body.lock().unwrap();
+            let family = h.family(&cold.id);
             let filing =
                 scope.spawn(|| h.file_session(&cold.id, FilingAction::File(FilingKind::Settled)));
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while h.loading.try_lock().is_ok() {
+            while family.try_lock().is_ok() {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "filing did not enter the cold load"
@@ -1948,7 +2005,7 @@ await new Promise(r => setTimeout(r, 60000));"#,
                 read.send(()).unwrap();
             });
             let responsive = done.recv_timeout(Duration::from_secs(5));
-            drop(db);
+            drop(blocked_load);
             assert_eq!(filing.join().unwrap().unwrap(), FilingOutcome::Applied);
             responsive.expect("UI reads blocked on storage for a different session");
         });

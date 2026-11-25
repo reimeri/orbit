@@ -141,7 +141,7 @@ async fn escape_dismisses_ui_before_stopping_only_the_selected_running_agent() {
         (Message::StopAgent(other.id.clone()), &other),
     ] {
         let (release, gate) = std::sync::mpsc::channel();
-        let barrier = app.io.run(move || {
+        let barrier = app.io.run_in([Lane::Family(target.id.clone())], move || {
             gate.recv_timeout(Duration::from_secs(5))
                 .expect("UI stayed responsive");
             Message::External(Ok(()))
@@ -339,5 +339,64 @@ async fn change_stream_delivers_pre_subscription_and_coalesced_updates() {
             .await
             .is_err(),
         "idle subscription must stay asleep"
+    );
+}
+
+#[tokio::test]
+async fn send_bypasses_another_sessions_filing_wait() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, root.clone()).await;
+    let other = app.selected.clone().unwrap();
+    stored_session(&mut app, root).await;
+    type_message(&mut app, "Send while the other session drains").await;
+    // A controlled wait in the filing lane: exercise the real UI Send and
+    // keep the wait open until its acknowledgement (or a regression timeout).
+    let (release, wait) = std::sync::mpsc::channel();
+    let filing = app.io.run_in([Lane::Family(other.clone())], move || {
+        let _ = wait.recv_timeout(Duration::from_secs(2));
+        Message::External(Ok(()))
+    });
+    send_current(&mut app).await;
+    let independent = release.send(()).is_ok();
+    drain(&mut app, filing).await;
+    assert!(independent, "Send queued behind a wait for {other}");
+    assert_eq!(
+        app.current().unwrap().entries[0].text,
+        "Send while the other session drains"
+    );
+}
+
+#[tokio::test]
+async fn stop_bypasses_a_blocked_sqlite_write_but_not_its_own_send() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, root.clone()).await;
+    let h = app.harness.as_ref().unwrap().clone();
+    let other = h.get(app.selected.as_ref().unwrap()).unwrap();
+    other.running.store(true, Ordering::Release);
+    stored_session(&mut app, root).await;
+    let owner = h.get(app.selected.as_ref().unwrap()).unwrap();
+    type_message(&mut app, "Durably accepted before Stop").await;
+
+    let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let send = app.update(Message::Send(owner.id.clone()));
+    let same_stop = app.update(Message::StopAgent(owner.id.clone()));
+    dispatch(&mut app, Message::StopAgent(other.id.clone())).await;
+    assert_eq!(other.status(), ConversationStatus::Stopping);
+    assert_eq!(
+        owner.status(),
+        ConversationStatus::Ready,
+        "same-family Stop passed Send"
+    );
+    assert!(h.store.load_session(&owner.id).unwrap().entries.is_empty());
+
+    db.execute_batch("ROLLBACK").unwrap();
+    drain(&mut app, Task::batch([send, same_stop])).await;
+    other.running.store(false, Ordering::Release);
+    assert_eq!(
+        h.store.load_session(&owner.id).unwrap().entries[0].text,
+        "Durably accepted before Stop"
     );
 }

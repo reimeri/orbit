@@ -255,8 +255,7 @@ impl App {
                     p.tile = Tile::PublishingOffscreen;
                     let id = id.clone();
                     let h = h.clone();
-                    let selected = self.selected.clone();
-                    self.tasks.push(self.io.run(move || {
+                    self.tasks.push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
                         let saved = h.edit(&id, |s| {
                             if let Some(input) = pending.take() {
                                 append(input, &mut s.draft, &mut s.draft_images);
@@ -265,7 +264,8 @@ impl App {
                         // On a failed load we still own the input. A failed save
                         // retains the edited session in memory: retry only its write.
                         match saved {
-                            Ok(()) => Message::AttachmentPublished(h.evict_inactive(selected.as_deref())
+                            Ok(()) if current => Message::AttachmentPublished(Ok(())),
+                            Ok(()) => Message::AttachmentPublished(h.evict_idle(&id)
                                 .map_err(|e| format!("Could not release inactive session: {e:#}"))),
                             Err(e) => Message::AttachmentSaveFailed(
                                 format!("Could not save imported input to session {id}: {e:#}. Keep Orbit open and fix storage to retry."), pending,

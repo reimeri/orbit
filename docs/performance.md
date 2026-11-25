@@ -10,9 +10,15 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   and ordered provider context commit in one SQLite transaction (WAL mode,
   `synchronous=FULL`). Persistent tree diffs update only changed records. A draft
   update does not serialize or rewrite historical entries or provider input.
-- A serialized UI I/O worker performs loading, editing, deletion and catalog/draft
-  saving. Stop requests (including Escape) use the same queue: cancellation may
-  wait for an earlier filing or send, but the window remains interactive.
+- UI storage jobs are FIFO for the resources they touch: a parent and its
+  children form one family; the shared new-session draft and catalog have
+  their own lanes. A switch flushes dirty drafts before opening its target,
+  without reserving a clean outgoing family. Stop waits for a preceding send
+  or filing in its own family, not for unrelated families. Project deletion
+  and final shutdown still drain all earlier jobs. Periodic pruning has its
+  own lane and never runs as part of a response save or statistics read.
+  Core lifecycle operations take family-specific admission locks; cold loads
+  and eviction exclude each other by session ID, even during metadata recovery.
   Conversation persistence has its own ordering lock; it snapshots state
   before writing and does not hold the conversation state lock across disk I/O.
   Agent async tasks offload saves to blocking workers. Message acceptance commits
@@ -34,7 +40,8 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   acknowledgeable without retaining their metadata: selection captures a cutoff
   per child so a later failure stays unread. Historical waits and retried spawn
   requests use parent-scoped SQLite lookups. The transcript fetches visible
-  historical assignment details on the storage worker, not while drawing.
+  historical assignment details on a blocking reader, not while drawing or
+  waiting in a send lane. Activity summaries likewise use independent WAL reads.
   Sidebar and transcript reads use a separate in-memory assignment index, so
   filing a cold session does not block drawing while its history loads or saves.
   See the [launch comparison](benchmarks/session-and-rendering.md#historical-subagent-assignments).
@@ -85,6 +92,30 @@ Labels and elapsed times contain no draft content, paths, or session IDs.
 The total starts at worker enqueue; attachment preparation, rendering, and the
 model response aren't part of it. A blocked Enter hasn't submitted a message
 and therefore produces no send trace.
+
+#### Contention check
+
+These local debug measurements use `ORBIT_TRACE_SEND=1` and temporary ext4
+stores (one baseline run, medians of three runs after the change).
+In each probe session A holds a controlled gate. The old implementation only
+made progress after the two-second test watchdog released it; the new one
+finishes session B's action **before** A is released.
+
+| Probe | Phase measured for B | Before | After |
+| --- | --- | ---: | ---: |
+| A's send waiting for its persistence lock | Family/lifecycle lock wait | 2,005 ms | 0.008 ms |
+| A's filing lane waiting, B sends from the UI | Storage queue wait | 2,000 ms | 0.059 ms |
+
+Reproduce with `just test unrelated_send_and_stop -- --nocapture` and
+`just test send_bypasses_another -- --nocapture` in the dev shell with the trace
+enabled. The assertions are about ordering, not a wall-clock performance target.
+For example, the three UI sends took 2.5–142 ms in total; the slow one spent
+141 ms in SQLite commit and only 0.054 ms waiting in the queue.
+SQLite still admits only one writer. Holding an external writer transaction
+still caused a send to fail after 5 s in a separate probe (the trace attributed
+the wait to the SQLite transaction body); an unrelated Stop call returned
+while that writer was still held. Failed acceptance published no user row,
+and retry after release committed one.
 
 ### Diagnosing a slow session switch
 

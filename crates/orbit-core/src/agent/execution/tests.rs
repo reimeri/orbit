@@ -825,3 +825,35 @@ async fn local_turn_benchmark() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn restart_during_stop_does_not_hold_admission_waiting_for_final_save() {
+    for stop_again in [false, true] {
+        let mut f = Fixture::new().await;
+        let _old_request = f.request().await;
+        std::thread::scope(|scope| {
+            let disk = f.c.persisted.lock().unwrap();
+            f.h.stop(&f.c.id);
+            let (started, result) = std::sync::mpsc::channel();
+            let h = &f.h;
+            let id = &f.c.id;
+            scope.spawn(move || started.send(h.start(id, Settings::default())).unwrap());
+            let admitted = result.recv_timeout(Duration::from_secs(5));
+            if admitted.is_ok() && stop_again {
+                h.stop(id);
+            }
+            drop(disk);
+            admitted
+                .expect("start should reserve, not wait for terminal persistence")
+                .unwrap();
+        });
+        if !stop_again {
+            f.request().await.reply.send(completed(json!([]))).unwrap();
+        }
+        until(|| !f.c.is_executing()).await;
+        assert!(
+            f.requests.try_recv().is_err(),
+            "Stop must cancel an armed restart"
+        );
+    }
+}
