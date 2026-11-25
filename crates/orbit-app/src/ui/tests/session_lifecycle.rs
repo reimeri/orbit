@@ -174,8 +174,34 @@ async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
         Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('a'))),
     )
     .await;
+    let mut renderer = header_renderer();
+    let mut animating = |app: &App| {
+        let mut ui = iced_runtime::UserInterface::build(
+            app.center(),
+            Size::new(800., 600.),
+            Default::default(),
+            &mut renderer,
+        );
+        let (state, _) = ui.update(
+            &[iced::Event::Window(window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            ))],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut vec![],
+        );
+        matches!(
+            state,
+            iced_runtime::user_interface::State::Updated {
+                redraw_request: window::RedrawRequest::NextFrame,
+                ..
+            }
+        )
+    };
     let task = app.update(Message::Create(path));
     assert!(app.io_busy);
+    assert!(!animating(&app), "navigation is not a pending send");
     dispatch(
         &mut app,
         Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('b'))),
@@ -191,6 +217,7 @@ async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
     dispatch(&mut app, Message::Select(first.clone())).await;
     assert_eq!(app.editor.text(), "a");
     let send = app.update(Message::Send);
+    assert!(animating(&app), "show the spinner before acknowledgement");
     dispatch(&mut app, Message::SaveDraft).await;
     dispatch(
         &mut app,
@@ -199,6 +226,7 @@ async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
     .await;
     assert_eq!(app.editor.text(), "a");
     drain(&mut app, send).await;
+    assert!(!animating(&app), "stop the spinner on acknowledgement");
     assert!(app.editor.text().is_empty());
     assert!(
         app.harness

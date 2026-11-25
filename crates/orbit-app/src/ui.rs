@@ -210,6 +210,7 @@ pub struct App {
     tasks: Vec<Task<Message>>,
     io_busy: bool,
     switching_session: bool,
+    sending_message: bool,
     closing: bool,
     close_requested: bool,
     submissions: HashMap<String, (UserMessage, String)>,
@@ -553,6 +554,7 @@ impl App {
             tasks: vec![],
             io_busy: false,
             switching_session: false,
+            sending_message: false,
             closing: false,
             close_requested: false,
             submissions: HashMap::new(),
@@ -1816,6 +1818,7 @@ impl App {
                 }
             }
             Message::Sent(id, text, result) => {
+                self.sending_message = false;
                 self.io_busy = false;
                 match result {
                     Ok(()) => {
@@ -2242,6 +2245,7 @@ impl App {
                         }));
                         return Task::none();
                     }
+                    self.sending_message = true;
                     let submission = self
                         .submissions
                         .entry(id.clone())
@@ -3939,7 +3943,9 @@ impl App {
             .as_ref()
             .and_then(|h| h.get(&session.id))
             .is_some_and(|c| c.is_manually_compacting());
-        let (send_icon, action) = if compacting {
+        let (send_icon, action) = if self.sending_message {
+            (Icon::LoaderCircle, "Sending message…")
+        } else if compacting {
             (Icon::ArrowUp, "Wait for compaction to finish")
         } else if running {
             (Icon::ArrowRight, "Steer agent")
@@ -3950,7 +3956,7 @@ impl App {
             opaque(self.model_selector(session, running)),
             space().width(Fill),
             opaque(footer_tip(
-                theme::button(send_icon.view(16.))
+                theme::button(send_icon.spinning(16., self.sending_message))
                     .width(TOOLBAR_BUTTON_HEIGHT)
                     .height(TOOLBAR_BUTTON_HEIGHT)
                     .padding(5)
