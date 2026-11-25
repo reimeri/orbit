@@ -123,6 +123,41 @@ async fn copied_text(task: Task<Message>) -> String {
     copied.expect("clipboard write")
 }
 
+async fn send_current(app: &mut App) {
+    dispatch(app, Message::Send(app.current().unwrap().id.clone())).await;
+}
+
+fn composer_enter(app: &App) -> Message {
+    let mut renderer = header_renderer();
+    let mut ui = iced_runtime::UserInterface::build(
+        app.composer_editor(&app.current().unwrap().id, false),
+        Size::new(600., 200.),
+        Default::default(),
+        &mut renderer,
+    );
+    ui.operate(
+        &renderer,
+        &mut iced::advanced::widget::operation::focusable::focus("composer".into()),
+    );
+    let Message::Event(enter) = footer_key(keyboard::key::Named::Enter) else {
+        unreachable!()
+    };
+    let mut messages = vec![];
+    ui.update(
+        &[enter],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut messages,
+    );
+    let [message] = messages.try_into().expect("one focused Enter action");
+    message
+}
+
+async fn press_composer_enter(app: &mut App) {
+    dispatch(app, composer_enter(app)).await;
+}
+
 async fn type_message(app: &mut App, message: &str) {
     dispatch(
         app,

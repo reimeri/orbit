@@ -63,7 +63,7 @@ async fn deferring_keeps_selection_and_draft_and_requires_opening_unread_complet
         Message::FileSession(id.clone(), FilingAction::File(FilingKind::Deferred)),
     )
     .await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(app.current().unwrap().filing.is_none());
     assert!(app.filed[FilingKind::Deferred as usize].rows.is_empty());
     assert_eq!(app.selected.as_deref(), Some(id.as_str()));

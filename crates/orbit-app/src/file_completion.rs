@@ -25,6 +25,7 @@ pub enum Message {
     Results(Response),
     Skills(u64, Result<orbit_core::skills::Catalog, String>),
     Move(bool),
+    PendingEnter,
     Dismiss,
     Accept {
         request: u64,
@@ -161,7 +162,7 @@ impl Completion {
             },
         );
         // Re-entering a complete filename must not expose the panel (or its
-        // key bindings) while the background index checks the whole tag.
+        // navigation bindings) while the background index checks the whole tag.
         self.awaiting_path_check = next
             .as_ref()
             .is_some_and(|(_, _, token)| token.full_path.is_some())
@@ -376,13 +377,32 @@ impl Completion {
             path: self.response.paths.get(self.selected).cloned(),
         }
     }
+    /// Resolve plain Enter after earlier edits in the same input batch.
+    pub fn enter(&self) -> Option<Message> {
+        // A complete-looking @path may still be under verification even though
+        // the panel is hidden. Don't send it before the result arrives.
+        if self.active_query()
+            && matches!(self.token, Some((_, Trigger::File, _)))
+            && self.response.phase == SearchPhase::Pending
+        {
+            return Some(Message::PendingEnter);
+        }
+        (self.is_open() && !self.picking_command() && !self.response.paths.is_empty())
+            .then(|| self.accept_selected())
+    }
+
     pub fn binding(&self, event: &text_editor::KeyPress) -> Option<Message> {
-        if !self.is_open()
-            || !matches!(event.status, text_editor::Status::Focused { .. })
+        if !matches!(event.status, text_editor::Status::Focused { .. })
             || event.modifiers.command()
             || event.modifiers.alt()
             || event.modifiers.shift()
         {
+            return None;
+        }
+        if event.key == keyboard::Key::Named(keyboard::key::Named::Enter) {
+            return self.enter();
+        }
+        if !self.is_open() {
             return None;
         }
         if self.picking_command() {
@@ -395,16 +415,7 @@ impl Completion {
         match event.key {
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::Move(true)),
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::Move(false)),
-            // With no match to accept, Enter belongs to the composer (send).
-            keyboard::Key::Named(keyboard::key::Named::Enter)
-                if self.response.phase != SearchPhase::Pending
-                    && self.response.paths.is_empty() =>
-            {
-                None
-            }
-            keyboard::Key::Named(keyboard::key::Named::Enter | keyboard::key::Named::Tab) => {
-                Some(self.accept_selected())
-            }
+            keyboard::Key::Named(keyboard::key::Named::Tab) => Some(self.accept_selected()),
             _ => None,
         }
     }
@@ -743,14 +754,6 @@ mod tests {
             &mut editor,
         );
         assert!(c.response.paths.is_empty());
-        let enter = text_editor::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Enter),
-            modified_key: keyboard::Key::Named(keyboard::key::Named::Enter),
-            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Enter),
-            modifiers: keyboard::Modifiers::empty(),
-            text: None,
-            status: text_editor::Status::Focused { is_hovered: false },
-        };
         c.update(
             Message::Results(Response {
                 request: c.request,
@@ -759,7 +762,7 @@ mod tests {
             &mut editor,
         );
         assert!(c.is_open());
-        assert!(c.binding(&enter).is_none());
+        assert!(c.enter().is_none());
         c.update(
             Message::Results(Response {
                 request: c.request,
@@ -768,7 +771,19 @@ mod tests {
             }),
             &mut editor,
         );
-        assert!(matches!(c.binding(&enter), Some(Message::Accept { .. })));
+        assert!(matches!(c.enter(), Some(Message::Accept { .. })));
+        c.update(
+            Message::Results(Response {
+                request: c.request,
+                phase: SearchPhase::Pending,
+                ..Response::default()
+            }),
+            &mut editor,
+        );
+        assert!(
+            matches!(c.enter(), Some(Message::PendingEnter)),
+            "a retained match is not a confirmed result for this keypress"
+        );
         let stale = c.accept_selected();
         c.update(
             Message::Results(Response {

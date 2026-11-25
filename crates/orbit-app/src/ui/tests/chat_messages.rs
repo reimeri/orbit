@@ -69,7 +69,7 @@ async fn user_messages_render_and_copy_literally_after_newline_and_paste() {
     .await;
     let expected = "First line λ\n**literal**\n\n  indented\n![not an image](missing.png)";
     assert_eq!(app.editor.text(), expected);
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     let id = app.selected.clone().unwrap();
     let h = app.harness.as_ref().unwrap().clone();
     h.edit(&id, |s| {

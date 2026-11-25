@@ -73,6 +73,19 @@ again once it has been delivered. Failed ordinary edits stay in memory for retry
 Cancellation frees inaccessible command slots; actual cell-thread lifetime is
 tracked independently of retrievable cell IDs so eviction cannot race callbacks.
 
+### Diagnosing a slow send
+
+Run `ORBIT_TRACE_SEND=1 orbit` from a terminal. Each submitted message prints
+one stderr line after the storage worker returns, on success or failure. It
+reports time queued on the worker, preparation (including file/skill capture),
+lifecycle and persistence lock waits where applicable, the database mutex,
+SQLite transaction body and commit, and publication/turn start. A SQLite writer
+outside Orbit can cause a wait in the transaction body, not the Rust mutex.
+Labels and elapsed times contain no draft content, paths, or session IDs.
+The total starts at worker enqueue; attachment preparation, rendering, and the
+model response aren't part of it. A blocked Enter hasn't submitted a message
+and therefore produces no send trace.
+
 ### Diagnosing a slow session switch
 
 Run `ORBIT_TRACE_SESSION_SWITCH=1 orbit` from a terminal. Each sidebar switch
@@ -156,8 +169,10 @@ require reparsing that block when text arrives.
 - Composer imports queue file paths and prepare one image at a time on a blocking
   worker, outside the session I/O queue. Decode limits and atomic media writes
   are unchanged. A switch or autosave need not wait for PNG encoding. Results
-  publish in input order to the originating draft; Send waits for that draft’s
-  imports, and Quit waits for pending publication. Up to two clipboard offers
+  publish in input order to the originating draft. Pressing Send during an
+  import waits for all of that draft’s current imports. Editing, adding or
+  removing an attachment, leaving the composer, or an import failure cancels
+  that send without discarding the draft. Quit waits for pending publication. Up to two clipboard offers
   are admitted at once because, unlike file paths, they can already hold bytes.
   See the [two-import selection probe](benchmarks/session-and-rendering.md#selection-during-image-import).
 

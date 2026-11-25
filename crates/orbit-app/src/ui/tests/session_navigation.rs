@@ -201,7 +201,7 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
     let original = app.current().unwrap().clone();
     type_message(&mut app, "Forbidden direct child edit").await;
     dispatch(&mut app, Message::SessionModel(LUNA.id.into())).await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(app.editor.text().is_empty());
     assert_eq!(app.current().unwrap().model, original.model);
     assert_eq!(app.current().unwrap().entries.len(), original.entries.len());

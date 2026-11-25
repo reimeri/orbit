@@ -740,7 +740,9 @@ impl Harness {
                 }
             }
         }
+        crate::send_trace::phase("child notice checkpoint");
         conversation.save_locked(&mut saved)?;
+        crate::send_trace::phase("child notice acknowledgements");
         for mut run in runs {
             run.notified = true;
             self.store.db.lock().expect("database lock").execute(

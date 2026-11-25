@@ -97,10 +97,17 @@ impl App {
                 .is_some_and(|owner| self.imports.queue.iter().any(|p| p.owner == owner))
     }
 
+    pub(super) fn cancel_import_send(&mut self, reason: &'static str) {
+        if self.send_after_import.take().is_some() {
+            self.notice = Some((reason.into(), std::time::Instant::now()));
+        }
+    }
+
     pub(super) fn import(&mut self, path: Option<PathBuf>) {
-        if !self.can_attach() {
+        if !self.composer_available() {
             return;
         }
+        self.cancel_import_send("Pending send cancelled because another import was requested.");
         let clipboard = path.is_none();
         let (source, tile) = match path {
             Some(path) => (Source::File(path), Tile::Visible),
@@ -140,6 +147,17 @@ impl App {
     }
 
     pub(super) fn import_loaded(&mut self, result: Result<Input, String>) {
+        if !matches!(result, Ok(Input::Text(_) | Input::Image(_)))
+            && self
+                .imports
+                .queue
+                .front()
+                .is_some_and(|p| Some(&p.owner) == self.draft_key().as_ref())
+        {
+            self.cancel_import_send(
+                "Not sent: an import did not complete. Review the draft and press Enter to send.",
+            );
+        }
         match result {
             Ok(Input::Empty) => {
                 self.imports.queue.pop_front();
@@ -165,6 +183,9 @@ impl App {
     }
 
     pub(super) fn import_save_failed(&mut self, error: String, pending: Option<Input>) {
+        self.cancel_import_send(
+            "Not sent: an import could not be saved. Review the draft and retry.",
+        );
         self.error = Some(error);
         self.close_requested = false;
         self.imports

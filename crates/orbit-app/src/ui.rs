@@ -213,6 +213,7 @@ pub struct App {
     io_busy: bool,
     switching_session: bool,
     sending_message: bool,
+    send_after_import: Option<String>, // Session ID, including the provisional new-session ID.
     closing: bool,
     close_requested: bool,
     submissions: HashMap<String, (UserMessage, String)>,
@@ -413,7 +414,8 @@ pub enum Message {
     DeletePreviousWord,
     ComposerHistory(Direction),
     Questionnaire(String, questionnaire::Message),
-    Send,
+    ComposerEnter(String),
+    Send(String),
     ToggleSettings,
     ToggleAgents,
     Changes(changes::Action),
@@ -559,6 +561,7 @@ impl App {
             io_busy: false,
             switching_session: false,
             sending_message: false,
+            send_after_import: None,
             closing: false,
             close_requested: false,
             submissions: HashMap::new(),
@@ -1267,7 +1270,7 @@ impl App {
         }
         self.prepare_visible();
     }
-    fn can_attach(&self) -> bool {
+    fn composer_available(&self) -> bool {
         self.current().is_some_and(|s| s.child.is_none())
             && !self.closing
             && !self.close_requested
@@ -1408,6 +1411,101 @@ impl App {
             }));
         }
     }
+    fn send(&mut self, owner: String) {
+        let Some(session) = self.current().filter(|s| s.id == owner) else {
+            self.notice = Some((
+                "Not sent: the active draft changed.".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        };
+        if self.io_busy {
+            if !self.sending_message {
+                let reason = if self.switching_session {
+                    "the session is changing"
+                } else {
+                    "another operation is in progress"
+                };
+                self.notice = Some((
+                    format!("Not sent: {reason}. Press Enter again when ready."),
+                    std::time::Instant::now(),
+                ));
+            }
+            return;
+        }
+        if !self.composer_available() {
+            self.notice = Some((
+                "Not sent: return to the composer and press Enter again.".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        if self.composer_importing() {
+            self.send_after_import = Some(owner);
+            self.file_completion.dismiss();
+            return;
+        }
+        let message = self.composer_message();
+        if message.is_empty() {
+            self.notice = Some((
+                "Not sent: type a message or attach an image first.".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        let Some(h) = self.harness.clone() else {
+            return;
+        };
+        let id = owner;
+        let draft = self.draft_session.clone();
+        let workspace = session.project.clone();
+        self.file_completion.dismiss();
+        let settings = self.catalog.settings.clone();
+        self.io_busy = true;
+        if message.text == crate::file_completion::COMPACT {
+            if draft.is_some() || !message.images.is_empty() {
+                self.io_busy = false;
+                self.error = Some(
+                    if !message.images.is_empty() {
+                        "Remove the attachments before running /compact."
+                    } else {
+                        "There is no conversation context to compact yet."
+                    }
+                    .into(),
+                );
+                return;
+            }
+            self.tasks.push(self.io.run(move || {
+                let result = h.compact(&id, settings).map_err(|e| format!("{e:#}"));
+                Message::Sent(id, message, result)
+            }));
+            return;
+        }
+        self.sending_message = true;
+        let submission = self
+            .submissions
+            .entry(id.clone())
+            .or_insert_with(|| (message.clone(), orbit_core::store::id()));
+        if submission.0 != message {
+            *submission = (message.clone(), orbit_core::store::id());
+        }
+        let submission = submission.1.clone();
+        let queued = orbit_core::send_trace::queued();
+        self.tasks.push(self.io.run(move || {
+            let result = orbit_core::send_trace::run(queued, || {
+                if !workspace.is_dir() {
+                    anyhow::ensure!(!workspace.starts_with(h.store.root().canonicalize()?.join("worktrees")),
+                        "The worktree at {} is missing. Restore the checkout to continue this chat or start a new session in another worktree.", workspace.display());
+                }
+                if let Some(draft) = draft {
+                    h.send_new(draft, &submission, message.clone(), settings)
+                } else {
+                    h.send(&id, &submission, message.clone(), settings)
+                }
+            }).map_err(|e| format!("Could not send message: {e:#}. Your message is preserved; fix the problem and retry."));
+            Message::Sent(id, message, result)
+        }));
+    }
     fn acknowledge_focused_completion(&mut self) {
         if self.window_focused
             && !self.closing
@@ -1504,6 +1602,17 @@ impl App {
             self.footer_menu_open = false;
             self.worktrees.popup = None;
         }
+        if let Some(owner) = &self.send_after_import {
+            if !self.composer_available() || self.current().is_none_or(|s| &s.id != owner) {
+                self.cancel_import_send(
+                    "Pending send cancelled. Review the draft and press Enter to send.",
+                );
+            } else if !self.composer_importing() {
+                // Dispatch before another edit or selection can overtake the import.
+                let owner = self.send_after_import.take().expect("waiting send");
+                self.send(owner);
+            }
+        }
         let close = if self.close_requested
             && self.imports.is_empty()
             && !self.io_busy
@@ -1532,7 +1641,8 @@ impl App {
                     | Message::Questionnaire(_, _)
                     | Message::ComposerHistory(_)
                     | Message::DeletePreviousWord
-                    | Message::Send
+                    | Message::ComposerEnter(_)
+                    | Message::Send(_)
                     | Message::Select(_)
                     | Message::New
                     | Message::Create(_)
@@ -1587,7 +1697,8 @@ impl App {
                     | Message::Questionnaire(_, _)
                     | Message::ComposerHistory(_)
                     | Message::DeletePreviousWord
-                    | Message::Send
+                    | Message::ComposerEnter(_)
+                    | Message::Send(_)
                     | Message::SessionModel(_)
                     | Message::SessionEffort(_)
                     | Message::SessionFast(_)
@@ -1630,9 +1741,10 @@ impl App {
                 self.import_save_failed(error, pending)
             }
             Message::RemoveAttachment(index) => {
-                if !self.can_attach() {
+                if !self.composer_available() {
                     return Task::none();
                 }
+                self.cancel_import_send("Pending send cancelled because the attachments changed.");
                 self.attachments.remove(index);
                 self.attachment_changed();
             }
@@ -2154,6 +2266,9 @@ impl App {
                         .map(move |message| Message::Questionnaire(id.clone(), message));
                 }
             }
+            Message::FileCompletion(crate::file_completion::Message::PendingEnter) => {
+                self.notice = Some(("Not sent: file search is still running. Press Enter again when results are ready.".into(), std::time::Instant::now()));
+            }
             Message::FileCompletion(message) => {
                 let result = matches!(
                     &message,
@@ -2170,7 +2285,8 @@ impl App {
                         | crate::file_completion::Message::Ignored
                 );
                 let before = spellcheck::BeforeEdit::capture(&self.editor);
-                let edited = if matches!(message, crate::file_completion::Message::Accept { .. }) {
+                let accepting = matches!(message, crate::file_completion::Message::Accept { .. });
+                let edited = if accepting {
                     self.histories
                         .active
                         .transaction(&mut self.editor, |editor| {
@@ -2180,7 +2296,13 @@ impl App {
                     self.file_completion.update(message, &mut self.editor)
                 };
                 if edited {
+                    self.cancel_import_send("Pending send cancelled because the draft changed.");
                     self.composer_edited(before, false);
+                } else if accepting {
+                    self.notice = Some((
+                        "Suggestion changed. Review the draft and try again.".into(),
+                        std::time::Instant::now(),
+                    ));
                 }
                 if refocus {
                     return widget::operation::focus("composer");
@@ -2191,6 +2313,19 @@ impl App {
             | Message::EditorScroll(_)
             | Message::DeletePreviousWord
             | Message::ComposerHistory(_) => {
+                if matches!(
+                    message,
+                    Message::Editor(text_editor::Action::Edit(_))
+                        | Message::DeletePreviousWord
+                        | Message::ComposerHistory(_)
+                ) {
+                    let reason = if self.imports.holds_paste_cursor() {
+                        "Pending send cancelled. The paste is still in progress; retry your edit when it finishes."
+                    } else {
+                        "Pending send cancelled because you edited the draft."
+                    };
+                    self.cancel_import_send(reason);
+                }
                 if self.active_questionnaire.is_some()
                     || self.imports.holds_paste_cursor()
                     || self.io_busy
@@ -2247,75 +2382,29 @@ impl App {
                     self.spellcheck.typing_at = None;
                 }
             }
-            Message::Send => {
-                if self.worktrees.popup.is_some() {
-                    return Task::none();
-                }
-                self.file_completion.dismiss();
-                if self.active_questionnaire.is_some()
-                    || self.modal.is_some()
-                    || self.context_menu.is_some()
+            Message::ComposerEnter(owner) => {
+                // Widget events may be batched: resolve the intent against the
+                // draft *after* processing earlier edits, not against the last view.
+                if self.current().is_some_and(|s| s.id == owner)
+                    && self.composer_available()
+                    && let Some(action) = self.file_completion.enter()
                 {
-                    return Task::none();
-                }
-                if let (Some(h), Some(session)) = (&self.harness, self.current()) {
-                    let message = self.composer_message();
-                    if message.is_empty() {
-                        return Task::none();
-                    }
-                    if self.io_busy || self.composer_importing() {
-                        return Task::none();
-                    }
-                    let h = h.clone();
-                    let id = session.id.clone();
-                    let draft = self.draft_session.clone();
-                    let workspace = session.project.clone();
-                    let settings = self.catalog.settings.clone();
-                    self.io_busy = true;
-                    if message.text == crate::file_completion::COMPACT {
-                        if draft.is_some() || !message.images.is_empty() {
-                            self.io_busy = false;
-                            self.error = Some(
-                                if !message.images.is_empty() {
-                                    "Remove the attachments before running /compact."
-                                } else {
-                                    "There is no conversation context to compact yet."
-                                }
+                    if self.imports.holds_paste_cursor()
+                        && !matches!(action, crate::file_completion::Message::PendingEnter)
+                    {
+                        self.notice = Some((
+                            "Not sent: wait for the paste to finish before accepting a suggestion."
                                 .into(),
-                            );
-                            return Task::none();
-                        }
-                        self.tasks.push(self.io.run(move || {
-                            let result = h.compact(&id, settings).map_err(|e| format!("{e:#}"));
-                            Message::Sent(id, message, result)
-                        }));
-                        return Task::none();
+                            std::time::Instant::now(),
+                        ));
+                    } else {
+                        return self.update_inner(Message::FileCompletion(action));
                     }
-                    self.sending_message = true;
-                    let submission = self
-                        .submissions
-                        .entry(id.clone())
-                        .or_insert_with(|| (message.clone(), orbit_core::store::id()));
-                    if submission.0 != message {
-                        *submission = (message.clone(), orbit_core::store::id());
-                    }
-                    let submission = submission.1.clone();
-                    self.tasks.push(self.io.run(move || {
-                        let result = (|| {
-                            if !workspace.is_dir() {
-                                anyhow::ensure!(!workspace.starts_with(h.store.root().canonicalize()?.join("worktrees")),
-                                    "The worktree at {} is missing. Restore the checkout to continue this chat or start a new session in another worktree.", workspace.display());
-                            }
-                            if let Some(draft) = draft {
-                                h.send_new(draft, &submission, message.clone(), settings)
-                            } else {
-                                h.send(&id, &submission, message.clone(), settings)
-                            }
-                        })().map_err(|e| format!("Could not send message: {e:#}. Your message is preserved; fix the problem and retry."));
-                        Message::Sent(id, message, result)
-                    }));
+                } else {
+                    self.send(owner);
                 }
             }
+            Message::Send(owner) => self.send(owner),
             Message::StopAgent(id) => self.stop_agent(id),
             Message::Worktree(action) => return self.worktree_action(action),
             Message::Changes(action) => return self.changes_action(action),
@@ -2912,6 +3001,9 @@ impl App {
                 }
                 iced::Event::Window(window::Event::Unfocused) => {
                     self.window_focused = false;
+                    self.cancel_import_send(
+                        "Pending send cancelled because the window lost focus.",
+                    );
                     self.histories.active.separate();
                     if let Some(draft) = self
                         .active_questionnaire
@@ -3991,6 +4083,8 @@ impl App {
             .is_some_and(|c| c.is_manually_compacting());
         let (send_icon, action) = if self.sending_message {
             (Icon::LoaderCircle, "Sending message…")
+        } else if self.send_after_import.is_some() {
+            (Icon::LoaderCircle, "Waiting for attachments…")
         } else if compacting {
             (Icon::ArrowUp, "Wait for compaction to finish")
         } else if running {
@@ -3998,10 +4092,15 @@ impl App {
         } else {
             (Icon::ArrowUp, "Send message")
         };
-        let toolbar = row![
+        let mut toolbar = row![
             opaque(self.model_selector(session, running)),
-            space().width(Fill),
-            opaque(footer_tip(
+            space().width(Fill)
+        ];
+        if self.send_after_import.is_some() {
+            toolbar = toolbar.push(text("Sending after import…").size(12));
+        }
+        let toolbar = toolbar
+            .push(opaque(footer_tip(
                 theme::button(send_icon.spinning(16., self.sending_message))
                     .width(TOOLBAR_BUTTON_HEIGHT)
                     .height(TOOLBAR_BUTTON_HEIGHT)
@@ -4010,20 +4109,21 @@ impl App {
                     .on_press_maybe(
                         (!compacting
                             && !self.io_busy
-                            && !self.composer_importing()
-                            && (!self.editor.is_empty() || !self.attachments.is_empty()))
-                        .then_some(Message::Send)
+                            && self.send_after_import.is_none()
+                            && (!self.editor.is_empty()
+                                || !self.attachments.is_empty()
+                                || self.composer_importing()))
+                        .then(|| Message::Send(session.id.clone())),
                     ),
                 action.into(),
-            )),
-        ]
-        .align_y(iced::Center)
-        .padding(iced::Padding::new(TOOLBAR_INSET).top(0.));
+            )))
+            .align_y(iced::Center)
+            .padding(iced::Padding::new(TOOLBAR_INSET).top(0.));
         let toolbar = mouse_area(toolbar)
             .on_press(Message::FocusComposer)
             .interaction(mouse::Interaction::Text);
         let editor = container(column![
-            self.composer_editor(running && !compacting),
+            self.composer_editor(&session.id, running && !compacting),
             toolbar
         ])
         .style(card);
@@ -4136,7 +4236,7 @@ impl App {
             && !self.footer_menu_open
             && self.worktrees.popup.is_none()
     }
-    fn composer_editor(&self, running: bool) -> Element<'_, Message> {
+    fn composer_editor<'a>(&'a self, owner: &'a str, running: bool) -> Element<'a, Message> {
         let line_height = self.catalog.settings.font_size * COMPOSER_LINE_HEIGHT_FACTOR;
         let editor = text_editor(&self.editor)
             .id("composer")
@@ -4147,7 +4247,7 @@ impl App {
                 "Message Orbit…"
             })
             .on_action(Message::Editor)
-            .key_binding(|event| {
+            .key_binding(move |event| {
                 if self.file_completion_enabled()
                     && self.file_completion.is_open()
                     && event.key == keyboard::Key::Named(keyboard::key::Named::Escape)
@@ -4160,7 +4260,7 @@ impl App {
                     .then(|| self.file_completion.binding(&event))
                     .flatten()
                     .map(|message| text_editor::Binding::Custom(Message::FileCompletion(message)))
-                    .or_else(|| composer_key_binding(event))
+                    .or_else(|| composer_key_binding(owner, event))
             })
             .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
             .min_height(COMPOSER_MIN_LINES as f32 * line_height)
@@ -5509,7 +5609,10 @@ fn updates(data: &Updates) -> iced::futures::stream::BoxStream<'static, Message>
     ))
 }
 
-fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+fn composer_key_binding(
+    owner: &str,
+    event: text_editor::KeyPress,
+) -> Option<text_editor::Binding<Message>> {
     if let Some(direction) = Direction::from_key_press(&event) {
         return Some(text_editor::Binding::Custom(Message::ComposerHistory(
             direction,
@@ -5543,7 +5646,13 @@ fn composer_key_binding(event: text_editor::KeyPress) -> Option<text_editor::Bin
         if event.key == keyboard::Key::Named(keyboard::key::Named::Enter)
             && !event.modifiers.shift()
         {
-            return Some(text_editor::Binding::Custom(Message::Send));
+            return Some(text_editor::Binding::Custom(
+                if event.modifiers.is_empty() {
+                    Message::ComposerEnter(owner.to_owned())
+                } else {
+                    Message::Send(owner.to_owned())
+                },
+            ));
         }
     }
     text_editor::Binding::from_key_press(event)

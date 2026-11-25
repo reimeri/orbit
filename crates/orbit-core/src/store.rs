@@ -790,7 +790,10 @@ impl Store {
         Ok((catalog, summaries, warnings))
     }
     pub(crate) fn contains_session(&self, id: &str) -> Result<bool> {
-        Ok(self.db.lock().expect("database lock").query_row(
+        crate::send_trace::phase("database mutex");
+        let db = self.db.lock().expect("database lock");
+        crate::send_trace::phase("session existence query");
+        Ok(db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
             [id],
             |row| row.get(0),
@@ -869,9 +872,11 @@ impl Store {
         Uuid::parse_str(&session.id)?;
         #[cfg(test)]
         let waiting = std::time::Instant::now();
+        crate::send_trace::phase("database mutex");
         let mut db = self.db.lock().expect("database lock");
         #[cfg(test)]
         let acquired = std::time::Instant::now();
+        crate::send_trace::phase("SQLite transaction body");
         let tx = db.transaction()?;
         tx.execute("INSERT INTO sessions VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated,summary=excluded.summary,metadata=excluded.metadata",
             params![session.id,session.updated as i64,serde_json::to_string(&SessionSummary::from(session))?,serde_json::to_string(session)?])?;
@@ -908,7 +913,9 @@ impl Store {
         }
         #[cfg(test)]
         let committing = std::time::Instant::now();
+        crate::send_trace::phase("SQLite commit");
         tx.commit()?;
+        crate::send_trace::phase("after commit");
         if matches!(checkpoint, Checkpoint::Save(samples) if !samples.is_empty()) {
             self.activity_changes.send_replace(());
         }

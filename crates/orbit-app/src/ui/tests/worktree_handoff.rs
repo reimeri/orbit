@@ -277,7 +277,7 @@ async fn removing_an_idle_checkout_keeps_the_chat_readable_but_prevents_send() {
     assert!(!path.exists());
     dispatch(&mut app, Message::Select(id.clone())).await;
     assert_eq!(app.editor.text(), "keep this draft");
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(app.error.as_ref().unwrap().contains("worktree"));
     let saved = store.load_session(&id).unwrap();
     assert_eq!(saved.draft, "keep this draft");

@@ -250,7 +250,7 @@ async fn file_picker_escape_is_local_but_hidden_picker_does_not_capture_modal_es
                 .on_input(Message::ModalInput)
                 .into()
         } else {
-            app.composer_editor(false)
+            app.composer_editor("fixture", false)
         };
         let mut ui = UserInterface::build(field, iced::Size::new(600., 200.), cache, &mut renderer);
         ui.operate(&renderer, &mut Focus);
@@ -321,14 +321,17 @@ fn composer_history_shortcuts_require_focused_editor_and_control_only() {
                 false,
             ),
         ] {
-            let binding = composer_key_binding(text_editor::KeyPress {
-                key: keyboard::Key::Character(key.into()),
-                modified_key: keyboard::Key::Character(key.into()),
-                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyZ),
-                modifiers,
-                text: None,
-                status,
-            });
+            let binding = composer_key_binding(
+                "fixture",
+                text_editor::KeyPress {
+                    key: keyboard::Key::Character(key.into()),
+                    modified_key: keyboard::Key::Character(key.into()),
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyZ),
+                    modifiers,
+                    text: None,
+                    status,
+                },
+            );
             assert_eq!(
                 matches!(binding, Some(text_editor::Binding::Custom(Message::ComposerHistory(actual))) if actual == direction),
                 expected
@@ -343,16 +346,17 @@ async fn composer_tabs_indent_at_caret_or_across_selection_as_one_edit() {
 
     let tab = |modifiers| {
         let key = keyboard::Key::Named(keyboard::key::Named::Tab);
-        let Some(text_editor::Binding::Custom(message)) =
-            composer_key_binding(text_editor::KeyPress {
+        let Some(text_editor::Binding::Custom(message)) = composer_key_binding(
+            "fixture",
+            text_editor::KeyPress {
                 key: key.clone(),
                 modified_key: key,
                 physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Tab),
                 modifiers,
                 text: None,
                 status: text_editor::Status::Focused { is_hovered: false },
-            })
-        else {
+            },
+        ) else {
             panic!("expected composer Tab binding")
         };
         message
@@ -416,7 +420,7 @@ async fn slash_picker_completes_without_sending_and_only_exact_compact_is_local(
     assert_eq!(app.editor.text(), "/compact");
     assert!(!app.file_completion.is_open());
     assert!(app.current().unwrap().entries.is_empty());
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(
         app.error
             .as_deref()
@@ -427,7 +431,7 @@ async fn slash_picker_completes_without_sending_and_only_exact_compact_is_local(
     assert_eq!(app.editor.text(), "/compact");
 
     type_message(&mut app, "\n/tmp/notes").await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     let entry = &app.current().unwrap().entries[0];
     assert!(matches!(entry.kind, EntryKind::User { .. }));
     assert_eq!(entry.text, "/compact\n/tmp/notes");
@@ -441,6 +445,8 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
     let root = app.smoke_dir.clone().unwrap();
     std::fs::write(root.join("source notes.md"), "tagged contents").unwrap();
     dispatch(&mut app, Message::Create(root.clone())).await;
+    // The native widget can produce the edit and Enter from the same view.
+    let enter_before_rebuild = composer_enter(&app);
     dispatch(
         &mut app,
         Message::Editor(text_editor::Action::Edit(text_editor::Edit::Paste(
@@ -448,6 +454,15 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
         ))),
     )
     .await;
+    // Before the first index response, the complete-looking tag is still
+    // being checked. Don't send it and don't accept a stale suggestion.
+    dispatch(&mut app, enter_before_rebuild).await;
+    assert_eq!(app.editor.text(), "Compare @source");
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("file search"))
+    );
     let mut messages = stream::select_all(
         subscription::into_recipes(app.file_completion.subscription())
             .into_iter()
@@ -477,7 +492,7 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
     let size = iced::Size::new(600., 200.);
     let mut renderer = header_renderer();
     let mut ui = UserInterface::build(
-        app.composer_editor(false),
+        app.composer_editor("fixture", false),
         size,
         Cache::new(),
         &mut renderer,
@@ -515,7 +530,12 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
     );
     let cache = ui.into_cache();
     let task = app.update(accept.clone());
-    let mut ui = UserInterface::build(app.composer_editor(false), size, cache, &mut renderer);
+    let mut ui = UserInterface::build(
+        app.composer_editor("fixture", false),
+        size,
+        cache,
+        &mut renderer,
+    );
     if let Some(mut stream) = iced_runtime::task::into_stream(task) {
         while let Some(action) = stream.next().await {
             if let iced_runtime::Action::Widget(mut operation) = action {
@@ -557,7 +577,7 @@ async fn completed_tag_for_a_deleted_file_sends_as_authored_text() {
     assert!(app.editor.text().ends_with(' '));
     let draft = app.editor.text();
     std::fs::remove_file(root.join("source notes.md")).unwrap();
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
     assert!(app.editor.text().is_empty());
     let saved = app
@@ -581,7 +601,7 @@ fn composer_grows_and_shrinks_within_its_configured_limits() {
     let mut app = app();
     let renderer = header_renderer();
     let measure = |app: &App, width| {
-        let mut editor = app.composer_editor(false);
+        let mut editor = app.composer_editor("fixture", false);
         let mut tree = Tree::new(editor.as_widget());
         editor
             .as_widget_mut()
@@ -767,7 +787,7 @@ async fn ctrl_w_follows_focus_and_repeats_without_rewriting_keys() {
             text_input("", "one two three")
                 .id("field")
                 .on_input(Message::Search),
-            app.composer_editor(false),
+            app.composer_editor("fixture", false),
             recorder
         ]
         .into(),
@@ -827,7 +847,11 @@ async fn ctrl_w_follows_focus_and_repeats_without_rewriting_keys() {
 fn delete_word_in_composer(app: &mut App, ctrl_w: bool) {
     let mut renderer = header_renderer();
     let messages = {
-        let view = pointer_input(app.composer_editor(false), false, Default::default());
+        let view = pointer_input(
+            app.composer_editor("fixture", false),
+            false,
+            Default::default(),
+        );
         let mut ui = iced_runtime::UserInterface::build(
             view,
             iced::Size::new(400., 100.),
@@ -959,7 +983,7 @@ async fn composer_toolbar_background_focuses_without_intercepting_buttons() {
     ));
     assert!(matches!(
         click_at(&mut ui, &mut renderer, send).as_slice(),
-        [Message::Send]
+        [Message::Send(owner)] if owner == &session.id
     ));
 }
 

@@ -67,7 +67,7 @@ async fn questionnaires_preserve_session_drafts_queue_and_modal_priority() {
     dispatch(&mut app, q("first-ask", questionnaire::Action::Toggle)).await;
     // The ordinary composer must neither mutate nor submit while an ask is open.
     type_message(&mut app, "Should not be pasted").await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert_eq!(app.editor.text(), "Unsent composer draft");
     app.modal = Some(Modal::Rename(owner.clone()));
     dispatch(&mut app, q("first-ask", questionnaire::Action::Next)).await;

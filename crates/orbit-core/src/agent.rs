@@ -749,6 +749,7 @@ impl Harness {
         if self.store.contains_session(&session.id)? {
             return self.send(&session.id, submission, message, settings);
         }
+        crate::send_trace::phase("prepare submission");
         message.files = crate::file_tags::capture(
             &session.project,
             &self.store.root().join("files"),
@@ -760,6 +761,7 @@ impl Harness {
         session.checkpoint();
         session.accept_submission(submission.to_owned(), message, false);
         self.store.commit_new_session(&session)?;
+        crate::send_trace::phase("publish acceptance");
         let id = session.id.clone();
         let conversation = self.make_conversation(session, true);
         if let Some(message) = naming_message {
@@ -777,7 +779,9 @@ impl Harness {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
+        crate::send_trace::phase("session load");
         let conversation = self.load(id)?;
+        crate::send_trace::phase("prepare submission");
         if conversation.snapshot().child.is_some() {
             bail!("Continue child sessions through spawn_subagent in their parent");
         }
@@ -792,6 +796,7 @@ impl Harness {
                 &message.text,
             )?;
         }
+        crate::send_trace::phase("lifecycle lock");
         let mut coordinator = self.subagents.lock().expect("subagent lock");
         anyhow::ensure!(
             !conversation.deleted.load(Ordering::Acquire),
@@ -801,10 +806,13 @@ impl Harness {
             !conversation.is_manually_compacting(),
             "Wait for compaction to finish before sending a message"
         );
+        crate::send_trace::phase("pending child notices");
         self.retry_results(&mut coordinator, id)?;
         self.deliver_notices(&mut coordinator, id)?;
         let needs_start = {
+            crate::send_trace::phase("persistence lock");
             let mut saved = conversation.persisted.lock().expect("persistence lock");
+            crate::send_trace::phase("prepare checkpoint");
             let idle_boundary = !conversation.is_running();
             let mut candidate = conversation.snapshot();
             if candidate.entries.by_id(submission).is_some() {
@@ -837,6 +845,7 @@ impl Harness {
                     accepted_at,
                 );
                 self.store.save_changes(saved.as_ref(), &candidate)?;
+                crate::send_trace::phase("publish acceptance");
                 *saved = Some(candidate);
                 let mut state = conversation.state.lock().expect("session lock");
                 state.points = points;
@@ -858,12 +867,14 @@ impl Harness {
         Ok(())
     }
     pub fn start(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
+        crate::send_trace::phase("lifecycle lock");
         let mut coordinator = self.subagents.lock().expect("subagent lock");
         coordinator.stopped.remove(id);
         coordinator.closing = false;
         self.start_inner(id, settings)
     }
     fn start_inner(self: &Arc<Self>, id: &str, settings: Settings) -> Result<()> {
+        crate::send_trace::phase("turn start");
         let conversation = self.load(id)?;
         anyhow::ensure!(
             !conversation.is_manually_compacting(),

@@ -202,6 +202,12 @@ async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
     let task = app.update(Message::Create(path));
     assert!(app.io_busy);
     assert!(!animating(&app), "navigation is not a pending send");
+    press_composer_enter(&mut app).await;
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("Not sent"))
+    );
     dispatch(
         &mut app,
         Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('b'))),
@@ -210,13 +216,20 @@ async fn pending_transitions_block_stale_edits_autosaves_and_measurements() {
     assert_eq!(app.editor.text(), "a");
     let old_epoch = app.view_epoch;
     drain(&mut app, task).await;
+    type_message(&mut app, "other draft").await;
+    dispatch(&mut app, Message::Send(first.clone())).await;
+    assert!(
+        app.selected.is_none(),
+        "a stale Enter cannot submit the new session"
+    );
+    assert_eq!(app.editor.text(), "other draft");
     let offset = app.transcript.offset;
     dispatch(&mut app, Message::Scroll(old_epoch, 200000., 300., false)).await;
     dispatch(&mut app, Message::RowSize(old_epoch, 0, 100000.)).await;
     assert_eq!(app.transcript.offset, offset);
     dispatch(&mut app, Message::Select(first.clone())).await;
     assert_eq!(app.editor.text(), "a");
-    let send = app.update(Message::Send);
+    let send = app.update(Message::Send(app.current().unwrap().id.clone()));
     assert!(animating(&app), "show the spinner before acknowledgement");
     dispatch(&mut app, Message::SaveDraft).await;
     dispatch(
@@ -249,7 +262,7 @@ async fn shutdown_waits_for_submission_and_reports_catalog_failure() {
         Message::Editor(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
     )
     .await;
-    let send = app.update(Message::Send);
+    let send = app.update(Message::Send(app.current().unwrap().id.clone()));
     let _ = app.quit();
     assert!(app.close_requested);
     let settings = app

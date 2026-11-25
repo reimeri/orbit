@@ -7,7 +7,7 @@ async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
     stored_session(&mut app, root).await;
     let source = app.selected.clone().unwrap();
     type_message(&mut app, "Explore the parser").await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     let entry = app.current().unwrap().entries[0].id.clone();
     type_message(&mut app, "Keep this source draft").await;
     let mut renderer = header_renderer();

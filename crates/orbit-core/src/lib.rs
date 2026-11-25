@@ -16,6 +16,7 @@ mod output;
 mod project_guidance;
 pub mod provider;
 pub mod questionnaire;
+pub mod send_trace;
 pub mod shell;
 pub mod skills;
 pub mod store;

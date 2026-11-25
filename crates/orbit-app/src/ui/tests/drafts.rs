@@ -76,7 +76,7 @@ async fn image_drafts_survive_navigation_storage_and_failed_image_only_send() {
     dispatch(&mut app, Message::Dismiss).await;
     let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
     sqlite::fail_writes(&db, "sessions", "image fixture failure");
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(
         app.error
             .as_ref()
@@ -85,7 +85,7 @@ async fn image_drafts_survive_navigation_storage_and_failed_image_only_send() {
     );
     assert_eq!(app.attachments, images);
     sqlite::allow_writes(&db, "sessions");
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(app.attachments.is_empty());
     let saved = h
         .store
@@ -181,7 +181,7 @@ async fn multiple_file_drops_are_ordered_and_cannot_leak_into_another_session() 
     let store = app.harness.as_ref().unwrap().store.clone();
     let id = id.unwrap();
     assert_eq!(store.load_session(&id).unwrap().draft, "owner draft");
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(store.load_session(&id).unwrap().entries.is_empty());
     dispatch(&mut app, Message::Create(root.clone())).await;
     assert!(
@@ -212,6 +212,14 @@ async fn multiple_file_drops_are_ordered_and_cannot_leak_into_another_session() 
         ["image/png", "image/gif"]
     );
     dispatch(&mut app, Message::Select(id)).await;
+    assert!(
+        store
+            .load_session(app.selected.as_ref().unwrap())
+            .unwrap()
+            .entries
+            .is_empty(),
+        "navigation cancelled the waiting send"
+    );
     let invalid = root.join("not-an-image.png");
     std::fs::write(&invalid, b"invalid image bytes").unwrap();
     dispatch(
@@ -302,7 +310,7 @@ async fn new_session_draft_follows_projects_but_not_existing_sessions() {
     let mut app = app();
     let h = app.harness.as_ref().unwrap().clone();
     dispatch(&mut app, Message::Create(PathBuf::from("/project-one"))).await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(app.selected.is_none());
     assert!(h.summaries().is_empty());
     assert!(h.store.load().unwrap().1.is_empty());
@@ -337,7 +345,7 @@ Then implement the fix.";
     assert_eq!(h.store.load_new_draft().unwrap(), app.new_draft);
 
     dispatch(&mut app, Message::SessionEffort("low".into())).await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     let id = app.selected.as_ref().unwrap();
     let saved = h.store.load_session(id).unwrap();
     assert_eq!(saved.project, Path::new("/project-two"));
@@ -366,7 +374,7 @@ async fn failed_shared_draft_save_and_first_send_keep_message_for_retry() {
     let h = app.harness.as_ref().unwrap().clone();
     dispatch(&mut app, Message::Create(path)).await;
     type_message(&mut app, "  \n").await;
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(h.store.load().unwrap().1.is_empty());
     type_message(&mut app, "Do not lose this message").await;
     let message = app.editor.text();
@@ -387,7 +395,7 @@ async fn failed_shared_draft_save_and_first_send_keep_message_for_retry() {
     assert_eq!(h.store.load_new_draft().unwrap().message, message);
 
     sqlite::fail_writes(&db, "sessions", "fixture session failure");
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(app.selected.is_none());
     assert_eq!(app.editor.text(), message);
     assert!(h.summaries().is_empty());
@@ -400,7 +408,7 @@ async fn failed_shared_draft_save_and_first_send_keep_message_for_retry() {
             .contains("fixture session failure")
     );
     sqlite::allow_writes(&db, "sessions");
-    dispatch(&mut app, Message::Send).await;
+    send_current(&mut app).await;
     assert!(app.selected.is_some());
     assert!(app.editor.text().is_empty());
     assert_eq!(h.store.load().unwrap().1.len(), 1);
@@ -456,5 +464,120 @@ async fn modal_blocks_composer_edits_and_failed_draft_save_keeps_text() {
             .snapshot()
             .draft,
         "a"
+    );
+}
+
+#[tokio::test]
+async fn enter_during_import_sends_the_complete_draft_once() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    dispatch(&mut app, Message::Create(root.clone())).await;
+    let id = app.current().unwrap().id.clone();
+    let store = app.harness.as_ref().unwrap().store.clone();
+    let png = root.join("first.png");
+    let gif = root.join("second.gif");
+    std::fs::write(&png, include_bytes!("../../fixtures/media.png")).unwrap();
+    std::fs::write(&gif, include_bytes!("../../fixtures/media.gif")).unwrap();
+    let drop_file = |path| Message::Event(iced::Event::Window(window::Event::FileDropped(path)));
+    let first = app.update(drop_file(png));
+    let second = app.update(drop_file(gif));
+
+    // Image-only new draft. Repeated Enter must neither send an incomplete
+    // message nor enqueue a second submission while the files are preparing.
+    press_composer_enter(&mut app).await;
+    press_composer_enter(&mut app).await;
+    drain(&mut app, second).await;
+    assert!(store.load().unwrap().1.is_empty());
+    drain(&mut app, first).await;
+    let saved = store.load_session(&id).unwrap();
+    let users: Vec<_> = saved
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::User { images, .. } => Some(images),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(users.len(), 1);
+    assert_eq!(
+        users[0].iter().map(|m| m.mime.as_str()).collect::<Vec<_>>(),
+        ["image/png", "image/gif"]
+    );
+    assert!(app.attachments.is_empty());
+}
+
+#[tokio::test]
+async fn changes_and_failed_imports_cancel_a_waiting_send_without_losing_the_draft() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, root.clone()).await;
+    let id = app.selected.clone().unwrap();
+    let store = app.harness.as_ref().unwrap().store.clone();
+    let png = root.join("ok.png");
+    std::fs::write(&png, include_bytes!("../../fixtures/media.png")).unwrap();
+    let drop_file = |path| Message::Event(iced::Event::Window(window::Event::FileDropped(path)));
+
+    let pending = app.update(drop_file(png));
+    type_message(&mut app, "before").await;
+    press_composer_enter(&mut app).await;
+    type_message(&mut app, " edit").await;
+    drain(&mut app, pending).await;
+    assert!(store.load_session(&id).unwrap().entries.is_empty());
+    assert_eq!(app.editor.text(), "before edit");
+    assert_eq!(app.attachments.len(), 1);
+
+    let failed = app.update(drop_file(root.join("missing.png")));
+    press_composer_enter(&mut app).await;
+    drain(&mut app, failed).await;
+    assert!(app.error.is_some());
+    assert!(store.load_session(&id).unwrap().entries.is_empty());
+    assert_eq!(app.editor.text(), "before edit");
+    assert_eq!(app.attachments.len(), 1);
+}
+
+#[tokio::test]
+async fn enter_waits_for_pasted_text_before_submitting() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, root).await;
+    let id = app.selected.clone().unwrap();
+    type_message(&mut app, "Review: ").await;
+    let _ = app.update(Message::Paste);
+    press_composer_enter(&mut app).await;
+    assert_eq!(app.editor.text(), "Review: ");
+    dispatch(
+        &mut app,
+        Message::AttachmentLoaded(Ok(crate::attachments::Input::Text("pasted prompt".into()))),
+    )
+    .await;
+    let saved = app
+        .harness
+        .as_ref()
+        .unwrap()
+        .store
+        .load_session(&id)
+        .unwrap();
+    assert_eq!(saved.entries[0].text, "Review: pasted prompt");
+}
+
+#[tokio::test]
+async fn pending_file_search_does_not_arm_a_send_on_paste_completion() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, root).await;
+    type_message(&mut app, "Look at @file").await;
+    let _ = app.update(Message::Paste);
+    press_composer_enter(&mut app).await;
+    dispatch(
+        &mut app,
+        Message::AttachmentLoaded(Ok(crate::attachments::Input::Text(" later".into()))),
+    )
+    .await;
+    assert_eq!(app.editor.text(), "Look at @file later");
+    assert!(app.current().unwrap().entries.is_empty());
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("file search"))
     );
 }

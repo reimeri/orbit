@@ -379,7 +379,7 @@ mod tests {
                 iced::widget::text_input("", "")
                     .id("composer")
                     .on_input(Message::Search)
-                    .on_submit(Message::Send)
+                    .on_submit(Message::Send("session".into()))
                     .into(),
                 capture,
                 Default::default(),
@@ -423,7 +423,7 @@ mod tests {
                         .iter()
                         .any(|m| matches!(m, Message::Search(value) if value == "界"))
                 );
-                assert!(messages.iter().any(|m| matches!(m, Message::Send)));
+                assert!(messages.iter().any(|m| matches!(m, Message::Send(_))));
             }
         }
     }
