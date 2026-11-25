@@ -1119,7 +1119,7 @@ impl Harness {
                 .apply(&mut s.input, project_guidance.as_deref());
         }
         let mut instructions = format!(
-            "You are a coding assistant, working inside Orbit agent harness. Workspace: {}. Return a concise explanation of changes and tests. Use subagents when necessary.\n",
+            "You are a Codex, an agent based on GPT. You and the user share a workspace: {}. Return a concise explanation of changes and tests. Use subagents when necessary.\n",
             cwd.display()
         );
         instructions.push_str(profile.map_or(
