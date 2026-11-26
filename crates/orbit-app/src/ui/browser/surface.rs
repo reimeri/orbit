@@ -32,6 +32,7 @@ pub(super) struct Surface<'a> {
     pub focus: Focus,
     pub selection: &'a str,
     pub disabled: bool,
+    pub finding: bool,
     pub dip: (u32, u32),
 }
 #[derive(Default)]
@@ -152,10 +153,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
         shell: &mut Shell<'_, Message>,
         _: &Rectangle,
     ) {
+        let state = tree.state.downcast_mut::<Input>();
+        if let Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
+            state.mods = *m;
+            return;
+        }
         if self.disabled {
             return;
         }
-        let state = tree.state.downcast_mut::<Input>();
         let bounds = layout.bounds();
         let pos = cursor.position_in(bounds);
         if let Some(p) = pos {
@@ -204,10 +209,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                     json!({"op":"scroll","x":x,"y":y,"dx":dx.round() as i32,"dy":dy.round() as i32}),
                 )
             }
-            Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
-                state.mods = *m;
-                return;
-            }
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modifiers: m,
@@ -218,6 +219,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                 use keyboard::key::Named;
                 let k = key.as_ref();
                 match (m.command(), k.clone()) {
+                    (_, keyboard::Key::Named(Named::Escape)) if self.finding => {
+                        Message::Browser(Action::EndFind)
+                    }
                     (true, keyboard::Key::Character("l")) => Message::Browser(Action::AddressFocus),
                     (true, keyboard::Key::Character("f")) => Message::Browser(Action::FindFocus),
                     (true, keyboard::Key::Character("r"))

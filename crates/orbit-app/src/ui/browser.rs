@@ -17,7 +17,7 @@ pub(super) struct State {
     size: Size,
     scale: f32,
     focus: surface::Focus,
-    confirm: bool,
+    pub(super) menu: Option<Menu>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -33,7 +33,7 @@ impl Default for State {
             size: Size::new(960., 720.),
             scale: 1.,
             focus: Default::default(),
-            confirm: false,
+            menu: None,
         }
     }
 }
@@ -45,9 +45,30 @@ impl State {
             self.size.height.round().clamp(1., max) as u32,
         )
     }
+    pub(super) fn find_open(&self) -> bool {
+        self.open && self.find.is_some()
+    }
     pub fn page_focused(&self) -> bool {
         self.open && self.focus.0.get()
     }
+}
+const TOOL_HEIGHT: f32 = 28.;
+const TOOL_INSET: f32 = 7.;
+const MENU_WIDTH: f32 = 200.;
+const COMPACT_WIDTH: f32 = 440.;
+fn tool_width(panel_width: f32) -> f32 {
+    if panel_width < COMPACT_WIDTH {
+        24.
+    } else {
+        TOOL_HEIGHT
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Driver,
+    More,
+    Profile,
 }
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -67,7 +88,7 @@ pub enum Action {
     Next,
     EndFind,
     Control,
-    ConfirmProfile,
+    Menu(Option<Menu>),
     Replace,
     Close,
     Expand,
@@ -195,6 +216,9 @@ impl App {
                 return widget::operation::focus("browser-page");
             }
             Action::AddressFocus => {
+                if self.browser.find.take().is_some() {
+                    let _ = b.user(&id, json!({"op":"end_find"}));
+                }
                 let _ = b.user(&id, json!({"op":"focus","focus":false}));
                 return widget::operation::focus("browser-location")
                     .chain(widget::operation::select_all("browser-location"));
@@ -213,7 +237,8 @@ impl App {
             Action::Zoom(step) => json!({"op":"zoom","step":step}),
             Action::FindFocus => {
                 let _ = b.user(&id, json!({"op":"focus","focus":false}));
-                self.browser.find = Some(String::new());
+                self.browser.menu = None;
+                self.browser.find.get_or_insert_with(String::new);
                 return widget::operation::focus("browser-find");
             }
             Action::EndFind => {
@@ -230,14 +255,19 @@ impl App {
             }
             Action::Next => json!({"op":"find","text":self.browser.find,"next":true}),
             Action::Control => {
+                self.browser.menu = None;
                 if let Err(e) = b.control(&id, !self.browser.status.user_control) {
                     self.error = Some(e.to_string())
                 }
                 self.refresh_browser();
                 return Task::none();
             }
-            Action::ConfirmProfile => {
-                self.browser.confirm = !self.browser.confirm;
+            Action::Menu(menu) => {
+                self.browser.menu = menu;
+                if menu.is_some() {
+                    self.footer_menu_open = false;
+                    self.worktrees.popup = None;
+                }
                 return Task::none();
             }
             Action::Replace => {
@@ -249,6 +279,7 @@ impl App {
                 return Task::none();
             }
             Action::Expand => {
+                self.browser.menu = None;
                 self.browser.expanded = !self.browser.expanded;
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 return Task::none();
@@ -268,113 +299,138 @@ impl App {
     pub(super) fn browser_panel(&self) -> Element<'_, Message> {
         let s = &self.browser;
         let state = &s.status;
+        let compact = self.panel_width() < COMPACT_WIDTH;
+        let button_width = tool_width(self.panel_width());
         let nav = |icon: Icon, desc: &'static str, a: Action, enabled: bool| {
-            tooltip(
-                theme::button(icon.view(16.))
-                    .padding(4)
-                    .style(theme::text_button)
-                    .on_press_maybe(enabled.then(|| msg(a))),
-                text(desc).size(12),
-                tooltip::Position::Bottom,
+            icon_tip(
+                theme::button(
+                    container(icon.view(16.))
+                        .center_x(button_width)
+                        .center_y(TOOL_HEIGHT),
+                )
+                .padding(0)
+                .style(theme::text_button)
+                .on_press_maybe(enabled.then(|| msg(a))),
+                desc,
             )
-            .style(card)
         };
-        let mut content = column![
-            right_panel_header("Browser", msg(Action::Toggle)),
-            row![
-                nav(Icon::ArrowLeft, "Back", Action::Nav("back"), state.back),
-                nav(
-                    Icon::ArrowRight,
-                    "Forward",
-                    Action::Nav("forward"),
-                    state.forward
-                ),
-                nav(
-                    if state.loading {
-                        Icon::Square
+        let driver = if state.handoff_pending {
+            "Switching…"
+        } else if state.user_control {
+            "You drive"
+        } else {
+            "Agent drives"
+        };
+        let icon = if state.handoff_pending {
+            Icon::LoaderCircle
+        } else if state.user_control {
+            Icon::User
+        } else {
+            Icon::Bot
+        };
+        let mut chip = row![icon.spinning(16., state.handoff_pending)]
+            .align_y(iced::Center)
+            .spacing(6);
+        if !compact {
+            chip = chip
+                .push(text(driver).size(13))
+                .push(Icon::ChevronDown.view(12.));
+        }
+
+        // Keep the field at the same child index so resizing preserves its focus and selection.
+        let mut prefix =
+            row![container(widget::rule::vertical(1)).height(16)].align_y(iced::Center);
+        if !compact {
+            prefix = prefix.push(
+                container(
+                    if s.find.is_some() {
+                        Icon::Search
                     } else {
-                        Icon::RefreshCw
-                    },
-                    if state.loading {
-                        "Stop loading"
-                    } else {
-                        "Reload"
-                    },
-                    Action::Nav(if state.loading { "stop" } else { "reload" }),
-                    true
-                ),
-                nav(Icon::Search, "Find on page", Action::FindFocus, true),
-                theme::button(text("−")).on_press(msg(Action::Zoom(-1))),
-                theme::button(text("+")).on_press(msg(Action::Zoom(1))),
-                nav(
-                    Icon::ArrowUpRight,
-                    "Expand or restore panel",
-                    Action::Expand,
-                    true
-                ),
-                space().width(Fill),
-                nav(Icon::X, "Close this tab", Action::Close, true)
-            ]
-            .spacing(2),
-            row![
-                text_input("URL or localhost:port", &s.location)
-                    .id("browser-location")
-                    .on_input(|s| msg(Action::Location(s)))
-                    .on_submit(msg(Action::Go))
-                    .size(14),
-                theme::button(text("Go").size(12)).on_press(msg(Action::Go))
-            ]
-            .spacing(4),
-            row![
-                theme::button(
-                    text(if state.handoff_pending {
-                        "Switching…"
-                    } else if state.user_control {
-                        "Hand to agent"
-                    } else {
-                        "Take control"
-                    })
-                    .size(12)
+                        Icon::Globe
+                    }
+                    .view(14.),
                 )
-                .on_press_maybe((!state.handoff_pending).then_some(msg(Action::Control))),
-                theme::button(
-                    text(if state.isolated {
-                        "Isolated ▾"
-                    } else {
-                        "Project login ▾"
-                    })
-                    .size(12)
-                )
-                .on_press(msg(Action::ConfirmProfile))
-            ]
-            .spacing(4)
+                .padding([0, 4]),
+            );
+        }
+        let mut bar = row![
+            nav(Icon::ArrowLeft, "Back", Action::Nav("back"), state.back),
+            nav(
+                Icon::ArrowRight,
+                "Forward",
+                Action::Nav("forward"),
+                state.forward
+            ),
+            nav(
+                if state.loading {
+                    Icon::Square
+                } else {
+                    Icon::RefreshCw
+                },
+                if state.loading {
+                    "Stop loading"
+                } else {
+                    "Reload"
+                },
+                Action::Nav(if state.loading { "stop" } else { "reload" }),
+                true
+            ),
+            prefix,
         ]
-        .spacing(5);
-        if s.editing && !state.url.is_empty() {
-            content = content.push(ellipsized_text(&format!("Page: {}", state.url), 12., None));
+        .align_y(iced::Center)
+        .spacing(2);
+        let field = if let Some(f) = &s.find {
+            text_input("Find", f)
+                .id("browser-find")
+                .on_input(|s| msg(Action::Query(s)))
+                .on_submit_maybe((!f.is_empty()).then_some(msg(Action::Next)))
+        } else {
+            text_input("Address", &s.location)
+                .id("browser-location")
+                .on_input(|s| msg(Action::Location(s)))
+                .on_submit(msg(Action::Go))
+        };
+        bar = bar.push(
+            field
+                .width(Fill)
+                .size(13)
+                .padding([4, 3])
+                .style(|t, status| {
+                    let mut style = theme::input(t, status);
+                    let c = theme::colors(t);
+                    style.background = Color::TRANSPARENT.into();
+                    style.border.color = match status {
+                        text_input::Status::Focused { .. } => c.border,
+                        _ => Color::TRANSPARENT,
+                    };
+                    style
+                }),
+        );
+        if s.find.is_some() {
+            bar = bar.push(nav(Icon::X, "Close find", Action::EndFind, true));
         }
-        if s.confirm {
-            content = content.push(
-                theme::button(
-                    text(if state.isolated {
-                        "Replace tab with project login"
-                    } else {
-                        "Replace tab with isolated login"
-                    })
-                    .size(12),
-                )
-                .on_press(msg(Action::Replace)),
-            )
-        }
-        if let Some(f) = &s.find {
-            content = content.push(row![
-                text_input("Find", f)
-                    .id("browser-find")
-                    .on_input(|s| msg(Action::Query(s)))
-                    .on_submit(msg(Action::Next)),
-                nav(Icon::X, "Close find", Action::EndFind, true)
-            ])
-        }
+        let bar = bar
+            .push(icon_tip(
+                theme::button(container(chip).center_y(TOOL_HEIGHT))
+                    .padding([0, 7])
+                    .style(secondary)
+                    .on_press_maybe(
+                        (!state.handoff_pending).then_some(msg(Action::Menu(Some(Menu::Driver)))),
+                    ),
+                driver,
+            ))
+            .push(nav(
+                Icon::Ellipsis,
+                "Browser options",
+                Action::Menu(Some(Menu::More)),
+                true,
+            ))
+            .push(container(widget::rule::vertical(1)).height(16))
+            .push(nav(Icon::X, "Hide browser panel", Action::Toggle, true));
+        let mut content = column![
+            container(bar).width(Fill).padding(TOOL_INSET),
+            widget::rule::horizontal(1)
+        ];
         if let Some(e) = &state.error {
             content = content.push(text(e).size(13))
         }
@@ -388,7 +444,10 @@ impl App {
                     frame: s.frame.as_ref(),
                     focus: s.focus.clone(),
                     selection: &state.selection,
-                    disabled: self.modal.is_some() || self.context_menu.is_some(),
+                    finding: s.find.is_some(),
+                    disabled: s.menu.is_some()
+                        || self.modal.is_some()
+                        || self.context_menu.is_some(),
                     dip: s.dip(),
                 })
                 .key(state.surface_id)
@@ -399,8 +458,93 @@ impl App {
         container(content)
             .width(self.panel_width())
             .height(Fill)
-            .padding(8)
             .style(right_panel)
+            .into()
+    }
+
+    pub(super) fn browser_popup(&self, menu: Menu) -> Element<'_, Message> {
+        let s = &self.browser;
+        let choice = |label: &'static str, action: Action| {
+            theme::button(text(label).size(13))
+                .width(Fill)
+                .padding([6, 9])
+                .style(theme::text_button)
+                .on_press(msg(action))
+        };
+        let actions = match menu {
+            Menu::Driver => column![choice(
+                if s.status.user_control {
+                    "Hand to agent"
+                } else {
+                    "Take control"
+                },
+                Action::Control
+            )],
+            Menu::More => column![
+                choice("Find on page", Action::FindFocus),
+                row![
+                    container(text("Zoom").size(13)).width(Fill).padding([0, 9]),
+                    choice("−", Action::Zoom(-1)).width(32),
+                    choice("+", Action::Zoom(1)).width(32)
+                ]
+                .align_y(iced::Center),
+                choice(
+                    if s.expanded {
+                        "Restore panel size"
+                    } else {
+                        "Expand panel"
+                    },
+                    Action::Expand
+                ),
+                widget::rule::horizontal(1),
+                choice(
+                    if s.status.isolated {
+                        "Login: isolated…"
+                    } else {
+                        "Login: project…"
+                    },
+                    Action::Menu(Some(Menu::Profile))
+                ),
+                choice("Close tab", Action::Close),
+            ],
+            Menu::Profile => column![
+                container(text("Replace this tab with a blank page?").size(13)).padding([6, 9]),
+                choice(
+                    if s.status.isolated {
+                        "Use project login"
+                    } else {
+                        "Use isolated login"
+                    },
+                    Action::Replace
+                ),
+                choice("Cancel", Action::Menu(None)),
+            ],
+        };
+        let popup = opaque(
+            container(actions.spacing(2))
+                .padding(5)
+                .width(MENU_WIDTH)
+                .style(card),
+        );
+        // Align the menu's right edge with its trigger; stay inside the browser panel.
+        let button_width = tool_width(self.panel_width());
+        let inset = TOOL_INSET
+            + button_width
+            + 5.
+            + if menu == Menu::Driver {
+                button_width + 2.
+            } else {
+                0.
+            };
+        container(popup)
+            .align_right(Fill)
+            .padding(
+                iced::Padding::ZERO
+                    .top(TOOL_INSET * 2. + TOOL_HEIGHT)
+                    .right(
+                        super::RAIL_WIDTH + inset.min((self.panel_width() - MENU_WIDTH).max(0.)),
+                    ),
+            )
             .into()
     }
 }

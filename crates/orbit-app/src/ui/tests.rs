@@ -223,6 +223,7 @@ fn click_at(
 #[derive(Default)]
 struct UiBounds {
     browser_page: Option<iced::Rectangle>,
+    browser_field: Option<iced::Rectangle>,
     find_input: Option<iced::Rectangle>,
     composer: Option<iced::Rectangle>,
     focused: Option<iced::advanced::widget::Id>,
@@ -243,6 +244,12 @@ impl iced::advanced::widget::Operation for UiBounds {
         bounds: iced::Rectangle,
         state: &mut dyn iced::advanced::widget::operation::Focusable,
     ) {
+        if ["browser-location", "browser-find"]
+            .into_iter()
+            .any(|name| id == Some(&iced::advanced::widget::Id::new(name)))
+        {
+            self.browser_field = Some(bounds);
+        }
         if id == Some(&iced::advanced::widget::Id::new("browser-page")) {
             self.browser_page = Some(bounds);
         }

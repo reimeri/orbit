@@ -162,7 +162,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
     ) {
         // An open footer picker blocks typing/submission in the editor underneath.
         // The window subscription handles Escape; other picker keystrokes are ignored.
-        if self.capture_keyboard && matches!(event, Event::Keyboard(_) | Event::InputMethod(_)) {
+        if self.capture_keyboard
+            && matches!(
+                event,
+                Event::Keyboard(
+                    keyboard::Event::KeyPressed { .. } | keyboard::Event::KeyReleased { .. }
+                ) | Event::InputMethod(_)
+            )
+        {
             shell.capture_event();
             return;
         }

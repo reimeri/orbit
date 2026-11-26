@@ -1,28 +1,33 @@
 # Session browser
 
-Open **Browser** (the globe in the right rail) in an existing session. Enter an
-HTTP(S) address or a development server such as `localhost:5173`. Back,
-forward, stop/reload, find, zoom and expand are in the toolbar. Click into the
-page to type; Ctrl+L focuses the address and Ctrl+F searches the page when it
-has focus. Clipboard shortcuts exchange plain text with the desktop.
+Open **Browser** (the globe in the right rail) in an existing session. Click the
+address, enter an HTTP(S) URL or a development server such as `localhost:5173`,
+and press Enter. Back, forward and stop/reload sit to the left of the address;
+the driver menu, **⋯** (browser options) and **×** (hide panel) sit to its right.
+On narrow panels the driver menu shows just the bot or person icon.
+
+Use **⋯** to find text, zoom, expand or restore the panel, change logins, or
+close the tab. With the page focused, Ctrl+L selects the address and Ctrl+F
+replaces it with Find. Press Enter for the next match; dismiss Find with its
+× or Escape to restore the address. Clipboard shortcuts exchange plain text
+with the desktop.
 
 Orbit starts the sandboxed CEF helper on first use, not on startup. The user
 and the main agent drive **the same tab**. Switching panels or sessions hides
 the page and stops its off-screen painting; it does not reload the document.
-**Close this tab** discards the page. Pages are not restored after quitting
+**⋯ → Close tab** discards the page. Pages are not restored after quitting
 Orbit. Background tabs still consume memory and can run site JavaScript.
 
 - **Project login** shares cookies and site storage between sessions of the
   same project, including its Git worktrees. Persistent cookies survive an
   Orbit restart subject to the site's expiry rules. This isn't a password
   manager, and Orbit doesn't import a desktop browser profile.
-- To test a separate account, click **Project login** and confirm **Replace
-  tab with isolated login**. This replaces the current page with a blank
+- To test a separate account, choose **⋯ → Login: project… → Use isolated login**. This replaces the current page with a blank
   in-memory browser context. Its site data disappears when the tab closes.
   The session remembers the isolation choice.
-- The agent has control by default. **Take control** blocks its browser input
+- The agent has control by default. **Agent drives → Take control** blocks its browser input
   and screenshots, including pending captures. Already dispatched actions
-  cannot be undone. Only **Hand to agent** grants access again; the choice
+  cannot be undone. Only **You drive → Hand to agent** grants access again; the choice
   survives closing the tab and restarting Orbit. For sign-in, take control
   and type credentials directly into the page, not into chat or a tool call.
 - Browser ownership applies to Orbit's browser tool. It does not sandbox the

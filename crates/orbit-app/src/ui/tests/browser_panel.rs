@@ -154,3 +154,129 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
     b.shutdown().unwrap();
     http.abort();
 }
+
+// Drive the toolbar through the rendered UI; menu overlays and inline Find must
+// not displace the page, even when a narrow panel hides the driver's label.
+#[tokio::test]
+#[ignore = "requires packaged CEF; run just browser-smoke"]
+async fn native_browser_toolbar_preserves_page_until_close() {
+    let mut app = app();
+    let project = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, project).await;
+    let id = app.selected.clone().unwrap();
+    let browser = app.harness.as_ref().unwrap().browser.clone();
+    let size = Size::new(1600., 720.);
+    app.window_width = size.width;
+    app.catalog.settings.settings_width = 600.;
+    dispatch(&mut app, Message::Browser(Action::Toggle)).await;
+    let tab = browser.status(&id).surface_id.unwrap();
+    let mut renderer = header_renderer();
+    let mut cache = Cache::default();
+    let mut probe = |app: &App, point: Option<iced::Point>| {
+        let mut ui =
+            UserInterface::build(app.view(), size, std::mem::take(&mut cache), &mut renderer);
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let messages = point
+            .map(|p| click_at(&mut ui, &mut renderer, p))
+            .unwrap_or_default();
+        cache = ui.into_cache();
+        (bounds, messages)
+    };
+    let wide = probe(&app, None).0;
+    let driver = wide.label("Agent drives");
+    let address = wide.browser_field.unwrap();
+    assert!(driver.y <= address.center_y() && address.center_y() <= driver.y + driver.height);
+    for m in probe(&app, Some(driver.center())).1 {
+        dispatch(&mut app, m).await;
+    }
+    let handoff = probe(&app, None).0;
+    assert_eq!(wide.browser_page, handoff.browser_page);
+    for m in probe(&app, Some(handoff.label("Take control").center())).1 {
+        dispatch(&mut app, m).await;
+    }
+    assert!(browser.status(&id).user_control);
+
+    probe(&app, Some(address.center()));
+    app.catalog.settings.settings_width = 260.;
+    let narrow = probe(&app, None).0;
+    assert_eq!(
+        narrow.focused,
+        Some(iced::advanced::widget::Id::new("browser-location"))
+    );
+    let field = narrow.browser_field.unwrap();
+    let page = narrow.browser_page.unwrap();
+    assert_eq!(page.y, wide.browser_page.unwrap().y);
+    assert!(field.width > 0. && field.width < address.width);
+    assert!(narrow.labels.iter().all(|(label, _)| label != "You drive"));
+    // The hide and options buttons are the last two toolbar controls before
+    // the app rail. Locate their centers in layout rather than hardcoding pixels.
+    let mut controls: Vec<_> = narrow
+        .containers
+        .iter()
+        .filter(|r| {
+            r.x > field.x + field.width
+                && r.x + r.width <= page.x + page.width
+                && r.height > 0.
+                && r.width > 1.
+                && (r.center_y() - field.center_y()).abs() < 1.
+        })
+        .map(|r| r.center())
+        .collect();
+    controls.sort_by(|a, b| b.x.total_cmp(&a.x));
+    controls.dedup();
+    let (hide, options) = (controls[0], controls[1]);
+    for m in probe(&app, Some(options)).1 {
+        dispatch(&mut app, m).await;
+    }
+    let menu = probe(&app, None).0;
+    assert_eq!(Some(page), menu.browser_page);
+    for m in probe(&app, Some(menu.label("Find on page").center())).1 {
+        dispatch(&mut app, m).await;
+    }
+    assert!(app.browser.find_open());
+    let find = probe(&app, None).0;
+    assert_eq!(find.browser_page, Some(page));
+    assert_eq!(find.browser_field.unwrap().center_y(), field.center_y());
+    for m in probe(&app, Some(page.center())).1 {
+        dispatch(&mut app, m).await;
+    }
+    assert!(app.browser.page_focused());
+    let Message::Event(escape) = footer_key(keyboard::key::Named::Escape) else {
+        unreachable!()
+    };
+    let mut renderer = header_renderer();
+    let mut ui = UserInterface::build(app.view(), size, Cache::default(), &mut renderer);
+    let mut keys = Vec::new();
+    ui.update(
+        &[escape],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut keys,
+    );
+    drop(ui);
+    assert!(matches!(
+        keys.as_slice(),
+        [Message::Browser(Action::EndFind)]
+    ));
+    for m in keys {
+        dispatch(&mut app, m).await;
+    }
+    assert!(!app.browser.find_open());
+    for m in probe(&app, Some(hide)).1 {
+        dispatch(&mut app, m).await;
+    }
+    assert!(!app.browser.open);
+    assert_eq!(browser.status(&id).surface_id, Some(tab));
+    dispatch(&mut app, Message::Browser(Action::Toggle)).await;
+    for m in probe(&app, Some(options)).1 {
+        dispatch(&mut app, m).await;
+    }
+    let close = probe(&app, None).0.label("Close tab");
+    for m in probe(&app, Some(close.center())).1 {
+        dispatch(&mut app, m).await;
+    }
+    assert!(!app.browser.open && browser.status(&id).surface_id.is_none());
+    browser.shutdown().unwrap();
+}

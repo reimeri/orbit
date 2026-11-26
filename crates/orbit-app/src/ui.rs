@@ -101,6 +101,7 @@ pub enum SettingsSave {
 
 type PendingLogin = Arc<tokio::sync::Mutex<Option<Login>>>;
 
+const RAIL_WIDTH: f32 = 50.;
 const RIGHT_PANEL_PADDING: f32 = 18.;
 const TOOLBAR_BUTTON_HEIGHT: f32 = 26.;
 const TOOLBAR_INSET: f32 = 6.;
@@ -1674,6 +1675,9 @@ impl App {
         {
             self.context_menu = None;
         }
+        if self.modal.is_some() || self.context_menu.is_some() {
+            self.browser.menu = None;
+        }
         if self.modal.is_some()
             || self.context_menu.is_some()
             || self.active_questionnaire.is_some()
@@ -3171,6 +3175,7 @@ impl App {
                 }
                 iced::Event::Window(window::Event::Unfocused) => {
                     self.window_focused = false;
+                    self.browser.menu = None;
                     if matches!(
                         self.context_menu,
                         Some(ContextMenu(MenuTarget::Spelling(..), _))
@@ -3230,6 +3235,12 @@ impl App {
                     }
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    if self.browser.menu.is_some() {
+                        if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                            self.browser.menu = None;
+                        }
+                        return Task::none();
+                    }
                     if self.browser.page_focused()
                         && self.modal.is_none()
                         && self.context_menu.is_none()
@@ -3276,6 +3287,8 @@ impl App {
                         if self.context_menu.take().is_some() {
                         } else if self.modal.is_some() {
                             return self.update_inner(Message::Dismiss);
+                        } else if self.browser.find_open() {
+                            return self.browser_action(browser::Action::EndFind);
                         } else if let Some(close_search) = close_search {
                             return self.update_inner(close_search);
                         } else if self.settings_open {
@@ -3592,6 +3605,7 @@ impl App {
         pointer_input(
             self.content(),
             self.footer_menu_open
+                || self.browser.menu.is_some()
                 || self.worktrees.popup.is_some()
                 || matches!(
                     self.context_menu,
@@ -3773,7 +3787,7 @@ impl App {
         )
         .padding([14, 8])
         .height(Fill)
-        .width(50)
+        .width(RAIL_WIDTH)
         .style(panel);
         // Keep the main UI at the same tree position when popups open/close,
         // otherwise iced discards its scroll offsets and other widget state.
@@ -3882,6 +3896,13 @@ impl App {
             };
             let positioned = row![space().width(x), anchored];
             layers.push(dismiss).push(positioned).into()
+        } else if let Some(menu) = self.browser.menu {
+            layers
+                .push(opaque(dismiss_layer(Message::Browser(
+                    browser::Action::Menu(None),
+                ))))
+                .push(self.browser_popup(menu))
+                .into()
         } else if let Some(offset) = self.worktrees.popup {
             let layers = layers.push(dismiss_layer(Message::Worktree(
                 worktrees::Action::ClosePopup,
@@ -4400,7 +4421,7 @@ impl App {
             .sidebar_width
             .min(self.window_width * 0.4)
             + 5.;
-        let right = 50.
+        let right = RAIL_WIDTH
             + if self.right_panel_open() {
                 self.panel_width() + 5.
             } else {

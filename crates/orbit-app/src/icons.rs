@@ -21,6 +21,7 @@ use iced::{
 #[derive(Clone, Copy)]
 pub enum Icon {
     Globe,
+    Ellipsis,
     Pencil,
     GitFork,
     Diff,
@@ -67,6 +68,7 @@ pub enum Icon {
 impl Icon {
     fn glyph(self) -> Glyph {
         let bytes: &'static [u8] = match self {
+            Self::Ellipsis => include_bytes!("icons/ellipsis.svg"),
             Self::Globe => include_bytes!("icons/globe.svg"),
             Self::Diff => include_bytes!("icons/diff.svg"),
             Self::GitFork => include_bytes!("icons/git-fork.svg"),
