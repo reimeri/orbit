@@ -1140,3 +1140,92 @@ async fn sidebar_search_shares_the_window_with_composer_completions() {
     assert!(app.search_active);
     assert!(!app.file_completion.is_open());
 }
+
+#[tokio::test]
+async fn spelling_menu_corrects_only_the_clicked_occurrence_as_one_edit() {
+    use iced_runtime::{UserInterface, user_interface::Cache};
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    app.spellcheck = spellcheck::tests::pair(&root, "fixture", "2\nreceive\nrésumé\n");
+    stored_session(&mut app, root).await;
+    app.catalog.settings.spellcheck.enabled = true;
+    app.catalog.settings.spellcheck.language = "fixture".into();
+    let original = "recieve résumé\r\nrecieve!";
+    type_message(&mut app, original).await;
+    let pos = |column| text_editor::Position { line: 0, column };
+    let selection = text_editor::Cursor {
+        position: pos(0),
+        selection: Some(pos("recieve résumé".len())),
+    };
+    app.editor.move_to(selection);
+    let size = iced::Size::new(app.window_width, app.window_height);
+    let mut renderer = header_renderer();
+    let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+    let mut bounds = UiBounds::default();
+    ui.operate(&renderer, &mut bounds);
+    let composer = bounds.composer.unwrap();
+    let point = app.editor.with_editor(|editor| {
+        let row = editor
+            .buffer()
+            .layout_runs()
+            .find(|r| r.line_i == 1)
+            .unwrap();
+        let glyph = &row.glyphs[0];
+        iced::Point::new(
+            composer.x + crate::growing_editor::PADDING + glyph.x + glyph.w / 2.,
+            composer.y + crate::growing_editor::PADDING + row.line_top + row.line_height / 2.,
+        )
+    });
+    let mut events = vec![];
+    ui.update(
+        &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Right,
+        ))],
+        mouse::Cursor::Available(point),
+        &mut renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut events,
+    );
+    let cache = ui.into_cache();
+    let [open @ Message::SpellingMenu(target, anchor)] = &events[..] else {
+        panic!("expected a spelling menu, got {events:?}")
+    };
+    assert_eq!(*anchor, point);
+    dispatch(&mut app, open.clone()).await;
+    assert_eq!(app.editor.cursor(), selection);
+    let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+    let mut bounds = UiBounds::default();
+    ui.operate(&renderer, &mut bounds);
+    let choice = bounds.label("receive");
+    assert!(iced::Rectangle::with_size(size).contains(choice.center()));
+    let choices = click_at(&mut ui, &mut renderer, choice.center());
+    drop(ui);
+    let [accept @ Message::CorrectSpelling(..)] = &choices[..] else {
+        panic!("expected a correction, got {choices:?}")
+    };
+    dispatch(&mut app, accept.clone()).await;
+    assert_eq!(app.editor.text(), "recieve résumé\r\nreceive!");
+    dispatch(&mut app, Message::ComposerHistory(Direction::Undo)).await;
+    assert_eq!(app.editor.text(), original);
+    assert_eq!(app.editor.cursor(), selection);
+
+    // The same typo is back at the same position, but from a different revision.
+    dispatch(&mut app, open.clone()).await;
+    assert!(app.context_menu.is_none());
+    let fresh = spellcheck::Target {
+        revision: app.spellcheck.revision(),
+        mark: target.mark.clone(),
+    };
+    dispatch(&mut app, Message::SpellingMenu(fresh, point)).await;
+    dispatch(
+        &mut app,
+        Message::Spellcheck(spellcheck::Message::Suggested(target.clone(), Ok(vec![]))),
+    )
+    .await;
+    dispatch(&mut app, accept.clone()).await;
+    assert_eq!(app.editor.text(), original);
+    assert!(displayed_text(app.view(), size).contains("receive"));
+    dispatch(&mut app, Message::CloseMenu).await;
+    dispatch(&mut app, Message::ComposerHistory(Direction::Redo)).await;
+    assert_eq!(app.editor.text(), "recieve résumé\r\nreceive!");
+}

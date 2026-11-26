@@ -316,6 +316,7 @@ enum FooterControl {
 struct ContextMenu(MenuTarget, iced::Point);
 #[derive(Clone, Debug)]
 enum MenuTarget {
+    Spelling(spellcheck::Target, Option<Vec<String>>),
     Session(String),
     Project(PathBuf),
 }
@@ -360,6 +361,8 @@ pub enum Message {
     RetryMarkdownImage(String),
     ImageBackend(orbit_core::image_tools::Backend),
     Spellcheck(spellcheck::Message),
+    SpellingMenu(spellcheck::Target, iced::Point),
+    CorrectSpelling(spellcheck::Target, usize),
     SpellcheckEnabled(bool),
     SpellcheckLanguage(String),
     ImageModel(String),
@@ -1654,6 +1657,14 @@ impl App {
         if !matches!(self.modal, Some(Modal::Image(_) | Modal::MarkdownImage(_))) {
             self.image_view.close();
         }
+        if let Some(ContextMenu(MenuTarget::Spelling(target, _), _)) = &self.context_menu
+            && (!self.spellcheck.still_marked(target)
+                || self.io_busy
+                || self.modal.is_some()
+                || self.active_questionnaire.is_some())
+        {
+            self.context_menu = None;
+        }
         if self.modal.is_some()
             || self.context_menu.is_some()
             || self.active_questionnaire.is_some()
@@ -1876,6 +1887,51 @@ impl App {
                 let task = self.image_view.open(&media).map(Message::Image);
                 self.modal = Some(Modal::Image(media));
                 return task;
+            }
+            Message::SpellingMenu(target, position) => {
+                if self.composer_available()
+                    && !self.imports.holds_paste_cursor()
+                    && self.spellcheck.still_marked(&target)
+                {
+                    let task = self.spellcheck.suggest(target.clone(), &self.editor);
+                    self.context_menu =
+                        Some(ContextMenu(MenuTarget::Spelling(target, None), position));
+                    return task.map(Message::Spellcheck);
+                }
+            }
+            Message::Spellcheck(spellcheck::Message::Suggested(target, result)) => {
+                if let Some(ContextMenu(MenuTarget::Spelling(active, choices), _)) =
+                    &mut self.context_menu
+                    && *active == target
+                {
+                    match result {
+                        Ok(words) => *choices = Some(words),
+                        Err(error) => {
+                            self.context_menu = None;
+                            self.error = Some(error);
+                        }
+                    }
+                }
+            }
+            Message::CorrectSpelling(target, index) => {
+                if let Some(ContextMenu(MenuTarget::Spelling(active, Some(choices)), _)) =
+                    &self.context_menu
+                    && *active == target
+                {
+                    let replacement = Arc::new(choices[index].clone());
+                    self.context_menu = None;
+                    if self.composer_available() && !self.imports.holds_paste_cursor() {
+                        let before = self
+                            .histories
+                            .active
+                            .transaction(&mut self.editor, |editor| {
+                                target.mark.replace(editor, replacement)
+                            });
+                        self.file_completion.edited(&self.editor);
+                        self.composer_edited(before, false);
+                        return widget::operation::focus("composer");
+                    }
+                }
             }
             Message::SpellcheckEnabled(enabled) => self.settings.spellcheck.enabled = enabled,
             Message::SpellcheckLanguage(language) => self.settings.spellcheck.language = language,
@@ -3102,6 +3158,12 @@ impl App {
                 }
                 iced::Event::Window(window::Event::Unfocused) => {
                     self.window_focused = false;
+                    if matches!(
+                        self.context_menu,
+                        Some(ContextMenu(MenuTarget::Spelling(..), _))
+                    ) {
+                        self.context_menu = None;
+                    }
                     self.cancel_import_send(
                         "Pending send cancelled because the window lost focus.",
                     );
@@ -3500,7 +3562,12 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         pointer_input(
             self.content(),
-            self.footer_menu_open || self.worktrees.popup.is_some(),
+            self.footer_menu_open
+                || self.worktrees.popup.is_some()
+                || matches!(
+                    self.context_menu,
+                    Some(ContextMenu(MenuTarget::Spelling(..), _))
+                ),
             self.chat_selection.clone(),
         )
     }
@@ -3685,8 +3752,25 @@ impl App {
                 )
                 .into()
         } else if let Some(ContextMenu(target, position)) = &self.context_menu {
+            const VISIBLE_SUGGESTIONS: usize = 5;
+            const SUGGESTION_HEIGHT: f32 = 28.;
+            const ROW_GAP: f32 = 4.;
             let dismiss = dismiss_layer(Message::CloseMenu);
             let actions = match target {
+                MenuTarget::Spelling(target, choices) => match choices {
+                    None => column![text("Looking up suggestions…").size(14)],
+                    Some(words) if words.is_empty() => {
+                        column![text("No spelling suggestions").size(14)]
+                    }
+                    Some(words) => column(words.iter().enumerate().map(|(index, word)| {
+                        theme::button(ellipsized_text(word, 14., None))
+                            .height(SUGGESTION_HEIGHT)
+                            .width(Fill)
+                            .style(theme::text_button)
+                            .on_press(Message::CorrectSpelling(target.clone(), index))
+                            .into()
+                    })),
+                },
                 MenuTarget::Session(id) => column![
                     theme::button(Icon::Pencil.label("Rename", 16.))
                         .width(Fill)
@@ -3732,14 +3816,22 @@ impl App {
                     ]
                 }
             };
-            let menu_width = 200.;
-            let menu = container(actions.spacing(4))
-                .padding(6)
-                .width(menu_width)
-                .style(card);
+            let menu_width = 200_f32.min(self.window_width);
+            let mut list = scroll(actions.spacing(ROW_GAP));
+            if matches!(target, MenuTarget::Spelling(_, Some(words)) if words.len() > VISIBLE_SUGGESTIONS)
+            {
+                list = list
+                    .height(VISIBLE_SUGGESTIONS as f32 * (SUGGESTION_HEIGHT + ROW_GAP) - ROW_GAP);
+            }
+            let menu = container(list).padding(6).width(menu_width).style(card);
             let x = position.x.min(self.window_width - menu_width - 10.).max(0.);
-            let y = position.y.min(self.window_height - 140.).max(0.);
-            let positioned = column![space().height(y), row![space().width(x), opaque(menu)]];
+            let y = position.y.clamp(0., self.window_height);
+            let anchored = if y > self.window_height / 2. {
+                container(opaque(menu)).align_bottom(y)
+            } else {
+                container(column![space().height(y), opaque(menu)])
+            };
+            let positioned = row![space().width(x), anchored];
             layers.push(dismiss).push(positioned).into()
         } else if let Some(offset) = self.worktrees.popup {
             let layers = layers.push(dismiss_layer(Message::Worktree(
@@ -4372,11 +4464,17 @@ impl App {
             .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
             .min_height(COMPOSER_MIN_LINES as f32 * line_height)
             .size(self.catalog.settings.font_size);
+        let revision = self.spellcheck.revision();
         let editor = crate::growing_editor::growing_editor(
             editor,
             &self.editor,
-            &self.spellcheck.marks,
-            self.spellcheck.typing_at,
+            Some(crate::growing_editor::Spelling {
+                marks: &self.spellcheck.marks,
+                typing_at: self.spellcheck.typing_at,
+                on_press: Box::new(move |mark| {
+                    Message::Press(Press::SpellingMenu(spellcheck::Target { revision, mark }))
+                }),
+            }),
             COMPOSER_MAX_LINES as f32 * line_height + 2. * crate::growing_editor::PADDING,
             Message::EditorScroll,
             |message| match message {

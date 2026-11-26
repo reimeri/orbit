@@ -4,7 +4,7 @@ use iced::{
     Element, Event, Length, Rectangle, Size, Theme,
     advanced::{
         Clipboard, Layout, Renderer as _, Shell, Widget,
-        graphics::text::editor::cluster_x,
+        graphics::text::{cosmic_text::LayoutRun, editor::cluster_x},
         layout, renderer,
         text::highlighter::PlainText,
         widget::{Operation, Tree, tree},
@@ -15,11 +15,16 @@ use iced::{
 
 pub(crate) const PADDING: f32 = 12.;
 
+pub struct Spelling<'a, Message> {
+    pub marks: &'a [Mark],
+    pub typing_at: Option<text_editor::Position>,
+    pub on_press: Box<dyn Fn(Mark) -> Message + 'a>,
+}
+
 pub fn growing_editor<'a, Message: Clone + 'a>(
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
-    marks: &'a [Mark],
-    typing_at: Option<text_editor::Position>,
+    spelling: Option<Spelling<'a, Message>>,
     max_height: f32,
     on_scroll: impl Fn(ScrollTo) -> Message + 'a,
     scroll_lines: fn(&Message) -> Option<i32>,
@@ -30,8 +35,7 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
             .height(Length::Shrink)
             .max_height(max_height),
         content,
-        marks,
-        typing_at,
+        spelling,
         on_scroll: Box::new(on_scroll),
         scroll_lines,
     })
@@ -40,14 +44,84 @@ pub fn growing_editor<'a, Message: Clone + 'a>(
 struct GrowingEditor<'a, Message> {
     editor: TextEditor<'a, PlainText, Message>,
     content: &'a text_editor::Content,
-    marks: &'a [Mark],
-    typing_at: Option<text_editor::Position>,
+    spelling: Option<Spelling<'a, Message>>,
     on_scroll: Box<dyn Fn(ScrollTo) -> Message + 'a>,
     scroll_lines: fn(&Message) -> Option<i32>,
 }
 
 fn editor_padding() -> iced::Padding {
     iced::Padding::new(PADDING).right(scrollbar::GUTTER + theme::SCROLLBAR_EDGE_INSET)
+}
+
+// Drawing and right-click targeting use the same shaped cluster geometry.
+fn marked_spans(
+    row: &LayoutRun<'_>,
+    marks: &[Mark],
+    typing_at: Option<text_editor::Position>,
+    clip: std::ops::Range<f32>,
+    mut visit: impl FnMut(&Mark, f32, f32),
+) {
+    let first = marks.partition_point(|mark| mark.line < row.line_i);
+    let marks = &marks[first..];
+    let marks = &marks[..marks.partition_point(|mark| mark.line == row.line_i)];
+    if marks.is_empty() {
+        return;
+    }
+
+    // A word-wrapped row can extend far past the viewport. Visit its
+    // clusters once, and only look up marks for visible ones. Byte
+    // indices need not increase in visual order (bidirectional text).
+    for cluster in row
+        .glyphs
+        .chunk_by(|a, b| a.start == b.start && a.end == b.end)
+    {
+        if !cluster
+            .iter()
+            .any(|g| g.x < clip.end && g.x + g.w > clip.start)
+        {
+            continue;
+        }
+        let glyph = &cluster[0];
+        let first = marks.partition_point(|mark| mark.bytes.end <= glyph.start);
+        for mark in marks[first..]
+            .iter()
+            .take_while(|mark| mark.bytes.start < glyph.end)
+        {
+            if typing_at.is_some_and(|at| {
+                at.line == row.line_i && mark.bytes.start < at.column && at.column <= mark.bytes.end
+            }) {
+                continue;
+            }
+            let a = cluster_x(cluster, row.text, mark.bytes.start.max(glyph.start));
+            let b = cluster_x(cluster, row.text, mark.bytes.end.min(glyph.end));
+            let left = a.min(b).max(clip.start);
+            let right = a.max(b).min(clip.end);
+            if left < right {
+                visit(mark, left, right);
+            }
+        }
+    }
+}
+
+fn mark_at(
+    editor: &iced::advanced::graphics::text::Editor,
+    marks: &[Mark],
+    typing_at: Option<text_editor::Position>,
+    point: iced::Point,
+) -> Option<Mark> {
+    let row = editor
+        .buffer()
+        .layout_runs()
+        .find(|row| (row.line_top..row.line_top + row.line_height).contains(&point.y))?;
+    let mut hit = None;
+    marked_spans(
+        &row,
+        marks,
+        typing_at,
+        point.x..point.x.next_up(),
+        |mark, _, _| hit = Some(mark.clone()),
+    );
+    hit
 }
 
 fn underline_spans(
@@ -59,49 +133,9 @@ fn underline_spans(
 ) {
     let mut spans = Vec::new();
     for row in editor.buffer().layout_runs() {
-        let first = marks.partition_point(|mark| mark.line < row.line_i);
-        let marks = &marks[first..];
-        let marks = &marks[..marks.partition_point(|mark| mark.line == row.line_i)];
-        if marks.is_empty() {
-            continue;
-        }
-
-        // A word-wrapped row can extend far past the viewport. Visit its
-        // clusters once, and only look up marks for visible ones. Byte
-        // indices need not increase in visual order (bidirectional text).
-        for cluster in row
-            .glyphs
-            .chunk_by(|a, b| a.start == b.start && a.end == b.end)
-        {
-            if !cluster
-                .iter()
-                .any(|g| g.x < clip.end && g.x + g.w > clip.start)
-            {
-                continue;
-            }
-            let glyph = &cluster[0];
-            let first = marks.partition_point(|mark| mark.bytes.end <= glyph.start);
-            for mark in marks[first..]
-                .iter()
-                .take_while(|mark| mark.bytes.start < glyph.end)
-            {
-                if typing_at.is_some_and(|at| {
-                    at.line == row.line_i
-                        && mark.bytes.start < at.column
-                        && at.column <= mark.bytes.end
-                }) {
-                    continue;
-                }
-                let a = cluster_x(cluster, row.text, mark.bytes.start.max(glyph.start));
-                let b = cluster_x(cluster, row.text, mark.bytes.end.min(glyph.end));
-                let left = a.min(b).max(clip.start);
-                let right = a.max(b).min(clip.end);
-                if left < right {
-                    spans.push((left, right));
-                }
-            }
-        }
-
+        marked_spans(&row, marks, typing_at, clip.clone(), |_, left, right| {
+            spans.push((left, right))
+        });
         spans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         let y = (row.line_y + 2.).min(row.line_top + row.line_height - 2.);
         let mut spans = spans.drain(..).peekable();
@@ -264,6 +298,18 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) = event
+            && let Some(spelling) = &self.spelling
+            && cursor.is_over(*viewport)
+            && let Some(point) = cursor.position_in(layout.bounds().shrink(editor_padding()))
+            && let Some(mark) = self
+                .content
+                .with_editor(|editor| mark_at(editor, spelling.marks, spelling.typing_at, point))
+        {
+            shell.publish((spelling.on_press)(mark));
+            shell.capture_event();
+            return;
+        }
         let scrollbar = state.scrollbar(layout.bounds());
         let hovered = scrollbar
             .as_ref()
@@ -410,7 +456,9 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
             cursor,
             viewport,
         );
-        if !self.marks.is_empty() {
+        if let Some(spelling) = &self.spelling
+            && !spelling.marks.is_empty()
+        {
             let text_bounds = layout.bounds().shrink(editor_padding());
             if let Some(clip) = text_bounds.intersection(viewport) {
                 let color = theme::colors(theme).danger;
@@ -419,8 +467,8 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
                         let left = clip.x - text_bounds.x;
                         underline_spans(
                             editor,
-                            self.marks,
-                            self.typing_at,
+                            spelling.marks,
+                            spelling.typing_at,
                             left..left + clip.width,
                             |x, y, width| {
                                 let mut offset = 0.;
@@ -492,7 +540,6 @@ mod tests {
                 .min_height(2. * LINE_HEIGHT)
                 .on_action(Message::Editor),
             content,
-            &[],
             None,
             VISIBLE_ROWS as f32 * LINE_HEIGHT + 2. * PADDING,
             Message::Scroll,
@@ -661,8 +708,43 @@ mod tests {
             "suppress only the word being typed",
         );
 
+        let second_row = editor.buffer().layout_runs().nth(1).unwrap();
+        let inside = Point::new(
+            second_row.line_w / 2.,
+            second_row.line_top + second_row.line_height / 2.,
+        );
+        assert_eq!(
+            mark_at(&editor, &marks, None, inside),
+            Some(marks[1].clone())
+        );
+        assert_eq!(
+            mark_at(
+                &editor,
+                &marks,
+                Some(text_editor::Position {
+                    line: 0,
+                    column: 15
+                }),
+                inside
+            ),
+            None
+        );
+        assert_eq!(
+            mark_at(
+                &editor,
+                &marks,
+                None,
+                Point::new(second_row.line_w + 1., inside.y)
+            ),
+            None
+        );
+
         editor.scroll_to(1, 0.);
         let scrolled = spans(&editor, &marks, None);
+        assert_eq!(
+            mark_at(&editor, &marks, None, Point::new(1., LINE_HEIGHT / 2.)),
+            Some(marks[2].clone())
+        );
         let plain = shaped_editor("second", 62., 2. * LINE_HEIGHT);
         let row = plain.buffer().layout_runs().next().unwrap();
         assert_eq!(scrolled.len(), 1);

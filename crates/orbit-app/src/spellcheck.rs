@@ -27,6 +27,29 @@ pub struct Mark {
     pub bytes: Range<usize>,
 }
 
+impl Mark {
+    pub fn replace(&self, editor: &mut Content, word: Arc<String>) -> BeforeEdit {
+        let at = |column| Position {
+            line: self.line,
+            column,
+        };
+        editor.move_to(Cursor {
+            position: at(self.bytes.end),
+            selection: Some(at(self.bytes.start)),
+        });
+        let before = BeforeEdit::replacement(editor, word.len());
+        editor.perform(iced::widget::text_editor::Action::Edit(Edit::Paste(word)));
+        before
+    }
+}
+
+/// A visible word in one particular draft revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub revision: u64,
+    pub mark: Mark,
+}
+
 #[derive(Debug, Clone)]
 pub struct Report {
     languages: Vec<String>,
@@ -38,6 +61,7 @@ pub struct Report {
 pub enum Message {
     Due(u64),
     Checked(u64, Result<Report, String>),
+    Suggested(Target, Result<Vec<String>, String>),
 }
 
 pub struct State {
@@ -85,6 +109,58 @@ impl State {
     fn cancel(&mut self) -> u64 {
         self.task = None;
         self.revision.fetch_add(1, Relaxed).wrapping_add(1)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Relaxed)
+    }
+
+    pub fn still_marked(&self, target: &Target) -> bool {
+        let mark = &target.mark;
+        self.revision() == target.revision
+            && self
+                .marks
+                .binary_search_by_key(&(mark.line, mark.bytes.start, mark.bytes.end), |m| {
+                    (m.line, m.bytes.start, m.bytes.end)
+                })
+                .is_ok()
+    }
+
+    pub fn suggest(&self, target: Target, editor: &Content) -> Task<Message> {
+        let backend = self.backend.clone();
+        let current = self.revision.clone();
+        let revision = target.revision;
+        let word = editor.with_editor(|e| {
+            e.buffer().lines[target.mark.line].text()[target.mark.bytes.clone()].to_owned()
+        });
+        Task::future(async move {
+            let backend = backend.lock_owned().await;
+            if current.load(Relaxed) != revision {
+                return None;
+            }
+            let choices = tokio::task::spawn_blocking(move || {
+                // Only a successful check with the current dictionary can publish marks.
+                let (_, dictionary) = backend
+                    .loaded
+                    .as_ref()
+                    .expect("marked word has a dictionary");
+                let dictionary = dictionary.as_ref().map_err(Clone::clone)?;
+                let mut choices = Vec::new();
+                dictionary.suggest(&word, &mut choices);
+                if choices.is_empty() && word.contains('’') {
+                    dictionary.suggest(&word.replace('’', "'"), &mut choices);
+                }
+                Ok(choices)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                Err(format!(
+                    "Could not get spelling suggestions: {e}. Right-click the word to retry."
+                ))
+            });
+            Some(Message::Suggested(target, choices))
+        })
+        .and_then(Task::done)
     }
 
     pub fn clear(&mut self) {
@@ -490,12 +566,13 @@ fn prose_words(token: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn pair(dir: &Path, language: &str, words: &str) {
+    pub(crate) fn pair(dir: &Path, language: &str, words: &str) -> State {
         fs::write(dir.join(format!("{language}.aff")), "SET UTF-8\n").unwrap();
         fs::write(dir.join(format!("{language}.dic")), words).unwrap();
+        State::with_dirs(vec![dir.to_owned()])
     }
 
     #[test]

@@ -3,8 +3,13 @@
 Orbit checks composer drafts locally with [Spellbook](https://docs.rs/spellbook/).
 Spell check is on by default with US English. Open **Settings → General →
 Spell Check** to turn it off or select another dictionary, then **Save**.
-Misspellings are underlined; Orbit does not autocorrect, change the draft, or
-send it anywhere for spelling analysis. Code, URLs, paths, common identifier
+Right-click an underlined word to see suggestions from the selected dictionary.
+The menu shows up to five single-line suggestions at a time; scroll for more.
+Choose a suggestion to insert its full text in place of just that occurrence,
+or dismiss the menu with Escape or an outside click. One undo restores the
+original text and selection.
+If the dictionary has no suggestions, the menu says so. Orbit never autocorrects
+as you type or sends text anywhere for spelling analysis. Code, URLs, paths, common identifier
 forms, and `@` file references are excluded. The word you are typing is not
 marked until you move the caret or type a separator.
 

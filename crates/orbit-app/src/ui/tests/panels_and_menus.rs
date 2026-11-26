@@ -331,3 +331,71 @@ async fn resizing_uses_press_position_and_saves_both_panel_widths() {
     assert_eq!(saved.settings.sidebar_width, 313.);
     assert_eq!(saved.settings.settings_width, 371.);
 }
+
+#[tokio::test]
+async fn spelling_menu_scrolls_after_five_single_line_suggestions() {
+    let mut app = app();
+    let words: Vec<_> = [
+        "first",
+        "a very long spelling suggestion that cannot fit on one line in the menu",
+        "third",
+        "fourth",
+        "fifth",
+        "sixth",
+        "last",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let target = spellcheck::Target {
+        revision: 0,
+        mark: spellcheck::Mark {
+            line: 0,
+            bytes: 0..1,
+        },
+    };
+    app.context_menu = Some(ContextMenu(
+        MenuTarget::Spelling(target, Some(words.clone())),
+        iced::Point::ORIGIN,
+    ));
+    let mut renderer = header_renderer();
+    let mut ui = iced_runtime::UserInterface::build(
+        app.view(),
+        iced::Size::new(app.window_width, app.window_height),
+        iced_runtime::user_interface::Cache::new(),
+        &mut renderer,
+    );
+    let mut bounds = UiBounds::default();
+    ui.operate(&renderer, &mut bounds);
+    let first = bounds.label(&words[0]);
+    let long = bounds.label(&words[1]);
+    assert_eq!(long.height, first.height);
+    let fifth = bounds.label("fifth").center();
+    assert!(matches!(
+        click_at(&mut ui, &mut renderer, fifth).as_slice(),
+        [Message::CorrectSpelling(_, 4)]
+    ));
+    assert!(
+        !click_at(&mut ui, &mut renderer, bounds.label("sixth").center())
+            .iter()
+            .any(|m| matches!(m, Message::CorrectSpelling(..)))
+    );
+    let mut messages = Vec::new();
+    ui.update(
+        &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Pixels {
+                x: 0.,
+                y: -app.window_height,
+            },
+        })],
+        mouse::Cursor::Available(fifth),
+        &mut renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut messages,
+    );
+    assert!(!messages.iter().any(|m| matches!(m, Message::CloseMenu)));
+    assert!(matches!(
+        click_at(&mut ui, &mut renderer, fifth).as_slice(),
+        [Message::CorrectSpelling(_, 6)]
+    ));
+}

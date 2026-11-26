@@ -75,6 +75,7 @@ pub enum Press {
     Resize(bool),
     SessionMenu(String),
     ProjectMenu(std::path::PathBuf),
+    SpellingMenu(crate::spellcheck::Target),
 }
 
 pub fn pointer_input(
@@ -253,6 +254,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
                     }
                     Press::SessionMenu(id) => Message::SessionMenu(id, position),
                     Press::ProjectMenu(path) => Message::ProjectMenu(path, position),
+                    Press::SpellingMenu(target) => Message::SpellingMenu(target, position),
                 }
             }
             message => message,
