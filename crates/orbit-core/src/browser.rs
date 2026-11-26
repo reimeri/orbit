@@ -174,6 +174,9 @@ impl Browser {
             .args([
                 "--ozone-platform=headless",
                 "--disable-background-networking",
+                // Alloy has no Chrome tab for Chromium 151's reader-mode
+                // soft-navigation observer (CEF #4234).
+                "--disable-features=ImmersiveReadAnything",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

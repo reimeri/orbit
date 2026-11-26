@@ -88,9 +88,25 @@ async fn fixture() -> String {
                     l.to_ascii_lowercase().starts_with("cookie:") && l.contains("login=orbit")
                 });
                 let color = if seed || cookie { "#00ff00" } else { "#ff0000" };
-                let body = format!(
-                    "<style>body{{background:{color};height:300vh;margin:0}}input,button{{height:40px;width:100px;box-sizing:border-box}}</style><input id=q><button onclick=\"if(q.value==='Orbitβ')document.body.style.background='blue'\">Apply</button><script>onscroll=()=>document.body.style.background='yellow'</script>"
-                );
+                // A router handles this link without requesting a new document.
+                let body = if req.starts_with("GET /app ") {
+                    r#"<!doctype html><body style="background:navy">
+                    <a href="/terms" style="display:block;padding:20px">Terms</a>
+                    <script>
+                    document.querySelector('a').onclick = event => {
+                        event.preventDefault();
+                        history.pushState({}, '', '/terms');
+                        document.body.innerHTML = '<main style="margin-left:35%"><h1>Terms</h1>'
+                            + 'Client-side page content. '.repeat(500) + '</main>';
+                        setTimeout(() => document.body.style.background = 'lime', 12000);
+                    };
+                    </script>"#
+                        .to_owned()
+                } else {
+                    format!(
+                        "<style>body{{background:{color};height:300vh;margin:0}}input,button{{height:40px;width:100px;box-sizing:border-box}}</style><input id=q><button onclick=\"if(q.value==='Orbitβ')document.body.style.background='blue'\">Apply</button><script>onscroll=()=>document.body.style.background='yellow'</script>"
+                    )
+                };
                 let set = if seed {
                     "Set-Cookie: login=orbit; Max-Age=3600; Path=/; HttpOnly\r\n"
                 } else {
@@ -119,6 +135,33 @@ async fn see(t: &AgentTab, url: &str, rgb: [u8; 3]) {
     }
     panic!("Tab {} expected {url}, {rgb:?}; saw {last:?}", t.id);
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires packaged CEF helper and Linux renderer sandbox; run just browser-smoke"]
+async fn native_browser_spa_link_keeps_rendering() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path().join("state")).unwrap();
+    let tab = AgentTab {
+        browser: Browser::new(store).unwrap(),
+        id: "spa".into(),
+        project: dir.path().into(),
+    };
+    tab.browser.show(&tab.id, &tab.project).unwrap();
+    let server = fixture().await;
+    let app = format!("{server}/app");
+    act(&tab, json!({"action":"navigate","url":app}))
+        .await
+        .unwrap();
+    see(&tab, &app, [0, 0, 128]).await;
+    act(&tab, json!({"action":"click","x":40,"y":30}))
+        .await
+        .unwrap();
+    // CEF #4234 crashes after the URL changes, when soft-navigation metrics arrive.
+    // Observe a delayed page update, not just the immediate navigation event.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    see(&tab, &format!("{server}/terms"), [0, 255, 0]).await;
+    tab.browser.shutdown().unwrap();
+}
+
 /// Exercise real sandboxed renderers; no user profiles, credentials or network dependency.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires packaged CEF helper and Linux renderer sandbox; run just browser-smoke"]
