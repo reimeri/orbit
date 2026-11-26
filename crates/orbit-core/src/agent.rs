@@ -239,6 +239,7 @@ struct FamilyRegistry {
 }
 
 pub struct Harness {
+    pub browser: Arc<crate::browser::Browser>,
     home: Option<std::path::PathBuf>,
     notifications: Arc<notifications::Notifications>,
     changes: tokio::sync::watch::Sender<()>,
@@ -288,8 +289,10 @@ impl Harness {
             .build()?;
         let image_client = crate::image_tools::ImageTools::client()?;
         let web_client = crate::web_search::WebSearch::client()?;
+        let browser = crate::browser::Browser::new(store.clone())?;
         Ok(Arc::new_cyclic(|weak| Self {
             notifications: Arc::new(notifications::Notifications::default()),
+            browser,
             home,
             image_client,
             web_client,
@@ -513,7 +516,12 @@ impl Harness {
                     questionnaires.clone(),
                 )
                 .with_images(images)
-                .with_web(web),
+                .with_web(web)
+                .with_browser(session.child.is_none().then(|| crate::browser::AgentTab {
+                    browser: self.browser.clone(),
+                    id: id.clone(),
+                    project: session.project.clone(),
+                })),
                 questionnaires,
                 state: Mutex::new(session),
                 running: AtomicBool::new(false),
@@ -1696,6 +1704,17 @@ impl Drop for Harness {
 mod tests {
     use super::*;
     use std::time::Instant;
+    #[test]
+    #[ignore = "requires packaged CEF; run just browser-smoke"]
+    fn native_browser_tool_returns_session_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(Store::open(dir.path().join("state")).unwrap(), vec![]).unwrap();
+        let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+        let out=c.code.exec_output("// @exec: {\"yield_time_ms\":30000}\nimage(await tools.browser({action:'screenshot'}));","browser-tool",&CancellationToken::new()).unwrap();
+        assert_eq!(out.media().len(), 1, "{}", out.summary());
+        assert!(out.media()[0].path.is_file());
+        h.browser.shutdown().unwrap();
+    }
     #[test]
     fn unrelated_send_and_stop_do_not_wait_for_session_persistence() {
         let dir = tempfile::tempdir().unwrap();

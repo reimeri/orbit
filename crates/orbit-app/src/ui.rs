@@ -1,3 +1,4 @@
+mod browser;
 mod changes;
 pub(crate) mod find;
 mod forks;
@@ -260,6 +261,7 @@ pub struct App {
     markdown_heights: HashMap<String, crate::markdown_window::Heights>,
     expanded: HashSet<String>,
     groups: HashSet<String>,
+    browser: browser::State,
     settings_open: bool,
     agents_open: bool,
     changes: changes::State,
@@ -342,6 +344,7 @@ pub enum Selection {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    Browser(browser::Action),
     Find(find::Action),
     FileCompletion(crate::file_completion::Message),
     Notification(crate::notifications::Message),
@@ -620,6 +623,7 @@ impl App {
             markdown_heights: HashMap::new(),
             expanded: HashSet::new(),
             groups: HashSet::new(),
+            browser: Default::default(),
             settings_open: false,
             pending_settings: None,
             agents_open: false,
@@ -1611,6 +1615,10 @@ impl App {
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if matches!(message, Message::Browser(browser::Action::Data)) {
+            self.refresh_browser();
+            return Task::none();
+        }
         let apply_timer = (matches!(message, Message::Selected(_))
             && std::env::var_os("ORBIT_TRACE_SESSION_SWITCH").is_some())
         .then(std::time::Instant::now);
@@ -1621,6 +1629,7 @@ impl App {
             self.transcript.total(),
         );
         let task = self.update_inner(message);
+        self.sync_browser();
         self.advance_imports();
         if self
             .fork_panel
@@ -2531,6 +2540,7 @@ impl App {
             }
             Message::Worktree(action) => return self.worktree_action(action),
             Message::Changes(action) => return self.changes_action(action),
+            Message::Browser(a) => return self.browser_action(a),
             Message::ToggleAgents => {
                 self.changes.close();
                 self.worktrees.panel = false;
@@ -3152,6 +3162,9 @@ impl App {
                 ));
             }
             Message::Event(event) => match event {
+                iced::Event::Window(window::Event::Rescaled(s)) => {
+                    return self.browser_action(browser::Action::Scale(s));
+                }
                 iced::Event::Window(window::Event::Focused) => {
                     self.window_focused = true;
                     self.acknowledge_focused_completion();
@@ -3217,6 +3230,12 @@ impl App {
                     }
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    if self.browser.page_focused()
+                        && self.modal.is_none()
+                        && self.context_menu.is_none()
+                    {
+                        return Task::none();
+                    }
                     if self.worktrees.popup.is_some() {
                         return self.worktree_key(key);
                     }
@@ -3319,7 +3338,10 @@ impl App {
             },
             Message::WindowOpened(id) => {
                 self.window_id = Some(id);
-                return self.start_capture(id);
+                return Task::batch([
+                    self.start_capture(id),
+                    window::scale_factor(id).map(|s| Message::Browser(browser::Action::Scale(s))),
+                ]);
             }
             Message::CheckScreenshot(screenshot) => return self.check_screenshot(screenshot),
             Message::SmokeOpenTool(session_id) => return self.smoke_open_tool(&session_id),
@@ -3494,6 +3516,7 @@ impl App {
                     h.store.save_new_draft(&new_draft)?;
                     writer.save_state(&h.store, catalog)?;
                     h.flush()?;
+                    h.browser.shutdown()?;
                     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(h.auth.flush())
                 })();
                 Message::Exit(result.map_err(|e|format!("Could not finish saving: {e:#}. Keep Orbit open, fix storage, then retry closing.")))
@@ -3508,6 +3531,12 @@ impl App {
         ];
         if let Some(harness) = &self.harness {
             subscriptions.push(Subscription::run_with(Updates(harness.clone()), updates));
+            if self.browser.open {
+                subscriptions.push(Subscription::run_with(
+                    Updates(harness.clone()),
+                    browser::subscription,
+                ));
+            }
             subscriptions
                 .push(iced::time::every(Duration::from_secs(60)).map(|_| Message::AgeTick));
             if self.current().is_none() {
@@ -3623,7 +3652,9 @@ impl App {
                 .height(Fill)
         ]
         .height(Fill);
-        if self.settings_open {
+        if self.browser.open {
+            body = body.push(self.divider(true)).push(self.browser_panel());
+        } else if self.settings_open {
             body = body.push(self.divider(true)).push(self.settings_panel());
         } else if self.changes.open {
             body = body.push(self.divider(true)).push(self.changes_panel());
@@ -3648,6 +3679,24 @@ impl App {
                     .on_press(Message::ShowForks(None))
                     .style(theme::text_button),
                     text("Forks").size(12),
+                    tooltip::Position::Left,
+                )
+                .style(card),
+            );
+        }
+        if self.current_session.is_some() {
+            controls = controls.push(
+                tooltip(
+                    theme::button(container(Icon::Globe.view(22.)).center_x(Fill).center_y(34))
+                        .width(Fill)
+                        .padding(0)
+                        .on_press(Message::Browser(browser::Action::Toggle))
+                        .style(if self.browser.open {
+                            secondary
+                        } else {
+                            theme::text_button
+                        }),
+                    text("Browser").size(12),
                     tooltip::Position::Left,
                 )
                 .style(card),
@@ -3896,13 +3945,24 @@ impl App {
             .unwrap_or(0)
     }
     fn right_panel_open(&self) -> bool {
-        self.settings_open
+        self.browser.open
+            || self.settings_open
             || self.agents_open
             || self.fork_panel.is_some()
             || self.worktrees.panel
             || self.changes.open
     }
     fn panel_width(&self) -> f32 {
+        if self.browser.open && self.browser.expanded {
+            return (self.window_width
+                - self
+                    .catalog
+                    .settings
+                    .sidebar_width
+                    .min(self.window_width * 0.4)
+                - 310.)
+                .max(self.window_width * 0.4);
+        }
         self.catalog
             .settings
             .settings_width
@@ -5913,6 +5973,7 @@ fn window_events() -> Subscription<Message> {
         iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
         | iced::Event::Window(
             window::Event::Resized(_)
+            | window::Event::Rescaled(_)
             | window::Event::Focused
             | window::Event::Unfocused
             | window::Event::CloseRequested

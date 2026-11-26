@@ -899,6 +899,7 @@ impl Harness {
                 c.naming_cancel.cancel();
                 c.cancel();
             }
+            self.browser.forget(id);
             self.notifications.clear(id);
             self.conversations
                 .lock()
@@ -1359,6 +1360,7 @@ mod tests {
                 "web__run",
                 "view_image",
                 "image_gen__imagegen",
+                "browser",
                 "ask_user",
                 "spawn_subagent",
                 "wait_subagent",

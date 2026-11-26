@@ -4,6 +4,7 @@ pub use anyhow::Error;
 pub use tokio_util::sync::CancellationToken;
 pub mod agent;
 pub mod auth;
+pub mod browser;
 pub mod code_mode;
 pub mod file_index;
 pub mod file_tags;

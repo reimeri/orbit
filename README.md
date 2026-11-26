@@ -14,6 +14,7 @@ codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage
   - Questionnaires
   - Image viewing and generation
   - Web search
+  - [Integrated Chromium browser](docs/browser.md): one shared user/agent tab per session
 - Subagents
 - File tags and attachements
 - Spell checking
@@ -70,6 +71,7 @@ Orbit stores state under `$XDG_CONFIG_HOME/orbit` (default `~/.config/orbit`):
 | Path                              | Contents                                                                    |
 | --------------------------------- | --------------------------------------------------------------------------- |
 | `settings.json`                   | Projects, favorites, layout and defaults                                    |
+| `browser/`                       | CEF state and per-project browser profiles (cookies and site storage)       |
 | `worktrees/`                      | Orbit-managed Git worktrees, grouped by repository; not a disposable cache  |
 | `sessions.sqlite3`                | Sessions, drafts, transcripts, provider context, forks and subagent results |
 | `media/`, `attachments/`          | Saved tool media and snapshots of images attached to prompts                |

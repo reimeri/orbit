@@ -53,3 +53,7 @@ verify: lint test test-quickjs-memory smoke
 # Generate a Cargo timing report without cleaning incremental artifacts.
 timings:
     cargo build --locked --timings
+
+# Real sandboxed CEF, disposable cookies and loopback-only HTTP fixture.
+browser-smoke:
+    cargo test --locked --workspace native_browser_ -- --ignored --test-threads=1

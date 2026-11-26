@@ -1,6 +1,6 @@
 # Code-mode contract
 
-Only `exec` and `wait` are sent as top-level Responses tools. Shell, web, media, questionnaire and subagent tools are
+Only `exec` and `wait` are sent as top-level Responses tools. Shell, [session browser](browser.md), web, media, questionnaire and subagent tools are
 exposed on the JavaScript `tools` object, not duplicated in the top-level catalog.
 
 Nested tool documentation lives in `exec.description`, not the system instructions.

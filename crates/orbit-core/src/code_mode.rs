@@ -144,6 +144,7 @@ impl CodeMode {
                 questionnaires,
                 images: None,
                 web: None,
+                browser: None,
             },
             cells: Mutex::new(HashMap::new()),
             stored: Arc::new(Mutex::new(Stored::default())),
@@ -154,6 +155,10 @@ impl CodeMode {
     }
     pub fn with_images(mut self, images: Arc<ImageTools>) -> Self {
         self.services.images = Some(images);
+        self
+    }
+    pub(crate) fn with_browser(mut self, browser: Option<crate::browser::AgentTab>) -> Self {
+        self.services.browser = browser;
         self
     }
     pub(crate) fn with_web(mut self, web: Arc<crate::web_search::WebSearch>) -> Self {
@@ -457,6 +462,7 @@ fn parse(source: &str) -> Result<(Pragma, String)> {
 }
 #[derive(Clone)]
 struct Services {
+    browser: Option<crate::browser::AgentTab>,
     shell: Arc<Shell>,
     delegation: Option<Delegation>,
     questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
@@ -466,6 +472,7 @@ struct Services {
 fn run_cell(
     code: String,
     Services {
+        browser,
         shell,
         delegation,
         questionnaires,
@@ -588,6 +595,7 @@ fn run_cell(
             )
             .map_err(js_error)?;
         let definitions = catalog::definitions(Capabilities {
+            browser: browser.is_some(),
             delegation: delegation.is_some(),
             web: web.is_some(),
             questionnaires: questionnaires.is_some(),
@@ -625,6 +633,7 @@ fn run_cell(
                         let delegation = delegation.clone();
                         let questionnaires = questionnaires.clone();
                         let images = images.clone();
+                        let browser = browser.clone();
                         let web = web.clone();
                         let tx = tx.clone();
                         let observer = observer.clone();
@@ -654,10 +663,20 @@ fn run_cell(
                                 let mut web_metadata=None;
                                 let mut display=None;
                                 let mut command_failed=false;
-                                let structured=matches!(name.as_str(),"view_image"|"image_gen__imagegen");
+                                let structured=matches!(name.as_str(),"browser"|"view_image"|"image_gen__imagegen");
                                 let result = started.and_then(|()| {
                                     if token.is_cancelled() || cancellation.is_cancelled() { bail!("Tool call cancelled before dispatch"); }
                                     match name.as_str() {
+                                    "browser" => {
+                                        let (mut value,png)=shell.runtime().block_on(browser.as_ref().expect("validated browser").call(&args,&token))?;
+                                        display=Some(value.to_string());
+                                        if let Some(png)=png {
+                                            let media=images.as_ref().expect("browser media").media.image(&png)?;
+                                            value["image_url"]=json!(media.data_url()?);
+                                            attachments.push(media);
+                                        }
+                                        Ok(value.to_string())
+                                    }
                                     "web__run" => shell.runtime().block_on(web.as_ref().expect("validated web tool").call(&args,&token)).map(|result| {web_metadata=Some(result.metadata);result.text}).inspect_err(|error| {if let Some(failure)=error.downcast_ref::<crate::web_search::Failure>() {web_metadata=Some(failure.metadata.clone());}}),
                                     "view_image"|"image_gen__imagegen" => shell.runtime().block_on(images.as_ref().expect("validated image tool").call(&name,&args,&request,&token)).map(|result| {attachments.push(result.media);display=Some(result.text);result.value.to_string()}),
                                     "exec_command" => serde_json::from_str(&args)

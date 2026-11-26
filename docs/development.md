@@ -34,6 +34,7 @@ Run these from the repository root inside `nix develop`:
 | Most edits                      | `cargo check --locked -p orbit` or `just check` |
 | Core logic                      | `cargo test --locked -p orbit-core`                 |
 | One test                        | `cargo test --locked -p orbit-core <test-name>`     |
+| Integrated CEF browser (sandboxed Linux user) | `just browser-smoke` |
 | Need to see the UI              | `just run`                                         |
 | Renderer/Wayland changes        | `just smoke` and `just smoke-gpu`                  |
 | Before handing off a change     | `just verify`                                      |
@@ -116,7 +117,8 @@ inside the dev shell.
 ## Implementation notes
 
 `crates/orbit-core` owns persistence, OAuth, the provider, agent loop and tools.
-`crates/orbit-app` owns iced UI, clipboard, browser launch and folder selection.
+`crates/orbit-app` owns iced UI, clipboard, the browser panel and folder selection. `browser/host.cc` is the
+separate sandbox-enabled CEF host; see [the browser guide](browser.md).
 The installed wrapper provides Git and xdg-open; the desktop provides the portal
 for the optional folder chooser. Manual path entry needs no portal.
 

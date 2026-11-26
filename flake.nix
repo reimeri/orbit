@@ -51,6 +51,7 @@
         ln -s ${patchedQuickjs.sys} "$out/.build-deps/rquickjs-sys"
         ln -s ${patchedQuickjs.core} "$out/.build-deps/rquickjs-core"
       '';
+      browser = import ./browser { inherit pkgs; };
       desktopItem = pkgs.makeDesktopItem {
         name = "orbit";
         desktopName = "Orbit";
@@ -104,6 +105,7 @@
         '';
         postFixup = ''
           wrapProgram "$out/bin/orbit" \
+            --set ORBIT_BROWSER_HOST "${browser}/libexec/orbit/orbit-browser" \
             --prefix LD_LIBRARY_PATH : ${runtimePath} \
             --prefix PATH : ${lib.makeBinPath [ pkgs.git pkgs.xdg-utils ]} \
             --set-default ORBIT_DICTIONARY_DIR "$out/share/orbit/dictionaries" \
@@ -121,7 +123,7 @@
         };
       };
     in {
-      packages.${system} = { default = orbit; inherit orbit; };
+      packages.${system} = { default = orbit; inherit orbit browser; };
       apps.${system}.default = {
         type = "app";
         program = "${orbit}/bin/orbit";
@@ -150,6 +152,7 @@
         ORBIT_TEST_VULKAN_ICD = testVulkanIcd;
         ORBIT_DICTIONARY_DIR = spellingData;
         ORBIT_TEST_DICTIONARY_DIR = spellingData;
+        ORBIT_BROWSER_HOST = "${browser}/libexec/orbit/orbit-browser";
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         shellHook = ''
           # Locate this checkout even when entering from a package subdirectory.

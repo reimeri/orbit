@@ -1,4 +1,5 @@
 mod attention;
+mod browser_panel;
 mod chat_messages;
 mod composer;
 mod drafts;
@@ -221,6 +222,7 @@ fn click_at(
 
 #[derive(Default)]
 struct UiBounds {
+    browser_page: Option<iced::Rectangle>,
     find_input: Option<iced::Rectangle>,
     composer: Option<iced::Rectangle>,
     focused: Option<iced::advanced::widget::Id>,
@@ -241,6 +243,9 @@ impl iced::advanced::widget::Operation for UiBounds {
         bounds: iced::Rectangle,
         state: &mut dyn iced::advanced::widget::operation::Focusable,
     ) {
+        if id == Some(&iced::advanced::widget::Id::new("browser-page")) {
+            self.browser_page = Some(bounds);
+        }
         if id == Some(&iced::advanced::widget::Id::new("conversation-find")) {
             self.find_input = Some(bounds);
         }

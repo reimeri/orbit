@@ -720,6 +720,7 @@ impl Store {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS new_session_draft (singleton INTEGER PRIMARY KEY CHECK(singleton=1), data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, updated INTEGER NOT NULL, summary TEXT NOT NULL, metadata TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS browser_policy (session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, isolated INTEGER NOT NULL, user_control INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS session_order ON sessions(updated DESC, id);
             CREATE TABLE IF NOT EXISTS entries (session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session,position));
             CREATE TABLE IF NOT EXISTS subagent_runs (id TEXT PRIMARY KEY, parent TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, request TEXT NOT NULL, metadata TEXT NOT NULL, result TEXT, error TEXT, UNIQUE(parent,request));
