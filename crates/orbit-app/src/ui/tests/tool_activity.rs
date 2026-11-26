@@ -608,3 +608,42 @@ async fn web_transcript_details_survive_reopen() {
     dispatch(&mut app, Message::ToggleEntry("web-result".into())).await;
     assert!(!entry_text(&app, 0).contains("Official source"));
 }
+
+#[test]
+fn tool_panel_stop_targets_its_owner_once_without_toggling_raw_input() {
+    use iced_runtime::{UserInterface, user_interface::Cache};
+    let mut renderer = header_renderer();
+    for state in [Some(ToolStop::Available), Some(ToolStop::Stopping), None] {
+        let mut ui = UserInterface::build(
+            tool_actions("call-b", false, state.map(|s| ("session-a", s))),
+            iced::Size::new(360., 80.),
+            Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let raw = bounds.label("Raw input");
+        assert!(
+            matches!(click_at(&mut ui, &mut renderer, raw.center()).as_slice(), [Message::ToggleToolRaw(entry)] if entry == "call-b")
+        );
+        match state {
+            Some(ToolStop::Available) => {
+                let stop = bounds.label("Stop");
+                assert!(raw.x + raw.width < stop.x);
+                assert!(
+                    matches!(click_at(&mut ui, &mut renderer, stop.center()).as_slice(),
+                    [Message::StopTool { session, entry }] if session == "session-a" && entry == "call-b")
+                );
+            }
+            Some(ToolStop::Stopping) => assert!(
+                click_at(&mut ui, &mut renderer, bounds.label("Stopping…").center()).is_empty()
+            ),
+            None => assert!(
+                !bounds
+                    .labels
+                    .iter()
+                    .any(|(label, _)| label.starts_with("Stop"))
+            ),
+        }
+    }
+}

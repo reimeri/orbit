@@ -384,10 +384,9 @@ async fn execute_call(
     let conv = conversation.clone();
     let token = cancel.clone();
     let parent = call_id.clone();
-    let result = tokio::task::spawn_blocking(move || match name.as_str() {
-        "exec" => conv.code.exec_output(&input, &parent, &token),
-        "wait" => conv.code.wait_output(&input, &token),
-        _ => bail!("Unknown tool {name}; only exec and wait are top-level tools"),
+    let result = tokio::task::spawn_blocking(move || {
+        conv.code
+            .invoke(&name, &input, &parent, &token, &conv.live_calls)
     })
     .await?;
     let output = result.unwrap_or_else(|error| {

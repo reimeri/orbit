@@ -106,7 +106,7 @@ impl Summary {
 pub struct Block {
     pub range: Range<usize>,
     pub summary: Option<Summary>,
-    pub wrappers: usize,
+    pub folded: HashSet<usize>,
     pub thinking: BTreeMap<usize, Range<usize>>,
 }
 #[derive(Default)]
@@ -227,7 +227,7 @@ impl Projection {
             let mut block = Block {
                 range: begin..index,
                 summary: activity.then(Summary::default),
-                wrappers: 0,
+                folded: HashSet::new(),
                 thinking: BTreeMap::new(),
             };
             if let Some(summary) = &mut block.summary {
@@ -256,9 +256,11 @@ impl Projection {
                             ..
                         } => {
                             let status = tool_status(*complete, *failed, *command_status);
-                            let hidden = self.hidden_wrapper(entry);
-                            if hidden {
-                                block.wrappers += 1;
+                            let nested = self.wrapper_has_children(entry);
+                            if nested {
+                                if !*failed && status == CommandStatus::Succeeded {
+                                    block.folded.insert(i);
+                                }
                             } else {
                                 summary.tools += 1;
                                 if status != CommandStatus::Running {
@@ -284,7 +286,7 @@ impl Projection {
                                 }
                             }
                             if status == CommandStatus::Running
-                                && (!hidden || summary.current.is_empty())
+                                && (!nested || summary.current.is_empty())
                             {
                                 summary.current = if wrapper(entry) {
                                     tool_name(name).into()
@@ -314,7 +316,7 @@ impl Projection {
         self.source = entries.clone();
         Some(start)
     }
-    fn hidden_wrapper(&self, entry: &Entry) -> bool {
+    fn wrapper_has_children(&self, entry: &Entry) -> bool {
         if !wrapper(entry) {
             return false;
         }
@@ -363,7 +365,7 @@ impl Projection {
             if !groups.contains(id) {
                 continue;
             }
-            if block.wrappers > 0 {
+            if !block.folded.is_empty() {
                 push(Row::Execution(head));
             }
             let mut i = head;
@@ -379,8 +381,7 @@ impl Projection {
                     i = range.end;
                     continue;
                 }
-                let failed = matches!(entry.kind, EntryKind::Tool { failed: true, .. });
-                if !self.hidden_wrapper(entry) || failed || execution.contains(id) {
+                if !block.folded.contains(&i) || execution.contains(id) {
                     push(Row::Entry(i));
                 }
                 i += 1;
@@ -711,7 +712,42 @@ mod tests {
             rows(&p, &[], &[], &[]),
             vec![Row::Activity(0), Row::Entry(1), Row::Activity(2)]
         );
-        assert_eq!(p.block(0).wrappers, 1);
+        assert_eq!(
+            p.block(0).summary.as_ref().unwrap().tools,
+            0,
+            "children in another block still account for their wrapper"
+        );
+    }
+    #[test]
+    fn live_wrapper_stays_reachable_across_yield_and_recedes_only_on_success() {
+        let mut source: History<_> = vec![
+            tool("outer", "exec", None, false, false),
+            tool("child", "exec_command", Some("outer"), true, false),
+        ]
+        .into();
+        let mut p = Projection::default();
+        for (yielded, status, visible) in [
+            (false, CommandStatus::Running, true),
+            (true, CommandStatus::Running, true),
+            (true, CommandStatus::Interrupted, true),
+            (true, CommandStatus::Succeeded, false),
+        ] {
+            let EntryKind::Tool {
+                complete,
+                command_status,
+                ..
+            } = &mut source[0].kind
+            else {
+                unreachable!()
+            };
+            *complete = yielded;
+            *command_status = Some(status);
+            p.sync(&source);
+            let group = rows(&p, &["outer"], &[], &[]);
+            assert_eq!(group.contains(&Row::Entry(0)), visible);
+            assert_eq!(group.contains(&Row::Execution(0)), !visible);
+            assert!(rows(&p, &["outer"], &["outer"], &[]).contains(&Row::Entry(0)));
+        }
     }
     #[test]
     fn waits_follow_the_originating_execution_but_failures_and_pure_code_stay_visible() {

@@ -689,6 +689,36 @@ async fn storage_failures_prevent_dispatch_and_retain_completed_results_for_save
 }
 
 #[tokio::test]
+async fn failed_transcript_checkpoint_does_not_leave_a_phantom_running_cell() {
+    let mut f = Fixture::new().await;
+    let stream = f.request().await;
+    // The raw provider item can be saved; fail only when the tool row is checkpointed.
+    sqlite::fail_writes(
+        &f.h.store.db.lock().unwrap(),
+        "entries",
+        "cannot save tool row",
+    );
+    let a = call(
+        "a",
+        "await tools.exec_command({cmd:'touch forbidden',login:false});",
+    );
+    stream.reply.send(done(0, &a)).unwrap();
+    until(|| !f.c.is_turn_active()).await;
+    sqlite::allow_writes(&f.h.store.db.lock().unwrap(), "entries");
+    f.h.flush().unwrap();
+    assert!(matches!(
+        f.saved().entries.by_id("a").unwrap().kind,
+        EntryKind::Tool {
+            complete: true,
+            failed: true,
+            command_status: None,
+            ..
+        }
+    ));
+    assert!(!f.dir.path().join("forbidden").exists());
+}
+
+#[tokio::test]
 async fn dropped_partial_output_retries_from_history_until_stopped_or_exhausted() {
     for stop in [true, false] {
         let mut f = Fixture::new().await;
@@ -856,4 +886,148 @@ async fn restart_during_stop_does_not_hold_admission_waiting_for_final_save() {
             "Stop must cancel an armed restart"
         );
     }
+}
+
+#[tokio::test]
+async fn panel_stop_wait_leaves_yielded_cell_and_its_unread_output_intact() {
+    use crate::code_mode::ToolStop;
+    let mut f = Fixture::new().await;
+    let stream = f.request().await;
+    let owner = call(
+        "owner",
+        &format!(
+            "await yield_control(); {HOLD} text('unread after yield'); notify('buffered'); await new Promise(() => {{}});"
+        ),
+    );
+    stream.reply.send(done(0, &owner)).unwrap();
+    until(|| result(&f.saved(), "owner").is_some()).await;
+    let original = result(&f.saved(), "owner").unwrap();
+    let session = f.saved();
+    let EntryKind::Tool {
+        cell_id: Some(cell),
+        ..
+    } = &session.entries.by_id("owner").unwrap().kind
+    else {
+        panic!("yielded cell")
+    };
+    let wait = |id: &str| {
+        json!({"type":"function_call", "id":format!("item-{id}"), "call_id":id, "name":"wait",
+        "arguments": json!({"cell_id": cell, "yield_time_ms":300000}).to_string(), "status":"completed"})
+    };
+    f.release_cell().await;
+    until(|| {
+        f.c.snapshot()
+            .pending_tool_outputs
+            .iter()
+            .any(|v| v["output"] == "buffered")
+    })
+    .await;
+    let first = wait("just-waiting");
+    stream.reply.send(done(1, &first)).unwrap();
+    until(|| f.c.tool_stop_state("just-waiting") == Some(ToolStop::Available)).await;
+    f.c.stop_tool("just-waiting");
+    until(|| result(&f.saved(), "just-waiting").is_some()).await;
+    assert!(result(&f.saved(), "just-waiting").unwrap().contains(cell));
+    assert_eq!(f.c.tool_stop_state("owner"), Some(ToolStop::Available));
+    f.c.stop_tool("owner");
+    until(|| f.c.tool_stop_state("owner").is_none()).await;
+    until(|| {
+        matches!(
+            f.saved().entries.by_id("owner").unwrap().kind,
+            EntryKind::Tool {
+                command_status: Some(crate::shell::CommandStatus::Interrupted),
+                ..
+            }
+        )
+    })
+    .await;
+    let collect = wait("collect");
+    stream
+        .reply
+        .send(completed(json!([owner, first, collect])))
+        .unwrap();
+    f.finish().await;
+    assert_eq!(result(&f.saved(), "owner").unwrap(), original);
+    let last = result(&f.saved(), "collect").unwrap();
+    assert!(
+        last.contains("unread after yield") && last.contains("terminated"),
+        "{last}"
+    );
+}
+
+#[tokio::test]
+async fn panel_stop_shell_poll_then_yielded_command_preserves_output_and_sibling() {
+    use crate::{code_mode::ToolStop, shell::CommandStatus};
+    let mut f = Fixture::new().await;
+    let stream = f.request().await;
+    let outer = call(
+        "outer",
+        r#"
+const cmd = await tools.exec_command({cmd:"while [ ! -f go ]; do sleep 0.01; done; printf 'unread bytes'; touch ready; exec sleep 120",login:false,yield_time_ms:0});
+const id = Number(cmd.match(/session ID (\d+)/)[1]);
+const [poll,sibling] = await Promise.allSettled([
+    tools.write_stdin({session_id:id, yield_time_ms:300000}),
+    tools.exec_command({cmd:"while [ ! -f release ]; do sleep 0.01; done; printf 'sibling finished'",login:false,yield_time_ms:300000})
+]);
+text(String(poll.reason)); text(sibling.value);
+text(await tools.write_stdin({session_id:id,yield_time_ms:300000}));
+"#,
+    );
+    stream.reply.send(done(0, &outer)).unwrap();
+    until(|| {
+        f.saved()
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.kind,
+                    EntryKind::Tool {
+                        parent: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+            == 3
+    })
+    .await;
+    let session = f.saved();
+    let entry = |name: &str, needle: &str| {
+        session.entries.iter().find(|e| matches!(&e.kind, EntryKind::Tool {name:n, input,..} if n == name && input.contains(needle))).unwrap().id.clone()
+    };
+    let command = entry("exec_command", "unread bytes");
+    let poll = entry("write_stdin", "session_id");
+    let sibling = entry("exec_command", "sibling finished");
+    let original = result(&session, &command).unwrap();
+    std::fs::write(f.dir.path().join("go"), "").unwrap();
+    until(|| f.dir.path().join("ready").exists()).await;
+    f.c.stop_tool(&poll);
+    until(|| result(&f.saved(), &poll).is_some()).await;
+    assert!(matches!(
+        &f.saved().entries.by_id(&poll).unwrap().kind,
+        EntryKind::Tool { failed: true, .. }
+    ));
+    assert_eq!(f.c.tool_stop_state(&command), Some(ToolStop::Available));
+    f.c.stop_tool(&command);
+    until(|| {
+        matches!(
+            &f.saved().entries.by_id(&command).unwrap().kind,
+            EntryKind::Tool {
+                command_status: Some(CommandStatus::Interrupted),
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(result(&f.saved(), &command).unwrap(), original);
+    assert_eq!(f.c.tool_stop_state(&sibling), Some(ToolStop::Available));
+    std::fs::write(f.dir.path().join("release"), "").unwrap();
+    stream.reply.send(completed(json!([outer]))).unwrap();
+    f.finish().await;
+    let out = result(&f.saved(), "outer").unwrap();
+    assert!(
+        out.contains("sibling finished") && out.contains("unread bytes"),
+        "{out}"
+    );
+    assert_eq!(f.c.tool_stop_state(&command), None);
 }

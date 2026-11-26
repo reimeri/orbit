@@ -335,6 +335,7 @@ pub enum EntryKind {
         input: String,
         output: String,
         complete: bool,
+        /// Actual cell/process lifetime, independent of the invocation result.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command_status: Option<crate::shell::CommandStatus>,
         #[serde(default)]

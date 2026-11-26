@@ -81,6 +81,21 @@ ID for retry after fixing disk space or permissions; do not rerun the command.
 The app cancels process groups on Stop and exit. Deliberately daemonized/re-parented processes can escape process-group
 cleanup; this is not a sandbox or a process supervisor.
 
+### Stopping a single tool
+
+Expand a tool in the transcript and click **Stop** next to **Raw input**. A command
+or code cell stays stoppable from its original panel after it yields an ID. Its
+exit status updates there without rewriting the result already sent to the model.
+Stopping a cell ends its JavaScript and pending nested calls; stopping a command
+signals its process group. Neither action stops the conversation.
+
+Stopping a **wait**, a **write_stdin** call, or **wait_subagent** ends that
+observation, not the cell, process, or assignment being observed. Poll again to
+collect unread output. Input already written, local changes, and remote work or
+charges are not undone. Nested tool errors follow normal JavaScript promise
+semantics: use `try/catch` or `Promise.allSettled` when other results should
+survive a rejection. Escape and the session Stop still operate on the conversation.
+
 ## Early execution and recovery
 
 Completed top-level calls start while the model response is still streaming. Orbit

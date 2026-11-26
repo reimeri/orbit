@@ -43,6 +43,7 @@ use orbit_core::{
         subagents::{ChildStatus, Profile, RunInfo, RunKey},
     },
     auth::Login,
+    code_mode::ToolStop,
     models::{MODELS, model},
     shell::CommandStatus,
     store::{
@@ -427,6 +428,10 @@ pub enum Message {
     Changes(changes::Action),
     Worktree(worktrees::Action),
     StopAgent(String),
+    StopTool {
+        session: String,
+        entry: String,
+    },
     ApplySettings,
     CatalogSaved(Result<(), String>),
     SettingsSaved(SettingsSave),
@@ -1692,6 +1697,7 @@ impl App {
                     | Message::SaveApiKey
                     | Message::RemoveApiKey
                     | Message::StopAgent(_)
+                    | Message::StopTool { .. }
                     | Message::FileSession(..)
                     | Message::Worktree(_)
             )
@@ -2462,6 +2468,11 @@ impl App {
             }
             Message::Send(owner) => self.send(owner),
             Message::StopAgent(id) => self.stop_agent(id),
+            Message::StopTool { session, entry } => {
+                if let Some(conversation) = self.harness.as_ref().and_then(|h| h.get(&session)) {
+                    conversation.stop_tool(&entry);
+                }
+            }
             Message::Worktree(action) => return self.worktree_action(action),
             Message::Changes(action) => return self.changes_action(action),
             Message::ToggleAgents => {
@@ -4429,7 +4440,7 @@ impl App {
                 .into()
             }
             ActivityRow::Execution(_) => {
-                let wrappers = self.activity.block(index).wrappers;
+                let wrappers = self.activity.block(index).folded.len();
                 container(
                     theme::button(
                         row![
@@ -4626,20 +4637,19 @@ impl App {
                     );
                 }
                 if open {
-                    let raw = self.raw_tool_inputs.contains(&entry.id);
-                    details = details.push(
-                        theme::button(
-                            row![
-                                chevron_icon(raw),
-                                text("Raw input").size(11).style(theme::muted)
-                            ]
-                            .spacing(6)
-                            .align_y(iced::Center),
-                        )
-                        .padding([2, 0])
-                        .style(theme::text_button)
-                        .on_press(Message::ToggleToolRaw(entry.id.clone())),
-                    );
+                    let stop = self.current().and_then(|session| {
+                        let state = self
+                            .harness
+                            .as_ref()?
+                            .get(&session.id)?
+                            .tool_stop_state(&entry.id)?;
+                        Some((session.id.as_str(), state))
+                    });
+                    details = details.push(tool_actions(
+                        &entry.id,
+                        self.raw_tool_inputs.contains(&entry.id),
+                        stop,
+                    ));
                     if let Some(metadata) = web {
                         details = details.push(
                             text(format!(
@@ -5752,6 +5762,44 @@ fn composer_key_binding(
         }
     }
     text_editor::Binding::from_key_press(event)
+}
+
+fn tool_actions(
+    entry: &str,
+    raw: bool,
+    stop: Option<(&str, ToolStop)>,
+) -> Element<'static, Message> {
+    let mut actions = row![
+        theme::button(
+            row![
+                chevron_icon(raw),
+                text("Raw input").size(11).style(theme::muted)
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+        )
+        .padding([2, 0])
+        .style(theme::text_button)
+        .on_press(Message::ToggleToolRaw(entry.to_owned()))
+    ]
+    .align_y(iced::Center);
+    if let Some((session, state)) = stop {
+        let available = state == ToolStop::Available;
+        actions = actions.push(space().width(Fill)).push(
+            theme::button(
+                text(if available { "Stop" } else { "Stopping…" })
+                    .size(11)
+                    .style(theme::muted),
+            )
+            .padding([2, 6])
+            .style(theme::text_button)
+            .on_press_maybe(available.then(|| Message::StopTool {
+                session: session.to_owned(),
+                entry: entry.to_owned(),
+            })),
+        );
+    }
+    actions.into()
 }
 
 fn tool_reference(id: &str, parent: Option<&str>) -> String {

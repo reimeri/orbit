@@ -3,7 +3,7 @@ use crate::{
     image_tools::ImageTools,
     media::{Output, Part},
     output::{OutputBuffer, character_budget},
-    shell::Shell,
+    shell::{CommandStatus, Shell},
     store::id,
 };
 use anyhow::{Context as _, Result, bail};
@@ -21,6 +21,13 @@ use tokio_util::sync::CancellationToken;
 
 pub const GRAMMAR: &str = "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n";
 mod catalog;
+mod live;
+pub(crate) use live::Calls;
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ToolStop {
+    Available,
+    Stopping,
+}
 use catalog::Capabilities;
 
 pub fn tools(child: bool) -> Value {
@@ -64,7 +71,7 @@ pub struct ToolEvent {
 #[derive(Clone, Debug)]
 pub enum Event {
     Tool(ToolEvent),
-    CommandStatus {
+    ExecutionStatus {
         id: String,
         status: crate::shell::CommandStatus,
     },
@@ -89,6 +96,7 @@ enum BufferedPart {
     Media(crate::media::Media),
 }
 struct Cell {
+    calls: Option<Arc<Calls>>,
     state: Arc<(Mutex<State>, tokio::sync::Notify)>,
     cancel: CancellationToken,
 }
@@ -166,6 +174,34 @@ impl CodeMode {
         parent: &str,
         cancel: &CancellationToken,
     ) -> Result<Output> {
+        self.exec_cell(source, parent, cancel, None)
+    }
+    /// The harness has already checkpointed the transcript row for this call.
+    pub(crate) fn invoke(
+        &self,
+        name: &str,
+        input: &str,
+        id: &str,
+        cancel: &CancellationToken,
+        calls: &Arc<Calls>,
+    ) -> Result<Output> {
+        match name {
+            "exec" => self.exec_cell(input, id, cancel, Some(calls)),
+            "wait" => {
+                let stop = CancellationToken::new();
+                let _live = calls.register(id.to_owned(), &stop);
+                self.wait_cell(input, cancel, &stop)
+            }
+            _ => bail!("Unknown tool {name}; only exec and wait are top-level tools"),
+        }
+    }
+    fn exec_cell(
+        &self,
+        source: &str,
+        parent: &str,
+        cancel: &CancellationToken,
+        calls: Option<&Arc<Calls>>,
+    ) -> Result<Output> {
         if cancel.is_cancelled() {
             bail!("Execution cancelled");
         }
@@ -179,11 +215,24 @@ impl CodeMode {
         }
         let cell_id = id();
         let cell = Arc::new(Cell {
+            calls: calls.cloned(),
             state: Arc::new((Mutex::new(State::default()), tokio::sync::Notify::new())),
             cancel: cancel.child_token(),
         });
         cells.insert(cell_id.clone(), cell.clone());
         drop(cells);
+        let live = if let Some(calls) = calls {
+            if let Err(error) = (self.observer)(Event::ExecutionStatus {
+                id: parent.to_owned(),
+                status: CommandStatus::Running,
+            }) {
+                self.cells.lock().expect("cell lock").remove(&cell_id);
+                return Err(error);
+            }
+            Some(calls.register(parent.to_owned(), &cell.cancel))
+        } else {
+            None
+        };
         let services = self.services.clone();
         let stored = self.stored.clone();
         let observer = self.observer.clone();
@@ -194,7 +243,24 @@ impl CodeMode {
         let active = WorkerPermit(self.active_cells.clone());
         thread::spawn(move || {
             let _active = active;
-            let result = run_cell(code, services, stored, observer, parent, workers, &worker);
+            let result = run_cell(
+                code,
+                services,
+                stored,
+                observer.clone(),
+                parent.clone(),
+                workers,
+                &worker,
+            );
+            let status = if result.is_ok() {
+                CommandStatus::Succeeded
+            } else if worker.cancel.is_cancelled() {
+                CommandStatus::Interrupted
+            } else {
+                CommandStatus::Failed
+            };
+            let tracked = live.is_some();
+            drop(live);
             worker.cancel.cancel();
             let mut state = worker.state.0.lock().expect("cell state");
             if let Err(error) = result {
@@ -202,6 +268,10 @@ impl CodeMode {
             }
             state.done = true;
             worker.state.1.notify_one();
+            drop(state);
+            if tracked && let Err(error) = observer(Event::ExecutionStatus { id: parent, status }) {
+                eprintln!("Could not record code cell exit: {error:#}");
+            }
         });
         self.observe(
             &cell_id,
@@ -209,6 +279,7 @@ impl CodeMode {
             pragma.yield_time_ms.unwrap_or(10_000),
             pragma.max_output_tokens.unwrap_or(10_000),
             cancel,
+            &CancellationToken::new(),
         )
     }
     #[cfg(test)]
@@ -216,6 +287,14 @@ impl CodeMode {
         self.wait_output(args, cancel).map(|o| o.summary())
     }
     pub fn wait_output(&self, args: &str, cancel: &CancellationToken) -> Result<Output> {
+        self.wait_cell(args, cancel, &CancellationToken::new())
+    }
+    fn wait_cell(
+        &self,
+        args: &str,
+        cancel: &CancellationToken,
+        stop: &CancellationToken,
+    ) -> Result<Output> {
         let args: Wait = serde_json::from_str(args)?;
         let cell = self
             .cells
@@ -233,6 +312,7 @@ impl CodeMode {
             args.yield_time_ms.unwrap_or(10_000),
             args.max_tokens.unwrap_or(10_000),
             cancel,
+            stop,
         )
     }
     fn observe(
@@ -242,6 +322,7 @@ impl CodeMode {
         ms: u64,
         tokens: usize,
         cancel: &CancellationToken,
+        stop_wait: &CancellationToken,
     ) -> Result<Output> {
         let interrupted = self.services.shell.runtime().block_on(async {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(ms.min(300_000));
@@ -262,14 +343,18 @@ impl CodeMode {
                         // Wait for the cell to finish emitting before draining its output.
                         // Returning an error here would discard buffered text and media.
                     }
+                    _ = stop_wait.cancelled(), if !interrupted => break,
                     _ = tokio::time::sleep_until(deadline), if !interrupted => break,
                     _ = notified => {}
                 }
             }
             interrupted
         });
+        let mut state = cell.state.0.lock().expect("cell state");
+        if stop_wait.is_cancelled() && !interrupted {
+            bail!("Wait stopped. Use wait with cell_id {id} to collect remaining output.");
+        }
         let result = (|| {
-            let mut state = cell.state.0.lock().expect("cell state");
             state.yielded = false;
             let mut budget = character_budget(tokens);
             let mut pending = Vec::new();
@@ -318,6 +403,7 @@ impl CodeMode {
                 cell_id: Some(id.to_owned()),
             })
         })();
+        drop(state);
         if result.is_err() {
             // Stop may have removed the ID while this observation was active. Failed
             // output preservation must still leave its unread buffers available to wait.
@@ -510,6 +596,7 @@ fn run_cell(
         });
         ctx.globals().set("__tools", serde_json::to_string(&definitions)?).map_err(js_error)?;
         let cancellation = cell.cancel.clone();
+        let calls = cell.calls.clone();
         ctx.globals()
             .set(
                 "__call",
@@ -541,6 +628,13 @@ fn run_cell(
                         let web = web.clone();
                         let tx = tx.clone();
                         let observer = observer.clone();
+                        // A yielded command and its panel outlive the starting cell.
+                        let token = if name == "exec_command" {
+                            CancellationToken::new()
+                        } else {
+                            cancellation.child_token()
+                        };
+                        let mut live = calls.as_ref().map(|calls| calls.register(request.clone(), &token));
                         let cancellation = cancellation.clone();
                         let parent = parent.clone();
                         thread::Builder::new()
@@ -561,24 +655,30 @@ fn run_cell(
                                 let mut display=None;
                                 let mut command_failed=false;
                                 let structured=matches!(name.as_str(),"view_image"|"image_gen__imagegen");
-                                let result = started.and_then(|()| match name.as_str() {
-                                    "web__run" => shell.runtime().block_on(web.as_ref().expect("validated web tool").call(&args,&cancellation)).map(|result| {web_metadata=Some(result.metadata);result.text}).inspect_err(|error| {if let Some(failure)=error.downcast_ref::<crate::web_search::Failure>() {web_metadata=Some(failure.metadata.clone());}}),
-                                    "view_image"|"image_gen__imagegen" => shell.runtime().block_on(images.as_ref().expect("validated image tool").call(&name,&args,&request,&cancellation)).map(|result| {attachments.push(result.media);display=Some(result.text);result.value.to_string()}),
+                                let result = started.and_then(|()| {
+                                    if token.is_cancelled() || cancellation.is_cancelled() { bail!("Tool call cancelled before dispatch"); }
+                                    match name.as_str() {
+                                    "web__run" => shell.runtime().block_on(web.as_ref().expect("validated web tool").call(&args,&token)).map(|result| {web_metadata=Some(result.metadata);result.text}).inspect_err(|error| {if let Some(failure)=error.downcast_ref::<crate::web_search::Failure>() {web_metadata=Some(failure.metadata.clone());}}),
+                                    "view_image"|"image_gen__imagegen" => shell.runtime().block_on(images.as_ref().expect("validated image tool").call(&name,&args,&request,&token)).map(|result| {attachments.push(result.media);display=Some(result.text);result.value.to_string()}),
                                     "exec_command" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|a| {
                                             let observer = observer.clone();
                                             let id = request.clone();
-                                            shell.exec_observed(a, &cancellation, Some(Arc::new(move |status| {
-                                                observer(Event::CommandStatus { id: id.clone(), status })
-                                            })))
+                                            let command = live.take();
+                                            shell.exec_observed(a, &cancellation, Some((&token, Arc::new(move |status| {
+                                                // Keep the command stoppable after its invocation yields.
+                                                let _keep_alive = &command;
+                                                observer(Event::ExecutionStatus { id: id.clone(), status })
+                                            }))))
                                         }).map(|result| {command_failed=result.failed;result.text}),
                                     "write_stdin" => serde_json::from_str(&args)
                                         .map_err(anyhow::Error::from)
-                                        .and_then(|a| shell.write(a, &cancellation)).map(|result| {command_failed=result.failed;result.text}),
-                                    "ask_user" => shell.runtime().block_on(questionnaires.as_ref().expect("validated questionnaire tool").ask(&request, &args, &cancellation)),
-                                    _ => delegation.as_ref().expect("validated delegation tool")(&name, &args, &request, &cancellation),
-                                });
+                                        .and_then(|a| shell.write(a, &token)).map(|result| {command_failed=result.failed;result.text}),
+                                    "ask_user" => shell.runtime().block_on(questionnaires.as_ref().expect("validated questionnaire tool").ask(&request, &args, &token)),
+                                    _ => delegation.as_ref().expect("validated delegation tool")(&name, &args, &request, &token),
+                                }});
+                                drop(live);
                                 let failed = result.is_err();
                                 let output = result.unwrap_or_else(|e| format!("{e:#}"));
                                 let name_for_output = name.clone();
@@ -940,6 +1040,32 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
             .unwrap();
         assert!(result.contains("Unknown nested tool"), "{result}");
     }
+    #[test]
+    fn stopped_wait_does_not_reopen_a_cell_removed_by_session_stop() {
+        let mode = mode();
+        let cancel = CancellationToken::new();
+        let id = mode
+            .exec_output(
+                "await yield_control(); await new Promise(() => {});",
+                "outer",
+                &cancel,
+            )
+            .unwrap()
+            .cell_id
+            .unwrap();
+        // This wait already resolved its ID when the panel and session stops arrived.
+        let waiting = mode.cells.lock().unwrap()[&id].clone();
+        let stop = CancellationToken::new();
+        stop.cancel();
+        mode.stop_all();
+        let err = mode
+            .observe(&id, waiting, 0, 100, &cancel, &stop)
+            .unwrap_err();
+        assert!(err.to_string().contains("Wait stopped"));
+        let next = mode.wait(&json!({"cell_id":id}).to_string(), &cancel);
+        assert!(next.unwrap_err().to_string().contains("already closed"));
+    }
+
     #[test]
     fn cancelled_cell_remains_active_until_native_callback_exits() {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();

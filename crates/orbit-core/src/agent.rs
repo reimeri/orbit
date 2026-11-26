@@ -5,7 +5,7 @@ pub mod notifications;
 pub mod subagents;
 use crate::{
     auth::Auth,
-    code_mode::{CodeMode, Event as CodeEvent},
+    code_mode::{Calls, CodeMode, Event as CodeEvent},
     provider::{Provider, is_tool_call},
     shell::Shell,
     store::{Entry, EntryKind, Filing, FilingKind, Session, SessionSummary, Settings, Store},
@@ -90,6 +90,7 @@ pub struct Conversation {
     cancel: Mutex<CancellationToken>,
     deleted: AtomicBool,
     code: CodeMode,
+    live_calls: Arc<Calls>,
     last_settings: Mutex<Settings>,
     persisted: Mutex<Option<Session>>,
     pending_activity: Mutex<Vec<crate::store::activity::Sample>>,
@@ -187,6 +188,13 @@ impl Conversation {
                 .questionnaires
                 .as_ref()
                 .is_some_and(|q| q.has_pending())
+    }
+    /// None for historical entries; otherwise whether Stop is still available.
+    pub fn tool_stop_state(&self, entry: &str) -> Option<crate::code_mode::ToolStop> {
+        self.live_calls.state(entry)
+    }
+    pub fn stop_tool(&self, entry: &str) {
+        self.live_calls.stop(entry);
     }
     pub fn cancel(&self) {
         let _state = self.state.lock().expect("session lock");
@@ -332,12 +340,23 @@ impl Harness {
                                 format!("Cell notification: {text}"),
                             ));
                         }
-                        CodeEvent::CommandStatus { id, status } => {
-                            let entry = session.entries.by_id_mut(&id).expect("command tool entry");
-                            let EntryKind::Tool { command_status, .. } = &mut entry.kind else {
-                                unreachable!("command status belongs to a tool entry");
+                        CodeEvent::ExecutionStatus { id, status } => {
+                            let entry = session.entries.by_id_mut(&id).expect("execution entry");
+                            let EntryKind::Tool {
+                                command_status,
+                                name,
+                                complete,
+                                ..
+                            } = &mut entry.kind
+                            else {
+                                unreachable!("execution status belongs to a tool entry");
                             };
                             *command_status = Some(status);
+                            // The invocation checkpoints its current cell status with its
+                            // result. After a yield, exits need their own checkpoint.
+                            if name == "exec" && !*complete {
+                                return Ok(());
+                            }
                         }
                         CodeEvent::Tool(event) => {
                             if let Some(result) = event.output {
@@ -465,6 +484,7 @@ impl Harness {
                 revision: AtomicU64::new(0),
                 changes: self.changes.clone(),
                 last_settings: Mutex::new(Settings::default()),
+                live_calls: Arc::new(Calls::new(self.changes.clone())),
                 code: CodeMode::with_tools(
                     Arc::new(Shell::with_runtime(
                         session.project.clone(),
@@ -1534,7 +1554,7 @@ fn recover_after_restart(before: &Session) -> Option<Session> {
     }
     if commands {
         repaired.entries.push(Entry::new(EntryKind::Notice,
-            "Command tracking was interrupted by the restart. Inspect the workspace before retrying; commands may have performed side effects."));
+            "Execution tracking was interrupted by the restart. Inspect the workspace before retrying; tools may have performed side effects."));
     }
     if abandoned {
         repaired.needs_attention = true;
@@ -2599,6 +2619,16 @@ await Promise.all(['first', 'second'].map(async id => {
             })
             .await
             .unwrap();
+            // Both questions can be visible before the first exec/wait drains
+            // its output. Answer only after that yield: the final collect below
+            // deliberately expects *both* answers in the unread output.
+            crate::test_support::until(|| {
+                matches!(
+                    c.snapshot().entries.by_id("ask").map(|entry| &entry.kind),
+                    Some(EntryKind::Tool { complete: true, .. })
+                )
+            })
+            .await;
             // The first request is the model asking. No second request may be made
             // even after the exec/wait yield deadline has elapsed.
             tokio::time::timeout(Duration::from_secs(3), requests.recv())

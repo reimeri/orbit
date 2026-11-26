@@ -75,9 +75,14 @@ struct Output {
     stopped: bool,
     readers: usize,
 }
+enum Read<'a> {
+    Start(&'a CancellationToken),
+    Poll,
+    AfterWrite,
+}
 struct Process {
     output: Arc<(Mutex<Output>, tokio::sync::Notify)>,
-    stdin: Option<Mutex<Arc<Async<FileDescriptor>>>>,
+    stdin: Option<tokio::sync::Mutex<Arc<Async<FileDescriptor>>>>,
     runtime: tokio::runtime::Handle,
     pid: u32,
     started: Instant,
@@ -98,35 +103,51 @@ impl Process {
             notified.await;
         }
     }
-    fn stop(&self) {
+    fn stop(&self) -> bool {
         let mut state = self.output.0.lock().expect("output lock");
-        if state.exit.is_some() && state.readers == 0 {
-            return;
+        if state.stopped || (state.exit.is_some() && state.readers == 0) {
+            return false;
         }
         state.stopped = true;
         let _ = killpg(Pid::from_raw(self.pid as i32), Signal::SIGKILL);
+        true
     }
     fn read(
         &self,
         id: i32,
         wait: u64,
         tokens: usize,
-        is_poll: bool,
         cancel: &CancellationToken,
+        read: Read<'_>,
     ) -> Result<(CommandOutput, bool)> {
         self.runtime.block_on(async {
-            tokio::select! {
-                biased;
-                _ = self.wait_for_exit() => {}
-                _ = cancel.cancelled() => {
-                    self.stop();
-                    bail!("Command cancelled. Side effects already performed are not undone.");
+            let deadline = tokio::time::sleep(Duration::from_millis(wait.min(300_000)));
+            if let Read::Start(panel_stop) = read {
+                tokio::select! {
+                    biased;
+                    _ = self.wait_for_exit() => return,
+                    _ = cancel.cancelled() => { self.stop(); }
+                    // The process observer owns this signal, even after yield.
+                    _ = panel_stop.cancelled() => {}
+                    _ = deadline => return,
                 }
-                _ = tokio::time::sleep(Duration::from_millis(wait.min(300_000))) => {}
+                // An escaped descendant can keep a pipe open. Return the session ID
+                // rather than blocking the invocation or losing the remaining bytes.
+                let _ = tokio::time::timeout(Duration::from_secs(3), self.wait_for_exit()).await;
+            } else {
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = self.wait_for_exit() => {}
+                    _ = deadline => {}
+                }
             }
-            Ok::<_, anyhow::Error>(())
-        })?;
+        });
         let mut output = self.output.0.lock().expect("process output lock");
+        if !matches!(read, Read::Start(_)) && cancel.is_cancelled() {
+            bail!(
+                "Wait stopped. Use write_stdin with session_id {id} to collect remaining output."
+            );
+        }
         let complete = output.exit.is_some() && output.readers == 0;
         let exit = output.exit.clone();
         let stopped = output.stopped;
@@ -145,7 +166,11 @@ impl Process {
         } else {
             format!("Process running with session ID {id}")
         };
-        let hint = if is_poll && !complete && body.is_empty() {
+        let hint = if stopped && !complete {
+            "\nStop requested. Poll this session for remaining output."
+        } else if stopped {
+            "\nCommand stopped. Side effects already performed are not undone."
+        } else if matches!(read, Read::Poll) && !complete && body.is_empty() {
             "\nNo new output. Do independent work before polling again. If you only need the exit result, set yield_time_ms to 300000 on both write_stdin and the enclosing @exec cell; the wait returns early on exit. Use shorter polls for intermediate output."
         } else {
             ""
@@ -255,17 +280,18 @@ impl Shell {
     pub fn exec(&self, args: ExecArgs, cancel: &CancellationToken) -> Result<CommandOutput> {
         self.exec_observed(args, cancel, None)
     }
-    pub fn exec_observed(
+    pub(crate) fn exec_observed(
         &self,
         args: ExecArgs,
         cancel: &CancellationToken,
-        observer: Option<CommandObserver>,
+        tracking: Option<(&CancellationToken, CommandObserver)>,
     ) -> Result<CommandOutput> {
-        if cancel.is_cancelled() {
+        let stop = tracking.as_ref().map_or(cancel, |(stop, _)| *stop);
+        if cancel.is_cancelled() || stop.is_cancelled() {
             bail!("Execution cancelled");
         }
         let mut processes = self.processes.lock().expect("process lock");
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || stop.is_cancelled() {
             bail!("Execution cancelled");
         }
         if processes.len() >= 64 {
@@ -332,7 +358,7 @@ impl Shell {
             });
             Arc::new(Process {
                 output,
-                stdin: Some(Mutex::new(pty)),
+                stdin: Some(tokio::sync::Mutex::new(pty)),
                 runtime: self.runtime.clone(),
                 pid,
                 started: Instant::now(),
@@ -399,32 +425,34 @@ impl Shell {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         processes.insert(id, process.clone());
         drop(processes);
-        if let Some(observer) = observer {
+        if let Some((_, observer)) = tracking {
             self.pending_status.fetch_add(1, Ordering::AcqRel);
             let pending = PendingStatus(self.pending_status.clone());
             let started = observer(CommandStatus::Running);
-            let output = process.output.clone();
+            let watched = process.clone();
+            let stop = stop.clone();
             self.runtime.spawn(async move {
                 let _pending = pending;
-                let failed = loop {
-                    let notified = output.1.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
-                    {
-                        let state = output.0.lock().expect("output lock");
-                        if let Some((_, failed)) = &state.exit
-                            && state.readers == 0
-                        {
-                            break *failed || state.stopped;
-                        }
+                let interrupted = tokio::select! {
+                    biased;
+                    _ = watched.wait_for_exit() => false,
+                    _ = stop.cancelled() => {
+                        let interrupted = watched.stop();
+                        watched.wait_for_exit().await;
+                        interrupted
                     }
-                    notified.await;
                 };
-                if let Err(error) = observer(if failed {
-                    CommandStatus::Failed
-                } else {
-                    CommandStatus::Succeeded
-                }) {
+                let status = {
+                    let state = watched.output.0.lock().expect("output lock");
+                    if interrupted {
+                        CommandStatus::Interrupted
+                    } else if state.stopped || state.exit.as_ref().expect("exited command").1 {
+                        CommandStatus::Failed
+                    } else {
+                        CommandStatus::Succeeded
+                    }
+                };
+                if let Err(error) = observer(status) {
                     eprintln!("Could not record command exit: {error:#}");
                 }
             });
@@ -437,17 +465,23 @@ impl Shell {
             id,
             args.yield_time_ms,
             args.max_output_tokens.unwrap_or(10_000),
-            false,
             cancel,
+            Read::Start(stop),
         );
+        // This is the handoff from the starting cell to the yielded process.
+        // Honour cancellation even if preserving the output failed.
         let cancelled = cancel.is_cancelled();
         if cancelled {
             process.stop();
         }
-        if result.as_ref().is_ok_and(|(_, complete)| *complete) || cancelled {
+        let (output, complete) = result?;
+        if complete {
             self.processes.lock().expect("process lock").remove(&id);
         }
-        result.map(|(text, _)| text)
+        if cancelled && (!complete || output.failed) {
+            bail!("Command cancelled. {}", output.text);
+        }
+        Ok(output)
     }
     pub fn write(&self, args: StdinArgs, cancel: &CancellationToken) -> Result<CommandOutput> {
         let process = self
@@ -461,18 +495,18 @@ impl Shell {
             let stdin = process.stdin.as_ref().context(
                 "stdin is closed for this session; rerun exec_command with tty=true for interactive input",
             )?;
-            let stdin = stdin.lock().expect("stdin lock");
             self.runtime.block_on(async {
+                let stdin = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => bail!("Input cancelled before writing"),
+                    lock = stdin.lock() => lock,
+                };
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 let mut remaining = args.chars.as_bytes();
                 while !remaining.is_empty() {
                     let written = tokio::select! {
                         biased;
-                        _ = cancel.cancelled() => {
-                            process.stop();
-                            self.processes.lock().expect("process lock").remove(&args.session_id);
-                            bail!("Input cancelled; some bytes may already have been sent");
-                        }
+                        _ = cancel.cancelled() => bail!("Input cancelled; some bytes may already have been sent. Poll session {} before sending more.", args.session_id),
                         _ = tokio::time::sleep_until(deadline) => bail!("PTY input stalled; {} bytes were not sent. Poll the session before sending more.", remaining.len()),
                         result = stdin.write_with(|fd| Ok(rustix::io::write(fd, remaining)?)) => result,
                     };
@@ -486,24 +520,24 @@ impl Shell {
                 Ok(())
             })?;
         }
-        let result = process.read(
+        let (output, complete) = process.read(
             args.session_id,
             args.yield_time_ms,
             args.max_output_tokens.unwrap_or(10_000),
-            args.chars.is_empty(),
             cancel,
-        );
-        let cancelled = cancel.is_cancelled();
-        if cancelled {
-            process.stop();
-        }
-        if result.as_ref().is_ok_and(|(_, complete)| *complete) || cancelled {
+            if args.chars.is_empty() {
+                Read::Poll
+            } else {
+                Read::AfterWrite
+            },
+        )?;
+        if complete {
             self.processes
                 .lock()
                 .expect("process lock")
                 .remove(&args.session_id);
         }
-        result.map(|(text, _)| text)
+        Ok(output)
     }
     pub fn is_executing(&self) -> bool {
         self.pending_status.load(Ordering::Acquire) > 0 || self.has_running_commands()
@@ -576,10 +610,13 @@ mod tests {
                 }))
                 .unwrap(),
                 &CancellationToken::new(),
-                Some(Arc::new(move |status| {
-                    events.send(status).unwrap();
-                    Ok(())
-                })),
+                Some((
+                    &CancellationToken::new(),
+                    Arc::new(move |status| {
+                        events.send(status).unwrap();
+                        Ok(())
+                    }),
+                )),
             )
             .unwrap();
         let id = running_id(&result.text);
@@ -624,16 +661,19 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"cmd": "exit 7", "login": false}))
                     .unwrap(),
                 &CancellationToken::new(),
-                Some(Arc::new(move |status| {
-                    events.send(status).unwrap();
-                    if status != CommandStatus::Running {
-                        gate.lock()
-                            .unwrap()
-                            .recv_timeout(Duration::from_secs(5))
-                            .unwrap();
-                    }
-                    Ok(())
-                })),
+                Some((
+                    &CancellationToken::new(),
+                    Arc::new(move |status| {
+                        events.send(status).unwrap();
+                        if status != CommandStatus::Running {
+                            gate.lock()
+                                .unwrap()
+                                .recv_timeout(Duration::from_secs(5))
+                                .unwrap();
+                        }
+                        Ok(())
+                    }),
+                )),
             )
             .unwrap();
         assert!(output.failed);
@@ -721,6 +761,47 @@ mod tests {
             crate::test_support::saved_output(&first.text),
             text.as_bytes()
         );
+    }
+
+    #[test]
+    fn stopping_before_first_yield_preserves_output_for_the_invocation() {
+        for stop_cell in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let shell = Shell::new(dir.path().into());
+            let cell = CancellationToken::new();
+            let panel = CancellationToken::new();
+            let args = serde_json::from_value(serde_json::json!({
+                "cmd": "printf 'before stop'; touch ready; exec sleep 30",
+                "login": false, "yield_time_ms": 300000,
+            }))
+            .unwrap();
+            let result = thread::scope(|scope| {
+                let job = scope.spawn(|| {
+                    shell.exec_observed(args, &cell, Some((&panel, Arc::new(|_| Ok(())))))
+                });
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !dir.path().join("ready").exists() {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                if stop_cell {
+                    cell.cancel()
+                } else {
+                    panel.cancel()
+                }
+                job.join().unwrap()
+            });
+            if stop_cell {
+                assert!(result.err().unwrap().to_string().contains("before stop"));
+            } else {
+                let output = result.unwrap();
+                assert!(output.failed && output.text.contains("before stop"));
+            }
+            assert!(
+                !shell.has_work(),
+                "the initial read collected the stopped process"
+            );
+        }
     }
 
     #[test]
@@ -831,7 +912,12 @@ mod tests {
             },
             &CancellationToken::new(),
         );
-        assert!(poll.err().unwrap().to_string().contains("closed"));
+        assert_eq!(
+            running_id(&poll.unwrap().text),
+            session_id,
+            "stopping a writer does not own the process"
+        );
+        shell.stop_all();
         assert_pty_released(slave);
     }
     #[test]
