@@ -3655,14 +3655,26 @@ impl App {
             notices = notices.push(
                 container(
                     row![
-                        Icon::CircleAlert.colored(16., colors.danger),
-                        text(error).size(13).width(Fill),
-                        theme::button(theme::primary_label("Dismiss"))
-                            .on_press(Message::ErrorDismiss)
+                        container(Icon::CircleAlert.colored(16., colors.danger)).center_y(24),
+                        container(
+                            text(error)
+                                .size(14)
+                                .line_height(text::LineHeight::Absolute(20.into()))
+                                .wrapping(text::Wrapping::WordOrGlyph)
+                        )
+                        .padding([2, 0])
+                        .width(Fill),
+                        icon_tip(
+                            theme::button(Icon::X.view(16.))
+                                .padding(4)
+                                .style(theme::text_button)
+                                .on_press(Message::ErrorDismiss),
+                            "Dismiss error"
+                        )
                     ]
-                    .spacing(12),
+                    .spacing(8),
                 )
-                .padding(12)
+                .padding([8, 12])
                 .style(move |_| container::Style {
                     background: Some(colors.error_surface.into()),
                     ..Default::default()
