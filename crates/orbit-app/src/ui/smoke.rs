@@ -1,5 +1,5 @@
 //! Native window capture workflow for smoke checks and marketing screenshots.
-use super::sidebar::FILED_VISIBLE_ROWS;
+use super::sidebar::{COLLAPSED_VISIBLE_ROWS, CollapsedSection};
 use super::*;
 
 impl App {
@@ -822,7 +822,7 @@ impl App {
 
             47 => {
                 self.sessions.clear();
-                for i in 0..(FILED_VISIBLE_ROWS * 3) {
+                for i in 0..(COLLAPSED_VISIBLE_ROWS * 3) {
                     let mut session =
                         Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
                     session.title = format!("Settled session {i} — a long title fits on one row");
@@ -836,20 +836,25 @@ impl App {
                     Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
                 idle.title = "Idle session — hover to settle".into();
                 self.sessions.push(SessionSummary::from(&idle));
-                self.filed[FilingKind::Settled as usize].open = true;
+                self.collapsed[CollapsedSection::Settled as usize].open = true;
                 self.prepare_sidebar();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
             48 => {
-                self.filed[FilingKind::Settled as usize].list.offset =
-                    self.filed[FilingKind::Settled as usize].list.total()
-                        - self.filed_list_height(FilingKind::Settled);
+                self.collapsed[CollapsedSection::Settled as usize]
+                    .list
+                    .offset = self.collapsed[CollapsedSection::Settled as usize]
+                    .list
+                    .total()
+                    - self.collapsed_list_height(CollapsedSection::Settled);
                 return Task::batch([
                     widget::operation::scroll_to(
                         "settled-sessions",
                         scrollable::AbsoluteOffset {
                             x: 0.,
-                            y: self.filed[FilingKind::Settled as usize].list.offset,
+                            y: self.collapsed[CollapsedSection::Settled as usize]
+                                .list
+                                .offset,
                         },
                     ),
                     delayed_capture(),
@@ -888,7 +893,7 @@ impl App {
                 self.modal = None;
                 self.context_menu = None;
                 self.stashed_open = false;
-                self.filed[FilingKind::Settled as usize].open = false;
+                self.collapsed[CollapsedSection::Settled as usize].open = false;
                 self.settings_open = false;
                 self.agents_open = false;
                 self.sessions.clear();

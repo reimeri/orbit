@@ -1,6 +1,7 @@
 use super::*;
 use crate::ui::sidebar::{
-    FILED_ROW_GAP, FILED_ROW_HEIGHT, FILED_VISIBLE_ROWS, SESSION_METADATA_GAP,
+    COLLAPSED_ROW_GAP, COLLAPSED_ROW_HEIGHT, COLLAPSED_VISIBLE_ROWS, CollapsedSection,
+    SESSION_METADATA_GAP,
 };
 
 #[tokio::test]
@@ -20,7 +21,11 @@ async fn deferring_keeps_selection_and_draft_and_requires_opening_unread_complet
     )
     .await;
     assert!(app.error.is_some());
-    assert!(app.filed[FilingKind::Deferred as usize].rows.is_empty());
+    assert!(
+        app.collapsed[CollapsedSection::Deferred as usize]
+            .rows
+            .is_empty()
+    );
     assert_eq!(app.selected, other);
     app.error = None;
 
@@ -41,20 +46,37 @@ async fn deferring_keeps_selection_and_draft_and_requires_opening_unread_complet
         app.current().unwrap().filing.unwrap().kind,
         FilingKind::Deferred
     );
-    assert!(app.filed[FilingKind::Settled as usize].rows.is_empty());
-    assert!(!app.filed_expanded(FilingKind::Deferred));
-    assert_eq!(app.filed[FilingKind::Deferred as usize].rows.len(), 1);
+    assert!(
+        app.collapsed[CollapsedSection::Settled as usize]
+            .rows
+            .is_empty()
+    );
+    assert!(!app.collapsed_expanded(CollapsedSection::Deferred));
+    assert_eq!(
+        app.collapsed[CollapsedSection::Deferred as usize]
+            .rows
+            .len(),
+        1
+    );
     assert!(!app.sidebar_rows.iter().any(|row| {
         matches!(row, SidebarRow::Session(index, _) if app.sessions[*index].id == id)
     }));
-    dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
-    assert!(app.filed_expanded(FilingKind::Deferred));
+    dispatch(
+        &mut app,
+        Message::ToggleCollapsed(CollapsedSection::Deferred),
+    )
+    .await;
+    assert!(app.collapsed_expanded(CollapsedSection::Deferred));
     dispatch(
         &mut app,
         Message::FileSession(id.clone(), FilingAction::Undo),
     )
     .await;
-    assert!(app.filed[FilingKind::Deferred as usize].rows.is_empty());
+    assert!(
+        app.collapsed[CollapsedSection::Deferred as usize]
+            .rows
+            .is_empty()
+    );
     assert_eq!(app.current().unwrap().updated, updated);
     assert_eq!(app.selected.as_deref(), Some(id.as_str()));
 
@@ -65,7 +87,11 @@ async fn deferring_keeps_selection_and_draft_and_requires_opening_unread_complet
     .await;
     send_current(&mut app).await;
     assert!(app.current().unwrap().filing.is_none());
-    assert!(app.filed[FilingKind::Deferred as usize].rows.is_empty());
+    assert!(
+        app.collapsed[CollapsedSection::Deferred as usize]
+            .rows
+            .is_empty()
+    );
     assert_eq!(app.selected.as_deref(), Some(id.as_str()));
     let c = h.get(&id).unwrap();
     let mut changes = h.subscribe();
@@ -131,7 +157,11 @@ async fn settlement_buttons_swap_locally_and_capture_only_their_own_clicks() {
                 Message::FileSession(id.clone(), FilingAction::File(FilingKind::Settled)),
             )
             .await;
-            dispatch(&mut app, Message::ToggleFiled(FilingKind::Settled)).await;
+            dispatch(
+                &mut app,
+                Message::ToggleCollapsed(CollapsedSection::Settled),
+            )
+            .await;
         }
         let title = app.current().unwrap().title.clone();
         let mut ui = UserInterface::build(app.sidebar(), size, Cache::new(), &mut renderer);
@@ -370,8 +400,8 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
     use iced_runtime::{UserInterface, user_interface::Cache};
     let mut app = app();
     let mut renderer = header_renderer();
-    let count = FILED_VISIBLE_ROWS * 30;
-    let pitch = FILED_ROW_HEIGHT + FILED_ROW_GAP;
+    let count = COLLAPSED_VISIBLE_ROWS * 30;
+    let pitch = COLLAPSED_ROW_HEIGHT + COLLAPSED_ROW_GAP;
     let now = orbit_core::store::now();
     app.sessions = (0..count)
         .map(|i| {
@@ -396,42 +426,50 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
     }
     app.prepare_sidebar();
     assert_eq!(
-        app.filed[FilingKind::Settled as usize].rows,
+        app.collapsed[CollapsedSection::Settled as usize].rows,
         (0..count).collect::<Vec<_>>()
     );
     assert!(app.sidebar_rows.is_empty());
-    assert!(!app.filed_expanded(FilingKind::Settled));
-    assert!(!app.filed_expanded(FilingKind::Deferred));
+    assert!(!app.collapsed_expanded(CollapsedSection::Settled));
+    assert!(!app.collapsed_expanded(CollapsedSection::Deferred));
     dispatch(&mut app, Message::Search("session 1".into())).await;
-    for (kind, first) in [
-        (FilingKind::Deferred, "Later session 1"),
-        (FilingKind::Settled, "Filed session 1"),
+    for (section, first) in [
+        (CollapsedSection::Deferred, "Later session 1"),
+        (CollapsedSection::Settled, "Filed session 1"),
     ] {
-        assert!(app.filed_expanded(kind));
-        let rows = &app.filed[kind as usize].rows;
+        assert!(app.collapsed_expanded(section));
+        let rows = &app.collapsed[section as usize].rows;
         assert_eq!(app.sessions[rows[0]].title, first);
         assert!(
             rows.iter()
                 .all(|&i| app.sessions[i].title.contains("session 1"))
         );
     }
-    dispatch(&mut app, Message::ToggleFiled(FilingKind::Settled)).await;
-    assert!(!app.filed_expanded(FilingKind::Settled));
-    assert!(app.filed_expanded(FilingKind::Deferred));
+    dispatch(
+        &mut app,
+        Message::ToggleCollapsed(CollapsedSection::Settled),
+    )
+    .await;
+    assert!(!app.collapsed_expanded(CollapsedSection::Settled));
+    assert!(app.collapsed_expanded(CollapsedSection::Deferred));
     dispatch(&mut app, Message::Search(String::new())).await;
-    assert!(!app.filed_expanded(FilingKind::Deferred));
-    dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
+    assert!(!app.collapsed_expanded(CollapsedSection::Deferred));
     assert!(
-        !app.filed_expanded(FilingKind::Settled),
+        !app.collapsed_expanded(CollapsedSection::Settled),
         "search must not change the normal expansion preference"
     );
-    dispatch(&mut app, Message::ToggleFiled(FilingKind::Settled)).await;
+    dispatch(
+        &mut app,
+        Message::ToggleCollapsed(CollapsedSection::Settled),
+    )
+    .await;
 
     let mut cache = Cache::new();
     for height in [800., 560.] {
         app.window_height = height;
-        app.filed[FilingKind::Settled as usize].list.offset = 0.;
-        dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
+        app.collapsed[CollapsedSection::Settled as usize]
+            .list
+            .offset = 0.;
         let mut ui = UserInterface::build(
             app.sidebar(),
             iced::Size::new(300., height),
@@ -441,7 +479,11 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
         let mut before = UiBounds::default();
         ui.operate(&renderer, &mut before);
         cache = ui.into_cache();
-        dispatch(&mut app, Message::ToggleFiled(FilingKind::Deferred)).await;
+        dispatch(
+            &mut app,
+            Message::ToggleCollapsed(CollapsedSection::Deferred),
+        )
+        .await;
         let mut ui = UserInterface::build(
             app.sidebar(),
             iced::Size::new(300., height),
@@ -471,7 +513,7 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
         assert!((bounds.label("Settled").y - before.label("Settled").y).abs() < 0.01);
         assert!(bounds.label("Deferred").y < before.label("Deferred").y);
         let main = bounds.scroll("sessions");
-        assert!(viewport.height <= pitch * FILED_VISIBLE_ROWS as f32);
+        assert!(viewport.height <= pitch * COLLAPSED_VISIBLE_ROWS as f32);
         assert!(viewport.height > pitch && main.height > pitch);
         let deferred = bounds.scroll("deferred-sessions");
         assert!(main.y + main.height <= bounds.label("Deferred").y);
@@ -495,7 +537,11 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
         assert!(viewport.intersects(&bounds.label("Filed session 0")));
         assert!(bounds.labels.iter().any(|(label, _)| label == "now"));
         assert!(
-            app.filed[FilingKind::Settled as usize].list.visible().len() < count / 2,
+            app.collapsed[CollapsedSection::Settled as usize]
+                .list
+                .visible()
+                .len()
+                < count / 2,
             "virtualization must bound mounted work"
         );
         let mut messages = vec![];
@@ -520,7 +566,7 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
             &mut messages,
         );
         assert!(messages.iter().any(
-            |m| matches!(m, Message::FiledScroll(FilingKind::Settled, _, offset, _) if *offset > 0.)
+            |m| matches!(m, Message::CollapsedScroll(CollapsedSection::Settled, _, offset, _) if *offset > 0.)
         ));
         assert!(
             !messages
@@ -530,11 +576,14 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
         );
         cache = ui.into_cache();
 
-        let offset = app.filed[FilingKind::Settled as usize].list.total() - viewport.height;
+        let offset = app.collapsed[CollapsedSection::Settled as usize]
+            .list
+            .total()
+            - viewport.height;
         let epoch = app.sidebar_epoch;
         dispatch(
             &mut app,
-            Message::FiledScroll(FilingKind::Settled, epoch, offset, viewport.height),
+            Message::CollapsedScroll(CollapsedSection::Settled, epoch, offset, viewport.height),
         )
         .await;
         let mut ui = UserInterface::build(
@@ -563,6 +612,26 @@ async fn filed_lists_cap_height_scrolls_and_search_reveals_matches_temporarily()
                 .iter()
                 .any(|(label, _)| label == &format!("{}d", count - 1)),
             "age must use the filing time, not the last submission"
+        );
+        let last_id = app.sessions[count - 1].id.clone();
+        let point = last.center() - iced::Vector::new(0., offset);
+        cache = ui.into_cache();
+        dispatch(
+            &mut app,
+            Message::ToggleCollapsed(CollapsedSection::Deferred),
+        )
+        .await;
+        let mut ui = UserInterface::build(
+            app.sidebar(),
+            iced::Size::new(300., height),
+            cache,
+            &mut renderer,
+        );
+        assert!(
+            click_at(&mut ui, &mut renderer, point)
+                .iter()
+                .any(|m| matches!(m, Message::Select(id) if id == &last_id)),
+            "closing Deferred must leave the same Settled row under the pointer"
         );
         cache = ui.into_cache();
     }

@@ -130,6 +130,8 @@ pub struct Settings {
     pub font_size: f32,
     pub chat_width: f32,
     pub resume_last: bool,
+    #[serde(default)]
+    pub hide_working_sessions: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -147,6 +149,7 @@ impl Default for Settings {
             font_size: 15.,
             chat_width: 900.,
             resume_last: true,
+            hide_working_sessions: false,
         }
     }
 }

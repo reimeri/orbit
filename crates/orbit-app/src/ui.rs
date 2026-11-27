@@ -11,7 +11,7 @@ mod smoke;
 mod usage_panel;
 mod worktrees;
 
-use sidebar::{FiledSection, SidebarRow};
+use sidebar::{CollapsedList, CollapsedSection, SidebarRow};
 
 use crate::activity::{self, Row as ActivityRow};
 use crate::editor_history::{Direction, Draft as DraftKey, DraftHistories};
@@ -210,7 +210,7 @@ pub struct App {
     sidebar_rows: Vec<SidebarRow>,
     child_statuses: HashMap<String, ChildStatus>,
     sidebar_list: crate::virtual_list::List,
-    filed: [FiledSection; 2],
+    collapsed: [CollapsedList; 3],
     catalog_revision: u64,
     view_epoch: u64,
     sidebar_epoch: u64,
@@ -418,8 +418,8 @@ pub enum Message {
     Select(String),
     FileSession(String, FilingAction),
     RunningCommandsAtFile(String, FilingKind),
-    ToggleFiled(FilingKind),
-    FiledScroll(FilingKind, u64, f32, f32),
+    ToggleCollapsed(CollapsedSection),
+    CollapsedScroll(CollapsedSection, u64, f32, f32),
     Create(PathBuf),
     Search(String),
     ToggleSearch,
@@ -463,6 +463,7 @@ pub enum Message {
     Font(f32),
     ChatWidth(f32),
     Resume(bool),
+    HideWorking(bool),
     AddProject,
     Browse,
     Folder(Option<PathBuf>),
@@ -576,7 +577,7 @@ impl App {
             sidebar_rows: vec![],
             child_statuses: HashMap::new(),
             sidebar_list: crate::virtual_list::List::default(),
-            filed: std::array::from_fn(|_| FiledSection::new()),
+            collapsed: std::array::from_fn(|_| CollapsedList::new()),
             catalog_revision: u64::MAX,
             view_epoch: 0,
             sidebar_epoch: 0,
@@ -1767,6 +1768,7 @@ impl App {
                     | Message::Font(_)
                     | Message::ChatWidth(_)
                     | Message::Resume(_)
+                    | Message::HideWorking(_)
             )
         {
             return Task::none();
@@ -1794,6 +1796,7 @@ impl App {
                     | Message::Font(_)
                     | Message::ChatWidth(_)
                     | Message::Resume(_)
+                    | Message::HideWorking(_)
             )
         {
             pending.close_on_success = false;
@@ -2333,8 +2336,8 @@ impl App {
                     self.modal = Some(Modal::StopCommandsAndFile(id, kind));
                 }
             }
-            Message::ToggleFiled(kind) => {
-                let section = &mut self.filed[kind as usize];
+            Message::ToggleCollapsed(kind) => {
+                let section = &mut self.collapsed[kind as usize];
                 if self.search.is_empty() {
                     section.open = !section.open;
                 } else {
@@ -2342,9 +2345,9 @@ impl App {
                 }
                 section.list.offset = 0.;
             }
-            Message::FiledScroll(kind, epoch, offset, height) => {
+            Message::CollapsedScroll(kind, epoch, offset, height) => {
                 if epoch == self.sidebar_epoch {
-                    let list = &mut self.filed[kind as usize].list;
+                    let list = &mut self.collapsed[kind as usize].list;
                     list.offset = offset;
                     list.viewport = height;
                 }
@@ -2352,7 +2355,7 @@ impl App {
             Message::Create(path) => self.select(Selection::Draft(path)),
             Message::Search(search) => {
                 self.search = search;
-                for section in &mut self.filed {
+                for section in &mut self.collapsed {
                     section.search_open = true;
                     section.list.offset = 0.;
                 }
@@ -2730,6 +2733,13 @@ impl App {
             Message::Resume(value) => {
                 self.settings.resume_last = value;
                 self.catalog.settings.resume_last = value;
+                self.save_catalog();
+            }
+            Message::HideWorking(value) => {
+                self.settings.hide_working_sessions = value;
+                self.catalog.settings.hide_working_sessions = value;
+                self.collapsed[CollapsedSection::Working as usize].open = false;
+                self.prepare_sidebar();
                 self.save_catalog();
             }
             Message::SessionSettingsEdited(result) => {
@@ -3553,6 +3563,7 @@ impl App {
             window_events(),
             window::open_events().map(Message::WindowOpened),
         ];
+        let mounted_rows = &self.sidebar_rows[self.sidebar_list.visible()];
         if let Some(harness) = &self.harness {
             subscriptions.push(Subscription::run_with(Updates(harness.clone()), updates));
             if self.browser.open {
@@ -3569,20 +3580,19 @@ impl App {
                     usage_panel::summaries,
                 ));
             }
-            // Waves reuse this clock, including Working rows whose own turn is
-            // no longer running (terminal persistence or active children).
-            if harness.all().iter().any(|c| c.is_running())
-                || self
-                    .sidebar_rows
+            // Only the selected turn and mounted Working rows use the activity clock.
+            if self.running()
+                || mounted_rows
                     .iter()
                     .any(|row| matches!(row, SidebarRow::Session(_, SessionStatus::Working)))
+                || self.collapsed_list_visible(CollapsedSection::Working)
             {
                 subscriptions.push(iced::time::every(ACTIVITY_INTERVAL).map(|_| Message::Tick));
             }
         }
         // Poll each mounted checkout once, independent of which session is selected.
         let mut checkouts = HashSet::new();
-        for row in &self.sidebar_rows[self.sidebar_list.visible()] {
+        for row in mounted_rows {
             if let SidebarRow::Session(index, _) = row {
                 let path = &self.sessions[*index].project;
                 if checkouts.insert(path) {

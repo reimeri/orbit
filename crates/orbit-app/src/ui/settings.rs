@@ -427,6 +427,11 @@ impl App {
                     .into(),
                 appearance.chat_width
             ),
+            rule::horizontal(1),
+            self.preference_row(
+                "Hide working sessions",
+                theme::switch(appearance.hide_working_sessions).on_toggle(Message::HideWorking)
+            ),
             space().height(8),
             section("SPELL CHECK"),
             self.preference_row(

@@ -17,6 +17,7 @@ pub fn with_live_controls(staged: &Settings, live: &Settings) -> Settings {
         font_size: live.font_size,
         chat_width: live.chat_width,
         resume_last: live.resume_last,
+        hide_working_sessions: live.hide_working_sessions,
         sidebar_width: live.sidebar_width,
         settings_width: live.settings_width,
         ..staged.clone()

@@ -10,30 +10,56 @@ pub(super) enum SidebarRow {
     Session(usize, SessionStatus),
 }
 
-pub(super) const FILED_KINDS: [FilingKind; 2] = [FilingKind::Deferred, FilingKind::Settled];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollapsedSection {
+    Working,
+    Deferred,
+    Settled,
+}
 
-pub(super) struct FiledSection {
+impl CollapsedSection {
+    pub(super) const ALL: [Self; 3] = [Self::Working, Self::Deferred, Self::Settled];
+    pub(super) const FILED: [Self; 2] = [Self::Deferred, Self::Settled];
+
+    pub(super) fn from_filing(kind: FilingKind) -> Self {
+        match kind {
+            FilingKind::Deferred => Self::Deferred,
+            FilingKind::Settled => Self::Settled,
+        }
+    }
+
+    pub(super) fn scroll_id(self) -> &'static str {
+        match self {
+            Self::Working => "working-sessions",
+            Self::Deferred => "deferred-sessions",
+            Self::Settled => "settled-sessions",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Working => "Working",
+            Self::Deferred => "Deferred",
+            Self::Settled => "Settled",
+        }
+    }
+}
+
+pub(super) struct CollapsedList {
     pub(super) rows: Vec<usize>,
     pub(super) list: crate::virtual_list::List,
     pub(super) open: bool,
     pub(super) search_open: bool,
 }
 
-impl FiledSection {
+impl CollapsedList {
     pub(super) fn new() -> Self {
         Self {
             rows: vec![],
-            list: crate::virtual_list::List::with_overscan(FILED_ROW_HEIGHT),
+            list: crate::virtual_list::List::with_overscan(COLLAPSED_ROW_HEIGHT),
             open: false,
             search_open: true,
         }
-    }
-}
-
-pub(super) fn filed_scroll_id(kind: FilingKind) -> &'static str {
-    match kind {
-        FilingKind::Deferred => "deferred-sessions",
-        FilingKind::Settled => "settled-sessions",
     }
 }
 
@@ -41,10 +67,10 @@ const SETTLE_FONT_SIZE: f32 = 12.;
 pub(super) const SESSION_METADATA_GAP: f32 = 6.;
 const SIDEBAR_VERTICAL_INSET: f32 = 4.;
 const SIDEBAR_CONTENT_PADDING: f32 = crate::session_action::RIGHT;
-pub(super) const FILED_ROW_HEIGHT: f32 =
+pub(super) const COLLAPSED_ROW_HEIGHT: f32 =
     crate::session_action::HEIGHT + 2. * crate::session_action::PADDING;
-pub(super) const FILED_ROW_GAP: f32 = 3.;
-pub(super) const FILED_VISIBLE_ROWS: usize = 10;
+pub(super) const COLLAPSED_ROW_GAP: f32 = 3.;
+pub(super) const COLLAPSED_VISIBLE_ROWS: usize = 10;
 
 impl App {
     pub(super) fn session_status(&self, s: &SessionSummary) -> SessionStatus {
@@ -70,10 +96,26 @@ impl App {
             SessionStatus::Idle
         }
     }
+    fn session_age_label(&self, session: &SessionSummary, status: SessionStatus) -> String {
+        let children = self
+            .child_statuses
+            .get(&session.id)
+            .copied()
+            .unwrap_or_default();
+        let age = age(session.updated);
+        if children.running > 0 {
+            format!("● {} · {age}", children.running)
+        } else if children.needs_attention || status == SessionStatus::Question {
+            format!("! · {age}")
+        } else {
+            age
+        }
+    }
+
     pub(super) fn prepare_sidebar(&mut self) {
         let needle = self.search.to_lowercase();
         let mut sections = [vec![], vec![], vec![]];
-        for section in &mut self.filed {
+        for section in &mut self.collapsed {
             section.rows.clear();
         }
         for (index, s) in self.sessions.iter().enumerate() {
@@ -87,10 +129,18 @@ impl App {
                 continue;
             }
             if let Some(filing) = s.filing {
-                self.filed[filing.kind as usize].rows.push(index);
+                self.collapsed[CollapsedSection::from_filing(filing.kind) as usize]
+                    .rows
+                    .push(index);
                 continue;
             }
             let status = self.session_status(s);
+            if status == SessionStatus::Working && self.catalog.settings.hide_working_sessions {
+                self.collapsed[CollapsedSection::Working as usize]
+                    .rows
+                    .push(index);
+                continue;
+            }
             sections[status.section()].push(SidebarRow::Session(index, status));
         }
         self.sidebar_rows.clear();
@@ -104,12 +154,14 @@ impl App {
                 self.sidebar_rows.extend(section);
             }
         }
-        for kind in FILED_KINDS {
-            let section = &mut self.filed[kind as usize];
-            section.rows.sort_unstable_by_key(|&i| {
-                let s = &self.sessions[i];
-                (std::cmp::Reverse(s.filing.expect("filed row").at), &s.id)
-            });
+        for kind in CollapsedSection::ALL {
+            let section = &mut self.collapsed[kind as usize];
+            if kind != CollapsedSection::Working {
+                section.rows.sort_unstable_by_key(|&i| {
+                    let s = &self.sessions[i];
+                    (std::cmp::Reverse(s.filing.expect("filed row").at), &s.id)
+                });
+            }
             let follow_top = section.list.offset <= 1.;
             section.list.reset(section.rows.iter().map(|&index| {
                 let next = self.sidebar_keys.len() + 3;
@@ -117,18 +169,20 @@ impl App {
                     .sidebar_keys
                     .entry(self.sessions[index].id.clone())
                     .or_insert(next);
-                (key, FILED_ROW_HEIGHT + FILED_ROW_GAP)
+                (key, COLLAPSED_ROW_HEIGHT + COLLAPSED_ROW_GAP)
             }));
             if follow_top {
                 section.list.offset = 0.;
             }
-            self.tasks.push(widget::operation::scroll_to(
-                filed_scroll_id(kind),
-                scrollable::AbsoluteOffset {
-                    x: 0.,
-                    y: section.list.offset,
-                },
-            ));
+            if kind != CollapsedSection::Working || self.catalog.settings.hide_working_sessions {
+                self.tasks.push(widget::operation::scroll_to(
+                    kind.scroll_id(),
+                    scrollable::AbsoluteOffset {
+                        x: 0.,
+                        y: section.list.offset,
+                    },
+                ));
+            }
         }
         self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
         self.sidebar_list
@@ -280,20 +334,8 @@ impl App {
                         project.push_str(branch);
                     }
                     // Age restarts on accepted input and successful completion, not streaming.
-                    let children = self
-                        .child_statuses
-                        .get(&session.id)
-                        .copied()
-                        .unwrap_or_default();
-                    let attention = children.needs_attention || *status == SessionStatus::Question;
-                    let age = if children.running > 0 {
-                        format!("● {} · {}", children.running, age(session.updated))
-                    } else if attention {
-                        format!("! · {}", age(session.updated))
-                    } else {
-                        age(session.updated)
-                    };
                     let status = *status;
+                    let age = self.session_age_label(session, status);
                     let project_line = |leading, trailing: Element<'static, Message>| {
                         row![
                             leading,
@@ -435,24 +477,15 @@ impl App {
                 Message::SidebarScroll(epoch, v.absolute_offset().y, v.bounds().height)
             });
         list = list.push(self.session_list_focus.list(sessions));
-        // Keep the close spacing between adjacent labels without changing
-        // Settled's header or hit target when Deferred opens above it.
-        let adjacent_headers = !self.filed_list_visible(FilingKind::Deferred);
-        let filed_sections = column(FILED_KINDS.map(|kind| {
-            let padding = iced::Padding::from([8., SIDEBAR_CONTENT_PADDING]);
-            let padding = match (adjacent_headers, kind) {
-                (true, FilingKind::Deferred) => padding.bottom(SIDEBAR_VERTICAL_INSET),
-                (_, FilingKind::Settled) => padding.top(SIDEBAR_VERTICAL_INSET),
-                (false, FilingKind::Deferred) => padding,
-            };
-            self.filed_section(kind, padding)
-        }))
-        .spacing(if adjacent_headers {
-            0.
-        } else {
-            SIDEBAR_VERTICAL_INSET
-        });
-        container(list.push(filed_sections))
+        let sections = self.collapsed_sections();
+        let collapsed_sections =
+            widget::keyed_column(sections.iter().enumerate().map(|(i, &kind)| {
+                (
+                    kind,
+                    self.collapsed_section(kind, i == 0, i + 1 == sections.len()),
+                )
+            }));
+        container(list.push(collapsed_sections))
             .padding(iced::Padding {
                 top: SIDEBAR_VERTICAL_INSET,
                 right: theme::SCROLLBAR_EDGE_INSET,
@@ -469,45 +502,59 @@ impl App {
             .style(panel)
             .into()
     }
-    pub(super) fn filed_expanded(&self, kind: FilingKind) -> bool {
-        if self.search.is_empty() {
-            self.filed[kind as usize].open
+
+    pub(super) fn collapsed_sections(&self) -> &'static [CollapsedSection] {
+        if self.catalog.settings.hide_working_sessions {
+            &CollapsedSection::ALL
         } else {
-            self.filed[kind as usize].search_open
+            &CollapsedSection::FILED
         }
     }
 
-    fn filed_list_visible(&self, kind: FilingKind) -> bool {
-        self.filed_expanded(kind) && !self.filed[kind as usize].rows.is_empty()
+    pub(super) fn collapsed_expanded(&self, kind: CollapsedSection) -> bool {
+        if self.search.is_empty() {
+            self.collapsed[kind as usize].open
+        } else {
+            self.collapsed[kind as usize].search_open
+        }
     }
 
-    pub(super) fn filed_list_height(&self, kind: FilingKind) -> f32 {
-        // Each list gets the same cap whether or not the other is expanded.
-        // Unused space belongs to the main list, not to the sibling section.
-        let cap = self.window_height * 0.45 / FILED_KINDS.len() as f32;
-        self.filed[kind as usize]
+    pub(super) fn collapsed_list_visible(&self, kind: CollapsedSection) -> bool {
+        self.collapsed_expanded(kind) && !self.collapsed[kind as usize].rows.is_empty()
+    }
+
+    pub(super) fn collapsed_list_height(&self, kind: CollapsedSection) -> f32 {
+        // Each list gets the same cap whether or not siblings are expanded.
+        // Unused space belongs to the main list, not to a sibling section.
+        let cap = self.window_height * 0.45 / self.collapsed_sections().len() as f32;
+        self.collapsed[kind as usize]
             .list
             .total()
-            .min((FILED_ROW_HEIGHT + FILED_ROW_GAP) * FILED_VISIBLE_ROWS as f32)
+            .min((COLLAPSED_ROW_HEIGHT + COLLAPSED_ROW_GAP) * COLLAPSED_VISIBLE_ROWS as f32)
             .min(cap)
     }
 
-    fn filed_section(
+    fn collapsed_section(
         &self,
-        kind: FilingKind,
-        header_padding: iced::Padding,
+        kind: CollapsedSection,
+        first: bool,
+        last: bool,
     ) -> Element<'_, Message> {
-        let filed = &self.filed[kind as usize];
-        let expanded = self.filed_expanded(kind);
+        let collapsed = &self.collapsed[kind as usize];
+        let expanded = self.collapsed_expanded(kind);
+        let visible = self.collapsed_list_visible(kind);
+        // Keep adjacent headers close without moving the hit target of a section below.
+        let header_padding = iced::Padding::from([8., SIDEBAR_CONTENT_PADDING])
+            .top(if first { 8. } else { SIDEBAR_VERTICAL_INSET })
+            .bottom(if last || visible {
+                8.
+            } else {
+                SIDEBAR_VERTICAL_INSET
+            });
         let header = theme::button(
             row![
-                text(match kind {
-                    FilingKind::Deferred => "Deferred",
-                    FilingKind::Settled => "Settled",
-                })
-                .size(12)
-                .width(Fill),
-                text(filed.rows.len().to_string()).size(11),
+                text(kind.label()).size(12).width(Fill),
+                text(collapsed.rows.len().to_string()).size(11),
                 crate::chevron_icon::chevron_icon(expanded),
             ]
             .spacing(10)
@@ -516,74 +563,114 @@ impl App {
         .width(Fill)
         .padding(header_padding)
         .style(sidebar_control)
-        .on_press(Message::ToggleFiled(kind));
+        .on_press(Message::ToggleCollapsed(kind));
         let mut section = column![header];
-        if self.filed_list_visible(kind) {
-            let range = filed.list.visible();
+        if visible {
+            let range = collapsed.list.visible();
             let mut rows = vec![(
                 usize::MAX,
-                space().height(filed.list.prefix(range.start)).into(),
+                space().height(collapsed.list.prefix(range.start)).into(),
             )];
             for index in range.clone() {
-                let session = &self.sessions[filed.rows[index]];
+                let session = &self.sessions[collapsed.rows[index]];
                 let active = self.parent_id() == Some(session.id.as_str());
-                let age = age(session.filing.expect("filed row").at);
-                let trailing_width = text_width(&age, crate::session_action::AGE_SIZE)
-                    .ceil()
-                    .max(crate::session_action::UNDO_SIZE);
                 let (_, badge) = self.session_project_label(&session.project, 16.);
-                let content = mouse_area(
-                    theme::button(
-                        row![
-                            badge,
-                            ellipsized_text(&session.title, 13., None),
-                            crate::session_action::slot(trailing_width),
-                        ]
-                        .spacing(6)
-                        .align_y(iced::Center),
+                let row: Element<'_, Message> = if kind == CollapsedSection::Working {
+                    let age = self.session_age_label(session, SessionStatus::Working);
+                    let phase_offset = match self.launch {
+                        crate::Launch::Marketing(_) => 0.125,
+                        _ => 0.,
+                    };
+                    mouse_area(
+                        theme::button(session_wave::wave(
+                            container(
+                                row![
+                                    badge,
+                                    ellipsized_text(&session.title, 13., None),
+                                    crate::session_action::age(age),
+                                ]
+                                .spacing(6)
+                                .align_y(iced::Center),
+                            )
+                            .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
+                            .width(Fill)
+                            .height(COLLAPSED_ROW_HEIGHT),
+                            SessionStatus::Working,
+                            phase_offset,
+                        ))
+                        .padding(0)
+                        .width(Fill)
+                        .style(if active {
+                            secondary
+                        } else {
+                            theme::text_button
+                        })
+                        .on_press(Message::Select(session.id.clone())),
                     )
-                    .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
-                    .width(Fill)
-                    .height(FILED_ROW_HEIGHT)
-                    .style(if active {
-                        secondary
-                    } else {
-                        theme::text_button
-                    })
-                    .on_press(Message::Select(session.id.clone())),
-                )
-                .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
-                let row = crate::session_action::row(
-                    content,
-                    crate::session_action::age(age),
-                    crate::session_action::control(
-                        Icon::Undo2.view(crate::session_action::UNDO_SIZE),
-                        Message::FileSession(session.id.clone(), FilingAction::Undo),
-                        match kind {
-                            FilingKind::Deferred => "Undo deferral",
-                            FilingKind::Settled => "Unsettle session",
-                        },
-                    ),
-                );
+                    .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())))
+                    .into()
+                } else {
+                    let age = age(session.filing.expect("filed row").at);
+                    let trailing_width = text_width(&age, crate::session_action::AGE_SIZE)
+                        .ceil()
+                        .max(crate::session_action::UNDO_SIZE);
+                    let content = mouse_area(
+                        theme::button(
+                            row![
+                                badge,
+                                ellipsized_text(&session.title, 13., None),
+                                crate::session_action::slot(trailing_width),
+                            ]
+                            .spacing(6)
+                            .align_y(iced::Center),
+                        )
+                        .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
+                        .width(Fill)
+                        .height(COLLAPSED_ROW_HEIGHT)
+                        .style(if active {
+                            secondary
+                        } else {
+                            theme::text_button
+                        })
+                        .on_press(Message::Select(session.id.clone())),
+                    )
+                    .on_right_press(Message::Press(Press::SessionMenu(session.id.clone())));
+                    crate::session_action::row(
+                        content,
+                        crate::session_action::age(age),
+                        crate::session_action::control(
+                            Icon::Undo2.view(crate::session_action::UNDO_SIZE),
+                            Message::FileSession(session.id.clone(), FilingAction::Undo),
+                            match kind {
+                                CollapsedSection::Deferred => "Undo deferral",
+                                CollapsedSection::Settled => "Unsettle session",
+                                CollapsedSection::Working => unreachable!(),
+                            },
+                        ),
+                    )
+                };
                 rows.push((
-                    filed.list.order[index],
-                    column![row, space().height(FILED_ROW_GAP)].into(),
+                    collapsed.list.order[index],
+                    column![row, space().height(COLLAPSED_ROW_GAP)].into(),
                 ));
             }
             rows.push((
                 usize::MAX - 1,
                 space()
-                    .height((filed.list.total() - filed.list.prefix(range.end)).max(0.))
+                    .height((collapsed.list.total() - collapsed.list.prefix(range.end)).max(0.))
                     .into(),
             ));
             let epoch = self.sidebar_epoch;
             let sessions = scroll(crate::keyed_column::keyed_column(rows))
-                .id(filed_scroll_id(kind))
-                .height(self.filed_list_height(kind))
+                .id(kind.scroll_id())
+                .height(self.collapsed_list_height(kind))
                 .on_scroll(move |v| {
-                    Message::FiledScroll(kind, epoch, v.absolute_offset().y, v.bounds().height)
+                    Message::CollapsedScroll(kind, epoch, v.absolute_offset().y, v.bounds().height)
                 });
             section = section.push(self.session_list_focus.list(sessions));
+            if !last {
+                section = section.push(space().height(SIDEBAR_VERTICAL_INSET));
+            }
         }
         section.into()
     }

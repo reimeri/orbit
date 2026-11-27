@@ -474,3 +474,54 @@ fn settings_dropdown_outside_click_activates_controls() {
         ));
     }
 }
+
+#[tokio::test]
+async fn hide_working_sessions_setting_toggles_live_persists_and_defaults_off() {
+    let mut app = app();
+    assert!(!app.catalog.settings.hide_working_sessions);
+    app.settings_open = true;
+    app.settings_tab = SettingsTab::General;
+    let mut renderer = header_renderer();
+    let width = app.panel_width();
+    let messages = {
+        let mut ui = iced_runtime::UserInterface::build(
+            app.settings_panel(),
+            iced::Size::new(width, 760.),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let label = bounds.label("Hide working sessions");
+        let switch = bounds
+            .containers
+            .iter()
+            .filter(|b| {
+                b.y <= label.center_y() && b.y + b.height >= label.center_y() && b.x > label.x
+            })
+            .min_by(|a, b| a.width.total_cmp(&b.width))
+            .expect("Hide working sessions switch");
+        click_at(
+            &mut ui,
+            &mut renderer,
+            iced::Point::new(switch.x + switch.width - 10., label.center_y()),
+        )
+    };
+    assert!(matches!(messages.as_slice(), [Message::HideWorking(true)]));
+    dispatch(&mut app, Message::HideWorking(true)).await;
+    dispatch(&mut app, Message::CancelSettings).await;
+    assert!(
+        app.catalog.settings.hide_working_sessions,
+        "live appearance toggle must survive cancelling staged settings"
+    );
+    let saved = app
+        .harness
+        .as_ref()
+        .unwrap()
+        .store
+        .load()
+        .unwrap()
+        .0
+        .settings;
+    assert!(saved.hide_working_sessions);
+}

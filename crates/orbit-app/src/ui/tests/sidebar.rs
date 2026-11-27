@@ -488,47 +488,89 @@ fn project_badge_initials_follow_name_words() {
     }
 }
 
-#[tokio::test]
-async fn sidebar_work_keeps_activity_ticks_until_frozen_or_idle() {
+async fn assert_activity_clock(app: &App, expected: bool) {
     use iced::futures::{StreamExt, stream};
     use iced_runtime::futures::subscription;
 
+    let messages = stream::select_all(
+        subscription::into_recipes(app.subscription())
+            .into_iter()
+            .map(|recipe| recipe.stream(stream::pending().boxed())),
+    );
+    let mut ticks = messages.filter(|m| std::future::ready(matches!(m, Message::Tick)));
+    if expected {
+        assert!(matches!(
+            tokio::time::timeout(ACTIVITY_INTERVAL + Duration::from_secs(1), ticks.next()).await,
+            Ok(Some(Message::Tick))
+        ));
+    } else {
+        assert!(
+            tokio::time::timeout(ACTIVITY_INTERVAL * 3, ticks.next())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn sidebar_work_keeps_activity_ticks_until_frozen_or_idle() {
     let mut app = app();
     let session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
     app.sessions.push(SessionSummary::from(&session));
+    app.prepare_sidebar();
     assert!(app.harness.as_ref().unwrap().all().is_empty());
-    // A Working presentation can outlive is_running(), or represent children.
-    // Exercise the production subscription without a running conversation.
+    // Working rows can outlive their own turn or represent running children.
     for status in [
         SessionStatus::Working,
         SessionStatus::Question,
         SessionStatus::Idle,
         SessionStatus::Working,
     ] {
-        app.sidebar_rows = vec![SidebarRow::Session(0, status)];
-        let messages = stream::select_all(
-            subscription::into_recipes(app.subscription())
-                .into_iter()
-                .map(|recipe| recipe.stream(stream::pending().boxed())),
-        );
-        let mut ticks =
-            messages.filter(|message| std::future::ready(matches!(message, Message::Tick)));
-        let timeout = if status == SessionStatus::Working {
-            ACTIVITY_INTERVAL + Duration::from_secs(1)
-        } else {
-            ACTIVITY_INTERVAL * 3
-        };
-        let next = tokio::time::timeout(timeout, ticks.next()).await;
-        if status == SessionStatus::Working {
-            assert!(
-                matches!(next, Ok(Some(Message::Tick))),
-                "Working rows need the existing activity clock"
-            );
-        } else {
-            assert!(
-                next.is_err(),
-                "frozen/idle rows must not keep an activity clock alive"
-            );
-        }
+        *app.sidebar_rows.last_mut().unwrap() = SidebarRow::Session(0, status);
+        assert_activity_clock(&app, status == SessionStatus::Working).await;
     }
+}
+
+#[tokio::test]
+async fn hidden_background_turn_animates_only_when_shown_and_returns_when_finished() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, root.clone()).await;
+    let mut session = Session::new(root, &app.catalog.settings);
+    session.title = "Background task".into();
+    let h = app.harness.as_ref().unwrap().clone();
+    let other = h.insert(session);
+    other.running.store(true, Ordering::Release);
+    app.refresh();
+    app.child_statuses
+        .entry(other.id.clone())
+        .or_default()
+        .needs_attention = true;
+    dispatch(&mut app, Message::HideWorking(true)).await;
+
+    let sidebar = |app: &App| displayed_text(app.sidebar(), Size::new(320., 600.));
+    assert!(!sidebar(&app).contains("Background task"));
+    assert_activity_clock(&app, false).await;
+
+    dispatch(
+        &mut app,
+        Message::ToggleCollapsed(CollapsedSection::Working),
+    )
+    .await;
+    let shown = sidebar(&app);
+    assert!(shown.contains("Background task") && shown.contains("! · "));
+    assert_activity_clock(&app, true).await;
+
+    dispatch(
+        &mut app,
+        Message::ToggleCollapsed(CollapsedSection::Working),
+    )
+    .await;
+    dispatch(&mut app, Message::Select(other.id.clone())).await;
+    assert_activity_clock(&app, true).await;
+    other.running.store(false, Ordering::Release);
+    h.edit(&other.id, |s| s.unchecked_completion = true)
+        .unwrap();
+    dispatch(&mut app, Message::Changed).await;
+    assert!(sidebar(&app).contains("Background task"));
 }

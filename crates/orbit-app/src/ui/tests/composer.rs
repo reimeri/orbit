@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::sidebar::{FILED_KINDS, FILED_VISIBLE_ROWS, filed_scroll_id};
+use crate::ui::sidebar::{COLLAPSED_VISIBLE_ROWS, CollapsedSection};
 
 #[tokio::test]
 async fn session_row_press_and_pending_load_keep_the_composer_focused() {
@@ -83,7 +83,7 @@ async fn session_row_press_and_pending_load_keep_the_composer_focused() {
     let messages = click_at(&mut ui, &mut renderer, bounds.label("Deferred").center());
     assert!(matches!(
         messages.as_slice(),
-        [Message::ToggleFiled(FilingKind::Deferred)]
+        [Message::ToggleCollapsed(CollapsedSection::Deferred)]
     ));
     let mut bounds = UiBounds::default();
     ui.operate(&renderer, &mut bounds);
@@ -107,9 +107,10 @@ async fn filed_list_scrollbars_do_not_blur_the_composer() {
     let mut app = app();
     let project = app.smoke_dir.clone().unwrap();
     stored_session(&mut app, project.clone()).await;
-    for kind in FILED_KINDS {
-        app.filed[kind as usize].open = true;
-        for _ in 0..FILED_VISIBLE_ROWS * 2 {
+    for kind in [FilingKind::Deferred, FilingKind::Settled] {
+        let section = CollapsedSection::from_filing(kind);
+        app.collapsed[section as usize].open = true;
+        for _ in 0..COLLAPSED_VISIBLE_ROWS * 2 {
             let mut session = Session::new(project.clone(), &app.catalog.settings);
             session.filing = Some(Filing {
                 kind,
@@ -123,10 +124,10 @@ async fn filed_list_scrollbars_do_not_blur_the_composer() {
     let size = iced::Size::new(app.window_width, app.window_height);
     let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
     ui.operate(&renderer, &mut focusable::focus("composer".into()));
-    for kind in FILED_KINDS {
+    for section in CollapsedSection::FILED {
         let mut bounds = UiBounds::default();
         ui.operate(&renderer, &mut bounds);
-        let list = bounds.scroll(filed_scroll_id(kind));
+        let list = bounds.scroll(section.scroll_id());
         let track = iced::Point::new(
             list.x + list.width - theme::SCROLLBAR_WIDTH / 2.,
             list.y + list.height - 1.,
@@ -134,9 +135,9 @@ async fn filed_list_scrollbars_do_not_blur_the_composer() {
         let messages = click_at(&mut ui, &mut renderer, track);
         assert!(
             messages.iter().any(|message| {
-                matches!(message, Message::FiledScroll(k, _, offset, _) if *k == kind && *offset > 0.)
+                matches!(message, Message::CollapsedScroll(s, _, offset, _) if *s == section && *offset > 0.)
             }),
-            "track click must scroll {kind:?}: {messages:?}"
+            "track click must scroll {section:?}: {messages:?}"
         );
         let mut bounds = UiBounds::default();
         ui.operate(&renderer, &mut bounds);

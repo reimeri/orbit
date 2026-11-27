@@ -73,7 +73,9 @@ process-wide startup environment variable is needed.
 
 The sidebar lists **Needs attention** (pending questions and errors) first, then
 **Working**, then **Sessions** (including unchecked completions). Ordering within
-each section is unchanged.
+each section is unchanged. Enable **Hide working sessions** in General settings to
+move Working into a collapsible section above Deferred and Settled. Search expands
+matching sections without changing their normal expansion state.
 
 Session rows have a subtle blue moving wave while the main agent or its children
 are working. A pending questionnaire takes priority and freezes the wave in yellow;
