@@ -1,6 +1,44 @@
 use super::*;
 
 #[tokio::test]
+async fn compaction_progress_follows_the_chat_tail_until_the_completion_notice() {
+    let mut app = app();
+    let path = app.smoke_dir.clone().unwrap();
+    stored_session(&mut app, path).await;
+    let h = app.harness.clone().unwrap();
+    let id = app.selected.clone().unwrap();
+    h.edit(&id, |s| s.accept("Review this change".into()))
+        .unwrap();
+    app.refresh();
+
+    let progress = "Compacting context…";
+    assert!(!chat_text(&app).contains(progress));
+    for status in [
+        ConversationStatus::CompactingContext,
+        ConversationStatus::RecoveringContext,
+    ] {
+        app.current_status = status;
+        let chat = chat_text(&app);
+        assert!(
+            chat.split_once("Review this change")
+                .unwrap()
+                .1
+                .contains(progress)
+        );
+    }
+
+    h.edit(&id, |s| {
+        s.entries
+            .push(Entry::new(EntryKind::Notice, "Context compacted."))
+    })
+    .unwrap();
+    app.refresh();
+    let chat = chat_text(&app);
+    assert!(chat.contains("Context compacted."));
+    assert!(!chat.contains(progress));
+}
+
+#[tokio::test]
 async fn long_user_prompts_wrap_within_the_right_two_thirds_only() {
     let mut app = app();
     let mut session = Session::new("/chat".into(), &app.catalog.settings);

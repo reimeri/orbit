@@ -1491,6 +1491,11 @@ impl Harness {
                     "Context compacted automatically. The complete transcript is preserved."
                 },
             ));
+            conversation.set_status(if manual {
+                ConversationStatus::Ready
+            } else {
+                ConversationStatus::Thinking
+            });
             session.input.len()
         };
         conversation.save_async().await?;

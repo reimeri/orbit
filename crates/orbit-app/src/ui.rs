@@ -40,7 +40,7 @@ use iced::{
 use orbit_core::CancellationToken;
 use orbit_core::{
     agent::{
-        FilingAction, FilingOutcome, Harness,
+        ConversationStatus, FilingAction, FilingOutcome, Harness,
         subagents::{ChildStatus, Profile, RunInfo, RunKey},
     },
     auth::Login,
@@ -70,6 +70,7 @@ use unicode_segmentation::UnicodeSegmentation;
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum TranscriptKey {
     ForkPoint,
+    Compacting,
     Top,
     Entry {
         session: String,
@@ -194,6 +195,7 @@ pub struct App {
     catalog: Catalog,
     sessions: Vec<SessionSummary>,
     current_session: Option<Session>,
+    current_status: ConversationStatus,
     draft_session: Option<Session>,
     new_draft: NewSessionDraft,
     new_draft_dirty: bool,
@@ -559,6 +561,7 @@ impl App {
             catalog,
             sessions: vec![],
             current_session: None,
+            current_status: ConversationStatus::Ready,
             draft_session: None,
             new_draft,
             new_draft_dirty: false,
@@ -804,6 +807,7 @@ impl App {
         let h = self.harness.as_ref().expect("harness");
         let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
             if self.current_session.take().is_some() {
+                self.current_status = ConversationStatus::Ready;
                 self.find = None;
                 self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
                 self.activity = activity::Projection::default();
@@ -884,6 +888,7 @@ impl App {
             }
         }
         let bookmark = self.chat_positions.remove(&snapshot.id);
+        self.current_status = conversation.status();
         self.current_session = Some(snapshot);
         self.find_sync();
         self.acknowledge_focused_completion();
@@ -4025,7 +4030,12 @@ impl App {
         let Some(session) = self.current() else {
             return self.new_session();
         };
-        let chat: Element<'_, Message> = if session.entries.is_empty()
+        let compacting = matches!(
+            self.current_status,
+            ConversationStatus::CompactingContext | ConversationStatus::RecoveringContext
+        );
+        let chat: Element<'_, Message> = if !compacting
+            && session.entries.is_empty()
             && session.child.is_none()
             && session.origin.is_none()
         {
@@ -4115,6 +4125,15 @@ impl App {
                     .height((self.transcript.total() - self.transcript.prefix(range.end)).max(0.))
                     .into(),
             ));
+            if compacting {
+                children.push((
+                    TranscriptKey::Compacting,
+                    text(ConversationStatus::CompactingContext.to_string())
+                        .size(12)
+                        .style(theme::muted)
+                        .into(),
+                ));
+            }
             let transcript = crate::keyed_column::keyed_column(children);
             let content = crate::transcript_viewport::observe(
                 self.chat_lane(
@@ -4301,7 +4320,7 @@ impl App {
                 )
                 .push(space().height(gap));
         }
-        let compacting = self
+        let manual_compaction = self
             .harness
             .as_ref()
             .and_then(|h| h.get(&session.id))
@@ -4310,7 +4329,7 @@ impl App {
             (Icon::LoaderCircle, "Sending message…")
         } else if self.send_after_import.is_some() {
             (Icon::LoaderCircle, "Waiting for attachments…")
-        } else if compacting {
+        } else if manual_compaction {
             (Icon::ArrowUp, "Wait for compaction to finish")
         } else if running {
             (Icon::ArrowRight, "Steer agent")
@@ -4332,7 +4351,7 @@ impl App {
                     .padding(5)
                     .style(secondary)
                     .on_press_maybe(
-                        (!compacting
+                        (!manual_compaction
                             && !self.io_busy
                             && self.send_after_import.is_none()
                             && (!self.editor.is_empty()
@@ -4348,7 +4367,7 @@ impl App {
             .on_press(Message::FocusComposer)
             .interaction(mouse::Interaction::Text);
         let editor = container(column![
-            self.composer_editor(&session.id, running && !compacting),
+            self.composer_editor(&session.id, running && !manual_compaction),
             toolbar
         ])
         .style(card);
