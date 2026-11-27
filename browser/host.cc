@@ -3,7 +3,9 @@
 #include "include/cef_app.h"
 #include "include/cef_client.h"
 #include "include/cef_cookie.h"
+#include "include/cef_devtools_message_observer.h"
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
@@ -13,6 +15,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <png.h>
+#include <set>
 #include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
@@ -22,7 +25,8 @@ using B = CefRefPtr<CefBrowser>;
 using F = CefRefPtr<CefFrame>;
 constexpr size_t limit = 4096, capacity = 64 + limit * limit * 4;
 struct Header {
-  uint32_t seq, width, height, lease;
+  uint32_t seq, width, height, lease, view_width, view_height;
+  float scale;
 };
 static void emit(const Json &j) {
   std::cout << j.dump(-1, ' ', false, Json::error_handler_t::replace) << '\n'
@@ -36,6 +40,8 @@ public:
   void Execute() override { work(); }
   IMPLEMENT_REFCOUNTING(Work);
 };
+#include "semantics.h"
+
 class Flushed final : public CefCompletionCallback {
   B browser;
 
@@ -63,6 +69,7 @@ class Tab final : public CefClient,
 public:
   uint64_t id;
   B browser;
+  CefRefPtr<Semantics> semantics;
   std::vector<Json> deferred;
   void OnAfterCreated(B b) override {
     browser = b;
@@ -77,6 +84,22 @@ public:
   Header *mem;
   int w = 960, h = 720;
   float scale = 1;
+  bool fixed = false;
+  int panel_w = w, panel_h = h;
+  float panel_scale = scale;
+  bool base_ready = false;
+  void size(int width, int height, float density) {
+    if (width == w && height == h && density == scale)
+      return;
+    base_ready = false;
+    w = width;
+    h = height;
+    scale = density;
+    auto host = browser->GetHost();
+    host->NotifyScreenInfoChanged();
+    host->WasResized();
+    host->Invalidate(PET_VIEW);
+  }
   bool visible = false, allowed = true, closing = false;
   std::string url = "about:blank", title;
   std::map<uint64_t, std::string> captures;
@@ -140,10 +163,24 @@ public:
     if ((!visible && captures.empty()) || closing || width <= 0 ||
         height <= 0 || width > int(limit) || height > int(limit))
       return;
+    if (type == PET_VIEW && b->GetHost()->GetZoomLevel() != 0) {
+      b->GetHost()->SetZoomLevel(0);
+      b->GetHost()->Invalidate(PET_VIEW);
+      return;
+    }
+    // Compositor callbacks may still describe the old surface after WasResized.
+    if ((type == PET_VIEW && (std::abs(width - w * scale) >= 1 ||
+                              std::abs(height - h * scale) >= 1)) ||
+        (type == PET_POPUP && !base_ready))
+      return;
     std::atomic_ref<uint32_t> seq(mem->seq);
     auto dst = reinterpret_cast<unsigned char *>(mem) + 64;
     seq.fetch_add(1);
     if (type == PET_VIEW) {
+      base_ready = true;
+      mem->view_width = w;
+      mem->view_height = h;
+      mem->scale = scale;
       mem->width = width;
       mem->height = height;
       memcpy(dst, pixels, size_t(width) * height * 4);
@@ -193,6 +230,8 @@ public:
   }
   void OnAddressChange(B b, F f, const CefString &u) override {
     if (f->IsMain()) {
+      if (semantics && url != u.ToString())
+        semantics->navigation();
       url = u.ToString();
       state(b);
     }
@@ -211,6 +250,16 @@ public:
     if (!loading && !captures.empty())
       b->GetHost()->Invalidate(PET_VIEW);
   }
+  void OnLoadStart(B b, F f, TransitionType) override {
+    if (f->IsMain()) {
+      if (semantics)
+        semantics->navigation();
+      // Orbit has no page zoom. Normalize any site zoom left by an older
+      // Orbit build in this project profile, in Fit as well as fixed mode.
+      if (b->GetHost()->GetZoomLevel() != 0)
+        b->GetHost()->SetZoomLevel(0);
+    }
+  }
   void OnLoadError(B, F f, ErrorCode code, const CefString &text,
                    const CefString &) override {
     if (f->IsMain() && code != ERR_ABORTED)
@@ -218,6 +267,8 @@ public:
   }
   void OnRenderProcessTerminated(B, TerminationStatus, int,
                                  const CefString &why) override {
+    if (semantics)
+      semantics->clear("Page process terminated");
     cancel_captures("Page process terminated");
     emit({{"tab", id},
           {"event", "error"},
@@ -246,6 +297,8 @@ public:
     if (closing)
       return;
     closing = true;
+    if (semantics)
+      semantics->clear("Browser closed");
     cancel_captures("Browser closed");
     auto host = browser->GetHost();
     auto cookies = host->GetRequestContext()->GetCookieManager(nullptr);
@@ -254,6 +307,8 @@ public:
   }
   void OnBeforeClose(B) override {
     cancel_captures("Browser closed");
+    if (semantics)
+      semantics->close();
     browser = nullptr;
     tabs.erase(id);
     emit({{"tab", id}, {"event", "closed"}});
@@ -325,6 +380,8 @@ static void command(Json j) {
       t->allowed = j.at("allow");
       emit({{"tab", id}, {"event", "control"}, {"epoch", j.at("epoch")}});
       if (!t->allowed) {
+        if (t->semantics)
+          t->semantics->clear("User took control");
         t->cancel_captures("User took control");
         t->refresh_visibility();
       }
@@ -334,11 +391,43 @@ static void command(Json j) {
         host->SetFocus(false);
       t->refresh_visibility();
     } else if (op == "size") {
-      t->w = j.at("width");
-      t->h = j.at("height");
-      t->scale = j.at("scale");
-      host->NotifyScreenInfoChanged();
-      host->WasResized();
+      t->panel_w = j.at("width");
+      t->panel_h = j.at("height");
+      t->panel_scale = j.at("scale");
+      if (!t->fixed)
+        t->size(t->panel_w, t->panel_h, t->panel_scale);
+    } else if (op == "viewport") {
+      const auto &fixed = j.at("fixed");
+      if (!fixed.is_null()) {
+        t->fixed = true;
+        t->size(fixed.at(0), fixed.at(1), 1);
+      } else if (t->fixed) {
+        t->fixed = false;
+        t->size(t->panel_w, t->panel_h, t->panel_scale);
+      }
+      emit({{"tab", id}, {"event", "viewport"}, {"fixed", fixed}});
+      if (req)
+        emit({{"req", req},
+              {"url", t->url},
+              {"mode", t->fixed ? "fixed" : "fit"},
+              {"width", t->w},
+              {"height", t->h}});
+      return;
+    } else if (op == "inspect" || op == "wait" || op == "activate" ||
+               op == "fill") {
+      if (!t->semantics) {
+        Tab *page = t.get();
+        t->semantics = new Semantics(
+            b,
+            [page](uint32_t epoch) {
+              return !page->closing && page->allowed &&
+                     epoch ==
+                         std::atomic_ref<uint32_t>(page->mem->lease).load();
+            },
+            [page] { return page->url; });
+      }
+      t->semantics->start(std::move(j));
+      return;
     } else if (op == "navigate") {
       std::string u = j.at("url");
       if (!web(u))
@@ -352,9 +441,6 @@ static void command(Json j) {
       b->Reload();
     else if (op == "stop")
       b->StopLoad();
-    else if (op == "zoom")
-      host->SetZoomLevel(
-          std::clamp(host->GetZoomLevel() + j.at("step").get<int>(), -4., 5.));
     else if (op == "find")
       host->Find(j.at("text").get<std::string>(), true, false,
                  j.value("next", false));
@@ -419,7 +505,7 @@ static void command(Json j) {
       if (op == "scroll")
         host->SendMouseWheelEvent(e, j.value("dx", 0), j.value("dy", 0));
       else if (op == "move")
-        host->SendMouseMoveEvent(e, false);
+        host->SendMouseMoveEvent(e, j.value("leave", false));
       else {
         host->SetFocus(true);
         if (op != "up")
@@ -432,6 +518,8 @@ static void command(Json j) {
       t->refresh_visibility();
       return;
     } else if (op == "cancel") {
+      if (t->semantics)
+        t->semantics->cancel(j.at("ticket"));
       t->captures.erase(j.at("ticket").get<uint64_t>());
       t->refresh_visibility();
     } else

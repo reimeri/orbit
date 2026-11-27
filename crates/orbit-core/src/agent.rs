@@ -1710,7 +1710,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let h = Harness::new(Store::open(dir.path().join("state")).unwrap(), vec![]).unwrap();
         let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
-        let out=c.code.exec_output("// @exec: {\"yield_time_ms\":30000}\nimage(await tools.browser({action:'screenshot'}));","browser-tool",&CancellationToken::new()).unwrap();
+        let out=c.code.exec_output("// @exec: {\"yield_time_ms\":30000}\nconst v=await tools.browser({action:'viewport', width:391, height:843}); await tools.browser({action:'wait',url:'about:blank'}); const ax=await tools.browser({action:'inspect'}); const shot=await tools.browser({action:'screenshot'}); if (!ax.nodes.some(n=>n.role==='document') || shot.width!==v.width || shot.height!==843) throw Error('Expected accessibility tree and fixed viewport'); image(shot);","browser-tool",&CancellationToken::new()).unwrap();
         assert_eq!(out.media().len(), 1, "{}", out.summary());
         assert!(out.media()[0].path.is_file());
         h.browser.shutdown().unwrap();

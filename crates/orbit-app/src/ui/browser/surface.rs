@@ -34,10 +34,32 @@ pub(super) struct Surface<'a> {
     pub disabled: bool,
     pub finding: bool,
     pub dip: (u32, u32),
+    pub fixed: Option<(u32, u32)>,
+}
+impl Surface<'_> {
+    // Both drawing and hit-testing use this centered content rectangle. The
+    // outer sensor continues reporting the panel size, including letterboxing.
+    fn preview(&self, bounds: Rectangle) -> Rectangle {
+        let Some((w, h)) = self.fixed else {
+            return bounds;
+        };
+        let scale = (bounds.width / w as f32)
+            .min(bounds.height / h as f32)
+            .min(1.);
+        let size = Size::new(w as f32 * scale, h as f32 * scale);
+        Rectangle::new(
+            Point::new(
+                bounds.center_x() - size.width / 2.,
+                bounds.center_y() - size.height / 2.,
+            ),
+            size,
+        )
+    }
 }
 #[derive(Default)]
 struct Input {
     down: bool,
+    inside: bool,
     mods: keyboard::Modifiers,
     click: Option<iced::advanced::mouse::Click>,
     point: Point,
@@ -140,7 +162,11 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
         _: &iced::Renderer,
         op: &mut dyn Operation,
     ) {
-        op.focusable(Some(&Id::new("browser-page")), layout.bounds(), self);
+        op.focusable(
+            Some(&Id::new("browser-page")),
+            self.preview(layout.bounds()),
+            self,
+        );
     }
     fn update(
         &mut self,
@@ -161,10 +187,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
         if self.disabled {
             return;
         }
-        let bounds = layout.bounds();
+        let bounds = self.preview(layout.bounds());
         let pos = cursor.position_in(bounds);
-        if let Some(p) = pos {
-            state.point = p;
+        if let Some(p) = cursor.position() {
+            state.point = Point::new(p.x - bounds.x, p.y - bounds.y);
+        }
+        let left = state.inside && pos.is_none();
+        if matches!(event, Event::Mouse(_)) {
+            state.inside = pos.is_some();
         }
         let x = (state.point.x * self.dip.0 as f32 / bounds.width) as i32;
         let y = (state.point.y * self.dip.1 as f32 / bounds.height) as i32;
@@ -175,6 +205,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                     if self.focus.0.replace(false) {
                         shell.publish(send(json!({"op":"focus","focus":false})));
                     }
+                    return;
+                }
+                if self.frame.is_none() {
                     return;
                 }
                 self.focus.focus();
@@ -197,10 +230,16 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                 state.down = false;
                 send(json!({"op":"up","x":x,"y":y,"mods":modifiers(state.mods)}))
             }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) if pos.is_some() => send(
-                json!({"op":"move","x":x,"y":y,"mods":modifiers(state.mods)+16*i32::from(state.down)}),
-            ),
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) if pos.is_some() => {
+            Event::Mouse(mouse::Event::CursorMoved { .. })
+                if pos.is_some() || left || state.down =>
+            {
+                send(
+                    json!({"op":"move","leave":pos.is_none(),"x":x,"y":y,"mods":modifiers(state.mods)+16*i32::from(state.down)}),
+                )
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta })
+                if pos.is_some() && self.frame.is_some() =>
+            {
                 let (dx, dy) = match delta {
                     mouse::ScrollDelta::Lines { x, y } => (x * 40., y * 40.),
                     mouse::ScrollDelta::Pixels { x, y } => (*x, *y),
@@ -304,7 +343,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
         if let Some(frame) = self.frame {
             iced_wgpu::primitive::Renderer::draw_primitive(
                 renderer,
-                layout.bounds(),
+                self.preview(layout.bounds()),
                 Pixels(frame.clone()),
             );
         }

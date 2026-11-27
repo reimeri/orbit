@@ -30,7 +30,7 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
                 {
                     return;
                 }
-                let html = r#"<body style="background:#de317a"><input style="position:absolute;right:10px;top:10px;width:60px;height:40px" onkeydown="if(event.keyCode===46)window.bad=true" oninput="if(this.value==='.'&&!window.bad)document.body.style.background='#30c974'">"#;
+                let html = r#"<body style="background:#de317a"><input style="position:absolute;right:10px;top:10px;width:60px;height:40px" onkeydown="if(event.keyCode===46)window.bad=true" oninput="if(this.value==='.'&&!window.bad)document.body.style.background='#30c974'"><button style="position:absolute;left:65%;top:70%;width:80px;height:50px" onclick="document.body.style.background=window.hit?'red':'#31429a';window.hit=true">Open</button>"#;
                 let _=socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{html}",html.len()).as_bytes()).await;
             });
         }
@@ -45,6 +45,8 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
     // surface needs its own resize, not just the first one measured by iced.
     let mut switched = false;
     let mut clicked = false;
+    let mut fit_bounds = None;
+    let mut preview_clicked = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         app.refresh_browser();
@@ -92,7 +94,60 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
         }
         if pixel == [48, 201, 116] {
             assert!(clicked);
-            break;
+            if fit_bounds.is_none() {
+                fit_bounds = Some(page);
+                b.user(
+                    &first,
+                    serde_json::json!({"op":"viewport","fixed":[900,1100]}),
+                )
+                .unwrap();
+            } else if b.status(&first).viewport.is_some()
+                && !preview_clicked
+                && page != fit_bounds.unwrap()
+            {
+                // The device is taller than the panel. Hit the off-center page
+                // control through the scaled image, not through the letterbox.
+                let fit = fit_bounds.unwrap();
+                assert!(page.height < fit.height || page.width < fit.width);
+                assert!((page.width / page.height - 900. / 1100.).abs() < 0.002);
+                let target = iced::Point::new(
+                    page.x + page.width * (0.65 + 40. / 900.),
+                    page.y + page.height * (0.70 + 25. / 1100.),
+                );
+                let margin = if page.y > fit.y + 1. {
+                    iced::Point::new(target.x, fit.y + 1.)
+                } else {
+                    iced::Point::new(fit.x + 1., target.y)
+                };
+                for (e, p) in [
+                    (mouse::Event::ButtonPressed(mouse::Button::Left), target),
+                    (mouse::Event::CursorMoved { position: margin }, margin),
+                    (mouse::Event::ButtonReleased(mouse::Button::Left), margin),
+                ] {
+                    ui.update(
+                        &[iced::Event::Mouse(e)],
+                        mouse::Cursor::Available(p),
+                        &mut renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut messages,
+                    );
+                }
+                messages.extend(click_at(&mut ui, &mut renderer, target));
+                preview_clicked = true;
+            }
+        }
+        if pixel == [49, 66, 154] {
+            assert!(preview_clicked);
+            if b.status(&first).viewport.is_none() && Some(page) == fit_bounds {
+                break;
+            }
+            if app.browser.menu.is_none() {
+                messages.push(Message::Browser(Action::Menu(Some(browser::Menu::More))));
+            } else if let Some((_, bounds)) =
+                layout.labels.iter().find(|(s, _)| s == "Fit to panel")
+            {
+                messages.extend(click_at(&mut ui, &mut renderer, bounds.center()));
+            }
         }
         let pink = pixel == [222, 49, 122];
         if switched && !clicked && pink {
@@ -238,6 +293,16 @@ async fn native_browser_toolbar_preserves_page_until_close() {
     let find = probe(&app, None).0;
     assert_eq!(find.browser_page, Some(page));
     assert_eq!(find.browser_field.unwrap().center_y(), field.center_y());
+    // An unwritten surface is not an input target. Wait for the blank tab's
+    // first real frame, as the UI's browser subscription does in production.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while browser.frame(&id, None).unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    app.refresh_browser();
     for m in probe(&app, Some(page.center())).1 {
         dispatch(&mut app, m).await;
     }

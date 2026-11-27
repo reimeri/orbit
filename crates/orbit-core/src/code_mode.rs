@@ -669,6 +669,9 @@ fn run_cell(
                                     match name.as_str() {
                                     "browser" => {
                                         let (mut value,png)=shell.runtime().block_on(browser.as_ref().expect("validated browser").call(&args,&token))?;
+                                        if value.get("nodes").is_some() {
+                                            crate::browser::externalize_snapshot(&mut value);
+                                        }
                                         display=Some(value.to_string());
                                         if let Some(png)=png {
                                             let media=images.as_ref().expect("browser media").media.image(&png)?;

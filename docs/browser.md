@@ -6,7 +6,7 @@ and press Enter. Back, forward and stop/reload sit to the left of the address;
 the driver menu, **⋯** (browser options) and **×** (hide panel) sit to its right.
 On narrow panels the driver menu shows just the bot or person icon.
 
-Use **⋯** to find text, zoom, expand or restore the panel, change logins, or
+Use **⋯** to find text, expand or restore the panel, change logins, or
 close the tab. With the page focused, Ctrl+L selects the address and Ctrl+F
 replaces it with Find. Press Enter for the next match; dismiss Find with its
 × or Escape to restore the address. Clipboard shortcuts exchange plain text
@@ -57,6 +57,48 @@ with `x,y,dy` (negative is down). Back, forward, stop and reload are also
 available. Agent tool calls and requested screenshots become session history;
 manual page input is not recorded as tool calls. Treat whatever the page
 shows as untrusted content.
+
+### Responsive layout and semantic actions
+
+The viewport normally fits the panel. To test a responsive layout, request an
+exact width and height (1–4096 CSS pixels per side). Page zoom is always 100%.
+In fixed mode, one screenshot pixel equals one CSS pixel. The desktop panel
+centers and scales the preview down if needed; this does **not** change the
+page size, user agent, or touch capabilities. The toolbar displays the fixed
+dimensions. Hiding, expanding, resizing or switching sessions doesn't reset
+them. Use **⋯ → Fit to panel** or the tool to restore normal sizing; closing
+the tab discards the override.
+
+```js
+await tools.browser({action:"viewport", width:390, height:844});
+await tools.browser({action:"wait", role:"button", name:"Menu"});
+const tree = await tools.browser({action:"inspect"});
+// For a large page, read tree.snapshot_file instead (complete JSON in /tmp).
+const menu = tree.nodes.find(n => n.role === "button" && n.name === "Menu");
+await tools.browser({action:"click", ref:menu.ref});
+await tools.browser({action:"wait", role:"link", name:"Guide"});
+image(await tools.browser({action:"screenshot"}));
+await tools.browser({action:"viewport", mode:"fit"});
+```
+
+- **Inspect** returns the main document's accessibility tree in reading order
+  with depth, role, accessible name, and relevant states. Text-field values
+  and editable contents aren't exported. Labels and ordinary visible text
+  still come from the page; this is not a secret scanner. Iframe contents
+  are out of scope; use the screenshot and coordinates there.
+- **Click by ref** activates the referenced HTML element; **fill** takes
+  `ref` and `text`, replaces the contents of an editable text input, textarea
+  or contenteditable, and dispatches input/change events. These are semantic
+  operations, not simulated mouse gestures or physical keystrokes. Use
+  coordinates or keyboard input for custom controls that need those events.
+  Re-inspect after navigation, replacement, a new snapshot, or handoff.
+  A stale ref fails instead of falling back to a similarly named element.
+- **Wait** matches an exact URL, or an exact role and accessible name with
+  `state:"appeared"` (default), `"disappeared"`, or `"enabled"`. Appeared and
+  enabled require at least one match; disappeared requires none. This checks
+  the accessibility tree, not pixel visibility or network idleness. Timeout
+  defaults to 5 seconds (`timeout_ms`: 1–60,000). User takeover cancels pending
+  waits and blocks inspection, element actions and viewport changes too.
 
 ## Packaging and checks
 

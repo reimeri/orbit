@@ -11,11 +11,11 @@ let
 in pkgs.stdenv.mkDerivation {
   pname = "orbit-browser";
   inherit (cef) version;
-  src = ./host.cc;
+  src = ./.;
   dontUnpack = true;
   buildInputs = [ pkgs.nlohmann_json pkgs.libpng ];
   buildPhase = ''
-    $CXX -x c++ -std=c++20 -O2 -I${cef} "$src" -x none \
+    $CXX -x c++ -std=c++20 -O2 -I${cef} "$src/host.cc" -x none \
       ${wrapper}/lib/libcef_dll_wrapper.a -L${cef}/Release -lcef -lpng -pthread -ldl \
       -Wl,-rpath,'$ORIGIN' -o orbit-browser
   '';

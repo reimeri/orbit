@@ -82,7 +82,7 @@ pub enum Action {
     PageFocus,
     Input(String, Value),
     Nav(&'static str),
-    Zoom(i32),
+    Fit,
     FindFocus,
     Query(String),
     Next,
@@ -234,7 +234,10 @@ impl App {
                 }
                 json!({"op":op})
             }
-            Action::Zoom(step) => json!({"op":"zoom","step":step}),
+            Action::Fit => {
+                self.browser.menu = None;
+                json!({"op":"viewport","fixed":null})
+            }
             Action::FindFocus => {
                 let _ = b.user(&id, json!({"op":"focus","focus":false}));
                 self.browser.menu = None;
@@ -340,7 +343,12 @@ impl App {
         // Keep the field at the same child index so resizing preserves its focus and selection.
         let mut prefix =
             row![container(widget::rule::vertical(1)).height(16)].align_y(iced::Center);
-        if !compact {
+        if let Some((w, h)) = state.viewport {
+            prefix = prefix.push(icon_tip(
+                container(text(format!("{w}×{h}")).size(11).style(theme::muted)).padding([0, 3]),
+                "Fixed viewport (CSS pixels)",
+            ));
+        } else if !compact {
             prefix = prefix.push(
                 container(
                     if s.find.is_some() {
@@ -441,14 +449,23 @@ impl App {
                 widget::sensor(surface::Surface {
                     id,
                     service: &self.harness.as_ref().unwrap().browser,
-                    frame: s.frame.as_ref(),
+                    frame: s.frame.as_ref().filter(|f| {
+                        f.view == state.viewport.unwrap_or_else(|| s.dip())
+                            && f.scale
+                                == if state.viewport.is_some() {
+                                    1.
+                                } else {
+                                    s.scale
+                                }
+                    }),
                     focus: s.focus.clone(),
                     selection: &state.selection,
                     finding: s.find.is_some(),
                     disabled: s.menu.is_some()
                         || self.modal.is_some()
                         || self.context_menu.is_some(),
-                    dip: s.dip(),
+                    fixed: state.viewport,
+                    dip: state.viewport.unwrap_or_else(|| s.dip()),
                 })
                 .key(state.surface_id)
                 .on_show(resize.clone())
@@ -482,12 +499,6 @@ impl App {
             )],
             Menu::More => column![
                 choice("Find on page", Action::FindFocus),
-                row![
-                    container(text("Zoom").size(13)).width(Fill).padding([0, 9]),
-                    choice("−", Action::Zoom(-1)).width(32),
-                    choice("+", Action::Zoom(1)).width(32)
-                ]
-                .align_y(iced::Center),
                 choice(
                     if s.expanded {
                         "Restore panel size"
@@ -506,7 +517,12 @@ impl App {
                     Action::Menu(Some(Menu::Profile))
                 ),
                 choice("Close tab", Action::Close),
-            ],
+            ]
+            .extend(
+                s.status
+                    .viewport
+                    .map(|_| choice("Fit to panel", Action::Fit).into()),
+            ),
             Menu::Profile => column![
                 container(text("Replace this tab with a blank page?").size(13)).padding([6, 9]),
                 choice(

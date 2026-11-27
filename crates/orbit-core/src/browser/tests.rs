@@ -89,7 +89,18 @@ async fn fixture() -> String {
                 });
                 let color = if seed || cookie { "#00ff00" } else { "#ff0000" };
                 // A router handles this link without requesting a new document.
-                let body = if req.starts_with("GET /app ") {
+                let body = if req.starts_with("GET /mobile ") {
+                    r#"<!DOCTYPE html><style>@media(min-width:500px){#menu{display:none}}</style>
+                    <h1 id="metrics"></h1><button id="menu" onclick="document.getElementById('links').hidden=false;this.remove()">Menu</button>
+                    <nav id="links" hidden><label>Email<input id="email" value="FORM_VALUE_SECRET"></label>
+                    <input type="password" aria-label="PIN" value="PASSWORD_SECRET">
+                    <button aria-labelledby="email">Alias</button><button id="apply" disabled>Apply</button><a href="/guide">Guide</a>
+                    <iframe srcdoc="<button>Frame-only action</button>"></iframe></nav>
+                    <script>onresize=()=>metrics.textContent=[innerWidth,innerHeight,Math.round(devicePixelRatio*100)/100].join('/');
+                    onresize(); email.oninput=()=>setTimeout(()=>apply.disabled=email.value!=='reader@example.org',150);</script>"#.into()
+                } else if req.starts_with("GET /guide ") {
+                    "<h1>Destination guide</h1>".into()
+                } else if req.starts_with("GET /app ") {
                     r#"<!doctype html><body style="background:navy">
                     <a href="/terms" style="display:block;padding:20px">Terms</a>
                     <script>
@@ -266,4 +277,143 @@ async fn native_browser_session_lifecycle() {
         .unwrap();
     see(&incognito, &check, [255, 0, 0]).await;
     fresh.browser.shutdown().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires packaged CEF helper and Linux renderer sandbox; run just browser-smoke"]
+async fn native_browser_responsive_accessibility_and_waits() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = crate::store::Store::open(dir.path().join("state"))?;
+    let session = crate::store::Session::new(dir.path().to_owned(), &Default::default());
+    store.save_session(&session)?;
+    let tab = AgentTab {
+        browser: Browser::new(store)?,
+        id: session.id,
+        project: dir.path().into(),
+    };
+    let server = fixture().await;
+    let page = format!("{server}/mobile");
+    let dest = format!("{server}/guide");
+    let wait = |role: &str, name: &str| json!({"action":"wait","role":role,"name":name});
+    let inspect = json!({"action":"inspect"});
+    let reference = |v: &Value, role: &str, name: &str| {
+        v["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["role"] == role && n["name"] == name)
+            .unwrap_or_else(|| panic!("Missing {role} {name}: {v}"))["ref"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    tab.browser.show(&tab.id, &tab.project)?;
+    tab.browser.user(
+        &tab.id,
+        json!({"op":"size","width":900,"height":650,"scale":1}),
+    )?;
+    act(&tab, json!({"action":"navigate","url":page})).await?;
+    act(&tab, wait("heading", "900/650/1")).await?;
+    act(&tab, json!({"action":"viewport","width":390,"height":844})).await?;
+    tab.browser.user(
+        &tab.id,
+        json!({"op":"size","width":960,"height":600,"scale":1.5}),
+    )?;
+    act(&tab, wait("heading", "390/844/1")).await?;
+    assert_eq!(tab.browser.status(&tab.id).viewport, Some((390, 844)));
+    let (shot, _) = act(&tab, json!({"action":"screenshot"})).await?;
+    assert_eq!(
+        (shot["width"].as_u64(), shot["height"].as_u64()),
+        (Some(390), Some(844))
+    );
+    let tree = act(&tab, inspect.clone()).await?.0;
+    let menu = reference(&tree, "button", "Menu");
+    act(&tab, json!({"action":"click","ref":menu})).await?;
+    act(
+        &tab,
+        json!({"action":"wait","role":"button","name":"Menu","state":"disappeared"}),
+    )
+    .await?;
+    assert!(
+        act(&tab, json!({"action":"click","ref":menu}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("inspect again")
+    );
+    let tree = act(&tab, inspect.clone()).await?.0;
+    for private in ["FORM_VALUE_SECRET", "PASSWORD_SECRET", "Frame-only action"] {
+        assert!(!tree.to_string().contains(private));
+    }
+    let email = reference(&tree, "textbox", "Email");
+    act(
+        &tab,
+        json!({"action":"fill","ref":email,"text":"reader@example.org"}),
+    )
+    .await?;
+    act(
+        &tab,
+        json!({"action":"wait","role":"button","name":"Apply","state":"enabled"}),
+    )
+    .await?;
+    let link = reference(&tree, "link", "Guide");
+    act(&tab, json!({"action":"click","ref":link})).await?;
+    act(&tab, json!({"action":"wait","url":dest})).await?;
+    act(&tab, wait("heading", "Destination guide")).await?;
+    assert!(
+        act(
+            &tab,
+            json!({"action":"fill","ref":email,"text":"wrong document"})
+        )
+        .await
+        .is_err()
+    );
+    let timeout = act(
+        &tab,
+        json!({"action":"wait","role":"heading","name":"Not here","timeout_ms":100}),
+    )
+    .await
+    .unwrap_err();
+    assert!(timeout.to_string().contains("Not here"));
+    act(&tab, json!({"action":"viewport","mode":"fit"})).await?;
+    // Fit uses the latest panel size/scale, not the size at the time of override.
+    let (shot, _) = act(&tab, json!({"action":"screenshot"})).await?;
+    assert_eq!(
+        (shot["width"].as_u64(), shot["height"].as_u64()),
+        (Some(1440), Some(900))
+    );
+    let pending = act(
+        &tab,
+        json!({"action":"wait","role":"heading","name":"Not here","timeout_ms":60000}),
+    );
+    tokio::pin!(pending);
+    assert!(futures_util::poll!(&mut pending).is_pending());
+    tab.browser.control(&tab.id, true)?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await?
+            .is_err()
+    );
+    assert!(
+        act(&tab, inspect)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("control")
+    );
+    tab.browser.shutdown()
+}
+
+#[test]
+fn oversized_snapshot_is_complete_private_json() {
+    use std::os::unix::fs::PermissionsExt;
+    let original = json!({"url":"about:blank","nodes":[{"role":"text","name":"世界".repeat(20_000)},{"role":"button","ref":"last"}]});
+    let mut value = original.clone();
+    externalize_snapshot(&mut value);
+    let file = Path::new(value["snapshot_file"].as_str().unwrap());
+    assert!(file.starts_with("/tmp"));
+    let bytes = fs::read(file).unwrap();
+    assert_eq!(value["bytes"], bytes.len());
+    assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o077, 0);
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), original);
 }

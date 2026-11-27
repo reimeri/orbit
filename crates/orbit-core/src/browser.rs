@@ -26,6 +26,7 @@ pub const MAX_SIDE: u32 = 4096;
 #[derive(Default, Clone, Debug)]
 pub struct Status {
     pub surface_id: Option<u64>,
+    pub viewport: Option<(u32, u32)>,
     pub handoff_pending: bool,
     pub selection: Arc<str>,
     pub url: String,
@@ -43,6 +44,8 @@ pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub bgra: Arc<Vec<u8>>,
+    pub view: (u32, u32),
+    pub scale: f32,
 }
 struct Surface {
     id: u64,
@@ -454,6 +457,10 @@ impl Browser {
                     a.error = None;
                 }
             }
+            Some("viewport") => {
+                t.status.viewport =
+                    serde_json::from_value(v["fixed"].clone()).expect("native viewport");
+            }
             Some("control") => {
                 if v["epoch"].as_u64() == Some(u64::from(t.epoch)) {
                     t.status.handoff_pending = false;
@@ -490,7 +497,7 @@ impl Browser {
         else {
             return Ok(None);
         };
-        let mut header = [0u8; 12];
+        let mut header = [0u8; 28];
         let file = f.file.as_file();
         file.read_exact_at(&mut header, 0)?;
         let seq = u32::from_ne_bytes(header[0..4].try_into()?);
@@ -508,11 +515,19 @@ impl Browser {
         file.read_exact_at(&mut pixels, 64)?;
         let mut end = [0; 4];
         file.read_exact_at(&mut end, 0)?;
-        Ok((u32::from_ne_bytes(end) == seq).then(|| Frame {
+        if u32::from_ne_bytes(end) != seq {
+            return Ok(None);
+        }
+        Ok(Some(Frame {
             key,
             width: w,
             height: h,
             bgra: Arc::new(pixels),
+            view: (
+                u32::from_ne_bytes(header[16..20].try_into()?),
+                u32::from_ne_bytes(header[20..24].try_into()?),
+            ),
+            scale: f32::from_ne_bytes(header[24..28].try_into()?),
         }))
     }
 }
@@ -590,17 +605,56 @@ pub fn address(input: &str) -> Result<String> {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum AgentAction {
-    Navigate { url: String },
+    Navigate {
+        url: String,
+    },
     Screenshot,
     Back,
     Forward,
     Reload,
     Stop,
-    Click { x: i32, y: i32 },
-    Type { text: String },
-    Scroll { x: i32, y: i32, dy: i32 },
-    Key { key: String },
+    Click {
+        x: Option<i32>,
+        y: Option<i32>,
+        r#ref: Option<String>,
+    },
+    Fill {
+        r#ref: String,
+        text: String,
+    },
+    Inspect,
+    Viewport {
+        width: Option<u32>,
+        height: Option<u32>,
+        mode: Option<String>,
+    },
+    Wait {
+        role: Option<String>,
+        name: Option<String>,
+        state: Option<WaitState>,
+        url: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    Type {
+        text: String,
+    },
+    Scroll {
+        x: i32,
+        y: i32,
+        dy: i32,
+    },
+    Key {
+        key: String,
+    },
 }
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WaitState {
+    Appeared,
+    Disappeared,
+    Enabled,
+}
+
 #[derive(Clone)]
 pub(crate) struct AgentTab {
     pub browser: Arc<Browser>,
@@ -621,6 +675,7 @@ impl AgentTab {
                     .tempdir_in(self.browser.store.root())
             })
             .transpose()?;
+        let mut timeout = Duration::from_secs(20);
         let mut msg = match a {
             AgentAction::Back => json!({"op":"back"}),
             AgentAction::Forward => json!({"op":"forward"}),
@@ -630,7 +685,51 @@ impl AgentTab {
             AgentAction::Screenshot => {
                 json!({"op":"screenshot","file":capture.as_ref().unwrap().path().join("page.png")})
             }
-            AgentAction::Click { x, y } => json!({"op":"click","x":x,"y":y}),
+            AgentAction::Click { x, y, r#ref } => match (x, y, r#ref) {
+                (Some(x), Some(y), None) => json!({"op":"click","x":x,"y":y}),
+                (None, None, Some(r)) => json!({"op":"activate","ref":r}),
+                _ => bail!("Click requires either x and y or ref"),
+            },
+            AgentAction::Fill { r#ref, text } => json!({"op":"fill","ref":r#ref,"text":text}),
+            AgentAction::Inspect => {
+                json!({"op":"inspect","snapshot":uuid::Uuid::new_v4().simple().to_string()})
+            }
+            AgentAction::Viewport {
+                width,
+                height,
+                mode,
+            } => match (width, height, mode.as_deref()) {
+                (Some(w), Some(h), None)
+                    if (1..=MAX_SIDE).contains(&w) && (1..=MAX_SIDE).contains(&h) =>
+                {
+                    json!({"op":"viewport","fixed":[w,h]})
+                }
+                (None, None, Some("fit")) => json!({"op":"viewport","fixed":null}),
+                _ => bail!("Specify width and height in 1..={MAX_SIDE}, or mode: fit"),
+            },
+            AgentAction::Wait {
+                role,
+                name,
+                state,
+                url,
+                timeout_ms,
+            } => {
+                let ms = timeout_ms.unwrap_or(5_000);
+                ensure!(
+                    (1..=60_000).contains(&ms),
+                    "timeout_ms must be in 1..=60000"
+                );
+                timeout = Duration::from_millis(ms) + Duration::from_secs(20);
+                match (role, name, state, url) {
+                    (None, None, None, Some(url)) => {
+                        json!({"op":"wait","url":if url=="about:blank"{url}else{address(&url)?},"timeout_ms":ms})
+                    }
+                    (Some(role), Some(name), state, None) if !role.is_empty() => {
+                        json!({"op":"wait","role":role,"name":name,"state":state.unwrap_or(WaitState::Appeared),"timeout_ms":ms})
+                    }
+                    _ => bail!("Wait requires either an exact URL or an accessible role and name"),
+                }
+            }
             AgentAction::Scroll { x, y, dy } => json!({"op":"scroll","x":x,"y":y,"dy":dy}),
             AgentAction::Type { text } => json!({"op":"text","text":text}),
             AgentAction::Key { key } => {
@@ -662,7 +761,7 @@ impl AgentTab {
             );
             (id, key, epoch, rx)
         };
-        let result = tokio::select! {biased;_=cancel.cancelled()=>Err(anyhow!("Browser action cancelled")), v=tokio::time::timeout(Duration::from_secs(20),rx)=>match v {Ok(Ok(reply))=>reply,Ok(Err(_))=>Err(anyhow!("Browser control revoked or tab closed")),Err(_)=>Err(anyhow!("Browser timed out; check the page before retrying"))}};
+        let result = tokio::select! {biased;_=cancel.cancelled()=>Err(anyhow!("Browser action cancelled")), v=tokio::time::timeout(timeout,rx)=>match v {Ok(Ok(reply))=>reply,Ok(Err(_))=>Err(anyhow!("Browser control revoked or tab closed")),Err(_)=>Err(anyhow!("Browser timed out; check the page before retrying"))}};
         let mut s = self.browser.state.lock().unwrap();
         s.pending.remove(&id);
         if result.is_err() {
@@ -682,6 +781,30 @@ impl AgentTab {
                 .map(|file| fs::read(file.path().join("page.png")))
                 .transpose()?,
         ))
+    }
+}
+
+/// Keep large semantic results out of QuickJS's bounded heap without losing nodes.
+pub(crate) fn externalize_snapshot(value: &mut Value) {
+    let bytes = serde_json::to_vec(value).expect("JSON snapshot");
+    if bytes.len() <= 40_000 {
+        return;
+    }
+    let save = || -> Result<PathBuf> {
+        let mut file = tempfile::Builder::new()
+            .prefix("orbit-browser-ax-")
+            .suffix(".json")
+            .tempfile_in("/tmp")?;
+        file.write_all(&bytes)?;
+        Ok(file.keep()?.1)
+    };
+    match save() {
+        Ok(path) => *value = json!({"url":value["url"],"snapshot_file":path,"bytes":bytes.len()}),
+        Err(e) => {
+            value["warning"] = json!(format!(
+                "Could not preserve snapshot in /tmp: {e}; returning complete snapshot inline"
+            ))
+        }
     }
 }
 
