@@ -623,6 +623,10 @@ enum AgentAction {
         text: String,
     },
     Inspect,
+    Evaluate {
+        expression: String,
+        timeout_ms: Option<u64>,
+    },
     Viewport {
         width: Option<u32>,
         height: Option<u32>,
@@ -668,6 +672,7 @@ impl AgentTab {
         cancel: &CancellationToken,
     ) -> Result<(Value, Option<Vec<u8>>)> {
         let a: AgentAction = serde_json::from_str(args)?;
+        let evaluating = matches!(a, AgentAction::Evaluate { .. });
         let capture = matches!(a, AgentAction::Screenshot)
             .then(|| {
                 tempfile::Builder::new()
@@ -675,7 +680,18 @@ impl AgentTab {
                     .tempdir_in(self.browser.store.root())
             })
             .transpose()?;
-        let mut timeout = Duration::from_secs(20);
+        let ms = match &a {
+            AgentAction::Evaluate { timeout_ms, .. } | AgentAction::Wait { timeout_ms, .. } => {
+                let ms = timeout_ms.unwrap_or(5_000);
+                ensure!(
+                    (1..=60_000).contains(&ms),
+                    "timeout_ms must be in 1..=60000"
+                );
+                ms
+            }
+            _ => 0,
+        };
+        let timeout = Duration::from_millis(ms) + Duration::from_secs(20);
         let mut msg = match a {
             AgentAction::Back => json!({"op":"back"}),
             AgentAction::Forward => json!({"op":"forward"}),
@@ -691,6 +707,13 @@ impl AgentTab {
                 _ => bail!("Click requires either x and y or ref"),
             },
             AgentAction::Fill { r#ref, text } => json!({"op":"fill","ref":r#ref,"text":text}),
+            AgentAction::Evaluate { expression, .. } => {
+                ensure!(
+                    !expression.trim().is_empty(),
+                    "Expected a JavaScript expression"
+                );
+                json!({"op":"evaluate","expression":expression,"timeout_ms":ms})
+            }
             AgentAction::Inspect => {
                 json!({"op":"inspect","snapshot":uuid::Uuid::new_v4().simple().to_string()})
             }
@@ -712,30 +735,33 @@ impl AgentTab {
                 name,
                 state,
                 url,
-                timeout_ms,
-            } => {
-                let ms = timeout_ms.unwrap_or(5_000);
-                ensure!(
-                    (1..=60_000).contains(&ms),
-                    "timeout_ms must be in 1..=60000"
-                );
-                timeout = Duration::from_millis(ms) + Duration::from_secs(20);
-                match (role, name, state, url) {
-                    (None, None, None, Some(url)) => {
-                        json!({"op":"wait","url":if url=="about:blank"{url}else{address(&url)?},"timeout_ms":ms})
-                    }
-                    (Some(role), Some(name), state, None) if !role.is_empty() => {
-                        json!({"op":"wait","role":role,"name":name,"state":state.unwrap_or(WaitState::Appeared),"timeout_ms":ms})
-                    }
-                    _ => bail!("Wait requires either an exact URL or an accessible role and name"),
+                ..
+            } => match (role, name, state, url) {
+                (None, None, None, Some(url)) => {
+                    json!({"op":"wait","url":if url=="about:blank"{url}else{address(&url)?},"timeout_ms":ms})
                 }
-            }
+                (Some(role), Some(name), state, None) if !role.is_empty() => {
+                    json!({"op":"wait","role":role,"name":name,"state":state.unwrap_or(WaitState::Appeared),"timeout_ms":ms})
+                }
+                _ => bail!("Wait requires either an exact URL or an accessible role and name"),
+            },
             AgentAction::Scroll { x, y, dy } => json!({"op":"scroll","x":x,"y":y,"dy":dy}),
             AgentAction::Type { text } => json!({"op":"text","text":text}),
             AgentAction::Key { key } => {
                 json!({"op":"key","code":match key.as_str(){"Enter"=>13,"Tab"=>9,"Escape"=>27,"Backspace"=>8,"Delete"=>46,"ArrowDown"=>40,"ArrowUp"=>38,"ArrowLeft"=>37,"ArrowRight"=>39,_=>bail!("Unknown browser key")}})
             }
         };
+        let eval_file = evaluating
+            .then(|| {
+                tempfile::Builder::new()
+                    .prefix("orbit-browser-eval-")
+                    .tempfile_in("/tmp")
+                    .context("Preparing private result file; expression was not run")
+            })
+            .transpose()?;
+        if let Some(file) = &eval_file {
+            msg["file"] = json!(file.path());
+        }
         let (id, key, epoch, rx) = {
             let mut s = self.browser.state.lock().unwrap();
             ensure!(!cancel.is_cancelled(), "Browser action cancelled");
@@ -762,18 +788,67 @@ impl AgentTab {
             (id, key, epoch, rx)
         };
         let result = tokio::select! {biased;_=cancel.cancelled()=>Err(anyhow!("Browser action cancelled")), v=tokio::time::timeout(timeout,rx)=>match v {Ok(Ok(reply))=>reply,Ok(Err(_))=>Err(anyhow!("Browser control revoked or tab closed")),Err(_)=>Err(anyhow!("Browser timed out; check the page before retrying"))}};
+        // Decode/spill outside the shared browser lock, before the final lease check.
+        let result = result.and_then(|mut value| {
+            if let Some(raw) = value.as_object_mut().unwrap().remove("evaluation_json") {
+                evaluation_value(
+                    &mut value,
+                    raw.as_str().context("Invalid evaluation response")?,
+                );
+            }
+            Ok(value)
+        });
+        let result = result.map_err(|e| {
+            if evaluating {
+                let reason = e.to_string();
+                if reason.len() > INLINE_BROWSER_BYTES {
+                    return anyhow!(
+                        "{}",
+                        crate::output::preserve_text(&reason, INLINE_BROWSER_BYTES)
+                    );
+                }
+            }
+            e
+        });
         let mut s = self.browser.state.lock().unwrap();
         s.pending.remove(&id);
         if result.is_err() {
             let _ = s.send(json!({"op":"cancel","tab":key,"ticket":id}));
         }
-        let mut value = result?;
         ensure!(
             s.tabs.get(&self.id).is_some_and(|t| t.epoch == epoch
                 && !t.status.user_control
                 && t.surface.as_ref().is_some_and(|f| f.id == key)),
             "Browser control was revoked"
         );
+        let mut value = result?;
+        if let Some(kind) = value.as_object_mut().unwrap().remove("eval_spill") {
+            let file = eval_file.expect("evaluation spool");
+            match file.keep() {
+                Ok((_, path)) => {
+                    if kind == "error" {
+                        bail!(
+                            "Page evaluation failed. Complete error ({} bytes): {}",
+                            value["bytes"],
+                            path.display()
+                        );
+                    }
+                    value["result_file"] = json!(path);
+                }
+                Err(e) => {
+                    let raw = fs::read_to_string(e.file.path())
+                        .context("Reading evaluation result after preservation failed")?;
+                    if kind == "error" {
+                        bail!("Could not preserve page error ({}): {raw}", e.error);
+                    }
+                    value["warning"] = json!(format!(
+                        "Could not preserve result ({}); returning complete JSON text inline",
+                        e.error
+                    ));
+                    value["value_json"] = json!(raw);
+                }
+            }
+        }
         value.as_object_mut().unwrap().remove("req");
         Ok((
             value,
@@ -784,21 +859,54 @@ impl AgentTab {
     }
 }
 
+const INLINE_BROWSER_BYTES: usize = 40_000;
+
+fn save_browser_json(prefix: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let mut file = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".json")
+        .tempfile_in("/tmp")?;
+    file.write_all(bytes)?;
+    Ok(file.keep()?.1)
+}
+
+fn evaluation_value(reply: &mut Value, raw: &str) {
+    // Keep the renderer-encoded JSON intact on the wire: an unusually deep
+    // value must not trip the IPC decoder and disconnect every tab.
+    if raw.len() <= INLINE_BROWSER_BYTES {
+        match serde_json::from_str::<Value>(raw) {
+            Ok(v) => {
+                reply["value"] = v;
+                return;
+            }
+            Err(e) => {
+                reply["warning"] = json!(format!(
+                    "Could not decode result inline ({e}); returning original page output"
+                ))
+            }
+        }
+    }
+    match save_browser_json("orbit-browser-eval-", raw.as_bytes()) {
+        Ok(path) => {
+            reply["result_file"] = json!(path);
+            reply["bytes"] = json!(raw.len());
+        }
+        Err(e) => {
+            reply["warning"] = json!(format!(
+                "Could not save result in /tmp: {e}; returning complete JSON text inline"
+            ));
+            reply["value_json"] = json!(raw);
+        }
+    }
+}
+
 /// Keep large semantic results out of QuickJS's bounded heap without losing nodes.
 pub(crate) fn externalize_snapshot(value: &mut Value) {
     let bytes = serde_json::to_vec(value).expect("JSON snapshot");
-    if bytes.len() <= 40_000 {
+    if bytes.len() <= INLINE_BROWSER_BYTES {
         return;
     }
-    let save = || -> Result<PathBuf> {
-        let mut file = tempfile::Builder::new()
-            .prefix("orbit-browser-ax-")
-            .suffix(".json")
-            .tempfile_in("/tmp")?;
-        file.write_all(&bytes)?;
-        Ok(file.keep()?.1)
-    };
-    match save() {
+    match save_browser_json("orbit-browser-ax-", &bytes) {
         Ok(path) => *value = json!({"url":value["url"],"snapshot_file":path,"bytes":bytes.len()}),
         Err(e) => {
             value["warning"] = json!(format!(

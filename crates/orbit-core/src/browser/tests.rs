@@ -98,6 +98,12 @@ async fn fixture() -> String {
                     <iframe srcdoc="<button>Frame-only action</button>"></iframe></nav>
                     <script>onresize=()=>metrics.textContent=[innerWidth,innerHeight,Math.round(devicePixelRatio*100)/100].join('/');
                     onresize(); email.oninput=()=>setTimeout(()=>apply.disabled=email.value!=='reader@example.org',150);</script>"#.into()
+                } else if req.starts_with("GET /eval ") {
+                    r#"<!doctype html><button id="run">Run</button><script>
+                    let runs=0; run.onclick=()=>{ runs++; document.title='Ran '+runs };
+                    const appFixture={name:'main world'};
+                    </script>"#
+                        .into()
                 } else if req.starts_with("GET /guide ") {
                     "<h1>Destination guide</h1>".into()
                 } else if req.starts_with("GET /app ") {
@@ -416,4 +422,133 @@ fn oversized_snapshot_is_complete_private_json() {
     assert_eq!(value["bytes"], bytes.len());
     assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o077, 0);
     assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), original);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires packaged CEF helper and Linux renderer sandbox; run just browser-smoke"]
+async fn native_browser_main_world_evaluation() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = crate::store::Store::open(dir.path().join("state"))?;
+    let session = crate::store::Session::new(dir.path().to_owned(), &Default::default());
+    store.save_session(&session)?;
+    let tab = AgentTab {
+        browser: Browser::new(store)?,
+        id: session.id,
+        project: dir.path().into(),
+    };
+    tab.browser.show(&tab.id, &tab.project)?;
+    let url = format!("{}/eval", fixture().await);
+    act(&tab, json!({"action":"navigate","url":url})).await?;
+    act(&tab, json!({"action":"wait","role":"button","name":"Run"})).await?;
+    let eval = |s: &str| json!({"action":"evaluate","expression":s});
+    let v=act(&tab,eval("new Promise(resolve=>setTimeout(()=>{run.click(); resolve({name:appFixture.name, data:[document.title, runs, null, false]})},80))")).await?.0;
+    assert_eq!(v["url"], url);
+    assert_eq!(
+        v["value"],
+        json!({"name":"main world", "data":["Ran 1",1,null,false]})
+    );
+    // Use inspector data, not the page's JSON serializer or JS promise machinery.
+    let v = act(
+        &tab,
+        eval("(()=>{JSON.stringify=()=>'{broken}';return {fraction:1.4000000000000001}})()"),
+    )
+    .await?
+    .0;
+    assert_eq!(v["value"]["fraction"].as_f64(), Some(1.4000000000000001));
+    for (expression, expected) in [
+        (
+            "(()=>{throw Error('broken calculation')})()",
+            "broken calculation",
+        ),
+        ("Promise.reject(Error('broken later'))", "broken later"),
+        ("({nested: document.body})", "Not JSON"),
+        ("(()=>{const a={};a.self=a;return a})()", "cyclic"),
+        ("[undefined]", "Not JSON"),
+    ] {
+        let err = act(&tab, eval(expression)).await.unwrap_err();
+        assert!(err.to_string().contains(expected), "{err}");
+    }
+    let err = act(
+        &tab,
+        eval("Promise.resolve({nested:{get reading(){run.click();return 3}}})"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("accessor"), "{err}");
+    assert_eq!(act(&tab, eval("runs")).await?.0["value"], 1);
+    let v = act(&tab, eval("({body:'界'.repeat(20000),tail:42})"))
+        .await?
+        .0;
+    let path = Path::new(v["result_file"].as_str().unwrap());
+    assert!(path.starts_with("/tmp"));
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(fs::metadata(path)?.permissions().mode() & 0o077, 0);
+    let bytes = fs::read(path)?;
+    assert_eq!(v["bytes"], bytes.len());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes)?,
+        json!({"body":"界".repeat(20000),"tail":42})
+    );
+    let mut never = eval("new Promise(()=>{})");
+    never["timeout_ms"] = json!(80);
+    assert!(
+        act(&tab, never)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("timed out")
+    );
+    let huge_error = act(&tab, eval("Promise.reject('z'.repeat(80000)+'\\0TAIL')"))
+        .await
+        .unwrap_err()
+        .to_string();
+    let (_, error_path) = huge_error.rsplit_once(": ").expect("preserved error path");
+    assert_eq!(
+        fs::read_to_string(error_path)?,
+        format!("Page evaluation: {}\0TAIL", "z".repeat(80000))
+    );
+
+    let mut busy = eval(
+        "(()=>{const end=performance.now()+1000; while(performance.now()<end){}; return true})()",
+    );
+    busy["timeout_ms"] = json!(30);
+    let err = act(&tab, busy).await.unwrap_err().to_string();
+    assert!(
+        err.contains("timed out") || err.contains("terminated"),
+        "{err}"
+    );
+    // Observe dispatch before taking control, not just queuing the request.
+    // Handback must neither replay it nor close/reload the shared document.
+    let pending = act(
+        &tab,
+        eval("new Promise(resolve=>{run.click();globalThis.resolveLate=resolve})"),
+    );
+    tokio::pin!(pending);
+    assert!(futures_util::poll!(&mut pending).is_pending());
+    act(
+        &tab,
+        json!({"action":"wait","role":"document","name":"Ran 2"}),
+    )
+    .await?;
+    tab.browser.control(&tab.id, true)?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await?
+            .is_err()
+    );
+    assert!(
+        act(&tab, eval("run.click()"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("control")
+    );
+    tab.browser.control(&tab.id, false)?;
+    assert_eq!(
+        act(&tab, eval("(resolveLate('obsolete result'),runs)"))
+            .await?
+            .0["value"],
+        2
+    );
+    tab.browser.shutdown()
 }

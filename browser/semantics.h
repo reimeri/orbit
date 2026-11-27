@@ -1,5 +1,5 @@
 // Private, per-tab CDP client. There is no debugging port or caller-supplied
-// method/script. Every continuation rechecks the request's control lease.
+// protocol method. Every continuation rechecks the request's control lease.
 class Semantics final : public CefDevToolsMessageObserver {
   using Ticket = uint64_t;
   using Clock = std::chrono::steady_clock;
@@ -11,6 +11,8 @@ class Semantics final : public CefDevToolsMessageObserver {
     Json args;
     uint64_t document;
     bool dispatched = false, poll = false, objects = false;
+    std::string promise;
+    std::shared_ptr<Evaluation> evaluation;
     Clock::time_point deadline = Clock::time_point::max();
   };
   struct Call {
@@ -30,7 +32,7 @@ class Semantics final : public CefDevToolsMessageObserver {
   static constexpr const char *stale = "Stale element reference; inspect again";
 
   void call(Ticket t, const char *method, Json params,
-            std::function<void(const Json &)> next) {
+            std::function<void(const Json &)> next = {}) {
     // Count submitted calls until Chromium replies, even after cancellation.
     if (calls.size() >= 16)
       throw std::runtime_error(
@@ -73,6 +75,20 @@ class Semantics final : public CefDevToolsMessageObserver {
       finish(t, {{"error", "User has browser control"}});
       return false;
     }
+    if (Clock::now() >= it->second.deadline) {
+      const auto &j = it->second.args;
+      if (j.at("op") == "evaluate")
+        finish(t, {{"error", "Page evaluation timed out; dispatched effects "
+                             "were not undone"}});
+      else {
+        auto condition = j.contains("url")
+                             ? j.at("url").dump()
+                             : j.at("role").dump() + " " + j.at("name").dump() +
+                                   " " + j.at("state").dump();
+        finish(t, {{"error", "Timed out waiting for " + condition}});
+      }
+      return false;
+    }
     if (it->second.document != document && it->second.args.at("op") != "wait" &&
         !it->second.dispatched) {
       finish(t, {{"error", stale}});
@@ -100,16 +116,12 @@ class Semantics final : public CefDevToolsMessageObserver {
       if (!live(t))
         continue;
       auto &r = requests.at(t);
-      if (Clock::now() >= r.deadline) {
-        auto &j = r.args;
-        auto condition = j.contains("url")
-                             ? j.at("url").dump()
-                             : j.at("role").dump() + " " + j.at("name").dump() +
-                                   " " + j.at("state").dump();
-        finish(t, {{"error", "Timed out waiting for " + condition}});
-      } else if (r.poll) {
+      if (r.poll) {
         try {
-          sample(t);
+          if (r.args.at("op") == "evaluate")
+            read_evaluation(t);
+          else
+            sample(t);
         } catch (const std::exception &e) {
           finish(t, {{"error", e.what()}});
         }
@@ -119,6 +131,79 @@ class Semantics final : public CefDevToolsMessageObserver {
       schedule();
   }
 
+  void read_evaluation(Ticket t) {
+    auto &r = requests.at(t);
+    r.poll = false;
+    call(t, "Runtime.getProperties",
+         {{"objectId", r.promise},
+          {"ownProperties", true},
+          {"nonIndexedPropertiesOnly", true}});
+  }
+  void evaluate(Ticket t) {
+    auto &r = requests.at(t);
+    r.evaluation =
+        std::make_shared<Evaluation>(r.args.at("file").get<std::string>());
+    r.objects = true;
+    r.dispatched = true;
+    // CDP defaults to the inspected main frame's page world. No console API,
+    // user activation, CSP bypass, caller-selected CDP method, or debugger
+    // port.
+    call(t, "Runtime.evaluate",
+         {{"expression",
+           "(\n" + r.args.at("expression").get<std::string>() + "\n)"},
+          {"objectGroup", std::to_string(t)},
+          {"awaitPromise", false},
+          {"allowUnsafeEvalBlockedByCSP", false},
+          {"timeout", r.args.at("timeout_ms")}});
+  }
+  void evaluated(Ticket t, Evaluation::Step reply) {
+    if (!live(t))
+      return;
+    switch (reply.next) {
+    case Evaluation::Step::Done:
+      finish(t, std::move(reply.data));
+      break;
+    case Evaluation::Step::Promise:
+      if (reply.data.is_null())
+        requests.at(t).poll = true;
+      else {
+        requests.at(t).promise = reply.data.get<std::string>();
+        read_evaluation(t);
+      }
+      break;
+    case Evaluation::Step::Properties:
+      call(t, "Runtime.getProperties", std::move(reply.data));
+      break;
+    case Evaluation::Step::Compare:
+      call(t, "Runtime.callFunctionOn", std::move(reply.data));
+      break;
+    }
+  }
+  void evaluation_response(Ticket t, int id, bool success, const char *p,
+                           size_t size) {
+    // CEF owns p only during the callback. Copy once; keep this call counted
+    // while decoding and spooling, even if cancelled. Only one step per
+    // request is in flight, so the decoder is never accessed concurrently.
+    calls.emplace(id, Call{t, {}});
+    auto decoder = requests.at(t).evaluation;
+    auto work = [self = CefRefPtr<Semantics>(this), t, id, success,
+                 bytes = std::string(p, size), decoder] {
+      auto reply = decoder->receive(success, bytes);
+      CefPostTask(TID_UI,
+                  new Work([self, t, id, reply = std::move(reply)]() mutable {
+                    self->calls.erase(id);
+                    try {
+                      self->evaluated(t, std::move(reply));
+                    } catch (const std::exception &e) {
+                      self->finish(t, {{"error", e.what()}});
+                    }
+                  }));
+    };
+    if (!CefPostTask(TID_FILE_USER_BLOCKING, new Work(std::move(work)))) {
+      calls.erase(id);
+      evaluated(t, decoder->receive(success, std::string(p, size)));
+    }
+  }
   void sample(Ticket t) {
     requests.at(t).poll = false;
     const auto &j = requests.at(t).args;
@@ -376,13 +461,15 @@ public:
     }
     requests.emplace(t, Request{std::move(j), document});
     try {
-      if (op == "wait") {
+      if (op == "wait" || op == "evaluate") {
         auto &r = requests.at(t);
         r.deadline = Clock::now() + std::chrono::milliseconds(
                                         r.args.at("timeout_ms").get<int>());
         schedule();
       }
-      if (op == "inspect" || op == "wait")
+      if (op == "evaluate")
+        evaluate(t);
+      else if (op == "inspect" || op == "wait")
         sample(t);
       else
         element(t);
@@ -401,6 +488,10 @@ public:
       return;
     try {
       auto p = static_cast<const char *>(data);
+      if (!next) {
+        evaluation_response(t, id, success, p, size);
+        return;
+      }
       if (!success && requests.at(t).args.at("op") == "wait") {
         requests.at(t).poll = true;
         return;
@@ -419,6 +510,16 @@ public:
   void navigation() {
     ++document;
     refs.clear();
+  }
+  void new_document() {
+    navigation();
+    std::vector<Ticket> pending;
+    for (auto &[t, r] : requests)
+      if (r.args.at("op") == "evaluate")
+        pending.push_back(t);
+    for (auto t : pending)
+      finish(t, {{"error", "Page navigated before evaluation completed; "
+                           "dispatched effects were not undone"}});
   }
   void cancel(Ticket t) { finish(t, {{"error", "Browser request cancelled"}}); }
   void clear(const char *why) {

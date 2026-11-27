@@ -40,8 +40,8 @@ clipboard transfers are not part of this integration.
 
 ## Agent interface
 
-Only a main conversation gets `tools.browser`. There is no tab ID, cookie
-export, arbitrary page-script tool, or network debugging port. Coordinates
+Only a main conversation gets `tools.browser`. There is no tab selector,
+profile-cookie export, or remote debugging port. Coordinates
 for input are relative to the last screenshot in **image pixels**, including
 on fractionally scaled displays. Navigation returns when dispatched, not when
 the web app has finished rendering. A screenshot wakes a hidden tab for a
@@ -99,6 +99,49 @@ await tools.browser({action:"viewport", mode:"fit"});
   the accessibility tree, not pixel visibility or network idleness. Timeout
   defaults to 5 seconds (`timeout_ms`: 1–60,000). User takeover cancels pending
   waits and blocks inspection, element actions and viewport changes too.
+
+### Evaluate page JavaScript
+
+Use `evaluate` to debug the live document from code mode. The expression
+runs once in the main frame's **page world**, not in Orbit's JavaScript cell.
+It can read application globals and the DOM, with the page's usual origin
+permissions. For example, to diagnose horizontal overflow:
+
+```js
+const {value} = await tools.browser({
+  action: "evaluate",
+  expression: "({viewport: document.documentElement.clientWidth, content: document.documentElement.scrollWidth})"
+});
+text(value);
+```
+
+Return a native JavaScript promise for asynchronous work. For multiple
+statements, use an IIFE
+such as `(async () => { await document.fonts.ready; return document.title; })()`.
+Thrown exceptions and rejected promises are tool errors. The timeout defaults
+to 5 seconds; set `timeout_ms` from 1 to 60,000. Orbit never automatically
+replays an evaluation or reloads the page on failure.
+
+- **Results are data, not handles.** Return strings, finite JSON numbers,
+  booleans, null, dense arrays, or plain data objects. Return the properties
+  you need from a DOM node, not the node itself. Orbit reads own data
+  properties, not page-defined getters or `toJSON`. Shared data is copied by
+  value. Accessors, cycles, functions, `undefined`, and
+  other non-JSON types produce a diagnostic rather than a live handle. Return
+  `null` explicitly for a side-effect-only expression.
+- Small results are in `value`. For larger results Orbit returns
+  `result_file` and `bytes`; the private file contains the complete JSON value,
+  not a preview. If Chromium cannot serialize the result, the tool reports an
+  error; it does not return a truncated object. Page console output is not captured.
+- This works in both project and isolated tabs. Unlike `inspect`, a page
+  script **can read form values** and act as the signed-in page. Expressions
+  and their results (or file references) are recorded in tool history: don't
+  use them for secrets. No DevTools command interface or synthetic user
+  activation is granted.
+- **Take control** blocks new evaluations and discards pending results. It
+  cannot undo code already dispatched, including requests, timers and other
+  callbacks. After a timeout, cancellation or exception, check the page
+  before repeating anything with side effects.
 
 ## Packaging and checks
 

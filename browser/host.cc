@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
@@ -17,6 +18,7 @@
 #include <png.h>
 #include <set>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -40,6 +42,7 @@ public:
   void Execute() override { work(); }
   IMPLEMENT_REFCOUNTING(Work);
 };
+#include "evaluation.h"
 #include "semantics.h"
 
 class Flushed final : public CefCompletionCallback {
@@ -253,7 +256,7 @@ public:
   void OnLoadStart(B b, F f, TransitionType) override {
     if (f->IsMain()) {
       if (semantics)
-        semantics->navigation();
+        semantics->new_document();
       // Orbit has no page zoom. Normalize any site zoom left by an older
       // Orbit build in this project profile, in Fit as well as fixed mode.
       if (b->GetHost()->GetZoomLevel() != 0)
@@ -413,8 +416,8 @@ static void command(Json j) {
               {"width", t->w},
               {"height", t->h}});
       return;
-    } else if (op == "inspect" || op == "wait" || op == "activate" ||
-               op == "fill") {
+    } else if (op == "evaluate" || op == "inspect" || op == "wait" ||
+               op == "activate" || op == "fill") {
       if (!t->semantics) {
         Tab *page = t.get();
         t->semantics = new Semantics(

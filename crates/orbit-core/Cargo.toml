@@ -20,7 +20,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 rquickjs = { version = "0.11", features = ["full"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "process"] }
 tokio-util = "0.7"
