@@ -2580,7 +2580,7 @@ image(shot);"#, "browser-tool", &CancellationToken::new()).unwrap();
 
     #[tokio::test]
     async fn questionnaire_blocks_model_continuation_until_all_answers_or_stop() {
-        use crate::test_support::{completed, server_with};
+        use crate::test_support::{completed, server_with, until};
 
         for (tool, stop) in [
             ("exec", false),
@@ -2658,7 +2658,7 @@ await Promise.all(['first', 'second'].map(async id => {
             // Both questions can be visible before the first exec/wait drains
             // its output. Answer only after that yield: the final collect below
             // deliberately expects *both* answers in the unread output.
-            crate::test_support::until(|| {
+            until(|| {
                 matches!(
                     c.snapshot().entries.by_id("ask").map(|entry| &entry.kind),
                     Some(EntryKind::Tool { complete: true, .. })
@@ -2698,13 +2698,9 @@ await Promise.all(['first', 'second'].map(async id => {
                     .submit(&pending[1].id, vec!["Second answer 界".into()])
                     .unwrap();
             }
-            tokio::time::timeout(Duration::from_secs(3), async {
-                while c.is_executing() {
-                    changes.changed().await.unwrap();
-                }
-            })
-            .await
-            .unwrap();
+            // Cell and nested-tool workers can release their execution permits
+            // after the last conversation change, especially on Stop.
+            until(|| !c.is_executing()).await;
             assert!(!questions.has_pending());
             if stop {
                 assert_eq!(c.status(), ConversationStatus::Stopped);
