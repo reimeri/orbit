@@ -3681,107 +3681,47 @@ impl App {
         }
         let mut controls = column![space().height(Fill)];
         if self.fork_family().is_some() {
-            controls = controls.push(
-                tooltip(
-                    theme::button(
-                        container(Icon::GitFork.view(22.))
-                            .center_x(Fill)
-                            .center_y(34),
-                    )
-                    .width(Fill)
-                    .padding(0)
-                    .on_press(Message::ShowForks(None))
-                    .style(theme::text_button),
-                    text("Forks").size(12),
-                    tooltip::Position::Left,
-                )
-                .style(card),
-            );
+            controls = controls.push(rail_button(
+                Icon::GitFork.view(22.),
+                "Forks",
+                self.fork_panel.is_some(),
+                Message::ShowForks(None),
+            ));
         }
         if self.current_session.is_some() {
-            controls = controls.push(
-                tooltip(
-                    theme::button(container(Icon::Globe.view(22.)).center_x(Fill).center_y(34))
-                        .width(Fill)
-                        .padding(0)
-                        .on_press(Message::Browser(browser::Action::Toggle))
-                        .style(if self.browser.open {
-                            secondary
-                        } else {
-                            theme::text_button
-                        }),
-                    text("Browser").size(12),
-                    tooltip::Position::Left,
-                )
-                .style(card),
-            );
+            controls = controls.push(rail_button(
+                Icon::Globe.view(22.),
+                "Browser",
+                self.browser.open,
+                Message::Browser(browser::Action::Toggle),
+            ));
         }
         let rail = container(
             controls
-                .push(
-                    tooltip(
-                        theme::button(container(Icon::Diff.view(22.)).center_x(Fill).center_y(34))
-                            .width(Fill)
-                            .padding(0)
-                            .style(if self.changes.open {
-                                secondary
-                            } else {
-                                theme::text_button
-                            })
-                            .on_press(Message::Changes(changes::Action::Toggle)),
-                        text("Changes").size(12),
-                        tooltip::Position::Left,
-                    )
-                    .style(card),
-                )
-                .push(
-                    tooltip(
-                        theme::button(
-                            container(Icon::FolderOpen.view(22.))
-                                .center_x(Fill)
-                                .center_y(34),
-                        )
-                        .width(Fill)
-                        .padding(0)
-                        .style(theme::text_button)
-                        .on_press(Message::Worktree(worktrees::Action::Panel)),
-                        text("Worktrees").size(12),
-                        tooltip::Position::Left,
-                    )
-                    .style(card),
-                )
-                .push(
-                    tooltip(
-                        theme::button(
-                            container(crate::agent_icon::agent_icon(self.agent_count() > 0))
-                                .center_x(Fill)
-                                .center_y(34),
-                        )
-                        .width(Fill)
-                        .padding(0)
-                        .on_press(Message::ToggleAgents)
-                        .style(theme::text_button),
-                        text("Agents").size(12),
-                        tooltip::Position::Left,
-                    )
-                    .style(card),
-                )
-                .push(
-                    tooltip(
-                        theme::button(
-                            container(Icon::Settings.view(24.))
-                                .center_x(Fill)
-                                .center_y(34),
-                        )
-                        .width(Fill)
-                        .padding(0)
-                        .on_press(Message::ToggleSettings)
-                        .style(theme::text_button),
-                        text("Settings").size(12),
-                        tooltip::Position::Left,
-                    )
-                    .style(card),
-                )
+                .push(rail_button(
+                    Icon::Diff.view(22.),
+                    "Changes",
+                    self.changes.open,
+                    Message::Changes(changes::Action::Toggle),
+                ))
+                .push(rail_button(
+                    Icon::FolderOpen.view(22.),
+                    "Worktrees",
+                    self.worktrees.panel,
+                    Message::Worktree(worktrees::Action::Panel),
+                ))
+                .push(rail_button(
+                    crate::agent_icon::agent_icon(self.agent_count() > 0),
+                    "Agents",
+                    self.agents_open,
+                    Message::ToggleAgents,
+                ))
+                .push(rail_button(
+                    Icon::Settings.view(24.),
+                    "Settings",
+                    self.settings_open,
+                    Message::ToggleSettings,
+                ))
                 .spacing(12)
                 .width(Fill),
         )
@@ -4002,8 +3942,7 @@ impl App {
     fn agents_panel(&self) -> Element<'_, Message> {
         let colors = &self.preset().colors;
         let mut content = column![
-            container(right_panel_header("Agents", Message::ToggleAgents))
-                .padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER)),
+            right_panel_header("Agents", Message::ToggleAgents),
             text(format!("{} running", self.agent_count()))
                 .size(12)
                 .style(theme::muted)
@@ -5708,6 +5647,25 @@ fn footer_tip<'a>(
     .style(footer_surface)
     .into()
 }
+fn rail_button<'a>(
+    icon: Element<'a, Message>,
+    label: &'static str,
+    open: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    tooltip(
+        theme::button(container(icon).center_x(Fill).center_y(34))
+            .width(Fill)
+            .padding(0)
+            .style(if open { secondary } else { theme::text_button })
+            .on_press(on_press),
+        text(label).size(12),
+        tooltip::Position::Left,
+    )
+    .style(card)
+    .into()
+}
+
 fn right_panel_header(title: &str, on_close: Message) -> Element<'_, Message> {
     row![
         text(title).size(22).width(Fill),

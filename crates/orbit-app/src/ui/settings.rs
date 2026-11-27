@@ -97,10 +97,9 @@ impl App {
         }
         let header = column![
             right_panel_header("Settings", Message::ToggleSettings),
-            tabs
+            container(tabs).padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER))
         ]
         .spacing(12);
-        let header = container(header).padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER));
         let settings = match self.settings_tab {
             SettingsTab::Account => self.account_settings(),
             SettingsTab::General => self.general_settings(),

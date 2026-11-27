@@ -257,12 +257,12 @@ async fn right_panel_headers_match_and_close_their_own_panel() {
     for width in [1200., 860.] {
         app.window_width = width;
         let mut headers = Vec::new();
-        for agents in [false, true] {
-            let (title, panel) = if agents {
-                ("Agents", app.agents_panel())
-            } else {
-                ("Settings", app.settings_panel())
-            };
+        for (name, panel) in [
+            ("Settings", app.settings_panel()),
+            ("Agents", app.agents_panel()),
+            ("Worktrees", app.worktrees_panel()),
+            ("Changes", app.changes_panel()),
+        ] {
             let mut ui = iced_runtime::UserInterface::build(
                 panel,
                 iced::Size::new(width, 560.),
@@ -271,30 +271,26 @@ async fn right_panel_headers_match_and_close_their_own_panel() {
             );
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
-            let title = bounds.label(title);
+            let title = bounds.label(name);
             let close = bounds.rightmost_control_at(title.center_y());
             assert_eq!(title.x, RIGHT_PANEL_PADDING);
             assert!(title.y >= RIGHT_PANEL_PADDING);
             assert_eq!(title.center_y(), close.center_y());
             headers.push((title, close));
 
-            let mut messages = Vec::new();
-            ui.update(
-                &[
-                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-                ],
-                mouse::Cursor::Available(close.center()),
-                &mut renderer,
-                &mut iced::advanced::clipboard::Null,
-                &mut messages,
-            );
+            let messages = click_at(&mut ui, &mut renderer, close.center());
             assert!(matches!(
-                (agents, messages.as_slice()),
-                (true, [Message::ToggleAgents]) | (false, [Message::ToggleSettings])
+                (name, messages.as_slice()),
+                ("Agents", [Message::ToggleAgents])
+                    | ("Settings", [Message::ToggleSettings])
+                    | ("Worktrees", [Message::Worktree(worktrees::Action::Panel)])
+                    | ("Changes", [Message::Changes(changes::Action::Toggle)])
             ));
         }
-        assert_eq!(headers[0], headers[1], "headers differ at width {width}");
+        assert!(
+            headers.iter().all(|header| header == &headers[0]),
+            "headers differ at width {width}: {headers:?}"
+        );
     }
 }
 
