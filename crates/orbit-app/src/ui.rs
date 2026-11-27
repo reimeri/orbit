@@ -430,6 +430,7 @@ pub enum Message {
     DeletePreviousWord,
     ComposerHistory(Direction),
     Questionnaire(String, questionnaire::Message),
+    QuestionResolved(String, Result<(), String>),
     ComposerEnter(String),
     Send(String),
     ToggleSettings,
@@ -737,23 +738,45 @@ impl App {
         let Some(h) = &self.harness else {
             return;
         };
-        let previous: HashSet<_> = self.questionnaires.keys().cloned().collect();
+        let previous: HashSet<_> = self
+            .questionnaires
+            .iter()
+            .filter(|(_, d)| d.async_owner.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
         let mut active = self.smoke_fixtures.questionnaire.clone();
         let mut live: HashSet<_> = active.iter().cloned().collect();
         for c in h.all() {
             if let Some(questions) = &c.questionnaires {
+                let selected = self.selected.as_ref() == Some(&c.id);
                 for pending in questions.pending() {
                     live.insert(pending.id.clone());
-                    if self.selected.as_deref() == Some(c.id.as_str()) && active.is_none() {
+                    if selected && active.is_none() {
                         active = Some(pending.id.clone());
                     }
                     self.questionnaires
                         .entry(pending.id.clone())
-                        .or_insert_with(|| questionnaire::Draft::new(pending));
+                        .or_insert_with(|| questionnaire::Draft::new(pending, None));
+                }
+                if selected
+                    && active.is_none()
+                    && let Some(pending) = c
+                        .state
+                        .lock()
+                        .expect("session lock")
+                        .async_questions
+                        .first()
+                        .cloned()
+                {
+                    active = Some(pending.id.clone());
+                    self.questionnaires
+                        .entry(pending.id.clone())
+                        .or_insert_with(|| questionnaire::Draft::new(pending, Some(c.id.clone())));
                 }
             }
         }
-        self.questionnaires.retain(|id, _| live.contains(id));
+        self.questionnaires
+            .retain(|id, d| d.async_owner.is_some() || live.contains(id));
         if active != self.active_questionnaire {
             if let Some(previous) = self
                 .active_questionnaire
@@ -795,6 +818,18 @@ impl App {
             self.child_statuses = h.child_statuses();
             if !self.smoke_fixtures.sidebar {
                 self.sessions = h.summaries();
+                let owners: HashSet<_> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.has_async_question)
+                    .map(|s| &s.id)
+                    .collect();
+                self.questionnaires.retain(|_, draft| {
+                    draft
+                        .async_owner
+                        .as_ref()
+                        .is_none_or(|owner| owners.contains(owner))
+                });
                 self.sessions
                     .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
                 self.forks = forks::Index::build(&self.sessions);
@@ -1486,7 +1521,7 @@ impl App {
             }));
     }
     fn send(&mut self, owner: String) {
-        let Some(session) = self.current().filter(|s| s.id == owner) else {
+        if self.current().is_none_or(|s| s.id != owner) {
             self.notice = Some((
                 "Not sent: the active draft changed.".into(),
                 std::time::Instant::now(),
@@ -1532,7 +1567,6 @@ impl App {
         };
         let id = owner;
         let draft = self.draft_session.clone();
-        let workspace = session.project.clone();
         self.file_completion.dismiss();
         let settings = self.catalog.settings.clone();
         self.io_busy = true;
@@ -1572,10 +1606,6 @@ impl App {
         }
         self.tasks.push(self.io.run_in(lanes, move || {
             let result = orbit_core::send_trace::run(queued, || {
-                if !workspace.is_dir() {
-                    anyhow::ensure!(!workspace.starts_with(h.store.root().canonicalize()?.join("worktrees")),
-                        "The worktree at {} is missing. Restore the checkout to continue this chat or start a new session in another worktree.", workspace.display());
-                }
                 if let Some(draft) = draft {
                     h.send_new(draft, &submission, message.clone(), settings)
                 } else {
@@ -2393,7 +2423,33 @@ impl App {
                 }
                 if let Some(draft) = self.questionnaires.get_mut(&id) {
                     let update = draft.update(message);
-                    if let Some(answers) = update.answers {
+                    if let Some(resolution) = update.resolution {
+                        if draft.async_owner.is_some() {
+                            let h = self.harness.clone().expect("questionnaire harness");
+                            let session = self.selected.clone().expect("questionnaire session");
+                            let settings = self.catalog.settings.clone();
+                            self.io_busy = true;
+                            return self.io.run_in(
+                                [Lane::Family(h.family_id(&session))],
+                                move || {
+                                    let result = match resolution {
+                                        questionnaire::Resolution::Answer(answers) => {
+                                            h.answer_question(&session, &id, answers, settings)
+                                        }
+                                        questionnaire::Resolution::Dismiss => {
+                                            h.dismiss_question(&session, &id)
+                                        }
+                                    };
+                                    Message::QuestionResolved(
+                                        id,
+                                        result.map_err(|e| format!("{e:#}")),
+                                    )
+                                },
+                            );
+                        }
+                        let questionnaire::Resolution::Answer(answers) = resolution else {
+                            unreachable!("blocking questionnaires cannot be dismissed")
+                        };
                         let result = self
                             .selected
                             .as_ref()
@@ -2410,6 +2466,24 @@ impl App {
                         .task
                         .map(move |message| Message::Questionnaire(id.clone(), message));
                 }
+            }
+            Message::QuestionResolved(id, result) => {
+                self.io_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.questionnaires.remove(&id);
+                    }
+                    Err(error) => {
+                        if let Some(draft) = self.questionnaires.get_mut(&id) {
+                            draft.error = Some(format!(
+                                "{error}. Check storage or session status and retry."
+                            ));
+                        } else {
+                            self.error = Some(error);
+                        }
+                    }
+                }
+                self.refresh();
             }
             Message::FileCompletion(crate::file_completion::Message::PendingEnter) => {
                 self.notice = Some(("Not sent: file search is still running. Press Enter again when results are ready.".into(), std::time::Instant::now()));

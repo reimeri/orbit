@@ -581,6 +581,7 @@ async fn popup_transitions_preserve_sidebar_and_chat_scroll() {
             format!("Message {i}: asymmetric café text."),
         ));
         app.sessions.push(SessionSummary {
+            has_async_question: false,
             origin: None,
             child: None,
             id: format!("scroll-session-{i}"),

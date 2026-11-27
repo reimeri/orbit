@@ -128,10 +128,7 @@ pub(super) fn definitions(capabilities: Capabilities) -> Vec<Tool> {
         });
     }
     if capabilities.questionnaires {
-        tools.push(Tool {
-            name: "ask_user",
-            description: "Ask the user required clarification questions.",
-            input_schema: json!({"type":"object","properties":{
+        let input_schema = json!({"type":"object","properties":{
                 "questions":{"type":"array","minItems":1,"maxItems":24,"description":"Questions in answer order, 1–24.","items":{
                     "type":"object","properties":{
                         "id":{"type":"string","description":"Unique nonblank question ID."},
@@ -140,9 +137,24 @@ pub(super) fn definitions(capabilities: Capabilities) -> Vec<Tool> {
                         "options":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":20,"description":"Select requires 1–20 choices; custom answer is automatic. Ignored for text."}
                     },"required":["id","question","kind"],"additionalProperties":false
                 }}
-            },"required":["questions"],"additionalProperties":false}),
-            output_schema: json!({"type":"string"}),
-        });
+            },"required":["questions"],"additionalProperties":false});
+        for (name, description) in [
+            (
+                "ask_user",
+                "Ask required clarification questions and wait for the answers.",
+            ),
+            (
+                "ask_user_async",
+                "Post questions and continue working. Returns an acceptance receipt; answers arrive later as a user message. Do not poll or wait for them.",
+            ),
+        ] {
+            tools.push(Tool {
+                name,
+                description,
+                input_schema: input_schema.clone(),
+                output_schema: json!({"type":"string"}),
+            });
+        }
     }
     if capabilities.delegation {
         tools.extend([

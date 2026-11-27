@@ -274,6 +274,7 @@ async fn sidebar_follows_top_but_preserves_browsing_anchor() {
     app.tasks.clear();
     app.sessions = (0..40)
         .map(|i| SessionSummary {
+            has_async_question: false,
             origin: None,
             child: None,
             id: format!("sticky-session-{i}"),

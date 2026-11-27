@@ -198,3 +198,107 @@ async fn sidebar_search_leaves_questionnaire_interactive() {
     assert!(app.search_active);
     assert!(chat_text(&app).contains("Any constraints?"));
 }
+#[tokio::test]
+async fn blocking_questionnaire_preempts_an_async_draft_and_dismiss_does_not_send() {
+    use orbit_core::questionnaire::{Pending, Request};
+    let mut app = app();
+    stored_session(&mut app, PathBuf::from("/project")).await;
+    type_message(&mut app, "Unsent composer text").await;
+    let owner = app.selected.clone().unwrap();
+    let h = app.harness.clone().unwrap();
+    let args = r#"{"questions":[{"id":"notes","question":"Any notes?","kind":"text"}]}"#;
+    h.edit(&owner, |s| {
+        // Fixture for a session with an already accepted tool call.
+        let entry = Entry::new(
+            EntryKind::Tool {
+                name: "ask_user_async".into(),
+                input: args.into(),
+                output: r#"{"accepted":true}"#.into(),
+                complete: true,
+                failed: false,
+                command_status: None,
+                cell_id: None,
+                parent: None,
+                media: vec![],
+                web: None,
+            },
+            "",
+        );
+        for entry in [Entry::new(entry.kind.clone(), ""), entry] {
+            s.async_questions.push(Pending {
+                id: entry.id.clone(),
+                request: Arc::new(Request::parse(args).unwrap()),
+            });
+            s.entries.push(entry);
+        }
+    })
+    .unwrap();
+    dispatch(&mut app, Message::Changed).await;
+    let id = app.active_questionnaire.clone().unwrap();
+    let action = |action| {
+        Message::Questionnaire(
+            id.clone(),
+            questionnaire::Message {
+                question: 0,
+                action,
+            },
+        )
+    };
+    dispatch(
+        &mut app,
+        action(questionnaire::Action::Editor(text_editor::Action::Edit(
+            text_editor::Edit::Paste(Arc::new("Draft answer".into())),
+        ))),
+    )
+    .await;
+    dispatch(&mut app, action(questionnaire::Action::Toggle)).await;
+    stored_session(&mut app, PathBuf::from("/elsewhere")).await;
+    assert!(
+        h.get(&owner).is_none(),
+        "keeping a UI draft must not pin the runtime"
+    );
+    dispatch(&mut app, Message::Select(owner.clone())).await;
+    let c = h.get(&owner).unwrap();
+    let q = c.questionnaires.clone().unwrap();
+    let cancel = CancellationToken::new();
+    let mut ask = Box::pin(q.ask("blocking", args, &cancel));
+    assert!(iced::futures::poll!(&mut ask).is_pending());
+    dispatch(&mut app, Message::Changed).await;
+    assert_eq!(app.active_questionnaire.as_deref(), Some("blocking"));
+    dispatch(&mut app, action(questionnaire::Action::Dismiss)).await; // stale panel event
+    cancel.cancel();
+    assert!(ask.await.is_err());
+    dispatch(&mut app, Message::Changed).await;
+    assert_eq!(app.active_questionnaire.as_ref(), Some(&id));
+    assert!(app.questionnaires[&id].collapsed);
+    assert!(chat_text(&app).contains("Dismiss"));
+    dispatch(&mut app, action(questionnaire::Action::Toggle)).await;
+    dispatch(&mut app, action(questionnaire::Action::Next)).await;
+    let second = app
+        .active_questionnaire
+        .clone()
+        .expect("second async request");
+    assert_ne!(second, id);
+    dispatch(
+        &mut app,
+        Message::Questionnaire(
+            second,
+            questionnaire::Message {
+                question: 0,
+                action: questionnaire::Action::Dismiss,
+            },
+        ),
+    )
+    .await;
+    assert!(app.active_questionnaire.is_none());
+    assert_eq!(app.editor.text(), "Unsent composer text");
+    let saved = h.store.load_session(&owner).unwrap();
+    assert!(saved.async_questions.is_empty());
+    let replies: Vec<_> = saved
+        .entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::User { .. }))
+        .collect();
+    assert_eq!(replies.len(), 1, "dismiss must not send another message");
+    assert!(replies[0].text.contains(&id) && replies[0].text.ends_with("Draft answer"));
+}

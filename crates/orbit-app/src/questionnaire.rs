@@ -20,6 +20,7 @@ use unicode_segmentation::UnicodeSegmentation;
 #[derive(Clone, Debug)]
 pub enum Action {
     Toggle,
+    Dismiss,
     Select(usize),
     Move(bool),
     Edit(usize),
@@ -59,17 +60,23 @@ impl Answer {
 
 pub struct Draft {
     pub pending: Pending,
+    pub async_owner: Option<String>,
     answers: Vec<Answer>,
     pub current: usize,
     pub collapsed: bool,
     pub error: Option<String>,
 }
+#[derive(Debug, PartialEq)]
+pub enum Resolution {
+    Answer(Vec<String>),
+    Dismiss,
+}
 pub struct Update {
-    pub answers: Option<Vec<String>>,
+    pub resolution: Option<Resolution>,
     pub task: Task<Message>,
 }
 impl Draft {
-    pub fn new(pending: Pending) -> Self {
+    pub fn new(pending: Pending, async_owner: Option<String>) -> Self {
         let answers = pending
             .request
             .questions()
@@ -84,6 +91,7 @@ impl Draft {
             .collect();
         Self {
             pending,
+            async_owner,
             answers,
             current: 0,
             collapsed: false,
@@ -150,10 +158,15 @@ impl Draft {
     }
     pub fn update(&mut self, message: Message) -> Update {
         let mut result = Update {
-            answers: None,
+            resolution: None,
             task: Task::none(),
         };
         if message.question != self.current {
+            return result;
+        }
+        if self.async_owner.is_some() && matches!(message.action, Action::Dismiss) {
+            self.error = None;
+            result.resolution = Some(Resolution::Dismiss);
             return result;
         }
         if self.collapsed && !matches!(message.action, Action::Toggle) {
@@ -258,13 +271,14 @@ impl Draft {
                     self.current += 1;
                     focus = true;
                 } else {
-                    result.answers = self
+                    result.resolution = self
                         .answers
                         .iter()
                         .enumerate()
                         .map(|(i, _)| self.value(i))
-                        .collect();
-                    if result.answers.is_none() {
+                        .collect::<Option<Vec<_>>>()
+                        .map(Resolution::Answer);
+                    if result.resolution.is_none() {
                         self.error = Some("Answer every question before submitting.".into());
                     }
                 }
@@ -376,6 +390,15 @@ Shift+Tab goes back · Shift+Enter adds a line";
         ]
         .align_y(iced::Center)
         .spacing(4);
+        let header = if self.async_owner.is_some() {
+            header.push(
+                theme::button("Dismiss")
+                    .on_press(message(Action::Dismiss))
+                    .style(theme::text_button),
+            )
+        } else {
+            header
+        };
         let mut panel = column![header].spacing(10);
         if !self.collapsed {
             let mut body = column![
@@ -523,11 +546,11 @@ Shift+Tab goes back · Shift+Enter adds a line";
                         .style(move |theme| theme::answer_row(theme, focused.get())),
                 );
             }
-            if let Some(error) = &self.error {
-                panel = panel.push(text(error).size(12).style(|t| text::Style {
-                    color: Some(theme::colors(t).danger),
-                }));
-            }
+        }
+        if let Some(error) = &self.error {
+            panel = panel.push(text(error).size(12).style(|t| text::Style {
+                color: Some(theme::colors(t).danger),
+            }));
         }
         let content = container(panel)
             .padding(12)
@@ -911,7 +934,7 @@ mod tests {
     use std::sync::Arc;
 
     fn draft() -> Draft {
-        Draft::new(Pending { id: "fixture".into(), request: Arc::new(orbit_core::questionnaire::Request::parse(r#"{"questions":[{"id":"platform","question":"Choose a platform","kind":"select","options":["A website","A mobile app","A command-line tool"]},{"id":"constraints","question":"Describe constraints","kind":"text"}]}"#).unwrap()) })
+        Draft::new(Pending { id: "fixture".into(), request: Arc::new(orbit_core::questionnaire::Request::parse(r#"{"questions":[{"id":"platform","question":"Choose a platform","kind":"select","options":["A website","A mobile app","A command-line tool"]},{"id":"constraints","question":"Describe constraints","kind":"text"}]}"#).unwrap()) }, None)
     }
     fn apply(draft: &mut Draft, action: Action) -> Update {
         draft.update(Message {
@@ -1415,8 +1438,8 @@ mod tests {
         apply(&mut d, Action::Toggle);
         apply(&mut d, Action::Next);
         assert_eq!(
-            apply(&mut d, Action::Next).answers.unwrap(),
-            ["A command-line tool".to_owned(), long]
+            apply(&mut d, Action::Next).resolution.unwrap(),
+            Resolution::Answer(vec!["A command-line tool".to_owned(), long])
         );
     }
 
@@ -1482,8 +1505,8 @@ mod tests {
         apply(&mut d, Action::Toggle);
         apply(&mut d, Action::History(Direction::Undo));
         assert_eq!(
-            apply(&mut d, Action::Next).answers.unwrap(),
-            ["my platform", "offline only"]
+            apply(&mut d, Action::Next).resolution.unwrap(),
+            Resolution::Answer(vec!["my platform".into(), "offline only".into()])
         );
     }
 

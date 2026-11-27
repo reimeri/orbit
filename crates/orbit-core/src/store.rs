@@ -422,6 +422,13 @@ pub struct Filing {
     pub at: u64,
 }
 
+fn serialize_question_ids<S: serde::Serializer>(
+    questions: &[crate::questionnaire::Pending],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_seq(questions.iter().map(|q| &q.id))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
@@ -458,6 +465,14 @@ pub struct Session {
     pub draft_images: Vec<crate::media::Media>,
     pub pending: Vec<UserMessage>,
     pub pending_submissions: Vec<String>,
+    /// Hydrated from the original nested tool inputs after the transcript is loaded.
+    #[serde(
+        rename = "async_question_ids",
+        serialize_with = "serialize_question_ids",
+        skip_deserializing,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub async_questions: Vec<crate::questionnaire::Pending>,
     pub pending_tool_outputs: Vec<Value>,
     #[serde(default)]
     pub in_progress_response: Option<InProgressResponse>,
@@ -496,6 +511,7 @@ impl Session {
             draft_images: vec![],
             pending: vec![],
             pending_submissions: vec![],
+            async_questions: vec![],
             pending_tool_outputs: vec![],
             in_progress_response: None,
             interrupted: false,
@@ -575,7 +591,7 @@ impl Session {
         self.accept_submission(id(), message, false);
     }
     pub fn accept_submission(&mut self, submission: String, message: UserMessage, steering: bool) {
-        self.accept_submission_at(submission, message, steering, now());
+        self.accept_submission_at(submission, message, steering, now(), None);
     }
     pub(crate) fn accept_submission_at(
         &mut self,
@@ -583,6 +599,7 @@ impl Session {
         message: UserMessage,
         steering: bool,
         accepted_at: u64,
+        answered_question: Option<&str>,
     ) {
         if self.needs_title()
             || (!self.title_manually_set
@@ -616,9 +633,13 @@ impl Session {
             text: message.text.clone(),
         });
         self.pending.push(message);
-        self.draft.clear();
-        self.draft_images.clear();
-        self.draft_files.clear();
+        if let Some(id) = answered_question {
+            self.async_questions.retain(|q| q.id != id);
+        } else {
+            self.draft.clear();
+            self.draft_images.clear();
+            self.draft_files.clear();
+        }
     }
     pub fn consume_pending(&mut self) {
         for notice in self.subagent_notices.drain(..) {
@@ -656,6 +677,8 @@ impl Session {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
     #[serde(default)]
+    pub has_async_question: bool,
+    #[serde(default)]
     pub origin: Option<ForkOrigin>,
     #[serde(default)]
     pub child: Option<crate::agent::subagents::Child>,
@@ -676,6 +699,7 @@ impl From<&Session> for SessionSummary {
         Self {
             child: s.child.clone(),
             origin: s.origin.clone(),
+            has_async_question: !s.async_questions.is_empty(),
             needs_attention: s.needs_attention,
             unchecked_completion: s.unchecked_completion,
             filing: s.filing,
@@ -809,17 +833,39 @@ impl Store {
         // Read one committed WAL snapshot without serializing with turn saves.
         let mut reader = self.read_connection()?;
         let db = reader.transaction()?;
-        let metadata: String = db
-            .query_row("SELECT metadata FROM sessions WHERE id=?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .context("Session no longer exists")?;
+        let (metadata, ids): (String, String) = db.query_row(
+            "SELECT metadata, coalesce(json_extract(metadata, '$.async_question_ids'), '[]') FROM sessions WHERE id=?1",
+            [id], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?.context("Session no longer exists")?;
         let mut session: Session = serde_json::from_str(&metadata)?;
         if session.id != id {
             bail!("Session metadata identity mismatch; database preserved");
         }
         session.entries = read_history(&db, "entries", id)?;
+        for request in serde_json::from_str::<Vec<String>>(&ids)? {
+            let entry = session
+                .entries
+                .by_id(&request)
+                .context("Missing async questionnaire tool entry")?;
+            let EntryKind::Tool {
+                name,
+                input,
+                complete: true,
+                failed: false,
+                ..
+            } = &entry.kind
+            else {
+                bail!("Invalid async questionnaire tool entry: {request}")
+            };
+            anyhow::ensure!(
+                name == "ask_user_async",
+                "Unexpected tool for async questionnaire: {request}"
+            );
+            session.async_questions.push(crate::questionnaire::Pending {
+                id: request,
+                request: Arc::new(crate::questionnaire::Request::parse(input)?),
+            });
+        }
         session.input = read_history(&db, "context", id)?;
         forks::load(&db, &mut session)?;
         db.commit()?;
@@ -1135,7 +1181,13 @@ mod tests {
         assert!(!message.is_empty());
         let mut session = Session::new(dir.path().into(), &Settings::default());
         session.draft_images = message.images.clone();
-        session.accept_submission_at("image-only".into(), message.clone(), false, 1_750_000_123);
+        session.accept_submission_at(
+            "image-only".into(),
+            message.clone(),
+            false,
+            1_750_000_123,
+            None,
+        );
         assert_eq!(session.title, "Image message");
         assert!(session.draft_images.is_empty());
         session.accept_submission(

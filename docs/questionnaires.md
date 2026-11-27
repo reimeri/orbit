@@ -1,8 +1,8 @@
 # Questionnaires
 
-`tools.ask_user` is a built-in **main-conversation-only** code-mode tool. Review
-and Explore do not receive it, and the native dispatcher rejects attempts to call
-it from children. Only `exec` and `wait` remain top-level provider tools.
+Orbit has two **main-conversation-only** code-mode tools with the same question schema:
+use `tools.ask_user` when the answer blocks progress, or `tools.ask_user_async`
+when the agent can keep working. Review and Explore cannot call either tool. Only `exec` and `wait` remain top-level provider tools.
 
 ```js
 text(await tools.ask_user({
@@ -14,11 +14,38 @@ text(await tools.ask_user({
 }));
 ```
 
-Every question is required. The result is a JSON **string**, in question order:
+Every question is required on submission. The blocking tool’s result is a JSON **string**, in question order:
 
 ```json
 {"answers":[{"id":"target","answer":"Desktop application"},{"id":"constraints","answer":"Native Wayland on Linux."}]}
 ```
+
+## Async questionnaires
+
+```js
+text(await tools.ask_user_async({
+  questions: [{id: "audience", question: "Who will read the report?", kind: "text"}]
+}));
+```
+
+The tool returns the JSON string `{"accepted":true}` once the request is saved.
+There is nothing to poll or collect. The ordinary **Question** panel opens;
+blocking requests take priority over async ones without resetting an answer in
+progress. Within each group, requests are shown in posting order.
+
+The request belongs to the conversation. Finishing or stopping a turn, switching
+sessions, or restarting Orbit does not dismiss it. Restoring it does not start
+a turn or replay a notification. Partially edited answers and undo history are
+in-memory UI drafts, not saved answers.
+
+- **Submit** sends one user message with the request ID, question IDs and prompts,
+  and complete answers in order. It steers a running agent at the next response
+  boundary, or starts a new turn if the agent has finished or stopped.
+- **Dismiss** removes the request without sending a message or starting a turn.
+  Escape still stops agent work; it does not dismiss the request.
+- Submitting or dismissing leaves the ordinary composer draft alone. Answers are
+  plain text, not composer file tags or skill mentions. If saving fails, the
+  panel retains the draft for retry; a committed reply cannot be sent twice.
 
 ## Validation and limits
 
@@ -32,7 +59,7 @@ Every question is required. The result is a JSON **string**, in question order:
   including leading/trailing whitespace and multiline text.
 - Answers have no questionnaire-specific byte or line cap.
 
-The full answer JSON is retained in the nested tool transcript. The copy delivered
+For blocking asks, the full answer JSON is retained in the nested tool transcript. The copy delivered
 to JavaScript is saved in full to a private `/tmp` file when it exceeds 40,000
 Unicode characters (the normal 10,000-token inline budget). It then returns a
 file notice with the absolute path and exact byte size, not a clipped JSON value.
@@ -42,7 +69,7 @@ fails, the complete result is returned inline with a warning. Normal process and
 QuickJS memory limits still apply; an unbounded answer policy is not a guarantee
 of unlimited physical memory.
 
-## Runtime lifecycle
+## Blocking questionnaire lifecycle
 
 - A request belongs to its unique nested-tool call and code-cell cancellation token,
   not to the currently selected UI session.
@@ -92,7 +119,7 @@ with pending questions appear under **Needs attention**, ahead of Working.
 - Switching sessions preserves questionnaire drafts and the ordinary composer draft.
 - Long prompts/options scroll in a bounded body. Hover **Question** for keyboard hints.
   The editor grows with multiline text, then scrolls without moving the selection.
-- Submitted answers appear in the existing tool result, with no synthetic user message
+- For blocking asks, submitted answers appear in the existing tool result, with no synthetic user message
   or separate answer-summary entry.
 
 While the expanded panel is focused:

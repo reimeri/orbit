@@ -77,8 +77,9 @@ impl App {
         let h = self.harness.as_ref();
         let c = h.and_then(|h| h.get(&s.id));
         let children = self.child_statuses.get(&s.id).copied().unwrap_or_default();
-        if c.as_ref()
-            .is_some_and(|c| c.questionnaires.as_ref().is_some_and(|q| q.has_pending()))
+        if s.has_async_question
+            || c.as_ref()
+                .is_some_and(|c| c.questionnaires.as_ref().is_some_and(|q| q.has_pending()))
         {
             SessionStatus::Question
         } else if c.as_ref().is_some_and(|c| c.is_turn_active()) || children.running > 0 {

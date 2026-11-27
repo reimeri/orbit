@@ -1,4 +1,4 @@
-//! In-memory human-input rendezvous. Requests belong to a code cell, not the UI.
+//! Shared questionnaire schema and the in-memory rendezvous for blocking asks.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-pub const INSTRUCTIONS: &str = "\nResolve ambiguous implementation details with the user before implementing by calling `tools.ask_user` in a code-mode cell.\n";
+pub const INSTRUCTIONS: &str = "\nResolve ambiguous implementation details with the user before implementing by calling `tools.ask_user` when the decision blocks progress. Use `tools.ask_user_async` if independent work can continue while the user answers.\n";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,18 +29,18 @@ enum Kind {
     Text,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QuestionKind {
     Select(Vec<String>),
     Text,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Question {
     pub id: String,
     pub question: String,
     pub kind: QuestionKind,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     questions: Vec<Question>,
 }
@@ -95,7 +95,7 @@ impl Request {
     pub fn questions(&self) -> &[Question] {
         &self.questions
     }
-    fn answer(&self, answers: Vec<String>) -> Result<String> {
+    fn validate_answers(&self, answers: &[String]) -> Result<()> {
         ensure!(
             answers.len() == self.questions.len(),
             "Answer every question before submitting"
@@ -104,6 +104,10 @@ impl Request {
             answers.iter().all(|s| !s.trim().is_empty()),
             "Answers must not be blank"
         );
+        Ok(())
+    }
+    fn answer(&self, answers: Vec<String>) -> Result<String> {
+        self.validate_answers(&answers)?;
         #[derive(Serialize)]
         struct Answer<'a> {
             id: &'a str,
@@ -124,10 +128,23 @@ impl Request {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pending {
     pub id: String,
     pub request: Arc<Request>,
+}
+impl Pending {
+    pub(crate) const ACCEPTED: &str = r#"{"accepted":true}"#;
+
+    pub(crate) fn reply(&self, answers: Vec<String>) -> Result<String> {
+        self.request.validate_answers(&answers)?;
+        let mut text = format!("Answers to questionnaire {}:", self.id);
+        for (q, answer) in self.request.questions().iter().zip(answers) {
+            use std::fmt::Write;
+            write!(text, "\n\n[{}] {}\n{}", q.id, q.question, answer).expect("write to string");
+        }
+        Ok(text)
+    }
 }
 struct Waiting {
     pending: Pending,

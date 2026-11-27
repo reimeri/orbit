@@ -7,6 +7,7 @@ use crate::{
     auth::Auth,
     code_mode::{Calls, CodeMode, Event as CodeEvent},
     provider::{Provider, is_tool_call},
+    questionnaire::Pending,
     shell::Shell,
     store::{Entry, EntryKind, Filing, FilingKind, Session, SessionSummary, Settings, Store},
 };
@@ -73,10 +74,18 @@ pub enum FilingOutcome {
     RunningCommands(FilingKind),
 }
 
+#[derive(Default)]
+struct QuestionAlerts {
+    front: Option<String>,
+    // Only the FIFO head can return to the front after blocking questions preempt it.
+    last_async: Option<String>,
+}
+
 pub struct Conversation {
     pub id: String,
     notifications: Arc<notifications::Notifications>,
     pub questionnaires: Option<Arc<crate::questionnaire::Questionnaires>>,
+    question_alerts: Mutex<QuestionAlerts>,
     revision: AtomicU64,
     changes: tokio::sync::watch::Sender<()>,
     pub state: Mutex<Session>,
@@ -113,6 +122,54 @@ impl Conversation {
     fn changed(&self) {
         self.revision.fetch_add(1, Ordering::Release);
         self.changes.send_replace(());
+    }
+
+    // Publish only after the transaction commits; streaming may edit unrelated
+    // state during disk I/O, so apply the same narrow edit to the live session.
+    fn commit_change(
+        &self,
+        saved: &mut Option<Session>,
+        edit: impl Fn(&mut Session),
+    ) -> Result<()> {
+        let mut candidate = self.snapshot();
+        edit(&mut candidate);
+        self.store.save_changes(saved.as_ref(), &candidate)?;
+        *saved = Some(candidate);
+        edit(&mut self.state.lock().expect("session lock"));
+        Ok(())
+    }
+
+    fn questions_changed(&self) {
+        self.sync_question_alert(&self.state.lock().expect("session lock"));
+        self.changed();
+    }
+
+    fn sync_question_alert(&self, state: &Session) {
+        let Some(questions) = &self.questionnaires else {
+            return;
+        };
+        let mut alerts = self.question_alerts.lock().expect("question alerts");
+        let blocking = questions.pending();
+        let next = blocking
+            .first()
+            .or_else(|| state.async_questions.first())
+            .map(|q| &q.id);
+        if alerts.front.as_ref() == next {
+            return;
+        }
+        if let Some(id) = next
+            && (!blocking.is_empty() || alerts.last_async.as_ref() != Some(id))
+            && !self.deleted.load(Ordering::Acquire)
+        {
+            self.notifications
+                .publish(state, notifications::Kind::Question(id.clone()));
+            if blocking.is_empty() {
+                alerts.last_async = Some(id.clone());
+            }
+        } else {
+            self.notifications.clear_question(&self.id);
+        }
+        alerts.front = next.cloned();
     }
 
     pub fn snapshot(&self) -> Session {
@@ -197,11 +254,12 @@ impl Conversation {
         self.live_calls.stop(entry);
     }
     pub fn cancel(&self) {
-        let _state = self.state.lock().expect("session lock");
+        let state = self.state.lock().expect("session lock");
         self.restart_after_stop.store(false, Ordering::Release);
         self.cancel.lock().expect("cancel lock").cancel();
         self.code.stop_all();
-        self.notifications.clear(&self.id);
+        self.notifications.clear_terminal(&self.id);
+        self.sync_question_alert(&state);
         self.set_status(if self.is_running() {
             ConversationStatus::Stopping
         } else {
@@ -236,6 +294,14 @@ struct FamilyRegistry {
     // After Stop All, only an explicit start may reopen a family, including
     // one that wasn't resident when shutdown began.
     stopped_by_default: bool,
+}
+
+enum Submission<'a> {
+    Composer(crate::store::UserMessage),
+    Answer {
+        request: &'a str,
+        answers: Vec<String>,
+    },
 }
 
 pub struct Harness {
@@ -326,85 +392,139 @@ impl Harness {
             let target = weak.clone();
             let harness = self.weak.clone();
             let observer = Arc::new(move |event: CodeEvent| -> Result<()> {
-                let Some(conversation) = target.upgrade() else {
-                    return Ok(());
-                };
+                let conversation = target.upgrade().context("Conversation closed")?;
                 let mut saved = conversation.persisted.lock().expect("persistence lock");
                 if conversation.deleted.load(Ordering::Acquire) {
                     bail!("Session deleted");
                 }
-                {
-                    let mut session = conversation.state.lock().expect("session lock");
-                    match event {
-                        CodeEvent::Notification { parent, text } => {
-                            session.pending_tool_outputs.push(json!({"type":"custom_tool_call_output","call_id":parent,"output":text}));
-                            session.entries.push(Entry::new(
-                                EntryKind::Notice,
-                                format!("Cell notification: {text}"),
-                            ));
-                        }
-                        CodeEvent::ExecutionStatus { id, status } => {
-                            let entry = session.entries.by_id_mut(&id).expect("execution entry");
-                            let EntryKind::Tool {
-                                command_status,
-                                name,
-                                complete,
-                                ..
-                            } = &mut entry.kind
-                            else {
-                                unreachable!("execution status belongs to a tool entry");
+                match event {
+                    CodeEvent::PostQuestion {
+                        id,
+                        parent,
+                        input,
+                        cancel,
+                    } => {
+                        let entry = |error: Option<String>| Entry {
+                            id: id.clone(),
+                            text: String::new(),
+                            kind: EntryKind::Tool {
+                                name: "ask_user_async".into(),
+                                input: input.clone(),
+                                failed: error.is_some(),
+                                output: error.unwrap_or_else(|| Pending::ACCEPTED.into()),
+                                complete: true,
+                                parent: Some(parent.clone()),
+                                command_status: None,
+                                cell_id: None,
+                                media: vec![],
+                                web: None,
+                            },
+                        };
+                        let result = (|| {
+                            anyhow::ensure!(
+                                !cancel.is_cancelled(),
+                                "Questionnaire cancelled before posting"
+                            );
+                            let q = Pending {
+                                id: id.clone(),
+                                request: Arc::new(crate::questionnaire::Request::parse(&input)?),
                             };
-                            *command_status = Some(status);
-                            // The invocation checkpoints its current cell status with its
-                            // result. After a yield, exits need their own checkpoint.
-                            if name == "exec" && !*complete {
-                                return Ok(());
-                            }
+                            conversation
+                                .commit_change(&mut saved, |s| {
+                                    s.entries.push(entry(None));
+                                    s.async_questions.push(q.clone());
+                                })
+                                .context("Questionnaire not posted. Fix storage and try again")
+                        })();
+                        if let Err(error) = result {
+                            // Preserve the failed call for the next checkpoint without
+                            // retrying a failed database write or publishing the request.
+                            conversation
+                                .state
+                                .lock()
+                                .expect("session lock")
+                                .entries
+                                .push(entry(Some(format!("{error:#}"))));
+                            conversation.changed();
+                            return Err(error);
                         }
-                        CodeEvent::Tool(event) => {
-                            if let Some(result) = event.output {
-                                // A successful ask_user result is accepted human input,
-                                // not ordinary tool activity. Save its age with the answer.
-                                if event.name == "ask_user" && !event.failed {
-                                    session.updated = crate::store::now();
-                                    if let Some(harness) = harness.upgrade() {
-                                        harness.catalog_revision.fetch_add(1, Ordering::Release);
-                                    }
+                        if let Some(h) = harness.upgrade() {
+                            h.catalog_revision.fetch_add(1, Ordering::Release);
+                        }
+                        conversation.questions_changed();
+                        return Ok(());
+                    }
+                    CodeEvent::Notification { parent, text } => {
+                        let mut session = conversation.state.lock().expect("session lock");
+                        session.pending_tool_outputs.push(json!({"type":"custom_tool_call_output","call_id":parent,"output":text}));
+                        session.entries.push(Entry::new(
+                            EntryKind::Notice,
+                            format!("Cell notification: {text}"),
+                        ));
+                    }
+                    CodeEvent::ExecutionStatus { id, status } => {
+                        let mut session = conversation.state.lock().expect("session lock");
+                        let entry = session.entries.by_id_mut(&id).expect("execution entry");
+                        let EntryKind::Tool {
+                            command_status,
+                            name,
+                            complete,
+                            ..
+                        } = &mut entry.kind
+                        else {
+                            unreachable!("execution status belongs to a tool entry");
+                        };
+                        *command_status = Some(status);
+                        // The invocation checkpoints its current cell status with its
+                        // result. After a yield, exits need their own checkpoint.
+                        if name == "exec" && !*complete {
+                            return Ok(());
+                        }
+                    }
+                    CodeEvent::Tool(event) => {
+                        let mut session = conversation.state.lock().expect("session lock");
+                        if let Some(result) = event.output {
+                            // A successful ask_user result is accepted human input,
+                            // not ordinary tool activity. Save its age with the answer.
+                            if event.name == "ask_user" && !event.failed {
+                                session.updated = crate::store::now();
+                                if let Some(harness) = harness.upgrade() {
+                                    harness.catalog_revision.fetch_add(1, Ordering::Release);
                                 }
-                                if let Some(entry) = session.entries.by_id_mut(&event.id)
-                                    && let EntryKind::Tool {
-                                        output,
-                                        complete,
-                                        failed,
-                                        media,
-                                        web,
-                                        ..
-                                    } = &mut entry.kind
-                                {
-                                    *media = event.media;
-                                    *web = event.web;
-                                    *output = result;
-                                    *complete = true;
-                                    *failed = event.failed;
-                                }
-                            } else {
-                                session.entries.push(Entry {
-                                    id: event.id,
-                                    text: String::new(),
-                                    kind: EntryKind::Tool {
-                                        name: event.name,
-                                        input: event.input,
-                                        output: String::new(),
-                                        complete: false,
-                                        failed: false,
-                                        command_status: None,
-                                        cell_id: None,
-                                        parent: Some(event.parent),
-                                        media: vec![],
-                                        web: None,
-                                    },
-                                });
                             }
+                            if let Some(entry) = session.entries.by_id_mut(&event.id)
+                                && let EntryKind::Tool {
+                                    output,
+                                    complete,
+                                    failed,
+                                    media,
+                                    web,
+                                    ..
+                                } = &mut entry.kind
+                            {
+                                *media = event.media;
+                                *web = event.web;
+                                *output = result;
+                                *complete = true;
+                                *failed = event.failed;
+                            }
+                        } else {
+                            session.entries.push(Entry {
+                                id: event.id,
+                                text: String::new(),
+                                kind: EntryKind::Tool {
+                                    name: event.name,
+                                    input: event.input,
+                                    output: String::new(),
+                                    complete: false,
+                                    failed: false,
+                                    command_status: None,
+                                    cell_id: None,
+                                    parent: Some(event.parent),
+                                    media: vec![],
+                                    web: None,
+                                },
+                            });
                         }
                     }
                 }
@@ -417,31 +537,9 @@ impl Harness {
             });
             let questionnaires = session.child.is_none().then(|| {
                 let target = weak.clone();
-                let front = Mutex::new(None);
                 Arc::new(crate::questionnaire::Questionnaires::new(move || {
                     if let Some(c) = target.upgrade() {
-                        let mut front = front.lock().expect("questionnaire notification");
-                        let pending = c
-                            .questionnaires
-                            .as_ref()
-                            .expect("main questionnaires")
-                            .pending();
-                        let next = pending.first().map(|q| q.id.clone());
-                        if *front != next {
-                            let state = c.state.lock().expect("session lock");
-                            if let Some(id) = &next {
-                                if !c.deleted.load(Ordering::Acquire)
-                                    && !c.cancel.lock().expect("cancel lock").is_cancelled()
-                                {
-                                    c.notifications
-                                        .publish(&state, notifications::Kind::Question(id.clone()));
-                                }
-                            } else {
-                                c.notifications.clear_question(&c.id);
-                            }
-                            *front = next;
-                        }
-                        c.changed();
+                        c.questions_changed();
                     }
                 }))
             });
@@ -523,6 +621,13 @@ impl Harness {
                     project: session.project.clone(),
                 })),
                 questionnaires,
+                question_alerts: Mutex::new({
+                    let restored = session.async_questions.first().map(|q| q.id.clone());
+                    QuestionAlerts {
+                        front: restored.clone(),
+                        last_async: restored,
+                    }
+                }),
                 state: Mutex::new(session),
                 running: AtomicBool::new(false),
                 manual_compaction: AtomicBool::new(false),
@@ -791,6 +896,7 @@ impl Harness {
                             || self.get(&r.session_id).is_some_and(|c| c.is_executing())
                             || (r.status.needs_attention() && !r.attention_acknowledged)
                     })
+                    || !state.async_questions.is_empty()
                     || state.interrupted
                     || state.needs_attention
                     || state.unchecked_completion
@@ -850,6 +956,17 @@ impl Harness {
         self.make_conversation(session, true);
         Ok(id)
     }
+    fn check_workspace(&self, workspace: &std::path::Path) -> Result<()> {
+        if !workspace.is_dir() {
+            anyhow::ensure!(
+                !workspace.starts_with(self.store.root().canonicalize()?.join("worktrees")),
+                "The worktree at {} is missing. Restore the checkout to continue this chat or start a new session in another worktree.",
+                workspace.display()
+            );
+        }
+        Ok(())
+    }
+
     pub fn send_new(
         self: &Arc<Self>,
         mut session: Session,
@@ -872,6 +989,7 @@ impl Harness {
             return self.send(&session.id, submission, message, settings);
         }
         crate::send_trace::phase("prepare submission");
+        self.check_workspace(&session.project)?;
         message.files = crate::file_tags::capture(
             &session.project,
             &self.store.root().join("files"),
@@ -896,23 +1014,82 @@ impl Harness {
         self: &Arc<Self>,
         id: &str,
         submission: &str,
-        mut message: crate::store::UserMessage,
+        message: crate::store::UserMessage,
         settings: Settings,
     ) -> Result<()> {
         if message.is_empty() {
             bail!("Type a message or attach an image first");
         }
+        self.submit(id, submission, Submission::Composer(message), settings)
+    }
+
+    pub fn answer_question(
+        self: &Arc<Self>,
+        id: &str,
+        request: &str,
+        answers: Vec<String>,
+        settings: Settings,
+    ) -> Result<()> {
+        self.submit(
+            id,
+            &crate::store::id(),
+            Submission::Answer { request, answers },
+            settings,
+        )
+    }
+
+    pub fn dismiss_question(&self, id: &str, request: &str) -> Result<()> {
+        let (_library, family) = self.admit(id);
+        let _coordinator = family.lock().expect("family lifecycle");
+        let c = self.load(id)?;
+        let mut saved = c.persisted.lock().expect("persistence lock");
+        anyhow::ensure!(
+            c.state
+                .lock()
+                .expect("session lock")
+                .async_questions
+                .iter()
+                .any(|q| q.id == request),
+            "This questionnaire is no longer active"
+        );
+        c.commit_change(&mut saved, |s| {
+            s.async_questions.retain(|q| q.id != request)
+        })?;
+        self.catalog_revision.fetch_add(1, Ordering::Release);
+        c.questions_changed();
+        Ok(())
+    }
+
+    fn submit(
+        self: &Arc<Self>,
+        id: &str,
+        submission: &str,
+        source: Submission<'_>,
+        settings: Settings,
+    ) -> Result<()> {
         crate::send_trace::phase("lifecycle lock");
         let (_library, family) = self.admit(id);
         let mut coordinator = family.lock().expect("family lifecycle");
         crate::send_trace::phase("session load");
         let conversation = self.load(id)?;
         crate::send_trace::phase("prepare submission");
-        if conversation.snapshot().child.is_some() {
+        let snapshot = conversation.snapshot();
+        if snapshot.child.is_some() {
             bail!("Continue child sessions through spawn_subagent in their parent");
         }
-        let snapshot = conversation.snapshot();
-        if snapshot.entries.by_id(submission).is_none() {
+        self.check_workspace(&snapshot.project)?;
+        let (mut message, answered_question) = match source {
+            Submission::Composer(message) => (message, None),
+            Submission::Answer { request, answers } => {
+                let q = snapshot
+                    .async_questions
+                    .iter()
+                    .find(|q| q.id == request)
+                    .context("This questionnaire is no longer active")?;
+                (q.reply(answers)?.into(), Some(request))
+            }
+        };
+        if answered_question.is_none() && snapshot.entries.by_id(submission).is_none() {
             message.skills =
                 crate::skills::capture(&snapshot.project, self.home.as_deref(), &message.text)?;
             message.files = crate::file_tags::capture_reusing(
@@ -967,13 +1144,20 @@ impl Harness {
                     message.clone(),
                     steering,
                     accepted_at,
+                    answered_question,
                 );
                 self.store.save_changes(saved.as_ref(), &candidate)?;
                 crate::send_trace::phase("publish acceptance");
                 *saved = Some(candidate);
                 let mut state = conversation.state.lock().expect("session lock");
                 state.points = points;
-                state.accept_submission_at(submission.to_owned(), message, steering, accepted_at);
+                state.accept_submission_at(
+                    submission.to_owned(),
+                    message,
+                    steering,
+                    accepted_at,
+                    answered_question,
+                );
                 if let Some(message) = naming_message {
                     self.name_session(&conversation, message);
                 }
@@ -983,6 +1167,9 @@ impl Harness {
                 true
             }
         };
+        if answered_question.is_some() {
+            conversation.questions_changed();
+        }
         if needs_start {
             coordinator.parent_stopped = false;
             self.start_inner(conversation, settings)?;
@@ -1127,7 +1314,7 @@ impl Harness {
                         if !cancel.is_cancelled() {
                             if result.is_err() || save_result.is_err() {
                                 conversation.notifications.publish(&state, notifications::Kind::Failed);
-                            } else if !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
+                            } else if state.async_questions.is_empty() && !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
                                 && harness.active_children(&conversation.id) == 0
                             {
                                 // This sidebar hint uses ordinary session saves (eviction,
@@ -2576,6 +2763,175 @@ image(shot);"#, "browser-tool", &CancellationToken::new()).unwrap();
                 .unwrap()
                 .contains("UI-only metadata")
         );
+    }
+
+    #[test]
+    fn failed_async_questionnaire_post_never_publishes_or_warns_of_uncertain_side_effects()
+    -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().into())?;
+        let h = Harness::new(store.clone(), vec![])?;
+        let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+        c.save()?;
+        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3"))?;
+        crate::test_support::sqlite::fail_writes(&db, "entries", "fixture post failure");
+        let result = c.code.exec(
+            "text(await tools.ask_user_async({questions:[{id:'q',kind:'text',question:'Preference?'}]}));",
+            "cell", &CancellationToken::new()
+        )?;
+        assert!(
+            result.contains("Questionnaire not posted") && result.contains("fixture post failure"),
+            "{result}"
+        );
+        assert!(
+            !result.contains("Side effects may have occurred"),
+            "{result}"
+        );
+        assert!(h.take_notifications().is_empty());
+        assert!(c.snapshot().async_questions.is_empty());
+        assert!(store.load_session(&c.id)?.async_questions.is_empty());
+        crate::test_support::sqlite::allow_writes(&db, "entries");
+        c.save()?;
+        let saved = store.load_session(&c.id)?;
+        assert!(saved.async_questions.is_empty());
+        assert!(saved.entries.iter().any(|entry|matches!(&entry.kind,
+            EntryKind::Tool {name, complete:true, failed:true, output,..} if name=="ask_user_async" && output.contains("fixture post failure"))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn async_questionnaire_answers_steer_and_resume_without_replaying_the_tool() -> Result<()>
+    {
+        use crate::test_support::{completed, sqlite, streaming_server, until};
+
+        let dir = tempfile::tempdir()?;
+        let store = crate::test_support::authenticated_store(dir.path().into());
+        let settings = Settings::default();
+        let (url, mut requests, server) = streaming_server().await;
+        let open = || {
+            Harness::with_provider(
+                store.clone(),
+                store.load()?.1,
+                Provider::fixture(store.clone(), url.clone()),
+            )
+        };
+        let h = open()?;
+        let mut session = Session::new(dir.path().into(), &settings);
+        session.rename("Async questionnaire fixture".into());
+        let c = h.insert(session);
+        let id = c.id.clone();
+        h.send(&id, "initial", "Draft a report".into(), settings.clone())?;
+        let timeout = Duration::from_secs(5);
+        let first = tokio::time::timeout(timeout, requests.recv())
+            .await?
+            .unwrap();
+        let source = r#"for (const question of ["Audience?", "Length?"]) {
+            text(await tools.ask_user_async({questions:[{id:"preference",question,kind:"text"}]}));
+        }"#;
+        first.reply.send(completed(
+            json!([{"type":"custom_tool_call","name":"exec","call_id":"ask","input":source}]),
+        ))?;
+        // A new model request, not just a yielded cell, before either answer.
+        let working = tokio::time::timeout(timeout, requests.recv())
+            .await?
+            .unwrap();
+        let out = working.body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["call_id"] == "ask" && v.get("output").is_some())
+            .unwrap();
+        assert_eq!(
+            out["output"]
+                .as_str()
+                .unwrap()
+                .matches(r#"{"accepted":true}"#)
+                .count(),
+            2
+        );
+        let pending = store.load_session(&id)?.async_questions;
+        let [early, late] = &pending[..] else {
+            panic!("both questions should be durable")
+        };
+        for q in &pending {
+            assert!(
+                matches!(&c.snapshot().entries.by_id(&q.id).unwrap().kind, EntryKind::Tool {complete:true, failed:false, output, ..} if output == r#"{"accepted":true}"#)
+            );
+        }
+
+        h.edit(&id, |s| s.draft = "Unrelated composer draft".into())?;
+        let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3"))?;
+        sqlite::fail_writes(&db, "entries", "fixture answer write failure");
+        std::fs::write(dir.path().join("private-notes"), "not an attachment")?;
+        let answer = "  Engineers\n@private-notes worldwide  ";
+        let reply = || h.answer_question(&id, &early.id, vec![answer.into()], settings.clone());
+        assert!(format!("{:#}", reply().unwrap_err()).contains("fixture answer write failure"));
+        assert_eq!(c.snapshot().async_questions, pending);
+        assert_eq!(store.load_session(&id)?.async_questions, pending);
+        sqlite::allow_writes(&db, "entries");
+        reply()?;
+        assert!(reply().is_err(), "do not accept a stale submission");
+        let state = store.load_session(&id)?;
+        assert_eq!(state.draft, "Unrelated composer draft");
+        assert_eq!(state.pending.len(), 1);
+        let text = &state.pending[0].text;
+        assert!(text.contains(&early.id) && text.contains("Audience?") && text.ends_with(answer));
+        working.reply.send(completed(json!([])))?;
+        let steered = tokio::time::timeout(timeout, requests.recv())
+            .await?
+            .unwrap();
+        let inputs = steered.body["input"].as_array().unwrap();
+        assert_eq!(
+            inputs
+                .iter()
+                .filter(|v| v["role"] == "user" && v["content"] == *text)
+                .count(),
+            1
+        );
+        steered.reply.send(completed(json!([])))?;
+        until(|| !c.is_executing()).await;
+        assert_eq!(c.status(), ConversationStatus::Completed);
+
+        assert!(
+            h.file_session(&id, FilingAction::File(FilingKind::Settled))
+                .is_err(),
+            "an otherwise idle session still has an unanswered questionnaire"
+        );
+
+        // Stop a later turn with a question outstanding, then reload as on restart.
+        h.send(&id, "next", "Check sources".into(), settings.clone())?;
+        let front = h.take_notifications().pop().expect("outstanding question");
+        assert_eq!(front.kind, notifications::Kind::Question(late.id.clone()));
+        let _stopped_request = tokio::time::timeout(timeout, requests.recv())
+            .await?
+            .unwrap();
+        h.stop(&id);
+        until(|| !c.is_executing()).await;
+        assert!(h.notification_is_current(&front));
+        drop(c);
+        drop(h);
+        let h = open()?;
+        assert!(h.summaries()[0].has_async_question);
+        let c = h.load(&id)?;
+        assert!(!c.is_executing());
+        assert!(h.take_notifications().is_empty());
+        assert_eq!(
+            c.snapshot().async_questions.as_slice(),
+            std::slice::from_ref(late)
+        );
+        h.answer_question(&id, &late.id, vec!["Two pages".into()], settings)?;
+        let resumed = tokio::time::timeout(timeout, requests.recv())
+            .await?
+            .unwrap();
+        let message = resumed.body["input"].as_array().unwrap().last().unwrap();
+        assert_eq!(message["role"], "user");
+        let text = message["content"].as_str().unwrap();
+        assert!(text.contains(&late.id) && text.contains("Length?") && text.ends_with("Two pages"));
+        resumed.reply.send(completed(json!([])))?;
+        until(|| !c.is_executing()).await;
+        assert!(store.load_session(&id)?.async_questions.is_empty());
+        server.abort();
+        Ok(())
     }
 
     #[tokio::test]

@@ -174,6 +174,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preempted_async_questionnaire_alerts_only_on_first_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(Store::open(dir.path().into()).unwrap(), vec![]).unwrap();
+        let c = h.insert(Session::new(dir.path().into(), &Settings::default()));
+        let questions = c.questionnaires.as_ref().unwrap();
+        let cancel = c.cancel.lock().unwrap().clone();
+        let args = r#"{"questions":[{"id":"q","kind":"text","question":"What next?"}]}"#;
+        // Hold each future at the rendezvous, so Stop must withdraw its alert
+        // before the cancelled ask is polled again.
+        for (index, blocking) in ["initial", "preempt", "stop"].into_iter().enumerate() {
+            let mut ask = Box::pin(questions.ask(blocking, args, &cancel));
+            assert!(futures_util::poll!(&mut ask).is_pending());
+            let [alert]: [Event; 1] = h.take_notifications().try_into().unwrap();
+            assert_eq!(alert.kind, Kind::Question(blocking.into()));
+            if index == 0 {
+                let worker = c.clone();
+                tokio::task::spawn_blocking(move || {
+                    worker.code.exec(
+                        &format!("text(await tools.ask_user_async({args}));"),
+                        "cell",
+                        &CancellationToken::new(),
+                    )
+                })
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(
+                    h.take_notifications().is_empty(),
+                    "still behind the blocking ask"
+                );
+            }
+            if blocking == "stop" {
+                h.stop(&c.id);
+                assert!(!h.notification_is_current(&alert));
+                assert!(ask.await.is_err());
+            } else {
+                questions.submit(blocking, vec!["Decision".into()]).unwrap();
+                assert!(ask.await.is_ok());
+                assert!(!h.notification_is_current(&alert));
+            }
+            let pending = c.snapshot().async_questions;
+            assert_eq!(pending.len(), 1);
+            let events = h.take_notifications();
+            if index == 0 {
+                let [first]: [Event; 1] = events.try_into().unwrap();
+                assert_eq!(first.kind, Kind::Question(pending[0].id.clone()));
+            } else {
+                assert!(
+                    events.is_empty(),
+                    "do not re-alert for the same async request"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn questionnaires_notify_only_the_actionable_request_and_stop_withdraws_it() {
         let dir = tempfile::tempdir().unwrap();
         let h = Harness::new(Store::open(dir.path().into()).unwrap(), vec![]).unwrap();

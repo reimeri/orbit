@@ -1109,13 +1109,14 @@ mod tests {
             "view_image",
             "image_gen__imagegen",
             "ask_user",
+            "ask_user_async",
             "spawn_subagent",
             "wait_subagent",
             "list_subagents",
         ] {
-            if name == "ask_user" {
+            if matches!(name, "ask_user" | "ask_user_async") {
                 assert_eq!(
-                    instructions.contains("tools.ask_user"),
+                    instructions.contains(&format!("`tools.{name}`")),
                     expected.contains(&name),
                     "questionnaire guidance must match tool availability"
                 );
@@ -1362,6 +1363,7 @@ mod tests {
                 "image_gen__imagegen",
                 "browser",
                 "ask_user",
+                "ask_user_async",
                 "spawn_subagent",
                 "wait_subagent",
                 "list_subagents",

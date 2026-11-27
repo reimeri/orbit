@@ -2,7 +2,9 @@
 
 Orbit sends native Linux desktop notifications for **main conversations**:
 
-- **Answer needed** when an `ask_user` questionnaire reaches the front of its queue.
+- **Answer needed** when a blocking or async questionnaire first reaches the front of its queue.
+  Blocking questions take priority. Answering or stopping a blocking question withdraws
+  its alert immediately; returning to a previously shown async question does not alert again.
   A questionnaire with multiple questions produces one notification, not one per field.
 - **Agent finished** when the main turn finishes successfully, with no pending
   questionnaire or running subagent assignments. Intermediate tool yields and

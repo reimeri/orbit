@@ -77,10 +77,13 @@ impl App {
         let id = "smoke-questionnaire".to_owned();
         self.questionnaires.insert(
             id.clone(),
-            questionnaire::Draft::new(orbit_core::questionnaire::Pending {
-                id: id.clone(),
-                request: Arc::new(request),
-            }),
+            questionnaire::Draft::new(
+                orbit_core::questionnaire::Pending {
+                    id: id.clone(),
+                    request: Arc::new(request),
+                },
+                None,
+            ),
         );
         self.smoke_fixtures.questionnaire = Some(id.clone());
         self.active_questionnaire = Some(id);
@@ -316,6 +319,7 @@ impl App {
                 self.smoke_fixtures.sidebar = true;
                 for i in 0..10000 {
                     self.sessions.push(SessionSummary {
+                        has_async_question: false,
                         origin: None,
                         child: None,
                         id: format!("smoke-sidebar-{i}"),

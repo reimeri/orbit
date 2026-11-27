@@ -71,6 +71,12 @@ pub struct ToolEvent {
 #[derive(Clone, Debug)]
 pub enum Event {
     Tool(ToolEvent),
+    PostQuestion {
+        id: String,
+        parent: String,
+        input: String,
+        cancel: CancellationToken,
+    },
     ExecutionStatus {
         id: String,
         status: crate::shell::CommandStatus,
@@ -649,6 +655,18 @@ fn run_cell(
                         thread::Builder::new()
                             .spawn(move || {
                                 let _permit = permit;
+                                // Posting is one atomic operation, not a running tool that
+                                // needs separate start and finish checkpoints.
+                                if name == "ask_user_async" {
+                                    let result = observer(Event::PostQuestion { id: request.clone(), parent, input: args, cancel: token });
+                                    let failed = result.is_err();
+                                    let output = match result {
+                                        Ok(()) => crate::questionnaire::Pending::ACCEPTED.to_owned(),
+                                        Err(error) => format!("{error:#}"),
+                                    };
+                                    let _ = tx.send((request, output, failed, false));
+                                    return;
+                                }
                                 let started = observer(Event::Tool(ToolEvent {
                                     id: request.clone(),
                                     parent: parent.clone(),
@@ -1057,10 +1075,12 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
                 "{result}"
             );
         }
-        let result = child
-            .exec("__call('ask_user','{}');", "child", &cancel)
-            .unwrap();
-        assert!(result.contains("Unknown nested tool"), "{result}");
+        for name in ["ask_user", "ask_user_async"] {
+            let result = child
+                .exec(&format!("__call('{name}','{{}}');"), "child", &cancel)
+                .unwrap();
+            assert!(result.contains("Unknown nested tool"), "{result}");
+        }
     }
     #[test]
     fn stopped_wait_does_not_reopen_a_cell_removed_by_session_stop() {

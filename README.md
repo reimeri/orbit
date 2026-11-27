@@ -11,7 +11,7 @@ codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage
 - Very light base system instructions (~50 tokens)
 - Code mode with essential tools
   - Shell
-  - Questionnaires
+  - [Blocking and async questionnaires](docs/questionnaires.md)
   - Image viewing and generation
   - Web search
   - [Integrated Chromium browser](docs/browser.md): one shared user/agent tab per session
