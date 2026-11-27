@@ -120,8 +120,8 @@ impl Window {
         self.list.viewport = viewport;
     }
 
-    pub fn visible<'a>(&self, items: &'a [Item]) -> &'a [Item] {
-        &items[self.list.visible()]
+    pub fn visible(&self) -> std::ops::Range<usize> {
+        self.list.visible()
     }
 
     pub fn view<'a>(

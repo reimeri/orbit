@@ -120,7 +120,7 @@ const ACTIVITY_INTERVAL: Duration = Duration::from_millis(100);
 struct Markdown {
     source: Arc<Entry>,
     content: markdown::Content,
-    images: HashSet<String>,
+    images: HashMap<String, (usize, usize)>,
     window: Option<crate::markdown_window::Window>,
     // Small eager replies can cross the threshold mid-stream while being read.
     eager_heights: std::cell::RefCell<Vec<f32>>,
@@ -140,8 +140,8 @@ impl Markdown {
         self.images.clear();
         if !self.content.images().is_empty() {
             let items = self.content.items();
-            let visible = self.window.as_ref().map_or(items, |w| w.visible(items));
-            self.images = crate::markdown_images::urls(visible);
+            let range = self.window.as_ref().map_or(0..items.len(), |w| w.visible());
+            self.images = crate::markdown_images::urls(&items[range.clone()], range.start);
         }
     }
     fn view<'a>(
@@ -1018,7 +1018,7 @@ impl App {
     }
     fn prepare_visible(&mut self) {
         let mut visible_media = self.attachments.clone();
-        let mut image_urls = HashSet::new();
+        let mut image_urls = HashMap::new();
         if let Some(session) = &self.current_session {
             let visible: Vec<_> = self
                 .chat_range()
@@ -1086,7 +1086,7 @@ impl App {
                         let content = markdown::Content::parse(&entry.text);
                         let mut markdown = Markdown {
                             eager_heights: Default::default(),
-                            images: HashSet::new(),
+                            images: HashMap::new(),
                             window: None,
                             source: session.entries.shared(index),
                             content,
@@ -1107,7 +1107,13 @@ impl App {
                     if !std::ptr::eq(entry, markdown.source.as_ref()) {
                         markdown.source = session.entries.shared(index);
                     }
-                    image_urls.extend(markdown.images.iter().cloned());
+                    // Rows are visited in transcript order, so the newest link wins.
+                    image_urls.extend(
+                        markdown
+                            .images
+                            .iter()
+                            .map(|(url, &position)| (url.clone(), (index, position))),
+                    );
                 }
                 if let EntryKind::Tool {
                     name,

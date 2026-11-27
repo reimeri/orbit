@@ -258,8 +258,10 @@ including their original bytes for the viewer. This offscreen cache is shared wi
 decoded tool/attachment thumbnails, retains up to 64 MiB and 256 entries, and
 evicts the least recently viewed entries first. Failures are not cached offscreen.
 Switching sessions clears offscreen Markdown previews, not saved-media thumbnails.
-Until eviction a preview can show the previously loaded image even if its source
-changes or disappears; after eviction it reloads the original. An already open
+When a later occurrence of the same image destination comes into view, Orbit reloads
+the source once and uses the new preview for every occurrence, including earlier
+messages. Scrolling back to an earlier link does not restore the old image.
+Orbit does not watch the source for changes between loads. An already open
 modal can finish using its loaded bytes. Two source loads and two shared decoders may run concurrently;
 the retained Markdown cache is capped at 256 MiB across visible messages. If that
 limit is reached, use fewer/smaller images or scroll other image messages out of view

@@ -197,3 +197,38 @@ async fn markdown_images_load_in_chat_open_modal_and_retry_after_source_disappea
     );
     assert!(matches!(saved.entries[0].kind, EntryKind::Assistant));
 }
+
+#[tokio::test]
+async fn relinking_a_replaced_image_refreshes_the_shared_chat_preview() {
+    let mut app = app();
+    let root = app.smoke_dir.clone().unwrap();
+    let path = root.join("plot.png");
+    let original = include_bytes!("../../fixtures/media.png");
+    let replacement = include_bytes!("../../fixtures/large-transparent.png");
+    stored_session(&mut app, root).await;
+    let session = app.selected.clone().unwrap();
+    let harness = app.harness.as_ref().unwrap().clone();
+    for (id, bytes) in [
+        ("first", original.as_slice()),
+        ("second", replacement.as_slice()),
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        harness
+            .edit(&session, |s| {
+                s.entries.push(Entry {
+                    id: id.into(),
+                    text: format!("![{id} plot](plot.png)"),
+                    kind: EntryKind::Assistant,
+                });
+            })
+            .unwrap();
+        dispatch(&mut app, Message::Changed).await;
+        let preview = app.markdown_images.loaded("plot.png").unwrap();
+        assert_eq!(preview.bytes.as_slice(), bytes);
+    }
+    dispatch(&mut app, Message::OpenMarkdownImage("plot.png".into())).await;
+    let Some(Modal::MarkdownImage(image)) = &app.modal else {
+        panic!("the shared preview must open")
+    };
+    assert_eq!(image.bytes.as_slice(), replacement);
+}

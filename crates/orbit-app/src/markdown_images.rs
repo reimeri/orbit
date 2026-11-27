@@ -5,7 +5,7 @@ use iced::{
     widget::{container, image, responsive, space, text, tooltip},
 };
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     path::Path,
     sync::{Arc, LazyLock},
 };
@@ -16,9 +16,13 @@ const MAX_PREVIEW_HEIGHT: f32 = 440.;
 static LOADERS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
+// Ordered by transcript entry, top-level Markdown item, then nested leaf.
+pub type LinkPosition = (usize, (usize, usize));
+
 #[derive(Debug)]
 pub struct Loaded {
     pub url: String,
+    link: LinkPosition,
     pub bytes: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
@@ -44,6 +48,7 @@ pub enum Message {
     },
 }
 struct Slot {
+    link: LinkPosition,
     generation: u64,
     source: Option<orbit_core::markdown_image::Source>,
     dimensions: Option<(u32, u32)>,
@@ -63,7 +68,7 @@ impl Cache {
         &mut self,
         recent: &mut RecentPreviews,
         session: Option<(&str, &Path)>,
-        urls: HashSet<String>,
+        urls: HashMap<String, LinkPosition>,
     ) -> Task<Message> {
         let id = session.map(|(id, _)| id);
         if self.session.as_deref() != id {
@@ -71,7 +76,7 @@ impl Cache {
             self.slots.clear();
             self.session = id.map(str::to_owned);
         }
-        for (_, slot) in self.slots.extract_if(|url, _| !urls.contains(url)) {
+        for (_, slot) in self.slots.extract_if(|url, _| !urls.contains_key(url)) {
             if let Some(Ok(image)) = slot.result {
                 recent.store_markdown(image);
             }
@@ -80,18 +85,24 @@ impl Cache {
             return Task::none();
         };
         let mut tasks = Vec::new();
-        for url in urls {
-            if self.slots.contains_key(&url) {
+        for (url, link) in urls {
+            // All occurrences share this slot. Only a later link should replace
+            // it; layouts and scrolling back to an earlier link reuse it.
+            if self.slots.get(&url).is_some_and(|slot| slot.link >= link) {
                 continue;
             }
             self.generation = self.generation.wrapping_add(1);
             let generation = self.generation;
-            if let Some(image) = recent.take_markdown(&url) {
+            if let Some(image) = recent.take_markdown(&url)
+                && image.link >= link
+            {
+                let link = image.link;
                 let dimensions = Some((image.width, image.height));
                 let result = self.admit(Ok(image));
                 self.slots.insert(
                     url,
                     Slot {
+                        link,
                         generation,
                         source: None,
                         dimensions,
@@ -119,7 +130,7 @@ impl Cache {
             let notify_url = url.clone();
             let loading = Task::perform(
                 async move {
-                    let result = load(destination.clone(), source, move |dimensions| {
+                    let result = load(destination.clone(), link, source, move |dimensions| {
                         // A dropped receiver means the preview left the viewport.
                         let _ = sender.unbounded_send(Message::Dimensions {
                             url: notify_url.clone(),
@@ -141,6 +152,7 @@ impl Cache {
             self.slots.insert(
                 url,
                 Slot {
+                    link,
                     generation,
                     source: key,
                     dimensions,
@@ -283,6 +295,7 @@ impl Cache {
 
 async fn load(
     url: String,
+    link: LinkPosition,
     source: Result<orbit_core::markdown_image::Source, String>,
     dimensions: impl Fn((u32, u32)) + Send + Sync + 'static,
 ) -> Result<Arc<Loaded>, String> {
@@ -309,6 +322,7 @@ async fn load(
         let (width, height) = (decoded.width(), decoded.height());
         let preview = decoded.thumbnail(640, 440).into_rgba8();
         Ok(Arc::new(Loaded {
+            link,
             url,
             bytes: Arc::new(bytes),
             width,
@@ -326,13 +340,20 @@ async fn load(
 }
 
 /// Traverse the rendered items, not Content::images (which retains stale streaming URLs).
-pub fn urls(items: &[iced::widget::markdown::Item]) -> HashSet<String> {
-    let mut urls = HashSet::new();
-    crate::markdown_window::visit_leaves(items, &mut |item| {
-        if let iced::widget::markdown::Item::Image { url, .. } = item {
-            urls.insert(url.clone());
-        }
-    });
+pub fn urls(
+    items: &[iced::widget::markdown::Item],
+    first_item: usize,
+) -> HashMap<String, (usize, usize)> {
+    let mut urls = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        let mut leaf = 0;
+        crate::markdown_window::visit_leaves(std::slice::from_ref(item), &mut |item| {
+            if let iced::widget::markdown::Item::Image { url, .. } = item {
+                urls.insert(url.clone(), (first_item + index, leaf));
+            }
+            leaf += 1;
+        });
+    }
     urls
 }
 
@@ -350,8 +371,8 @@ mod tests {
             }
         }
     }
-    fn one_url() -> HashSet<String> {
-        HashSet::from(["image.gif".into()])
+    fn one_url() -> HashMap<String, LinkPosition> {
+        HashMap::from([("image.gif".into(), (0, (0, 0)))])
     }
 
     #[tokio::test]
@@ -383,12 +404,12 @@ mod tests {
         }
         // A same-session scroll back must keep the actual decoded preview, even
         // if the source disappears. Switching sessions must instead reload it.
-        let _ = cache.prepare(&mut recent, Some(("first", dir.path())), HashSet::new());
+        let _ = cache.prepare(&mut recent, Some(("first", dir.path())), HashMap::new());
         std::fs::remove_file(&path).unwrap();
         let hit = cache.prepare(&mut recent, Some(("first", dir.path())), one_url());
         assert!(iced_runtime::task::into_stream(hit).is_none());
         assert!(Arc::ptr_eq(&cache.loaded("image.gif").unwrap(), &loaded));
-        let _ = cache.prepare(&mut recent, Some(("first", dir.path())), HashSet::new());
+        let _ = cache.prepare(&mut recent, Some(("first", dir.path())), HashMap::new());
         let task = cache.prepare(&mut recent, Some(("second", dir.path())), one_url());
         cache.update(Message::Loaded {
             url: "image.gif".into(),
@@ -403,13 +424,41 @@ mod tests {
         let task = cache.prepare(&mut recent, Some(("second", dir.path())), one_url());
         finish(&mut cache, task).await;
         assert!(cache.slots["image.gif"].result.as_ref().unwrap().is_ok());
-        let _ = cache.prepare(&mut recent, None, HashSet::new());
+        let _ = cache.prepare(&mut recent, None, HashMap::new());
         assert!(cache.slots.is_empty());
         // Evict an in-flight request as well; it must never restore its slot.
         let task = cache.prepare(&mut recent, Some(("second", dir.path())), one_url());
-        let _ = cache.prepare(&mut recent, None, HashSet::new());
+        let _ = cache.prepare(&mut recent, None, HashMap::new());
         finish(&mut cache, task).await;
         assert!(cache.slots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_later_link_bypasses_the_offscreen_preview_and_scroll_back_keeps_the_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plot.png");
+        let original = include_bytes!("fixtures/media.png");
+        let replacement = include_bytes!("fixtures/large-transparent.png");
+        let session = Some(("chat", dir.path()));
+        let mut cache = Cache::default();
+        let mut recent = RecentPreviews::default();
+        let link = |item| HashMap::from([("plot.png".into(), (0, (item, 0)))]);
+        for (item, bytes) in [(2, original.as_slice()), (5, replacement.as_slice())] {
+            std::fs::write(&path, bytes).unwrap();
+            let task = cache.prepare(&mut recent, session, link(item));
+            finish(&mut cache, task).await;
+            assert_eq!(cache.loaded("plot.png").unwrap().bytes.as_slice(), bytes);
+            let _ = cache.prepare(&mut recent, session, HashMap::new());
+        }
+        std::fs::remove_file(path).unwrap();
+        for item in [2, 5] {
+            let task = cache.prepare(&mut recent, session, link(item));
+            finish(&mut cache, task).await;
+            assert_eq!(
+                cache.loaded("plot.png").unwrap().bytes.as_slice(),
+                replacement
+            );
+        }
     }
 
     #[tokio::test]
@@ -450,7 +499,7 @@ mod tests {
             let task = cache.prepare(
                 &mut recent,
                 Some(("session", dir.path())),
-                HashSet::from([url.clone()]),
+                HashMap::from([(url.clone(), (0, (0, 0)))]),
             );
             let mut stream = iced_runtime::task::into_stream(task).unwrap();
             let first = stream.next().await.unwrap();
@@ -541,6 +590,7 @@ mod tests {
                 url: "image.gif".into(),
                 generation,
                 result: Ok(Arc::new(Loaded {
+                    link: (0, (0, 0)),
                     url: "image.gif".into(),
                     bytes: Arc::new(vec![]),
                     width: dimensions.0,
@@ -621,7 +671,7 @@ mod tests {
             dimensions: (900, 300),
         });
         let expected = layout(&cache, 500.);
-        let _task = cache.prepare(&mut recent, None, HashSet::new());
+        let _task = cache.prepare(&mut recent, None, HashMap::new());
         let _task = cache.prepare(
             &mut recent,
             Some(("second", Path::new("/workspace/a"))),
@@ -653,7 +703,7 @@ mod tests {
             generation,
             dimensions: (50, 150),
         });
-        let _task = cache.prepare(&mut recent, None, HashSet::new());
+        let _task = cache.prepare(&mut recent, None, HashMap::new());
         let _task = cache.prepare(
             &mut recent,
             Some(("first", Path::new("/workspace/a"))),
@@ -666,7 +716,9 @@ mod tests {
     fn retained_originals_are_bounded_across_images_and_eviction_allows_retry() {
         let mut cache = Cache::default();
         let mut recent = RecentPreviews::default();
-        let urls: HashSet<_> = ["a", "b", "c", "d"].map(str::to_owned).into();
+        let urls: HashMap<_, _> = ["a", "b", "c", "d"]
+            .map(|url| (url.to_owned(), (0, (0, 0))))
+            .into();
         let _task = cache.prepare(
             &mut recent,
             Some(("session", Path::new("/workspace"))),
@@ -679,6 +731,7 @@ mod tests {
         let bytes = Arc::new(bytes);
         let loaded = |url: &str| {
             Arc::new(Loaded {
+                link: (0, (0, 0)),
                 url: url.into(),
                 bytes: bytes.clone(),
                 width: 1,
@@ -710,7 +763,7 @@ mod tests {
         let _task = cache.prepare(
             &mut recent,
             Some(("session", Path::new("/workspace"))),
-            urls.into_iter().filter(|url| url != "a").collect(),
+            urls.into_iter().filter(|(url, _)| url != "a").collect(),
         );
         assert!(
             recent.take_markdown("a").is_none(),
@@ -720,7 +773,9 @@ mod tests {
         let _task = cache.prepare(
             &mut recent,
             Some(("session", Path::new("/workspace"))),
-            ["b", "c", "d"].map(str::to_owned).into(),
+            ["b", "c", "d"]
+                .map(|url| (url.to_owned(), (0, (0, 0))))
+                .into(),
         );
         cache.update(Message::Loaded {
             url: "d".into(),
@@ -736,6 +791,7 @@ mod tests {
         let handle = image::Handle::from_rgba(1, 1, vec![1; 4]);
         // One original plus its preview fills the specified 64 MiB budget.
         let large = Arc::new(Loaded {
+            link: (0, (0, 0)),
             url: "large".into(),
             bytes: Arc::new(vec![0; 64 * 1024 * 1024 - 4]),
             width: 1,
@@ -760,17 +816,20 @@ mod tests {
 
     #[test]
     fn discovers_nested_and_reference_images_but_not_links_or_code() {
+        use std::collections::HashSet;
         let content = markdown::Content::parse(
             "![first](one.png)\n\n> ![quote](two.png)\n\n- ![list][ref]\n\n[ref]: three.png\n\n| image | other |\n| --- | --- |\n| ![table](four.png) | [link](not-image.png) |\n\n`![code](ignored.png)`\n",
         );
         assert_eq!(
-            urls(content.items()),
+            urls(content.items(), 0).into_keys().collect::<HashSet<_>>(),
             HashSet::from(["one.png", "two.png", "three.png", "four.png"].map(str::to_owned))
         );
         let mut streaming = markdown::Content::parse("![x](old.png)");
         streaming.push_str(" extra\n\n![new](new.png)");
         assert_eq!(
-            urls(streaming.items()),
+            urls(streaming.items(), 0)
+                .into_keys()
+                .collect::<HashSet<_>>(),
             HashSet::from(["old.png", "new.png"].map(str::to_owned))
         );
     }
