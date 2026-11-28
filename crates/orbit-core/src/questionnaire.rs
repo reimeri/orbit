@@ -1,7 +1,11 @@
 //! Shared questionnaire schema and the in-memory rendezvous for blocking asks.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::{
+    fmt::Write,
+    ops::Range,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -136,16 +140,66 @@ pub struct Pending {
 impl Pending {
     pub(crate) const ACCEPTED: &str = r#"{"accepted":true}"#;
 
-    pub(crate) fn reply(&self, answers: Vec<String>) -> Result<String> {
+    pub(crate) fn reply(&self, answers: Vec<String>) -> Result<(String, Reply)> {
         self.request.validate_answers(&answers)?;
-        let mut text = format!("Answers to questionnaire {}:", self.id);
+        let mut text = String::new();
+        let mut pairs = Vec::with_capacity(answers.len());
         for (q, answer) in self.request.questions().iter().zip(answers) {
-            use std::fmt::Write;
-            write!(text, "\n\n[{}] {}\n{}", q.id, q.question, answer).expect("write to string");
+            if !pairs.is_empty() {
+                text.push_str("\n\n");
+            }
+            let start = text.len();
+            text.push_str(&q.question);
+            let question = start..text.len();
+            text.push_str("\nAnswer\n");
+            let start = text.len();
+            text.push_str(&answer);
+            pairs.push(AnswerPair {
+                id: q.id.clone(),
+                question,
+                answer: start..text.len(),
+            });
         }
-        Ok(text)
+        Ok((
+            text,
+            Reply {
+                request: self.id.clone(),
+                pairs,
+            },
+        ))
     }
 }
+
+/// Byte ranges in the literal transcript text. Keeping the boundaries at submission
+/// avoids parsing arbitrary multiline answers or storing another copy of their contents.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnswerPair {
+    id: String,
+    pub question: Range<usize>,
+    pub answer: Range<usize>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Reply {
+    pub(crate) request: String,
+    pub pairs: Vec<AnswerPair>,
+}
+impl Reply {
+    pub(crate) fn agent_text(&self, display: &str) -> String {
+        let mut text = format!("Answers to questionnaire {}:", self.request);
+        for pair in &self.pairs {
+            write!(
+                text,
+                "\n\n[{}] {}\n{}",
+                pair.id,
+                &display[pair.question.clone()],
+                &display[pair.answer.clone()]
+            )
+            .expect("write to string");
+        }
+        text
+    }
+}
+
 struct Waiting {
     pending: Pending,
     cancel: CancellationToken,

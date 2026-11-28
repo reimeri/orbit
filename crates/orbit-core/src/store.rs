@@ -314,6 +314,8 @@ pub struct NewSessionDraft {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EntryKind {
     User {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        questionnaire: Option<crate::questionnaire::Reply>,
         /// Unix time in seconds when this submission was accepted.
         sent_at: u64,
         images: Vec<crate::media::Media>,
@@ -595,7 +597,7 @@ impl Session {
         message: UserMessage,
         steering: bool,
         accepted_at: u64,
-        answered_question: Option<&str>,
+        questionnaire: Option<crate::questionnaire::Reply>,
     ) {
         if self.needs_title()
             || (!self.title_manually_set
@@ -610,25 +612,30 @@ impl Session {
         self.unchecked_completion = false;
         self.filing = None;
         self.pending_submissions.push(submission.clone());
-        self.entries.push(Entry {
-            id: submission,
-            kind: EntryKind::User {
-                images: message.images.clone(),
-                files: message.files.clone(),
-                skills: message.skills.clone(),
-                sent_at: accepted_at,
-                steering,
-            },
-            text: message.text.clone(),
-        });
-        self.pending.push(message);
-        if let Some(id) = answered_question {
-            self.async_questions.retain(|q| q.id != id);
+        let mut pending = message;
+        let display = if let Some(reply) = &questionnaire {
+            self.async_questions.retain(|q| q.id != reply.request);
+            let wire = reply.agent_text(&pending.text);
+            std::mem::replace(&mut pending.text, wire)
         } else {
             self.draft.clear();
             self.draft_images.clear();
             self.draft_files.clear();
-        }
+            pending.text.clone()
+        };
+        self.entries.push(Entry {
+            id: submission,
+            kind: EntryKind::User {
+                questionnaire,
+                images: pending.images.clone(),
+                files: pending.files.clone(),
+                skills: pending.skills.clone(),
+                sent_at: accepted_at,
+                steering,
+            },
+            text: display,
+        });
+        self.pending.push(pending);
     }
     pub fn consume_pending(&mut self) {
         for notice in self.subagent_notices.drain(..) {

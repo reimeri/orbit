@@ -925,9 +925,10 @@ async fn async_questionnaire_answers_steer_and_resume_without_replaying_the_tool
     let first = tokio::time::timeout(timeout, requests.recv())
         .await?
         .unwrap();
-    let source = r#"for (const question of ["Audience?", "Length?"]) {
-        text(await tools.ask_user_async({questions:[{id:"preference",question,kind:"text"}]}));
-    }"#;
+    let source = r#"for (const questions of [
+        [{id:"audience",question:"Audience?",kind:"text"}, {id:"locale",question:"Which language?",kind:"text"}],
+        [{id:"length",question:"Length?",kind:"text"}]
+    ]) text(await tools.ask_user_async({questions}));"#;
     first.reply.send(completed(
         json!([{"type":"custom_tool_call","name":"exec","call_id":"ask","input":source}]),
     ))?;
@@ -963,8 +964,15 @@ async fn async_questionnaire_answers_steer_and_resume_without_replaying_the_tool
     let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3"))?;
     sqlite::fail_writes(&db, "entries", "fixture answer write failure");
     std::fs::write(dir.path().join("private-notes"), "not an attachment")?;
-    let answer = "  Engineers\n@private-notes worldwide  ";
-    let reply = || h.answer_question(&id, &early.id, vec![answer.into()], settings.clone());
+    let answer = "  Engineers\n@private-notes worldwide\n\n[locale] Answer  ";
+    let reply = || {
+        h.answer_question(
+            &id,
+            &early.id,
+            vec![answer.into(), "français".into()],
+            settings.clone(),
+        )
+    };
     assert!(format!("{:#}", reply().unwrap_err()).contains("fixture answer write failure"));
     assert_eq!(c.snapshot().async_questions, pending);
     assert_eq!(store.load_session(&id)?.async_questions, pending);
@@ -975,7 +983,27 @@ async fn async_questionnaire_answers_steer_and_resume_without_replaying_the_tool
     assert_eq!(state.draft, "Unrelated composer draft");
     assert_eq!(state.pending.len(), 1);
     let text = &state.pending[0].text;
-    assert!(text.contains(&early.id) && text.contains("Audience?") && text.ends_with(answer));
+    assert_eq!(
+        text,
+        &format!(
+            "Answers to questionnaire {}:\n\n[audience] Audience?\n{answer}\n\n[locale] Which language?\nfrançais",
+            early.id
+        )
+    );
+    let display = &state
+        .entries
+        .by_id(&state.pending_submissions[0])
+        .unwrap()
+        .text;
+    assert_eq!(
+        display,
+        &format!("Audience?\nAnswer\n{answer}\n\nWhich language?\nAnswer\nfrançais")
+    );
+    assert_eq!(
+        plaintext_context(&state).last().unwrap()["content"],
+        *text,
+        "rebuilding agent context from a saved transcript retains the IDs"
+    );
     working.reply.send(completed(json!([])))?;
     let steered = tokio::time::timeout(timeout, requests.recv())
         .await?
@@ -1571,6 +1599,7 @@ fn evicting_transcript_keeps_completed_cell_results_and_shared_store() {
     let id = session.id.clone();
     session.entries.push(Entry::new(
         EntryKind::User {
+            questionnaire: None,
             skills: vec![],
             files: vec![],
             images: vec![],

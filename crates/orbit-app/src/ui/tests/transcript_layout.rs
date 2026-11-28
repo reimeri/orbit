@@ -265,6 +265,7 @@ async fn fitting_chat_expansions_keep_prose_mounted_with_real_viewport_feedback(
     let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
     session.entries.push(Entry::new(
         EntryKind::User {
+            questionnaire: None,
             skills: vec![],
             files: vec![],
             images: vec![],
@@ -436,6 +437,7 @@ async fn opening_child_at_bottom_measures_offscreen_mounted_rows_without_scrolli
     for (kind, text) in [
         (
             EntryKind::User {
+                questionnaire: None,
                 skills: vec![],
                 files: vec![],
                 images: vec![],
@@ -451,6 +453,7 @@ async fn opening_child_at_bottom_measures_offscreen_mounted_rows_without_scrolli
         ),
         (
             EntryKind::User {
+                questionnaire: None,
                 skills: vec![],
                 files: vec![],
                 images: vec![],

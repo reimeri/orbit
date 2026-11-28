@@ -1070,6 +1070,7 @@ async fn empty_workspace_welcome_centers_above_composer_and_fits_long_names() {
 
     app.draft_session.as_mut().unwrap().entries.push(Entry::new(
         EntryKind::User {
+            questionnaire: None,
             skills: vec![],
             files: vec![],
             images: vec![],

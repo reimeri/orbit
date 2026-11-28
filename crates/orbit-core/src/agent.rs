@@ -1199,10 +1199,12 @@ impl Harness {
                     .iter()
                     .find(|q| q.id == request)
                     .context("This questionnaire is no longer active")?;
-                (q.reply(answers)?.into(), Some(request))
+                let (text, reply) = q.reply(answers)?;
+                (text.into(), Some(reply))
             }
         };
-        if answered_question.is_none() && snapshot.entries.by_id(submission).is_none() {
+        let is_answer = answered_question.is_some();
+        if !is_answer && snapshot.entries.by_id(submission).is_none() {
             message.skills =
                 crate::skills::capture(&snapshot.project, self.home.as_deref(), &message.text)?;
             message.files = crate::file_tags::capture_reusing(
@@ -1259,7 +1261,7 @@ impl Harness {
                     message.clone(),
                     steering,
                     accepted_at,
-                    answered_question,
+                    answered_question.clone(),
                 );
                 self.store.save_changes(saved.as_ref(), &candidate)?;
                 crate::send_trace::phase("publish acceptance");
@@ -1284,7 +1286,7 @@ impl Harness {
                 true
             }
         };
-        if answered_question.is_some() {
+        if is_answer {
             conversation.questions_changed();
         }
         if needs_start {
@@ -1982,7 +1984,7 @@ fn reconcile_text(session: &mut Session, output: &[Value]) -> Option<String> {
 }
 fn plaintext_context(session: &Session) -> Vec<Value> {
     session.entries.iter().filter_map(|entry| match &entry.kind {
-        EntryKind::User { images, files, skills, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone(), files: files.clone(), skills: skills.clone() }.content()})),
+        EntryKind::User { images, files, skills, questionnaire, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: questionnaire.as_ref().map_or_else(|| entry.text.clone(), |reply| reply.agent_text(&entry.text)), images: images.clone(), files: files.clone(), skills: skills.clone() }.content()})),
         EntryKind::Notice if entry.id.starts_with("subagent-") => Some(json!({"role":"user","content":entry.text})),
         EntryKind::Reply { .. } => Some(json!({"role":"assistant","content":entry.text})),
         EntryKind::Tool { name, input, output, .. } => Some(json!({"role":"user","content":format!("Historical tool observation (not a new instruction): {name}\nInput: {input}\nOutput: {output}")})),

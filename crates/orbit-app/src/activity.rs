@@ -526,6 +526,7 @@ mod tests {
             entry(
                 "user",
                 EntryKind::User {
+                    questionnaire: None,
                     skills: vec![],
                     files: vec![],
                     images: vec![],

@@ -248,6 +248,7 @@ async fn model_defaults_footer_fast_and_retired_session_recovery_persist() {
     session.fast = false;
     session.entries.push(Entry::new(
         EntryKind::User {
+            questionnaire: None,
             skills: vec![],
             files: vec![],
             images: vec![],

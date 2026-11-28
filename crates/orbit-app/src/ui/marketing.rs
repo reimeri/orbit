@@ -79,7 +79,7 @@ impl App {
             .extend([inspect.id.clone(), test.id.clone()]);
         self.details.expanded.insert(test.id.clone());
         session.entries = vec![
-            Entry::new(EntryKind::User { skills: vec![], files: vec![], images: vec![], sent_at: 1_750_000_123, steering: false }, "Panning back to a trail reloads the same map tiles. Can we reuse them without growing memory usage?"),
+            Entry::new(EntryKind::User { questionnaire: None, skills: vec![], files: vec![], images: vec![], sent_at: 1_750_000_123, steering: false }, "Panning back to a trail reloads the same map tiles. Can we reuse them without growing memory usage?"),
             Entry::new(EntryKind::Reply { final_at: None }, "I’ll trace how tiles leave the viewport, then add a test for panning away and back."),
             inspect,
             Entry::new(EntryKind::Reply { final_at: None }, "The renderer was dropping tiles as soon as they left the screen. I’ve added a **bounded tile cache**: visible tiles stay pinned, and the oldest offscreen tile makes room for the next one."),

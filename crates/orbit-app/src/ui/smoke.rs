@@ -148,7 +148,7 @@ impl App {
                 s.usage.total_cached = 126_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
-                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: 1_750_000_123, steering: false }, "Inspect this project and run its tests."),
+                    Entry::new(EntryKind::User { questionnaire: None, skills: vec![], files: vec![],  images: vec![], sent_at: 1_750_000_123, steering: false }, "Inspect this project and run its tests."),
                     Entry::new(
                         EntryKind::Reply { final_at: None },
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Orbit\"); }\n```\n\n[Documentation](https://openai.com)",
@@ -439,6 +439,7 @@ impl App {
                 child.effort = "high".into();
                 child.entries.push(Entry::new(
                     EntryKind::User {
+                        questionnaire: None,
                         skills: vec![],
                         files: vec![],
                         images: vec![],
@@ -724,7 +725,7 @@ impl App {
                         }
                     };
                 session.entries = vec![
-                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: 1_750_000_123, steering: false }, "Check the implementation and run validation."),
+                    Entry::new(EntryKind::User { questionnaire: None, skills: vec![], files: vec![],  images: vec![], sent_at: 1_750_000_123, steering: false }, "Check the implementation and run validation."),
                     Entry { id: "activity-reason".into(), kind: EntryKind::Reasoning, text: "**Inspecting the build configuration**\n\nReviewing the existing Nix development environment.".into() },
                     Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
                     tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),

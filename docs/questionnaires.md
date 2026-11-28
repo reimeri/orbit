@@ -40,7 +40,9 @@ in-memory UI drafts, not saved answers.
 
 - **Submit** sends one user message with the request ID, question IDs and prompts,
   and complete answers in order. It steers a running agent at the next response
-  boundary, or starts a new turn if the agent has finished or stopped.
+  boundary, or starts a new turn if the agent has finished or stopped. In chat,
+  the **Your answers** card shows each prompt followed by its labeled answer.
+  Find and copy use that text; the IDs are only included in the agent message.
 - **Dismiss** removes the request without sending a message or starting a turn.
   Escape still stops agent work; it does not dismiss the request.
 - Submitting or dismissing leaves the ordinary composer draft alone. Answers are

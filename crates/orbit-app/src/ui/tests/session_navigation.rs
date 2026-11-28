@@ -13,6 +13,7 @@ async fn deleting_populated_session_then_opening_draft_clears_transcript() {
         .edit(&id, |s| {
             s.entries.push(Entry::new(
                 EntryKind::User {
+                    questionnaire: None,
                     skills: vec![],
                     files: vec![],
                     images: vec![],
@@ -71,6 +72,7 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
     child.effort = "max".into();
     child.entries.push(Entry::new(
         EntryKind::User {
+            questionnaire: None,
             skills: vec![],
             files: vec![],
             images: vec![],

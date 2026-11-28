@@ -300,5 +300,33 @@ async fn blocking_questionnaire_preempts_an_async_draft_and_dismiss_does_not_sen
         .filter(|e| matches!(e.kind, EntryKind::User { .. }))
         .collect();
     assert_eq!(replies.len(), 1, "dismiss must not send another message");
-    assert!(replies[0].text.contains(&id) && replies[0].text.ends_with("Draft answer"));
+    let index = saved.entries.index_of(&replies[0].id).unwrap();
+    let body = "Any notes?\nAnswer\nDraft answer";
+    let card = displayed_text(app.entry_view(replies[0], index), Size::new(320., 600.));
+    assert!(card.contains("Your answers") && card.contains(body));
+    assert!(!card.contains(&id) && !card.contains("[notes]"));
+    dispatch(&mut app, Message::Find(find::Action::Open)).await;
+    for (query, expected) in [(&*id, None), ("Draft answer", body.find("Draft answer"))] {
+        dispatch(&mut app, Message::Find(find::Action::Query(query.into()))).await;
+        let paint = app
+            .find
+            .as_ref()
+            .unwrap()
+            .paint(index, &app.current().unwrap().entries[index]);
+        assert_eq!(paint.active.map(|hit| hit.start), expected);
+    }
+    {
+        let mut selection = app.chat_selection.borrow_mut();
+        let at = |byte| Position {
+            entry: index,
+            block: 0,
+            byte,
+        };
+        selection.anchor = Some(at(0));
+        selection.focus = Some(at(body.len()));
+    }
+    assert_eq!(
+        copied_text(app.update_inner(Message::CopySelection)).await,
+        body
+    );
 }

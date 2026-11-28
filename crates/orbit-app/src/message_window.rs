@@ -280,6 +280,7 @@ impl Prompt {
         &self,
         entry: usize,
         size: f32,
+        muted: iced::Color,
         selection: chat_selection::Shared,
         find: Paint,
     ) -> Element<'_, Message> {
@@ -293,7 +294,7 @@ impl Prompt {
                 paint.reveal = None;
             }
             self.text
-                .chunk(bytes, entry, size, selection.clone(), paint)
+                .chunk(bytes, entry, size, muted, selection.clone(), paint)
         })
     }
 }

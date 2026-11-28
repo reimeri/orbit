@@ -700,9 +700,20 @@ impl App {
                     images,
                     files,
                     steering,
+                    questionnaire,
                     ..
                 } = &entry.kind
                 {
+                    if questionnaire.is_some() {
+                        content = content.push(
+                            row![
+                                Icon::Check.colored(14., colors.accent),
+                                text("Your answers").size(13)
+                            ]
+                            .align_y(iced::Center)
+                            .spacing(6),
+                        );
+                    }
                     if *steering {
                         content = content.push(
                             text("Steering · waiting for the next boundary")
@@ -746,20 +757,17 @@ impl App {
                     content = content.push(prompt.view(
                         index,
                         self.catalog.settings.font_size,
+                        colors.muted,
                         self.chat_selection.clone(),
                         paint,
                     ));
                 } else {
-                    content = content.push(chat_selection::plain_find(
-                        &entry.text,
+                    content = content.push(chat_selection::prompt_find(
+                        entry,
                         self.catalog.settings.font_size,
-                        None,
+                        colors.muted,
                         self.chat_selection.clone(),
-                        Position {
-                            entry: index,
-                            block: 0,
-                            byte: 0,
-                        },
+                        index,
                         paint,
                     ));
                 }

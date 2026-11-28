@@ -400,6 +400,7 @@ mod tests {
         let mut source: History<Entry> = vec![
             Entry::new(
                 EntryKind::User {
+                    questionnaire: None,
                     images: vec![],
                     files: vec![],
                     skills: vec![],

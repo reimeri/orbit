@@ -504,17 +504,6 @@ pub fn plain(
     selection: Shared,
     at: Position,
 ) -> Element<'static, Message> {
-    plain_find(value, size, color, selection, at, Paint::default())
-}
-
-pub fn plain_find(
-    value: &str,
-    size: f32,
-    color: Option<Color>,
-    selection: Shared,
-    at: Position,
-    find: Paint,
-) -> Element<'static, Message> {
     let mut span = Span::new(value.to_owned());
     span.color = color;
     selectable(
@@ -523,6 +512,71 @@ pub fn plain_find(
         Font::DEFAULT,
         selection,
         at,
+        SelectableText::Plain,
+        Paint::default(),
+    )
+}
+
+// Style the same literal text used by Find and Copy, whether the entire card
+// or just one virtualized hard line is mounted.
+fn prompt_spans(
+    source: &orbit_core::store::Entry,
+    bytes: Range<usize>,
+    muted: Color,
+) -> Arc<[Span<'static, String>]> {
+    let orbit_core::store::EntryKind::User {
+        questionnaire: Some(reply),
+        ..
+    } = &source.kind
+    else {
+        return Arc::from([Span::new(source.text[bytes].to_owned())]);
+    };
+    let mut spans = Vec::new();
+    let mut start = bytes.start;
+    let mut until = |end: usize, color: Option<Color>, font: Option<Font>| {
+        let end = end.min(bytes.end);
+        if start < end {
+            let mut span = Span::new(source.text[start..end].to_owned());
+            span.color = color;
+            span.font = font;
+            spans.push(span);
+            start = end;
+        }
+    };
+    for pair in &reply.pairs {
+        until(pair.question.start, None, None);
+        until(pair.question.end, Some(muted), None);
+        until(
+            pair.answer.start,
+            None,
+            Some(Font {
+                weight: iced::font::Weight::Semibold,
+                ..Font::DEFAULT
+            }),
+        );
+        until(pair.answer.end, None, None);
+    }
+    spans.into()
+}
+
+pub fn prompt_find(
+    source: &orbit_core::store::Entry,
+    size: f32,
+    muted: Color,
+    selection: Shared,
+    entry: usize,
+    find: Paint,
+) -> Element<'static, Message> {
+    selectable(
+        prompt_spans(source, 0..source.text.len(), muted),
+        size.into(),
+        Font::DEFAULT,
+        selection,
+        Position {
+            entry,
+            block: 0,
+            byte: 0,
+        },
         SelectableText::Plain,
         find,
     )
@@ -546,6 +600,7 @@ impl PromptText {
         bytes: Range<usize>,
         entry: usize,
         size: f32,
+        muted: Color,
         selection: Shared,
         find: Paint,
     ) -> Element<'static, Message> {
@@ -554,12 +609,9 @@ impl PromptText {
             block: 0,
             byte: bytes.start,
         };
+        let line = self.source.text[bytes].trim_end_matches(hard_break);
         selectable(
-            Arc::from([Span::new(
-                self.source.text[bytes]
-                    .trim_end_matches(hard_break)
-                    .to_owned(),
-            )]),
+            prompt_spans(&self.source, at.byte..at.byte + line.len(), muted),
             size.into(),
             Font::DEFAULT,
             selection,
