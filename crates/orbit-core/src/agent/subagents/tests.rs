@@ -490,7 +490,7 @@ async fn parallel_children_isolate_context_wake_parent_and_resume_with_stable_re
         .unwrap();
     assert_ne!(resumed.run_id, explore.run_id);
     let continuation = f.request().await;
-    assert_eq!(resumed.configuration.as_ref(), Some(&follow_up));
+    assert_eq!(resumed.configuration, follow_up);
     assert_eq!(continuation.body["model"], follow_up.model);
     assert_eq!(continuation.body["reasoning"]["effort"], follow_up.effort);
     assert_eq!(continuation.body["service_tier"], "priority");
@@ -948,7 +948,7 @@ async fn failed_result_does_not_block_another_parents_send_or_completion() {
 fn older_assignments_do_not_change_latest_child_status() {
     let mut coordinator = RunIndex::default();
     let mut old = RunInfo {
-        configuration: None,
+        configuration: Profile::Review.defaults(),
         run_id: "old".into(),
         session_id: "child".into(),
         parent_id: "parent".into(),
@@ -1235,7 +1235,7 @@ fn restart_keeps_history_cold_but_addressable_and_acknowledgeable() {
             parent_id: parent.id.clone(),
             request_id: format!("request-{n}"),
             profile: Profile::Review,
-            configuration: None,
+            configuration: Profile::Review.defaults(),
             title: format!("Task {n}"),
             status,
             assignment: n,
@@ -1364,7 +1364,7 @@ fn restart_skips_only_malformed_assignments_and_preserves_their_rows() {
             profile: Profile::Review,
         });
         let run = RunInfo {
-            configuration: None,
+            configuration: Profile::Review.defaults(),
             run_id: id(),
             parent_id: parent.id.clone(),
             session_id: child.id.clone(),

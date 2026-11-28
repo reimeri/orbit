@@ -16,7 +16,7 @@ async fn deleting_populated_session_then_opening_draft_clears_transcript() {
                     skills: vec![],
                     files: vec![],
                     images: vec![],
-                    sent_at: None,
+                    sent_at: 1_750_000_123,
                     steering: false,
                 },
                 "Old message",
@@ -74,7 +74,7 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
             skills: vec![],
             files: vec![],
             images: vec![],
-            sent_at: None,
+            sent_at: 1_750_000_123,
             steering: false,
         },
         "Inspect without edits",
@@ -86,11 +86,11 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
     h.store.save_session(&child).unwrap();
     let finished = orbit_core::store::now();
     let run = RunInfo {
-        configuration: Some(orbit_core::store::SubagentSettings {
+        configuration: orbit_core::store::SubagentSettings {
             model: child.model.clone(),
             effort: child.effort.clone(),
             fast: child.fast,
-        }),
+        },
         run_id: orbit_core::store::id(),
         session_id: child_id.clone(),
         parent_id: parent.clone(),

@@ -1073,7 +1073,7 @@ async fn empty_workspace_welcome_centers_above_composer_and_fits_long_names() {
             skills: vec![],
             files: vec![],
             images: vec![],
-            sent_at: None,
+            sent_at: 1_750_000_123,
             steering: false,
         },
         "Start building",

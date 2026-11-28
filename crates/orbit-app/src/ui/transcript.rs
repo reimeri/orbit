@@ -550,13 +550,9 @@ impl App {
                     ));
                     if let Some(metadata) = web {
                         details = details.push(
-                            text(format!(
-                                "{} web access · {}",
-                                metadata.mode,
-                                age(metadata.searched_at)
-                            ))
-                            .size(11)
-                            .style(theme::muted),
+                            text(format!("Web access · {}", age(metadata.searched_at)))
+                                .size(11)
+                                .style(theme::muted),
                         );
                         for source in &metadata.sources {
                             details = details.push(

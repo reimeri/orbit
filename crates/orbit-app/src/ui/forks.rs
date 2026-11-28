@@ -134,11 +134,11 @@ impl App {
         let ActivityRow::Entry(i) = projected else {
             return content;
         };
-        if !matches!(entry.kind, EntryKind::User { .. }) {
+        let EntryKind::User { sent_at, .. } = entry.kind else {
             return content;
-        }
+        };
         let prompt = if session.can_fork(i) {
-            self.prompt_controls(session, entry, content)
+            self.prompt_controls(session, &entry.id, sent_at, content)
         } else {
             content
         };
@@ -154,11 +154,11 @@ impl App {
     fn prompt_controls<'a>(
         &'a self,
         session: &'a Session,
-        entry: &'a Entry,
+        eid: &str,
+        sent_at: u64,
         content: Element<'a, Message>,
     ) -> Element<'a, Message> {
         let sid = &session.id;
-        let eid = &entry.id;
         let mut controls = row![].align_y(iced::Center).height(CONTROLS_HEIGHT);
         if let Some(n) = self.forks.descendants.get(sid).and_then(|m| m.get(eid)) {
             controls = controls.push(
@@ -168,18 +168,14 @@ impl App {
                 ))
                 .padding([2, 8])
                 .style(theme::text_button)
-                .on_press(Message::ShowForks(Some(eid.clone()))),
+                .on_press(Message::ShowForks(Some(eid.to_owned()))),
             );
         }
         let fork = theme::button(container(Icon::GitFork.view(16.)).center(CONTROLS_HEIGHT))
             .padding(0)
             .style(theme::sidebar_control)
-            .on_press_maybe((!self.io_busy).then(|| Message::Fork(sid.clone(), eid.clone())));
-        let time: Element<'_, Message> = if let EntryKind::User {
-            sent_at: Some(seconds),
-            ..
-        } = entry.kind
-            && let Ok(seconds) = i64::try_from(seconds)
+            .on_press_maybe((!self.io_busy).then(|| Message::Fork(sid.clone(), eid.to_owned())));
+        let time: Element<'_, Message> = if let Ok(seconds) = i64::try_from(sent_at)
             && let Some(utc) = chrono::DateTime::from_timestamp(seconds, 0)
         {
             let local = utc

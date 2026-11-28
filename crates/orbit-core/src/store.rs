@@ -1,4 +1,4 @@
-//! Durable V2 state. Provider context and the complete visible transcript are separate.
+//! Durable Orbit state. Provider context and the complete visible transcript are separate.
 pub mod activity;
 mod forks;
 use crate::{
@@ -36,9 +36,7 @@ pub fn id() -> String {
 pub struct Project {
     pub path: PathBuf,
     pub favorite: bool,
-    #[serde(default)]
     pub display_name: Option<String>,
-    #[serde(default)]
     pub stashed: bool,
 }
 impl Project {
@@ -90,12 +88,7 @@ fn subagent_defaults() -> BTreeMap<Profile, SubagentSettings> {
 
 pub const DEFAULT_THEME: &str = "Moonfly";
 
-fn default_theme() -> String {
-    DEFAULT_THEME.to_owned()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct SpellcheckSettings {
     pub enabled: bool,
     pub language: String,
@@ -112,16 +105,11 @@ impl Default for SpellcheckSettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
-    #[serde(default = "default_theme")]
     pub theme: String,
-    #[serde(default)]
     pub images: crate::image_tools::Settings,
-    #[serde(default)]
     pub spellcheck: SpellcheckSettings,
     pub model: String,
-    #[serde(default = "model_defaults")]
     pub models: BTreeMap<String, ModelDefaults>,
-    #[serde(default = "subagent_defaults")]
     pub subagents: BTreeMap<Profile, SubagentSettings>,
     pub context_limit: u64,
     pub compact_percent: u8,
@@ -130,13 +118,12 @@ pub struct Settings {
     pub font_size: f32,
     pub chat_width: f32,
     pub resume_last: bool,
-    #[serde(default)]
     pub hide_working_sessions: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: default_theme(),
+            theme: DEFAULT_THEME.to_owned(),
             images: crate::image_tools::Settings::default(),
             spellcheck: SpellcheckSettings::default(),
             model: DEFAULT_MODEL.into(),
@@ -251,7 +238,6 @@ impl Catalog {
 pub struct UserMessage {
     pub text: String,
     pub images: Vec<crate::media::Media>,
-    #[serde(default)]
     pub files: Vec<crate::file_tags::Attachment>,
     /// Explicit skill bodies captured at submission, never developer instructions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -329,15 +315,12 @@ pub struct NewSessionDraft {
 pub enum EntryKind {
     User {
         /// Unix time in seconds when this submission was accepted.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        sent_at: Option<u64>,
+        sent_at: u64,
         images: Vec<crate::media::Media>,
-        #[serde(default)]
         files: Vec<crate::file_tags::Attachment>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skills: Vec<String>,
         /// Submitted during an active turn and not yet consumed at a model boundary.
-        #[serde(default)]
         steering: bool,
     },
     Assistant,
@@ -349,16 +332,13 @@ pub enum EntryKind {
         output: String,
         complete: bool,
         /// Actual cell/process lifetime, independent of the invocation result.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         command_status: Option<crate::shell::CommandStatus>,
-        #[serde(default)]
         failed: bool,
-        #[serde(default)]
         cell_id: Option<String>,
         parent: Option<String>,
-        #[serde(default)]
         media: Vec<crate::media::Media>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         web: Option<crate::web_search::Metadata>,
     },
 }
@@ -387,9 +367,7 @@ pub struct Usage {
     pub input: u64,
     pub output: u64,
     pub cached: u64,
-    #[serde(default)]
     pub total_input: u64,
-    #[serde(default)]
     pub total_cached: u64,
     pub total_output: u64,
 }
@@ -408,7 +386,6 @@ impl Usage {
 /// completed items and results durable until they can be committed in model order.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InProgressResponse {
-    #[serde(default)]
     pub(crate) text_rows: im::HashMap<String, String>,
     pub items: im::OrdMap<usize, Value>,
     pub results: im::OrdMap<usize, Value>,
@@ -443,28 +420,22 @@ fn serialize_question_ids<S: serde::Serializer>(
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
-    #[serde(default)]
     pub origin: Option<ForkOrigin>,
     #[serde(skip)]
     pub(crate) points: im::OrdMap<usize, Arc<forks::Point>>,
-    #[serde(default)]
     pub draft_files: Vec<crate::file_tags::Attachment>,
     pub id: String,
-    #[serde(default)]
     pub child: Option<crate::agent::subagents::Child>,
-    #[serde(default)]
     pub subagent_notices: Vec<String>,
     pub project: PathBuf,
     pub title: String,
     /// Explicit renames win even if the chosen text equals the automatic fallback.
-    #[serde(default)]
     pub title_manually_set: bool,
     /// Sidebar age/order: last accepted message, answer, or successful completion.
     pub updated: u64,
     pub model: String,
     pub effort: String,
     pub(crate) effort_baseline: Option<EffortBaseline>,
-    #[serde(default)]
     pub fast: bool,
     #[serde(skip)]
     pub entries: History<Entry>,
@@ -486,12 +457,10 @@ pub struct Session {
     )]
     pub async_questions: Vec<crate::questionnaire::Pending>,
     pub pending_tool_outputs: Vec<Value>,
-    #[serde(default)]
     pub in_progress_response: Option<InProgressResponse>,
     pub interrupted: bool,
     pub needs_attention: bool,
     /// A successful main turn completed since the session was last opened.
-    #[serde(default)]
     pub unchecked_completion: bool,
     /// Sidebar category and filing time; absent for active sessions.
     pub filing: Option<Filing>,
@@ -644,7 +613,7 @@ impl Session {
                 images: message.images.clone(),
                 files: message.files.clone(),
                 skills: message.skills.clone(),
-                sent_at: Some(accepted_at),
+                sent_at: accepted_at,
                 steering,
             },
             text: message.text.clone(),
@@ -693,15 +662,11 @@ impl Session {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
-    #[serde(default)]
     pub has_async_question: bool,
-    #[serde(default)]
     pub origin: Option<ForkOrigin>,
-    #[serde(default)]
     pub child: Option<crate::agent::subagents::Child>,
     pub needs_attention: bool,
     /// A successful main turn completed since the session was last opened.
-    #[serde(default)]
     pub unchecked_completion: bool,
     /// Sidebar category and filing time; absent for active sessions.
     pub filing: Option<Filing>,
@@ -1122,6 +1087,26 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn incomplete_settings_are_reported_without_replacing_the_file() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::open(root.path().into())?;
+        let (fresh, _, _) = store.load()?;
+        let mut catalog = serde_json::to_value(fresh)?;
+        catalog["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("models");
+        let saved = serde_json::to_vec(&catalog)?;
+        let path = root.path().join("settings.json");
+        fs::write(&path, &saved)?;
+
+        let error = store.load().unwrap_err();
+        assert!(format!("{error:#}").contains("missing field `models`"));
+        assert_eq!(fs::read(path)?, saved);
+        Ok(())
+    }
+
+    #[test]
     fn cold_load_sees_committed_history_while_store_writer_is_busy() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path().into()).unwrap();
@@ -1226,7 +1211,7 @@ mod tests {
         let mut saved = store.load_session(&id).unwrap();
         assert_eq!(saved.pending[0], message);
         assert!(
-            matches!(&saved.entries[0].kind, EntryKind::User { images, steering: false, sent_at: Some(1_750_000_123), .. } if images == &vec![image.clone()])
+            matches!(&saved.entries[0].kind, EntryKind::User { images, steering: false, sent_at: 1_750_000_123, .. } if images == &vec![image.clone()])
         );
         assert!(matches!(
             saved.entries[1].kind,
@@ -1303,11 +1288,6 @@ mod tests {
         assert_eq!(restored.usage.total_output, 69);
         assert_eq!(restored.usage.total_cached, 3200);
         assert_eq!(restored.usage.cached, 0);
-        let existing: Usage = serde_json::from_value(serde_json::json!({
-            "input":1234,"output":12,"cached":1000,"total_output":57
-        }))
-        .unwrap();
-        assert_eq!(existing.total_input, 0);
     }
 
     #[test]

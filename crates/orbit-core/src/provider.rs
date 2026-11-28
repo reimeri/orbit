@@ -1063,7 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_ui_metadata_stays_out_of_provider_context() {
-        use crate::web_search::{Metadata, Mode};
+        use crate::web_search::Metadata;
         let reply = crate::test_support::completed(
             json!([{"type":"message","content":[{"type":"output_text","text":"summary"}]}]),
         );
@@ -1084,7 +1084,6 @@ mod tests {
                 cell_id: None,
                 media: vec![],
                 web: Some(Metadata {
-                    mode: Mode::Live,
                     searched_at: 123,
                     sources: vec![],
                     details: "ui-metadata-marker".into(),

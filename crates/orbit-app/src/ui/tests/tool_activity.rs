@@ -544,14 +544,13 @@ async fn activity_expansion_streaming_selection_and_details_preserve_source_entr
 
 #[tokio::test]
 async fn web_transcript_details_survive_reopen() {
-    use orbit_core::web_search::{Metadata, Mode, Source};
+    use orbit_core::web_search::{Metadata, Source};
     let mut app = app();
     let root = app.smoke_dir.clone().unwrap();
     stored_session(&mut app, root).await;
     let id = app.selected.clone().unwrap();
     let h = app.harness.as_ref().unwrap().clone();
     let metadata = Metadata {
-        mode: Mode::Cached,
         searched_at: 123,
         sources: vec![Source {
             title: "Official source".into(),

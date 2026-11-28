@@ -25,8 +25,7 @@ pub struct Attachment {
     pub inline: Option<String>,
     pub image: Option<crate::media::Media>,
     spill: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_version: Option<SourceVersion>,
+    source_version: SourceVersion,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct SourceVersion {
@@ -362,9 +361,7 @@ pub(crate) fn capture_reusing(
         let name = encode(&path);
         let mut capture_one = || -> Result<Option<Attachment>> {
             if let Some(file) = saved.iter().find(|file| file.name == name) {
-                if file.source_version.is_some_and(|v| !seen.insert(v))
-                    || attachments.iter().any(|f: &Attachment| f.name == name)
-                {
+                if !seen.insert(file.source_version) {
                     return Ok(None);
                 }
                 let mut file = file.clone();
@@ -489,7 +486,7 @@ fn snapshot_file(
         snapshot,
         inline,
         image,
-        source_version: Some(version),
+        source_version: version,
         spill: PathBuf::from(format!("/tmp/orbit-file-{}/snapshot", crate::store::id())),
     };
     if attachment.inline.is_none() && attachment.image.is_none() {

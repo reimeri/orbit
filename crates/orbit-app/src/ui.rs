@@ -3697,13 +3697,9 @@ impl App {
                 colors.muted
             };
             let status = activity.as_deref().unwrap_or(run.status.label());
-            let metadata = match &run.configuration {
-                Some(config) => {
-                    let name = model(&config.model).map_or(config.model.as_str(), |m| m.name);
-                    format!("{name} · {} · {elapsed}s", config.effort)
-                }
-                None => format!("{elapsed}s"),
-            };
+            let config = &run.configuration;
+            let name = model(&config.model).map_or(config.model.as_str(), |m| m.name);
+            let metadata = format!("{name} · {} · {elapsed}s", config.effort);
             let card_content = column![
                 row![
                     text(run.profile.label()).size(13),

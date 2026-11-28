@@ -78,14 +78,13 @@ pub struct RunInfo {
     pub request_id: String,
     pub profile: Profile,
     /// Snapshot at acceptance; independent of later edits to this profile.
-    pub configuration: Option<SubagentSettings>,
+    pub configuration: SubagentSettings,
     pub title: String,
     pub status: RunStatus,
     pub assignment: usize,
     pub started: u64,
     pub finished: Option<u64>,
     pub notified: bool,
-    #[serde(default)]
     pub attention_acknowledged: bool,
 }
 // Use the same expressions in the indexes and their readers. Invalid JSON must
@@ -96,7 +95,7 @@ pub(crate) const PENDING: &str = "CASE WHEN json_valid(metadata) THEN
     metadata ->> '$.status' = 'running' OR metadata ->> '$.notified' = 0 ELSE 1 END";
 pub(crate) const UNACKNOWLEDGED: &str = "CASE WHEN json_valid(metadata) THEN
     metadata ->> '$.status' IN ('failed','interrupted')
-    AND coalesce(metadata ->> '$.attention_acknowledged', 0) = 0 END";
+    AND metadata ->> '$.attention_acknowledged' = 0 END";
 pub(super) const RUN_COLUMNS: &str =
     "rowid,id,parent,session,request,metadata,result IS NOT NULL AS has_result";
 
@@ -532,7 +531,7 @@ impl Harness {
             parent_id: parent.into(),
             request_id: request.into(),
             profile: args.profile,
-            configuration: Some(configuration.clone()),
+            configuration: configuration.clone(),
             title,
             status: RunStatus::Running,
             // Skipped, unreadable assignments still occupy their original positions.

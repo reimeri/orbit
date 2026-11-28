@@ -133,8 +133,7 @@ held, one local debug run took 0.5 ms from the selection request to the
 destination composer being ready. This is not a frame-presentation time or a
 latency bound for large transcripts or switches that have unsaved work.
 
-For file locations, backup and format compatibility, see
-[State and recovery](../README.md#state-and-recovery).
+For state file locations, see [Directories & Configuration](../README.md#directories--configuration).
 
 ## Rendering
 

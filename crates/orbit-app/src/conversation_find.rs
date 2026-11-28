@@ -402,7 +402,7 @@ mod tests {
                     images: vec![],
                     files: vec![],
                     skills: vec![],
-                    sent_at: None,
+                    sent_at: 1_750_000_123,
                     steering: false,
                 },
                 "**Ｋ** k.",

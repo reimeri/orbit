@@ -518,7 +518,7 @@ mod tests {
                     skills: vec![],
                     files: vec![],
                     images: vec![],
-                    sent_at: None,
+                    sent_at: 1_750_000_123,
                     steering: false,
                 },
                 "Inspect it",

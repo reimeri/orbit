@@ -2,7 +2,7 @@
 
 Hover over a forkable user prompt or the controls row just below it. Click the
 **fork icon** on the right to start a new session. Nothing is sent automatically.
-The local weekday and send time appear beside the icon for messages that recorded a send time.
+The local weekday and send time appear beside the icon.
 
 Text and images start in the new session's composer. Keep an original file tag to reuse its
 captured bytes, remove it to omit the file, or add a new tag to attach another
@@ -24,9 +24,8 @@ inherited context are retained until the last referencing session is deleted.
 
 ## Exact boundaries
 
-Only newly submitted main-conversation prompts at a stable turn boundary have
-fork points. Older messages and steering submissions do not acquire approximate
-fork points. While a turn is running you can still fork any saved point.
+Only main-conversation prompts submitted at a stable turn boundary have
+fork points. Steering submissions do not. While a turn is running you can still fork any saved point.
 
 Each point records the pre-prompt transcript, ordered provider input, account and
 compaction state in the acceptance transaction. Comparing successive immutable

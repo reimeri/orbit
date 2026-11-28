@@ -119,7 +119,11 @@ text(await tools.web__run({finance:[{ticker:'MSFT',type:'equity',market:'USA'}],
         }
     }
     let persisted = store.load_session(&id)?;
-    if !persisted.entries.iter().any(|entry| matches!(&entry.kind, EntryKind::Tool {web:Some(metadata),..} if metadata.mode==crate::web_search::Mode::Live)) {
+    if !persisted
+        .entries
+        .iter()
+        .any(|entry| matches!(&entry.kind, EntryKind::Tool { web: Some(_), .. }))
+    {
         bail!("Live metadata was not persisted");
     }
     println!(

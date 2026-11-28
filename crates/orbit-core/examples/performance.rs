@@ -45,7 +45,7 @@ fn main() -> Result<()> {
                     skills: vec![],
                     files: vec![],
                     images: vec![],
-                    sent_at: None,
+                    sent_at: 1_750_000_123,
                     steering: false,
                 }
             } else {
@@ -138,7 +138,7 @@ fn main() -> Result<()> {
             for assignment in 1..=100 {
                 let failed = (index + assignment) % 2 == 0;
                 let run = RunInfo {
-                    configuration: None,
+                    configuration: Profile::Review.defaults(),
                     run_id: format!("run-{index}-{assignment}"),
                     parent_id: parent.clone(),
                     session_id: child.id.clone(),

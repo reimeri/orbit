@@ -84,8 +84,7 @@ This tool is not an interactive browser and does not use browser sessions/cookie
 ## Request identity and privacy
 
 Web search is always live for main agents and subagents. Every search requests
-`external_web_access: true`, including in existing sessions that previously used
-Cached or Disabled. Each invocation uses the calling conversation's selected model.
+`external_web_access: true`. Each invocation uses the calling conversation's selected model.
 
 Requests use existing Orbit ChatGPT OAuth and account routing, a stable calling
 conversation ID, the selected model, explicit commands, and access/output settings.
@@ -107,7 +106,7 @@ response does not provide token accounting.
 The usual nested tool row is persisted before dispatch. Completion stores:
 
 - The agent-facing text, also returned to JavaScript.
-- The access mode and request timestamp.
+- The request timestamp.
 - Complete structured result metadata in SQLite, including unknown result fields.
 - Up to 20 HTTP(S) source links for the expanded UI. Complete details remain
   stored in SQLite, including results beyond that display-only link limit.

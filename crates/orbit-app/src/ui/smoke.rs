@@ -148,7 +148,7 @@ impl App {
                 s.usage.total_cached = 126_470;
                 s.usage.total_output = 1_237;
                 s.entries = vec![
-                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: None, steering: false }, "Inspect this project and run its tests."),
+                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: 1_750_000_123, steering: false }, "Inspect this project and run its tests."),
                     Entry::new(
                         EntryKind::Assistant,
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Orbit\"); }\n```\n\n[Documentation](https://openai.com)",
@@ -442,7 +442,7 @@ impl App {
                         skills: vec![],
                         files: vec![],
                         images: vec![],
-                        sent_at: None,
+                        sent_at: 1_750_000_123,
                         steering: false,
                     },
                     "Inspect the completion notification path. Do not modify files.",
@@ -654,7 +654,7 @@ impl App {
                     name:"web__run".into(),input:r#"{"search_query":[{"q":"Rust documentation","domains":["rust-lang.org"]}]}"#.into(),
                     command_status: None,
                     output:"Rust documentation (https://doc.rust-lang.org/book/)\nThe Rust Programming Language".into(),complete:true,failed:false, cell_id: None,parent:None,media:vec![],
-                    web:Some(orbit_core::web_search::Metadata{mode:orbit_core::web_search::Mode::Live,searched_at:orbit_core::store::now(),sources:vec![orbit_core::web_search::Source{title:"The Rust Programming Language — a long source title that should fit in a constrained chat column".into(),url:"https://doc.rust-lang.org/book/".into()}],details:r#"[{"type":"text_result","url":"https://doc.rust-lang.org/book/"}]"#.into()})
+                    web:Some(orbit_core::web_search::Metadata{searched_at:orbit_core::store::now(),sources:vec![orbit_core::web_search::Source{title:"The Rust Programming Language — a long source title that should fit in a constrained chat column".into(),url:"https://doc.rust-lang.org/book/".into()}],details:r#"[{"type":"text_result","url":"https://doc.rust-lang.org/book/"}]"#.into()})
                 }});
                 self.details.expanded.insert("smoke-web".into());
                 self.details.groups.insert("smoke-web".into());
@@ -724,7 +724,7 @@ impl App {
                         }
                     };
                 session.entries = vec![
-                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: None, steering: false }, "Check the implementation and run validation."),
+                    Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: 1_750_000_123, steering: false }, "Check the implementation and run validation."),
                     Entry { id: "activity-reason".into(), kind: EntryKind::Reasoning, text: "**Inspecting the build configuration**\n\nReviewing the existing Nix development environment.".into() },
                     Entry { id: "activity-reason-next".into(), kind: EntryKind::Reasoning, text: "**Checking cancellation behavior**\n\nVerify that output survives a cancelled process.".into() },
                     tool("activity-exec", "exec", "text(await tools.exec_command({cmd:'rg cancellation crates'}));", None, true, false),

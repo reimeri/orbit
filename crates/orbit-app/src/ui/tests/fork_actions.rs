@@ -89,13 +89,11 @@ async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
         let EntryKind::User { sent_at, .. } = &mut example.kind else {
             panic!("expected user prompt")
         };
-        *sent_at = Some(
-            chrono::Local
-                .with_ymd_and_hms(2025, 9, 15, 22, 34, 0)
-                .single()
-                .unwrap()
-                .timestamp() as u64,
-        );
+        *sent_at = chrono::Local
+            .with_ymd_and_hms(2025, 9, 15, 22, 34, 0)
+            .single()
+            .unwrap()
+            .timestamp() as u64;
         let mut ui = iced_runtime::UserInterface::build(
             app.fork_row(session, &example, ActivityRow::Entry(0)),
             size,

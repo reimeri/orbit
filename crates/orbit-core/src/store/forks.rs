@@ -214,9 +214,12 @@ mod tests {
             crate::file_tags::capture(root.path(), &root.path().join("files"), &message.text)?;
         {
             let db = Store::open(root.path().into())?;
-            // A legacy prompt and a steering prompt must never acquire a point by inference.
-            source.accept("legacy".into());
-            source.consume_pending();
+            source
+                .entries
+                .push(Entry::new(EntryKind::Assistant, "Prior response"));
+            source
+                .input
+                .push(json!({"role":"assistant","content":"Prior response"}));
             source.input.push(before.clone());
             source
                 .entries

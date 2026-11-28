@@ -1,6 +1,6 @@
 //! Cheap snapshots and indexed edits. Tree diffs skip unchanged shared subtrees.
 use im::{HashMap, OrdMap, ordmap::DiffItem};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use std::{
     ops::{Index, IndexMut},
     sync::Arc,
@@ -125,10 +125,5 @@ impl<T: Record> From<Vec<T>> for History<T> {
 impl<T: Record + Serialize> Serialize for History<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(self.iter())
-    }
-}
-impl<'de, T: Record + Deserialize<'de>> Deserialize<'de> for History<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Vec::<T>::deserialize(deserializer)?.into())
     }
 }

@@ -9,21 +9,6 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    #[default]
-    Live,
-    Cached,
-}
-impl std::fmt::Display for Mode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Live => "Live",
-            Self::Cached => "Cached",
-        })
-    }
-}
 /// Display-only links. Complete backend metadata is retained in `Metadata::details`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Source {
@@ -32,7 +17,6 @@ pub struct Source {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metadata {
-    pub mode: Mode,
     pub searched_at: u64,
     pub sources: Vec<Source>,
     /// Complete result metadata or response diagnostics, persisted in SQLite; never model input.
@@ -64,7 +48,6 @@ impl Metadata {
             .take(20)
             .collect();
         Ok(Self {
-            mode: Mode::Live,
             searched_at,
             sources,
             details: serde_json::to_string_pretty(&results)?,
@@ -74,7 +57,6 @@ impl Metadata {
 #[derive(Deserialize)]
 struct Response {
     output: String,
-    #[serde(default)]
     results: Option<Vec<Value>>,
 }
 pub(crate) struct ToolResult {
@@ -103,7 +85,6 @@ impl Failure {
         Self {
             message,
             metadata: Metadata {
-                mode: Mode::Live,
                 searched_at,
                 sources: vec![],
                 details: diagnostic.to_string(),

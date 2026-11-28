@@ -295,15 +295,9 @@ public:
     if (!loading && !captures.empty())
       b->GetHost()->Invalidate(PET_VIEW);
   }
-  void OnLoadStart(B b, F f, TransitionType) override {
-    if (f->IsMain()) {
-      if (semantics)
-        semantics->new_document();
-      // Orbit has no page zoom. Normalize any site zoom left by an older
-      // Orbit build in this project profile, in Fit as well as fixed mode.
-      if (b->GetHost()->GetZoomLevel() != 0)
-        b->GetHost()->SetZoomLevel(0);
-    }
+  void OnLoadStart(B, F f, TransitionType) override {
+    if (f->IsMain() && semantics)
+      semantics->new_document();
   }
   void OnLoadError(B, F f, ErrorCode code, const CefString &text,
                    const CefString &) override {

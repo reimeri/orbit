@@ -500,7 +500,7 @@ async fn settlement_rejects_unread_attention_work_questions_and_children() {
     });
     let child = h.insert(child);
     let mut run = subagents::RunInfo {
-        configuration: None,
+        configuration: subagents::Profile::Explore.defaults(),
         run_id: "child-run".into(),
         session_id: child.id.clone(),
         parent_id: c.id.clone(),
@@ -812,7 +812,6 @@ fn restart_finishes_abandoned_web_calls_without_replay_or_metadata_loss() {
     let mut session = Session::new(dir.path().into(), &Settings::default());
     let id = session.id.clone();
     let metadata = crate::web_search::Metadata {
-        mode: crate::web_search::Mode::Live,
         searched_at: 123,
         sources: vec![],
         details: "UI-only metadata".into(),
@@ -1575,7 +1574,7 @@ fn evicting_transcript_keeps_completed_cell_results_and_shared_store() {
             skills: vec![],
             files: vec![],
             images: vec![],
-            sent_at: None,
+            sent_at: 1_750_000_123,
             steering: false,
         },
         "preserved history",

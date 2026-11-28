@@ -251,7 +251,7 @@ async fn model_defaults_footer_fast_and_retired_session_recovery_persist() {
             skills: vec![],
             files: vec![],
             images: vec![],
-            sent_at: None,
+            sent_at: 1_750_000_123,
             steering: false,
         },
         "Keep this transcript",

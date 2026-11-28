@@ -93,7 +93,6 @@ async fn transport_preserves_metadata_and_snapshots_model_without_conversation_c
         response.text,
         "Read https://example.org/manual (turn0search0)"
     );
-    assert_eq!(response.metadata.mode, Mode::Live);
     assert_eq!(
         serde_json::from_str::<Value>(&response.metadata.details).unwrap(),
         json!([result])
@@ -144,7 +143,6 @@ async fn transport_preserves_metadata_and_snapshots_model_without_conversation_c
         )
         .await
         .unwrap();
-    assert_eq!(second.metadata.mode, Mode::Live);
     assert_eq!(second.metadata.details, "[]");
     let request = requests.recv().await.unwrap();
     let request: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
