@@ -348,7 +348,7 @@ pub fn urls(
     let mut urls = HashMap::new();
     for (index, item) in items.iter().enumerate() {
         let mut leaf = 0;
-        crate::markdown_window::visit_leaves(std::slice::from_ref(item), &mut |item| {
+        crate::message_window::visit_leaves(std::slice::from_ref(item), &mut |item| {
             if let iced::widget::markdown::Item::Image { url, .. } = item {
                 urls.insert(url.clone(), (first_item + index, leaf));
             }

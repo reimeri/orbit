@@ -102,7 +102,7 @@ struct ChatPosition {
     row: usize,
     inside: f32,
     height: f32,
-    markdown: Option<(String, crate::markdown_window::Heights)>,
+    message: Option<(String, crate::message_window::Heights)>,
 }
 
 struct PendingSettings {
@@ -139,7 +139,7 @@ struct Markdown {
     source: Arc<Entry>,
     content: markdown::Content,
     images: HashMap<String, (usize, usize)>,
-    window: Option<crate::markdown_window::Window>,
+    window: Option<crate::message_window::Window>,
     // Small eager replies can cross the threshold mid-stream while being read.
     eager_heights: std::cell::RefCell<Vec<f32>>,
 }
@@ -151,7 +151,7 @@ impl Markdown {
         } else {
             font_size
         };
-        crate::markdown_window::Window::sync(&mut self.window, self.content.items(), from, size);
+        crate::message_window::Window::sync(&mut self.window, self.content.items(), from, size);
     }
 
     fn refresh_images(&mut self) {
@@ -281,7 +281,8 @@ pub struct App {
     active_questionnaire: Option<String>,
     chat_selection: chat_selection::Shared,
     markdown: HashMap<String, Markdown>,
-    markdown_heights: HashMap<String, crate::markdown_window::Heights>,
+    prompt_windows: HashMap<String, crate::message_window::Prompt>,
+    message_heights: HashMap<String, crate::message_window::Heights>,
     browser: browser::State,
     changes: changes::State,
     worktrees: worktrees::State,
@@ -503,12 +504,12 @@ pub enum Message {
     JumpToLatest,
     JumpToPrompt(String),
     RowSize(u64, usize, f32),
-    MarkdownGeometry(
+    RowGeometry(
         u64,
         usize,
         Arc<Entry>,
         f32,
-        Option<crate::markdown_window::Geometry>,
+        Option<crate::message_window::Geometry>,
     ),
     SidebarScroll(u64, f32, f32),
     SidebarSize(u64, usize, f32),
@@ -653,7 +654,8 @@ impl App {
             active_questionnaire: None,
             chat_selection: Default::default(),
             markdown: HashMap::new(),
-            markdown_heights: HashMap::new(),
+            message_heights: HashMap::new(),
+            prompt_windows: HashMap::new(),
             browser: Default::default(),
             pending_settings: None,
             changes: Default::default(),
@@ -903,7 +905,8 @@ impl App {
             self.outputs.clear();
             self.historical_runs.clear();
             self.markdown.clear();
-            self.markdown_heights.clear();
+            self.prompt_windows.clear();
+            self.message_heights.clear();
             self.chat_selection.borrow_mut().clear();
             self.prepare_visible();
             return false;
@@ -924,10 +927,15 @@ impl App {
             self.outputs.clear();
             self.historical_runs.clear();
             self.markdown.clear();
-            self.markdown_heights.clear();
+            self.prompt_windows.clear();
+            self.message_heights.clear();
             self.chat_selection.borrow_mut().clear();
             self.view_epoch = self.view_epoch.wrapping_add(1);
+            // Size the first inner text window for the actual pane, not the
+            // default viewport used before the first redraw.
+            let viewport = self.transcript.viewport;
             self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
+            self.transcript.viewport = viewport;
             self.activity = activity::Projection::default();
         }
         // The history diff skips shared subtrees.
@@ -940,6 +948,13 @@ impl App {
             let Some(entry) = entry else {
                 continue;
             };
+            if index < old.len()
+                && matches!(entry.kind, EntryKind::User { .. })
+                && old[index].text != entry.text
+            {
+                self.prompt_windows.remove(&entry.id);
+                self.message_heights.remove(&entry.id);
+            }
             if let EntryKind::Tool { input, output, .. } = &entry.kind
                 && let Some(view) = self.outputs.get_mut(&entry.id)
             {
@@ -989,8 +1004,8 @@ impl App {
             // row height before seeking, so even a deep offset stays in its row.
             self.transcript.measure(bookmark.row, bookmark.height);
             self.transcript.offset = self.transcript.prefix(pos) + bookmark.inside;
-            if let Some((id, heights)) = bookmark.markdown {
-                self.markdown_heights.insert(id, heights);
+            if let Some((id, heights)) = bookmark.message {
+                self.message_heights.insert(id, heights);
             }
             self.auto_scroll = false;
         } else if self.auto_scroll {
@@ -1048,12 +1063,13 @@ impl App {
         let pos = self.transcript.at(self.transcript.offset);
         if let Some(&row) = self.transcript.order.get(pos) {
             let session = self.current_session.as_ref().expect("mounted transcript");
-            let markdown = match ActivityRow::from_id(row) {
+            let message = match ActivityRow::from_id(row) {
                 ActivityRow::Entry(i) => {
                     let id = &session.entries[i].id;
                     self.markdown
                         .get_mut(id)
                         .and_then(|md| md.window.as_mut())
+                        .or_else(|| self.prompt_windows.get_mut(id).map(|p| &mut p.window))
                         .map(|window| (id.clone(), std::mem::take(&mut window.known)))
                 }
                 _ => None,
@@ -1064,7 +1080,7 @@ impl App {
                     row,
                     inside: self.transcript.offset - self.transcript.prefix(pos),
                     height: self.transcript.height(pos),
-                    markdown,
+                    message,
                 },
             );
         }
@@ -2587,7 +2603,7 @@ impl App {
                     return bottom();
                 }
             }
-            Message::MarkdownGeometry(epoch, index, source, height, geometry) => {
+            Message::RowGeometry(epoch, index, source, height, geometry) => {
                 if epoch != self.view_epoch
                     || !self
                         .current()
@@ -2607,9 +2623,11 @@ impl App {
                         markdown.refresh_images();
                     }
                     delta
+                } else if let Some(prompt) = self.prompt_windows.get_mut(&source.id) {
+                    geometry.map(|g| prompt.window.update(g))
                 } else {
                     if let Some(g) = geometry {
-                        g.save_heights(self.markdown_heights.entry(source.id.clone()).or_default());
+                        g.save_heights(self.message_heights.entry(source.id.clone()).or_default());
                     }
                     None
                 };
@@ -3808,13 +3826,22 @@ impl App {
                     _ => content,
                 };
                 let row = if let ActivityRow::Entry(_) = projected
-                    && let Some(md) = self.markdown.get(&entry.id)
-                    && let Some(window) = &md.window
+                    && let Some(window) = self
+                        .markdown
+                        .get(&entry.id)
+                        .and_then(|md| md.window.as_ref())
+                        .or_else(|| self.prompt_windows.get(&entry.id).map(|p| &p.window))
                 {
                     let expected =
                         self.transcript.height(position) - projected.spacing(&session.entries);
                     window.observe_row(content, expected, move |height, geometry| {
-                        Message::MarkdownGeometry(epoch, index, md.source.clone(), height, geometry)
+                        Message::RowGeometry(
+                            epoch,
+                            index,
+                            session.entries.shared(projected.source()),
+                            height,
+                            geometry,
+                        )
                     })
                 } else {
                     widget::sensor(content)

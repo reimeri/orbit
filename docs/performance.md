@@ -176,10 +176,15 @@ For state file locations, see [Directories & Configuration](../README.md#directo
   their image URLs are requested. Sparse numeric height measurements can outlive
   the mounted entry within the selected session. When switching away from a
   scrolled-up chat, Orbit keeps an in-memory bookmark for the visible row,
-  including its offset and any measured Markdown item heights. Returning restores
+  including its offset and any measured item heights. Returning restores
   that reading position; chats left at the bottom still follow new messages.
   Copy still walks the complete source. A single giant paragraph, code fence or nested structure can still
   be expensive to lay out; see the [long-reply measurements](benchmarks/session-and-rendering.md#layout-within-a-long-markdown-reply).
+- Large literal user prompts use the same inner viewport, keyed by source byte
+  offsets rather than Markdown items. Only nearby hard lines are shaped and wrapped.
+  Find and copy still address the full original text, including line endings.
+  An individual very long line must still be shaped in full when mounted; no
+  artificial breaks are inserted. See the [debug switch measurements](benchmarks/session-and-rendering.md#cold-sidebar-switch-with-a-visible-long-prompt).
 
 ## Conversation Find
 

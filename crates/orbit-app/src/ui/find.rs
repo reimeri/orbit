@@ -35,6 +35,7 @@ pub(super) struct Find {
     results: Option<Arc<Results>>,
     active: Option<usize>,
     pub(super) reveal: Option<u64>,
+    confirmation: Option<(u64, Rectangle, Rectangle, Rectangle)>,
     error: Option<String>,
     pub(super) frame: Rc<Frame>,
 }
@@ -56,6 +57,10 @@ impl Find {
             || "No matches".to_owned(),
             |n| format!("{} of {total}", n + 1),
         );
+    }
+
+    pub(super) fn revealing_match(&self) -> bool {
+        self.reveal.is_some() && self.active.is_some()
     }
 
     fn position(&self) -> Option<Position> {
@@ -158,6 +163,7 @@ impl App {
                 results: None,
                 active: None,
                 reveal: None,
+                confirmation: None,
                 error: None,
                 frame: Default::default(),
             });
@@ -282,9 +288,18 @@ impl App {
                 let y = delta(target.y, target.height, chat.y, chat.height);
                 let x = delta(target.x, target.width, inner.x, inner.width);
                 if y == 0. && x == 0. {
-                    find.reveal = None;
-                    self.prepare_visible();
+                    // Measurements from this redraw can still replace spacers
+                    // above the hit. Confirm against the next laid-out frame
+                    // before releasing the reveal and its scroll anchor.
+                    let sample = (token, target, chat, inner);
+                    if find.confirmation.replace(sample) == Some(sample) {
+                        find.reveal = None;
+                        self.prepare_visible();
+                    } else {
+                        find.frame.located.set(None);
+                    }
                 } else {
+                    find.confirmation = None;
                     if y != 0. {
                         // Let the reveal move the viewport before row measurements
                         // can snap it back. Scroll reports whether we land at the end.

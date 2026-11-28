@@ -370,7 +370,10 @@ async fn fitting_chat_expansions_keep_prose_mounted_with_real_viewport_feedback(
 async fn cold_open_at_bottom_does_not_mount_a_long_historical_prompt() {
     let mut app = app();
     let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
-    let prompt = "Historical review finding and its supporting evidence.\n".repeat(800);
+    let prompt = format!(
+        "Prompt start\n{}Prompt end",
+        "Historical review finding and its supporting evidence.\n".repeat(800)
+    );
     session.accept(prompt.clone().into());
     let prompt_id = session.entries[0].id.clone();
     session
@@ -400,9 +403,11 @@ async fn cold_open_at_bottom_does_not_mount_a_long_historical_prompt() {
         "first layout should skip the old prompt"
     );
     let _ = app.jump_to_prompt(&prompt_id);
+    let jumped = chat_text(&app);
+    assert!(jumped.contains("Prompt start"));
     assert!(
-        chat_text(&app).contains(&prompt),
-        "the complete prompt is still navigable"
+        !jumped.contains("Prompt end"),
+        "jumping should mount only the beginning"
     );
 }
 

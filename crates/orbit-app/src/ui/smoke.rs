@@ -625,7 +625,7 @@ impl App {
                     kind: EntryKind::Assistant,
                 });
                 self.markdown.clear();
-                self.markdown_heights.clear();
+                self.message_heights.clear();
                 self.stage_smoke_transcript(session);
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }

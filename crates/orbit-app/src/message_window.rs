@@ -1,6 +1,12 @@
-//! Window top-level Markdown items inside the existing transcript scrollable.
+//! Window long messages inside the existing transcript scrollable.
 //! Lists, tables, quotes and fenced blocks retain their native internal layout.
-use crate::{chat_selection::Viewer, keyed_column::keyed_column, ui::Message, virtual_list::List};
+use crate::{
+    chat_selection::{self, Viewer},
+    conversation_find::Paint,
+    keyed_column::keyed_column,
+    ui::Message,
+    virtual_list::List,
+};
 use iced::{
     Element, Padding,
     widget::{
@@ -9,7 +15,7 @@ use iced::{
         space,
     },
 };
-use std::{cell::Cell, collections::HashMap};
+use std::{cell::Cell, collections::HashMap, ops::Range, rc::Rc};
 
 const MIN_ITEMS: usize = 64;
 const OVERSCAN: f32 = 160.;
@@ -45,7 +51,7 @@ pub fn visit_leaves(items: &[Item], f: &mut impl FnMut(&Item)) {
 pub type Heights = HashMap<usize, f32>;
 pub struct Window {
     list: List,
-    // Prefix offsets in the full selection/copy traversal, including code lines.
+    // Logical starts: Markdown block ordinals or literal prompt byte offsets.
     starts: Vec<usize>,
     pub known: Heights,
     // The inner and outer probes sample the SAME redraw, inside-out. Publish
@@ -138,34 +144,48 @@ impl Window {
         settings: markdown::Settings,
         viewer: &Viewer<'a>,
     ) -> Element<'a, Message> {
-        let mut range = self.list.visible();
-        if viewer.find.reveal.is_some()
-            && let Some(hit) = viewer.find.active
-        {
-            let item = self.starts.partition_point(|&n| n <= hit.block) - 1;
-            if !range.contains(&item) {
-                range = self
-                    .list
-                    .visible_at(self.list.prefix(item), self.list.viewport);
-            }
-        }
+        let range = self.range(
+            viewer
+                .find
+                .reveal
+                .and(viewer.find.active)
+                .map(|hit| hit.block),
+        );
         viewer.start_block(self.starts[range.start]);
-        let mut rows = vec![(None, space().height(self.list.prefix(range.start)).into())];
-        for i in range.clone() {
+        self.rows(range, |i| {
             let gap = if i + 1 == items.len() {
                 0.
             } else {
                 settings.spacing.0
             };
-            rows.push((
-                Some(i),
-                container(markdown::item(viewer, settings, &items[i], i))
-                    .padding(Padding::default().bottom(gap))
-                    .into(),
-            ));
+            container(markdown::item(viewer, settings, &items[i], i))
+                .padding(Padding::default().bottom(gap))
+                .into()
+        })
+    }
+
+    fn range(&self, reveal: Option<usize>) -> Range<usize> {
+        let range = self.visible();
+        if let Some(at) = reveal {
+            let item = self.starts.partition_point(|&start| start <= at) - 1;
+            if !range.contains(&item) {
+                return self
+                    .list
+                    .visible_at(self.list.prefix(item), self.list.viewport_height());
+            }
         }
+        range
+    }
+
+    fn rows<'a>(
+        &'a self,
+        range: Range<usize>,
+        row: impl Fn(usize) -> Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let mut rows = vec![(None, space().height(self.list.prefix(range.start)).into())];
+        rows.extend(range.clone().map(|i| (Some(i), row(i))));
         rows.push((
-            Some(items.len()),
+            Some(self.list.order.len()),
             space()
                 .height((self.list.total() - self.list.prefix(range.end)).max(0.))
                 .into(),
@@ -212,6 +232,69 @@ impl Window {
             self.list.measure(i, height);
         }
         self.list.offset - geometry.offset
+    }
+}
+
+/// Index whole hard lines, never artificial line breaks: each line can be
+/// independently wrapped and shaped without changing the literal source.
+pub struct Prompt {
+    pub window: Window,
+    text: Rc<chat_selection::PromptText>,
+}
+
+impl Prompt {
+    pub const MIN_BYTES: usize = 8 * 1024;
+
+    pub fn new(source: std::sync::Arc<orbit_core::store::Entry>, width: f32, size: f32) -> Self {
+        let mut list = List::with_overscan(OVERSCAN);
+        let mut starts = Vec::new();
+        let columns = (width / (size * 0.5)).max(1.);
+        let line_height = iced::widget::text::LineHeight::default()
+            .to_absolute(size.into())
+            .0;
+        list.reset(
+            chat_selection::hard_lines(&source.text)
+                .take_while(|line| line.start < source.text.len())
+                .enumerate()
+                .map(|(i, line)| {
+                    starts.push(line.start);
+                    (
+                        i,
+                        (line.len() as f32 / columns).ceil().max(1.) * line_height,
+                    )
+                }),
+        );
+        starts.push(source.text.len());
+        Self {
+            window: Window {
+                list,
+                starts,
+                known: Heights::new(),
+                pending: Cell::new(None),
+            },
+            text: Rc::new(chat_selection::PromptText::new(source)),
+        }
+    }
+
+    pub fn view(
+        &self,
+        entry: usize,
+        size: f32,
+        selection: chat_selection::Shared,
+        find: Paint,
+    ) -> Element<'_, Message> {
+        let range = self
+            .window
+            .range(find.reveal.and(find.active).map(|hit| hit.start));
+        self.window.rows(range, |i| {
+            let mut paint = find.clone();
+            let bytes = self.window.starts[i]..self.window.starts[i + 1];
+            if paint.active.is_none_or(|h| !bytes.contains(&h.start)) {
+                paint.reveal = None;
+            }
+            self.text
+                .chunk(bytes, entry, size, selection.clone(), paint)
+        })
     }
 }
 

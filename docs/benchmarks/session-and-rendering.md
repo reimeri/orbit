@@ -728,3 +728,24 @@ or new checkpoint may need to decode its stored prefix once.
 At 1280×800, 60 Hz, three further debug trials displayed the chat in 96 ms.
 These are local click-to-frame measurements, not a 100 ms guarantee under
 storage contention, cold OS caches or different display/driver configurations.
+
+## Cold sidebar switch with a visible long prompt
+
+This second session has 80 transcript records but just six rows with activity
+collapsed. Its 44,868-character, 270-line user prompt is partly **visible** on
+open: improving the outer height estimate cannot skip it. On the same private
+2552×1394 Wayland output and hardware Vulkan setup as above, we timed the click
+to the first displayed destination transcript with a fresh unoptimized debug
+process per trial. The prompt, provider context and fork checkpoint were
+unchanged; OS caches were not flushed.
+
+| Layout | Trials | Click → displayed | Median |
+| --- | ---: | ---: | ---: |
+| Entire mounted prompt | 3 | 258–265 ms | 259 ms |
+| Visible hard lines plus overscan | 8 | 77.3–84.4 ms | 78 ms |
+
+The destination storage load remained about 5 ms. The improvement is in first
+layout, not storage. To exercise the visible-tail case without private data, run
+`just test long_prompt_opens` in the dev shell. It checks which text mounts and
+then finds and copies offscreen text; it does not assert a machine-specific
+latency.

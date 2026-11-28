@@ -82,7 +82,7 @@ async fn settle(
         for message in messages {
             if !matches!(
                 message,
-                Message::MarkdownGeometry(..)
+                Message::RowGeometry(..)
                     | Message::RowSize(..)
                     | Message::Scroll(..)
                     | Message::Find(find::Action::Located { .. })
@@ -118,6 +118,98 @@ async fn opening_at_bottom_mounts_rendered_markdown_not_an_offset_into_its_sourc
     let rendered = chat_text(&app);
     assert!(rendered.contains("Item 127") && rendered.contains("Item 124"));
     assert!(!rendered.contains("Item 0"));
+}
+
+#[tokio::test]
+async fn long_prompt_opens_at_its_tail_and_finds_and_copies_across_unmounted_text() {
+    // A single logical paragraph spans many screens and crosses chunk boundaries.
+    let mut paragraph = String::new();
+    for i in 0..400 {
+        if i == 110 {
+            paragraph.push_str("ASCII predecessor\r\nMiddleNEEDLE here\r\ncafé following\n");
+        }
+        paragraph.push_str(&format!(
+            "line {i}: **literal** café λ and a varying amount of text.{}\n",
+            " More.".repeat(i % 7)
+        ));
+    }
+    let paragraph = paragraph.trim_end();
+    let source = format!("Prompt start\n\n{paragraph}\n\nPrompt end");
+    let mut app = app();
+    let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+    session.accept(source.clone().into());
+    session
+        .entries
+        .push(Entry::new(EntryKind::Assistant, "Short reply"));
+    app.harness
+        .as_ref()
+        .unwrap()
+        .store
+        .save_session(&session)
+        .unwrap();
+    let size = Size::new(680., 510.);
+    let mut renderer = header_renderer();
+    let mut cache = Cache::new();
+    drive_messages(
+        &mut app,
+        &mut renderer,
+        &mut cache,
+        size,
+        vec![Message::Select(session.id)],
+    )
+    .await;
+
+    let initial = chat_text(&app);
+    assert!(initial.contains("Prompt end") && initial.contains("Short reply"));
+    assert!(!initial.contains("Prompt start") && !initial.contains("MiddleNEEDLE"));
+
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+    let mut viewport = Viewport::default();
+    let mut labels = UiBounds::default();
+    ui.operate(&renderer, &mut viewport);
+    ui.operate(&renderer, &mut labels);
+    assert!(
+        viewport
+            .bounds
+            .contains(labels.label("Prompt end").center() - iced::Vector::new(0., viewport.dy))
+    );
+    cache = ui.into_cache();
+    dispatch(&mut app, Message::Find(find::Action::Open)).await;
+    dispatch(
+        &mut app,
+        Message::Find(find::Action::Query("MiddleNEEDLE".into())),
+    )
+    .await;
+    settle(&mut app, &mut renderer, &mut cache, size, None).await;
+    let mut ui = UserInterface::build(app.center(), size, cache, &mut renderer);
+    let mut viewport = Viewport::default();
+    ui.operate(&renderer, &mut viewport);
+    let mut labels = UiBounds::default();
+    ui.operate(&renderer, &mut labels);
+    let before = labels.label("ASCII predecessor");
+    let hit_line = labels.label("MiddleNEEDLE here");
+    let after = labels.label("café following");
+    // CRLF is one visual break regardless of the adjacent lines' scripts.
+    assert!((hit_line.y - before.y - before.height).abs() < 0.5);
+    assert!((after.y - hit_line.y - hit_line.height).abs() < 0.5);
+    let (_, target, _, _) = app.find.as_ref().unwrap().frame.located.get().unwrap();
+    let point = target.center() - iced::Vector::new(0., viewport.dy);
+    assert!(viewport.bounds.contains(point));
+    click_at(&mut ui, &mut renderer, point);
+    let byte = app.chat_selection.borrow().anchor.unwrap().byte;
+    let start = source.find("MiddleNEEDLE").unwrap();
+    assert!(
+        (start..start + "MiddleNEEDLE".len()).contains(&byte),
+        "clicked byte {byte}, expected hit at {start}"
+    );
+    click_at(&mut ui, &mut renderer, point);
+    click_at(&mut ui, &mut renderer, point);
+    drop(ui);
+    assert_eq!(
+        copied_text(app.update_inner(Message::CopySelection)).await,
+        paragraph
+    );
 }
 
 #[tokio::test]

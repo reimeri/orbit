@@ -118,7 +118,10 @@ impl App {
             self.prepare_visible();
             return bottom();
         }
-        if !self.auto_scroll && (corrected || inside != 0.) {
+        // The same redraw can reveal a Find match and measure chunks above it.
+        // Do not undo the reveal with a correction to the old reading position.
+        let revealing = self.find.as_ref().is_some_and(find::Find::revealing_match);
+        if !self.auto_scroll && !revealing && (corrected || inside != 0.) {
             self.transcript.offset = (self.transcript.offset + inside).max(0.);
             self.prepare_visible();
             return widget::operation::scroll_to(
@@ -154,13 +157,21 @@ impl App {
                 .iter()
                 .map(|&(_, i)| session.entries[i].id.as_str())
                 .collect();
+            for (id, prompt) in self
+                .prompt_windows
+                .extract_if(|id, _| !ids.contains(id.as_str()))
+            {
+                if !prompt.window.known.is_empty() {
+                    self.message_heights.insert(id, prompt.window.known);
+                }
+            }
             for (id, markdown) in self.markdown.extract_if(|id, _| !ids.contains(id.as_str())) {
                 // Keep only numerical measurements in this session, not the
                 // parsed items, text, images or widget trees.
                 if let Some(window) = markdown.window
                     && !window.known.is_empty()
                 {
-                    self.markdown_heights.insert(id, window.known);
+                    self.message_heights.insert(id, window.known);
                 }
             }
             self.tool_previews.retain(|id, _| ids.contains(id.as_str()));
@@ -168,6 +179,9 @@ impl App {
                 .retain(|id, _| ids.contains(id.as_str()) && self.details.expanded.contains(id));
             self.historical_runs
                 .retain(|id, _| ids.contains(id.as_str()));
+            let settings = &self.catalog.settings;
+            let lane =
+                (self.center_dimensions().1 - 2. * self.chat_inset()).min(settings.chat_width);
             for &(position, index) in &visible {
                 let entry = &session.entries[index];
                 if let EntryKind::Tool { name, input, .. } = &entry.kind
@@ -213,6 +227,25 @@ impl App {
                     }));
                 }
                 if let EntryKind::User { images, files, .. } = &entry.kind {
+                    if entry.text.len() >= crate::message_window::Prompt::MIN_BYTES {
+                        self.prompt_windows
+                            .entry(entry.id.clone())
+                            .or_insert_with(|| {
+                                // User cards occupy the right two thirds with 12px padding on either side.
+                                let mut prompt = crate::message_window::Prompt::new(
+                                    session.entries.shared(index),
+                                    lane * 2. / 3. - 24.,
+                                    settings.font_size,
+                                );
+                                prompt.window.restore(
+                                    self.message_heights.remove(&entry.id).unwrap_or_default(),
+                                    &self.transcript,
+                                    position,
+                                    self.auto_scroll,
+                                );
+                                prompt
+                            });
+                    }
                     visible_media.extend(images.iter().cloned());
                     visible_media.extend(files.iter().filter_map(|file| file.image.clone()));
                 }
@@ -230,7 +263,7 @@ impl App {
                         markdown.sync_window(self.catalog.settings.font_size, 0);
                         if let Some(window) = &mut markdown.window {
                             window.restore(
-                                self.markdown_heights.remove(&entry.id).unwrap_or_default(),
+                                self.message_heights.remove(&entry.id).unwrap_or_default(),
                                 &self.transcript,
                                 position,
                                 self.auto_scroll,
@@ -708,6 +741,13 @@ impl App {
                             theme::markdown_style(&self.preset().theme),
                         ),
                         &viewer,
+                    ));
+                } else if let Some(prompt) = self.prompt_windows.get(&entry.id) {
+                    content = content.push(prompt.view(
+                        index,
+                        self.catalog.settings.font_size,
+                        self.chat_selection.clone(),
+                        paint,
                     ));
                 } else {
                     content = content.push(chat_selection::plain_find(

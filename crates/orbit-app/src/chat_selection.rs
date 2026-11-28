@@ -73,6 +73,30 @@ enum Paragraphs {
     Lines,
 }
 
+fn hard_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{1c}'..='\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+pub fn hard_lines(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut breaks = text
+        .match_indices(hard_break)
+        .chain(std::iter::once((text.len(), "")))
+        .peekable();
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        let (end, sep) = breaks.next()?;
+        let line = start..end;
+        start = end + sep.len();
+        if sep == "\r" && breaks.next_if_eq(&(start, "\n")).is_some() {
+            start += 1;
+        }
+        Some(line)
+    })
+}
+
 impl TextUnits {
     fn new(text: &str, offset: usize, paragraphs: Paragraphs) -> Self {
         #[cfg(test)]
@@ -81,26 +105,10 @@ impl TextUnits {
             .split_word_bound_indices()
             .map(|(start, word)| offset + start..offset + start + word.len())
             .collect();
-        let mut lines = Vec::new();
-        let mut start = 0;
-        let mut chars = text.char_indices().peekable();
-        while let Some((byte, ch)) = chars.next() {
-            if matches!(
-                ch,
-                '\n' | '\r' | '\u{1c}'..='\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
-            ) {
-                lines.push(start..byte);
-                start = byte + ch.len_utf8();
-                if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') {
-                    chars.next();
-                    start += 1;
-                }
-            }
-        }
-        lines.push(start..text.len());
+        let lines = hard_lines(text);
         let paragraphs = match paragraphs {
             Paragraphs::Block => std::iter::once(0..text.len()).collect(),
-            Paragraphs::Lines => lines,
+            Paragraphs::Lines => lines.collect(),
             Paragraphs::BlankLines => {
                 let mut result: Vec<Range<usize>> = Vec::new();
                 let mut previous_blank = true;
@@ -176,7 +184,12 @@ impl Selection {
         self.granularity = Granularity::Character;
         self.origin = None;
     }
-    fn press(&mut self, at: Position, unit_byte: usize, point: Point, units: &TextUnits) {
+    fn press(
+        &mut self,
+        at: Position,
+        point: Point,
+        unit: impl FnOnce(Granularity) -> Range<usize>,
+    ) {
         let previous = self
             .last_click
             .filter(|(_, previous)| previous.entry == at.entry && previous.block == at.block);
@@ -189,7 +202,7 @@ impl Selection {
             mouse::click::Kind::Triple => Granularity::Paragraph,
         };
         if self.granularity != Granularity::Character {
-            let range = units.range(unit_byte, self.granularity);
+            let range = unit(self.granularity);
             let start = Position {
                 byte: range.start,
                 ..at
@@ -515,6 +528,48 @@ pub fn plain_find(
     )
 }
 
+// Chunk widgets use the original message for multi-click/drag granularity:
+// a blank-line-delimited paragraph can extend beyond the viewport.
+pub struct PromptText {
+    source: Arc<orbit_core::store::Entry>,
+    units: std::cell::OnceCell<TextUnits>,
+}
+impl PromptText {
+    pub fn new(source: Arc<orbit_core::store::Entry>) -> Self {
+        Self {
+            source,
+            units: Default::default(),
+        }
+    }
+    pub fn chunk(
+        self: &Rc<Self>,
+        bytes: Range<usize>,
+        entry: usize,
+        size: f32,
+        selection: Shared,
+        find: Paint,
+    ) -> Element<'static, Message> {
+        let at = Position {
+            entry,
+            block: 0,
+            byte: bytes.start,
+        };
+        selectable(
+            Arc::from([Span::new(
+                self.source.text[bytes]
+                    .trim_end_matches(hard_break)
+                    .to_owned(),
+            )]),
+            size.into(),
+            Font::DEFAULT,
+            selection,
+            at,
+            SelectableText::Prompt(self.clone()),
+            find,
+        )
+    }
+}
+
 pub fn tool_row(
     value: &str,
     selection: Shared,
@@ -552,6 +607,7 @@ pub fn tool_row(
 enum SelectableText {
     Block,
     Plain,
+    Prompt(Rc<PromptText>),
     Row { height: f32, units: Arc<TextUnits> },
 }
 
@@ -566,7 +622,7 @@ fn selectable(
 ) -> Element<'static, Message> {
     let row_height = match &kind {
         SelectableText::Row { height, .. } => Some(*height),
-        SelectableText::Block | SelectableText::Plain => None,
+        _ => None,
     };
     let line_height = row_height
         .map(|h| text::LineHeight::Absolute(h.into()))
@@ -574,7 +630,7 @@ fn selectable(
     let wrapping = match &kind {
         SelectableText::Row { .. } => text::Wrapping::None,
         // Prefer word breaks, but keep unbroken log lines and paths inside the card.
-        SelectableText::Block | SelectableText::Plain => text::Wrapping::WordOrGlyph,
+        _ => text::Wrapping::WordOrGlyph,
     };
     Element::new(Selectable {
         find,
@@ -721,6 +777,18 @@ struct Hit {
     unit_byte: usize,
 }
 impl Selectable {
+    fn unit(&self, state: &State, byte: usize, granularity: Granularity) -> Range<usize> {
+        if granularity == Granularity::Character {
+            return byte..byte;
+        }
+        let units = match &self.kind {
+            SelectableText::Prompt(text) => text
+                .units
+                .get_or_init(|| TextUnits::new(&text.source.text, 0, Paragraphs::BlankLines)),
+            _ => &state.units,
+        };
+        units.range(byte, granularity)
+    }
     fn hit(&self, state: &State, point: Point) -> Option<Hit> {
         // Iced's generic hit_test drops the hard-line index. Use the renderer's
         // shaped buffer so hard breaks, wrapping, bidi and Unicode agree with paint.
@@ -768,7 +836,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
         );
     }
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Shrink, self.height)
+        let width = if matches!(self.kind, SelectableText::Prompt(_)) {
+            Length::Fill
+        } else {
+            Length::Shrink
+        };
+        Size::new(width, self.height)
     }
     fn layout(
         &mut self,
@@ -778,7 +851,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
     ) -> layout::Node {
         // Match iced Rich's sizing, but own the only shaped paragraph. Paint,
         // hits, links and selection must all use the same bounds and glyphs.
-        layout::sized(limits, Length::Shrink, self.height, |limits| {
+        layout::sized(limits, self.size().width, self.height, |limits| {
             let state = tree.state.downcast_mut::<State>();
             let spans_replaced = !Arc::ptr_eq(&state.spans, &self.spans);
             let spans_changed = state.spans != self.spans;
@@ -805,6 +878,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                         state.units_key = Some(key);
                     }
                 }
+                SelectableText::Prompt(_) => (), // Shared and computed on interaction.
                 SelectableText::Row { units, .. } => {
                     // Tool rows share boundaries for the entire output; a word or
                     // logical line may extend beyond this mounted visual row.
@@ -883,24 +957,26 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
             let chat = frame.viewport.get();
             if bounds.y + bounds.height > chat.y && bounds.y < chat.y + chat.height {
                 let start = Position {
-                    byte: if bounds.y >= chat.y {
-                        0
-                    } else {
-                        self.hit(state, Point::new(0., chat.y - bounds.y))
-                            .map_or(0, |hit| hit.byte)
-                    },
+                    byte: self.at.byte
+                        + if bounds.y >= chat.y {
+                            0
+                        } else {
+                            self.hit(state, Point::new(0., chat.y - bounds.y))
+                                .map_or(0, |hit| hit.byte)
+                        },
                     ..self.at
                 };
                 let end = Position {
-                    byte: if bounds.y + bounds.height <= chat.y + chat.height {
-                        state.content.len()
-                    } else {
-                        self.hit(
-                            state,
-                            Point::new(bounds.width, chat.y + chat.height - bounds.y),
-                        )
-                        .map_or(state.content.len(), |hit| hit.byte)
-                    },
+                    byte: self.at.byte
+                        + if bounds.y + bounds.height <= chat.y + chat.height {
+                            state.content.len()
+                        } else {
+                            self.hit(
+                                state,
+                                Point::new(bounds.width, chat.y + chat.height - bounds.y),
+                            )
+                            .map_or(state.content.len(), |hit| hit.byte)
+                        },
                     ..self.at
                 };
                 let (first, last) = frame.visible.get().unwrap_or((start, end));
@@ -915,7 +991,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                     .buffer()
                     .layout_runs()
                     .find_map(|run| {
-                        let line = state.index.lines[run.line_i].start;
+                        let line = self.at.byte + state.index.lines[run.line_i].start;
                         let mut glyphs = run
                             .glyphs
                             .iter()
@@ -965,9 +1041,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                     byte: self.at.byte + hit.byte,
                     ..self.at
                 };
-                let range = state
-                    .units
-                    .range(self.at.byte + hit.unit_byte, selection.granularity);
+                let range = self.unit(state, self.at.byte + hit.unit_byte, selection.granularity);
                 selection.candidate = Some(MotionCandidate {
                     at,
                     unit: (
@@ -996,9 +1070,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                             byte: self.at.byte + hit.byte,
                             ..self.at
                         },
-                        self.at.byte + hit.unit_byte,
                         cursor.position().expect("hit has a cursor"),
-                        &state.units,
+                        |g| self.unit(state, self.at.byte + hit.unit_byte, g),
                     );
                     state.pressed_link = self.link(state, Point::new(point.x, point.y));
                     shell.capture_event();
@@ -1107,7 +1180,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Selectable {
                     if y >= clip.y + clip.height {
                         break;
                     }
-                    let line = state.index.lines[run.line_i].start;
+                    let line = self.at.byte + state.index.lines[run.line_i].start;
                     // Glyphs are in visual order (including bidi). Never rescan
                     // the paragraph for each individual occurrence.
                     let mut area: Option<(bool, Rectangle)> = None;

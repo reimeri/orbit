@@ -1,5 +1,5 @@
 //! Find indexes logical display blocks, never widget trees or provider context.
-use crate::{chat_selection::Position, markdown_window::visit_leaves};
+use crate::{chat_selection::Position, message_window::visit_leaves};
 use iced::widget::markdown::{self, Item};
 use im::Vector;
 use orbit_core::{
