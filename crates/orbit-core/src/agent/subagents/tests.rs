@@ -1197,6 +1197,18 @@ async fn simultaneous_completion_and_failure_merge_with_user_steering_without_pa
         .unwrap();
     until(|| f.h.all().iter().all(|c| !c.is_executing())).await;
     assert!(f.requests.try_recv().is_err());
+    let saved = f.h.store.load_session(&f.parent).unwrap();
+    let final_replies: Vec<_> = saved
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, EntryKind::Reply { final_at: Some(_) }))
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(
+        final_replies,
+        ["Acknowledged both results and steering"],
+        "the answer before queued steering was consumed was not the final reply"
+    );
     let results = f.wait(vec![explore.run_id, review.run_id], 0).await;
     assert_eq!(results["runs"][0]["status"], "failed");
     assert!(results["runs"][0].get("final_response").is_none());

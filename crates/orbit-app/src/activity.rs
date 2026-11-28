@@ -551,7 +551,7 @@ mod tests {
             entry("subagent-run", EntryKind::Notice, "Full harness notice"),
             entry("notice", EntryKind::Notice, "Storage failed; retry saving"),
             tool("pure", "exec", None, true, false),
-            entry("answer", EntryKind::Assistant, "Done"),
+            entry("answer", EntryKind::Reply { final_at: None }, "Done"),
         ]
         .into();
         let mut p = Projection::default();
@@ -694,7 +694,11 @@ mod tests {
     fn yielded_children_reproject_their_parent_without_changing_group_identity() {
         let mut source: History<_> = vec![
             tool("outer", "exec", None, false, false),
-            entry("prose", EntryKind::Assistant, "I will check both"),
+            entry(
+                "prose",
+                EntryKind::Reply { final_at: None },
+                "I will check both",
+            ),
             tool("a", "exec_command", Some("outer"), false, false),
             tool("b", "exec_command", Some("outer"), false, false),
         ]
@@ -765,7 +769,11 @@ mod tests {
         let mut source: History<_> = vec![
             tool("outer", "exec", None, true, false),
             tool("child", "exec_command", Some("outer"), true, false),
-            entry("prose", EntryKind::Assistant, "Waiting for more output"),
+            entry(
+                "prose",
+                EntryKind::Reply { final_at: None },
+                "Waiting for more output",
+            ),
             tool("wait1", "wait", None, true, false),
             tool("wait2", "wait", None, true, true),
             tool("pure", "exec", None, true, false),

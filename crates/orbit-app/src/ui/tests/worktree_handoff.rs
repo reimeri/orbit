@@ -219,8 +219,10 @@ async fn panel_selects_a_base_without_moving_the_original_chat_or_its_draft() {
     let session = app.current().unwrap().id.clone();
     let h = app.harness.as_ref().unwrap().clone();
     h.edit(&session, |s| {
-        s.entries
-            .push(Entry::new(EntryKind::Assistant, "Original chat"));
+        s.entries.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            "Original chat",
+        ));
     })
     .unwrap();
     app.refresh();
@@ -263,8 +265,10 @@ async fn removing_an_idle_checkout_keeps_the_chat_readable_but_prevents_send() {
     let id = app.current().unwrap().id.clone();
     let h = app.harness.as_ref().unwrap().clone();
     h.edit(&id, |s| {
-        s.entries
-            .push(Entry::new(EntryKind::Assistant, "Saved transcript"));
+        s.entries.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            "Saved transcript",
+        ));
     })
     .unwrap();
     type_message(&mut app, "keep this draft").await;

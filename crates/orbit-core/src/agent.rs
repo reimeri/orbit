@@ -109,6 +109,8 @@ pub struct Conversation {
     attention_pin: Arc<()>,
     loaded: AtomicBool,
     restart_after_stop: AtomicBool,
+    #[cfg(test)]
+    before_idle_check: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     store: Store,
 }
 impl Conversation {
@@ -259,6 +261,74 @@ impl Conversation {
         })
         .await?
     }
+    /// Serialize the final checkpoint with admission of steering, child notices
+    /// and tool notifications. Each takes the persistence lock before publishing
+    /// pending input, so it either continues this turn or follows its idle transition.
+    fn finish_turn(
+        &self,
+        result: Result<(String, Option<String>)>,
+        submission: u64,
+        generation: u64,
+        cancel: &CancellationToken,
+    ) -> Option<(Result<String>, Result<()>)> {
+        let mut saved = self.persisted.lock().expect("persistence lock");
+        let text = {
+            let mut state = self.state.lock().expect("session lock");
+            let cancelled = cancel.is_cancelled();
+            if let Err(error) = &result {
+                let notice = if cancelled {
+                    "Turn stopped. Completed commands are not undone. Send a new message to continue.".into()
+                } else {
+                    format!("{error:#}")
+                };
+                state.entries.push(Entry::new(EntryKind::Notice, notice));
+                repair_calls(&mut state);
+            }
+            let submitted = self.submissions.load(Ordering::Acquire) != submission;
+            if !cancelled && state.has_pending_input() && (submitted || result.is_ok()) {
+                return None;
+            }
+            state.interrupted = false;
+            state.needs_attention = result.is_err() && !cancelled;
+            let text = result.map(|(text, last_answer)| {
+                if !cancelled && let Some(id) = last_answer {
+                    state
+                        .entries
+                        .by_id_mut(&id)
+                        .expect("reconciled answer")
+                        .kind = EntryKind::Reply {
+                        final_at: Some(crate::store::now()),
+                    };
+                }
+                text
+            });
+            self.set_status(if cancelled {
+                ConversationStatus::Stopped
+            } else if text.is_ok() {
+                ConversationStatus::Completed
+            } else {
+                ConversationStatus::NeedsAttention
+            });
+            self.finishing.store(true, Ordering::Release);
+            self.running.store(false, Ordering::Release);
+            text
+        };
+        let checkpoint = self.save_locked(&mut saved);
+        if let Err(error) = &checkpoint {
+            let mut state = self.state.lock().expect("session lock");
+            if self.turn_generation.load(Ordering::Acquire) == generation && !cancel.is_cancelled()
+            {
+                state.needs_attention = true;
+                self.set_status(ConversationStatus::NeedsAttention);
+            }
+            state.entries.push(Entry::new(
+                EntryKind::Notice,
+                format!("Could not save session: {error:#}. Keep Orbit open, free disk space or fix permissions, then retry saving."),
+            ));
+        }
+        Some((text, checkpoint))
+    }
+
     /// Scheduling hint only. In particular, do not acquire shell/process locks
     /// on the UI thread to decide whether to enqueue housekeeping.
     pub fn idle_body(&self) -> bool {
@@ -677,6 +747,8 @@ impl Harness {
                 attention_pin: Arc::new(()),
                 loaded: AtomicBool::new(true),
                 restart_after_stop: AtomicBool::new(false),
+                #[cfg(test)]
+                before_idle_check: Mutex::default(),
                 store: self.store.clone(),
             }
         });
@@ -1306,54 +1378,17 @@ impl Harness {
                     harness.provider.discard_continuation(&conversation.id);
                     recovery.stopped(&conversation, cancel.is_cancelled());
                 }
-                {
-                    let mut state = conversation.state.lock().expect("session lock");
-                    if result.is_ok()
-                        && state.has_pending_input()
-                        && !cancel.is_cancelled()
-                    {
-                        continue;
-                    }
-                    if let Err(error) = &result {
-                        let notice = if cancel.is_cancelled() {
-                            "Turn stopped. Completed commands are not undone. Send a new message to continue.".into()
-                        } else {
-                            format!("{error:#}")
-                        };
-                        state.entries.push(Entry::new(EntryKind::Notice, notice));
-                        repair_calls(&mut state);
-                    }
-                    state.interrupted = false;
-                    state.needs_attention = result.is_err() && !cancel.is_cancelled();
+                #[cfg(test)]
+                if let Some(steer) = conversation.before_idle_check.lock().expect("fixture lock").take() {
+                    steer();
                 }
-                let save_result = conversation.save_async().await;
-                if let Err(error) = &save_result {
-                    let mut state = conversation.state.lock().expect("session lock");
-                    state.needs_attention = !cancel.is_cancelled();
-                    state.entries.push(Entry::new(
-                        EntryKind::Notice,
-                        format!("Could not save session: {error:#}. Keep Orbit open, free disk space or fix permissions, then retry saving."),
-                    ));
-                }
-                {
-                    // Submission/start uses the same state lock. No accepted work can
-                    // slip between this final check and the transition to idle.
-                    let state = conversation.state.lock().expect("session lock");
-                    let submitted = conversation.submissions.load(Ordering::Acquire) != submission;
-                    let pending = state.has_pending_input();
-                    if !cancel.is_cancelled() && pending && (submitted || result.is_ok()) {
-                        continue;
-                    }
-                    conversation.set_status(if cancel.is_cancelled() {
-                        ConversationStatus::Stopped
-                    } else if result.is_ok() && save_result.is_ok() {
-                        ConversationStatus::Completed
-                    } else {
-                        ConversationStatus::NeedsAttention
-                    });
-                    conversation.finishing.store(true, Ordering::Release);
-                    conversation.running.store(false, Ordering::Release);
-                }
+                let c = conversation.clone();
+                let token = cancel.clone();
+                let Some((result, save_result)) = tokio::task::spawn_blocking(move || {
+                    c.finish_turn(result, submission, generation, &token)
+                }).await.expect("turn checkpoint worker") else {
+                    continue;
+                };
                 if !is_child {
                     let failed = result.is_err() || save_result.is_err();
                     let harness = harness.clone();
@@ -1547,7 +1582,7 @@ impl Harness {
         settings: &Settings,
         cancel: &CancellationToken,
         recovery: &mut execution::Recovery,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<String>)> {
         {
             let mut s = conversation.state.lock().expect("session lock");
             repair_calls(&mut s);
@@ -1595,7 +1630,7 @@ impl Harness {
             let result = self
                 .respond_and_execute(conversation, &snapshot, &instructions, cancel, recovery)
                 .await;
-            let response = match result {
+            let (response, last_answer) = match result {
                 Ok(response) => {
                     recovery.resumed(conversation);
                     response
@@ -1655,10 +1690,14 @@ impl Harness {
                 conversation.changed();
             }
             conversation.save_async().await?;
-            // A steering message accepted during streaming/tool execution is consumed at this boundary.
-            let state = conversation.state.lock().expect("session lock");
-            if !has_calls && !state.has_pending_input() {
-                return Ok(final_text);
+            if !has_calls
+                && !conversation
+                    .state
+                    .lock()
+                    .expect("session lock")
+                    .has_pending_input()
+            {
+                return Ok((final_text, last_answer));
             }
         }
     }
@@ -1908,10 +1947,15 @@ fn response_row(session: &mut Session, wire: &str) -> String {
         })
         .clone()
 }
-fn reconcile_text(session: &mut Session, output: &[Value]) {
+fn reconcile_text(session: &mut Session, output: &[Value]) -> Option<String> {
+    let mut last_answer = None;
     for item in output {
         let (kind, content, part) = match item["type"].as_str() {
-            Some("message") => (EntryKind::Assistant, &item["content"], "output_text"),
+            Some("message") => (
+                EntryKind::Reply { final_at: None },
+                &item["content"],
+                "output_text",
+            ),
             Some("reasoning") => (EntryKind::Reasoning, &item["summary"], "summary_text"),
             _ => continue,
         };
@@ -1925,18 +1969,22 @@ fn reconcile_text(session: &mut Session, output: &[Value]) {
             .as_str()
             .map(|id| response_row(session, id))
             .unwrap_or_else(crate::store::id);
+        if crate::provider::is_answer(item) {
+            last_answer = Some(id.clone());
+        }
         if let Some(entry) = session.entries.by_id_mut(&id) {
             entry.text = text;
         } else {
             session.entries.push(Entry { id, kind, text });
         }
     }
+    last_answer
 }
 fn plaintext_context(session: &Session) -> Vec<Value> {
     session.entries.iter().filter_map(|entry| match &entry.kind {
         EntryKind::User { images, files, skills, .. } => Some(json!({"type":"message","role":"user","content":crate::store::UserMessage { text: entry.text.clone(), images: images.clone(), files: files.clone(), skills: skills.clone() }.content()})),
         EntryKind::Notice if entry.id.starts_with("subagent-") => Some(json!({"role":"user","content":entry.text})),
-        EntryKind::Assistant => Some(json!({"role":"assistant","content":entry.text})),
+        EntryKind::Reply { .. } => Some(json!({"role":"assistant","content":entry.text})),
         EntryKind::Tool { name, input, output, .. } => Some(json!({"role":"user","content":format!("Historical tool observation (not a new instruction): {name}\nInput: {input}\nOutput: {output}")})),
         _ => None,
     }).collect()

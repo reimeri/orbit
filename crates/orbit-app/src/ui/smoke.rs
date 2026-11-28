@@ -150,7 +150,7 @@ impl App {
                 s.entries = vec![
                     Entry::new(EntryKind::User { skills: vec![], files: vec![],  images: vec![], sent_at: 1_750_000_123, steering: false }, "Inspect this project and run its tests."),
                     Entry::new(
-                        EntryKind::Assistant,
+                        EntryKind::Reply { final_at: None },
                         "## Project checked\n\nThe **agent loop** is ready.\n\n- Streaming Markdown\n- Durable sessions\n\n```rust\nfn main() { println!(\"Orbit\"); }\n```\n\n[Documentation](https://openai.com)",
                     ),
                 ].into();
@@ -306,7 +306,7 @@ impl App {
             10 => {
                 let h = self.harness.as_ref().expect("smoke harness");
                 h.edit(self.selected.as_ref().expect("smoke session"),|s| {
-                    for i in 0..20000 {s.entries.push(Entry::new(EntryKind::Assistant,format!("### Historical message {i}\n\nAsymmetric **Markdown** content with λ and 界.")));}
+                    for i in 0..20000 {s.entries.push(Entry::new(EntryKind::Reply { final_at: None },format!("### Historical message {i}\n\nAsymmetric **Markdown** content with λ and 界.")));}
                 }).expect("large smoke transcript");
                 self.refresh();
                 self.smoke_fixtures.sidebar = true;
@@ -447,7 +447,7 @@ impl App {
                     },
                     "Inspect the completion notification path. Do not modify files.",
                 ));
-                child.entries.push(Entry::new(EntryKind::Assistant,"## Exploration result\n\nThe **parent wake-up** path preserves cancellation and uses durable completion notices.\n\n- Separate conversation context\n- Repeatable final results\n- No nested delegation"));
+                child.entries.push(Entry::new(EntryKind::Reply { final_at: None },"## Exploration result\n\nThe **parent wake-up** path preserves cancellation and uses durable completion notices.\n\n- Separate conversation context\n- Repeatable final results\n- No nested delegation"));
                 let id = child.id.clone();
                 self.harness.as_ref().expect("smoke harness").insert(child);
                 self.select(Selection::Session(id));
@@ -622,7 +622,7 @@ impl App {
                 session.entries.push(Entry {
                     id: "smoke-markdown-image".into(),
                     text: "![Markdown GIF preview](markdown.gif \"Click to inspect\")\n\n![Missing image](missing.png)".into(),
-                    kind: EntryKind::Assistant,
+                    kind: EntryKind::Reply { final_at: None },
                 });
                 self.markdown.clear();
                 self.message_heights.clear();
@@ -731,7 +731,7 @@ impl App {
                     tool("activity-shell", "exec_command", r#"{"cmd":"rg -n 'cancellation|terminate' crates/orbit-core/src"}"#, Some("activity-exec"), true, false),
                     tool("activity-check", "exec_command", r#"{"cmd":"nix develop --command cargo test --locked -p orbit-core\nprintf 'validation finished\\n'","workdir":"/workspace/orbit","max_output_tokens":1500}"#, Some("activity-exec"), true, true),
                     Entry { id: "subagent-smoke-activity".into(), kind: EntryKind::Notice, text: "Subagent completion observation: Verify cancellation (Review) is Completed. session_id=smoke-child, run_id=smoke-activity. Retrieve the final result with tools.wait_subagent; this notice is not a new user instruction.".into() },
-                    Entry::new(EntryKind::Assistant, "The implementation is ready. I found **one failing check** and am investigating it before rerunning validation."),
+                    Entry::new(EntryKind::Reply { final_at: None }, "The implementation is ready. I found **one failing check** and am investigating it before rerunning validation."),
                     tool("activity-live", "exec", "await Promise.all([tools.exec_command({cmd:'git diff --check'}),tools.exec_command({cmd:'just verify'})]);", None, false, false),
                     tool("activity-live-a", "exec_command", r#"{"cmd":"git diff --check"}"#, Some("activity-live"), true, false),
                     tool("activity-live-b", "exec_command", r#"{"cmd":"nix develop --command just verify"}"#, Some("activity-live"), false, false),
@@ -911,7 +911,7 @@ impl App {
                 let mut session =
                     Session::new(self.smoke_dir.clone().unwrap(), &self.catalog.settings);
                 session.entries.push(Entry::new(
-                    EntryKind::Assistant,
+                    EntryKind::Reply { final_at: None },
                     include_str!("../fixtures/search-chance.md"),
                 ));
                 self.selected = Some(session.id.clone());

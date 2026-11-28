@@ -87,7 +87,7 @@ impl Harness {
         instructions: &str,
         cancel: &CancellationToken,
         recovery: &mut Recovery,
-    ) -> Result<Response> {
+    ) -> Result<(Response, Option<String>)> {
         conversation
             .state
             .lock()
@@ -125,7 +125,7 @@ impl Harness {
                         kind: if reasoning {
                             EntryKind::Reasoning
                         } else {
-                            EntryKind::Assistant
+                            EntryKind::Reply { final_at: None }
                         },
                     });
                 }
@@ -157,7 +157,7 @@ impl Harness {
                     _ = cancel.cancelled() => bail!("Turn cancelled"),
                     result = &mut request, if response.is_none() => {
                         let completed = result?;
-                        {
+                        let last_answer = {
                             let mut session = conversation.state.lock().expect("session lock");
                             // Final-response fallback items are already in the channel.
                             // Include them in this same checkpoint, not in a later save.
@@ -172,10 +172,11 @@ impl Harness {
                             session.usage.record_response(completed.usage.clone());
                             conversation.pending_activity.lock().expect("activity lock")
                                 .push(crate::store::activity::Sample::new(snapshot, &completed));
-                            reconcile_text(&mut session, &completed.output);
+                            let answer = reconcile_text(&mut session, &completed.output);
                             conversation.changed();
-                        }
-                        response = Some(completed);
+                            answer
+                        };
+                        response = Some((completed, last_answer));
                         conversation.save_async().await?;
                     }
                     result = async {
@@ -229,7 +230,7 @@ impl Harness {
                 }
                 if response
                     .as_ref()
-                    .is_some_and(|response| next_index == response.output.len())
+                    .is_some_and(|(response, _)| next_index == response.output.len())
                     && received.is_empty()
                     && active.is_none()
                     && !waiting_for_answers
@@ -298,7 +299,7 @@ impl Harness {
                     .entries
                     .range(snapshot.entries.len())
                     .filter(|e| {
-                        matches!(e.kind, EntryKind::Assistant | EntryKind::Reasoning)
+                        (matches!(e.kind, EntryKind::Reply { .. } | EntryKind::Reasoning))
                             && !completed_ids.contains(e.id.as_str())
                     })
                     .map(|e| e.id.clone())

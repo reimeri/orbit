@@ -80,21 +80,69 @@ impl Drop for Fixture {
 async fn provider_text_id_cannot_replace_a_user_entry() {
     let mut f = Fixture::new().await;
     let user = f.c.snapshot().entries[0].clone();
+    let before = crate::store::now();
     f.request().await.reply.send(format!("{}\n\n{}",
         json!({"type":"response.output_text.delta","item_id":user.id,"delta":"Part"}),
         completed(json!([{"type":"message","id":user.id,"role":"assistant","content":[{"type":"output_text","text":"Complete reply"}]}])))).unwrap();
     until(|| !f.c.is_turn_active()).await;
     let saved = f.saved();
     assert_eq!(saved.entries.by_id(&user.id), Some(&user));
-    assert_eq!(
-        saved
-            .entries
-            .iter()
-            .filter(|e| matches!(e.kind, EntryKind::Assistant))
-            .map(|e| e.text.as_str())
-            .collect::<Vec<_>>(),
-        ["Complete reply"]
+    let mut replies = saved
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, EntryKind::Reply { .. }));
+    let reply = replies.next().expect("reconciled reply");
+    assert!(
+        replies.next().is_none(),
+        "streamed text and final text must share one row"
     );
+    assert_eq!(reply.text, "Complete reply");
+    assert!(matches!(reply.kind, EntryKind::Reply { final_at: Some(at) }
+        if (before..=crate::store::now()).contains(&at)));
+}
+
+#[tokio::test]
+async fn steering_accepted_at_the_idle_boundary_dates_only_the_last_answer() {
+    let mut f = Fixture::new().await;
+    let harness = f.h.clone();
+    let id = f.c.id.clone();
+    // Exercise the last admission window deterministically, after the response
+    // checkpoint but before the running worker has committed to going idle.
+    *f.c.before_idle_check.lock().unwrap() = Some(Box::new(move || {
+        harness
+            .send(&id, "late", "One more check".into(), Settings::default())
+            .unwrap();
+    }));
+    f.request()
+        .await
+        .reply
+        .send(completed(json!([{
+            "type":"message", "id":"first", "phase":"final_answer",
+            "content":[{"type":"output_text","text":"First result"}]
+        }])))
+        .unwrap();
+
+    let next = f.request().await;
+    assert_eq!(
+        next.body["input"].as_array().unwrap().last().unwrap()["content"],
+        "One more check"
+    );
+    next.reply
+        .send(completed(json!([{
+            "type":"message", "id":"last", "phase":"final_answer",
+            "content":[{"type":"output_text","text":"Revised result"}]
+        }])))
+        .unwrap();
+    until(|| !f.c.is_turn_active()).await;
+    let saved = f.saved();
+    assert!(matches!(
+        saved.entries.by_id("first").unwrap().kind,
+        EntryKind::Reply { final_at: None }
+    ));
+    assert!(matches!(
+        saved.entries.by_id("last").unwrap().kind,
+        EntryKind::Reply { final_at: Some(_) }
+    ));
 }
 
 fn call(id: &str, source: &str) -> Value {

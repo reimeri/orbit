@@ -365,7 +365,7 @@ async fn formatted_tool_copy_and_raw_disclosure_survive_viewport_eviction() {
                     web: None,
                 },
             },
-            Entry::new(EntryKind::Assistant, "After the tool."),
+            Entry::new(EntryKind::Reply { final_at: None }, "After the tool."),
         ]
         .into();
     })
@@ -468,7 +468,10 @@ async fn activity_expansion_streaming_selection_and_details_preserve_source_entr
                     web: None,
                 },
             },
-            Entry::new(EntryKind::Assistant, "I will examine the result."),
+            Entry::new(
+                EntryKind::Reply { final_at: None },
+                "I will examine the result.",
+            ),
         ]
         .into();
     })

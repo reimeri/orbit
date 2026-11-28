@@ -336,9 +336,10 @@ mod tests {
             crate::file_tags::capture(root.path(), &root.path().join("files"), &message.text)?;
         {
             let db = Store::open(root.path().into())?;
-            source
-                .entries
-                .push(Entry::new(EntryKind::Assistant, "Prior response"));
+            source.entries.push(Entry::new(
+                EntryKind::Reply { final_at: None },
+                "Prior response",
+            ));
             source
                 .input
                 .push(json!({"role":"assistant","content":"Prior response"}));

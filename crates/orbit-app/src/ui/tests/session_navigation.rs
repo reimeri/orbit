@@ -50,7 +50,7 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
         });
         for n in 0..60 {
             s.entries.push(Entry::new(
-                EntryKind::Assistant,
+                EntryKind::Reply { final_at: None },
                 format!("Historical parent message {n}"),
             ));
         }
@@ -79,9 +79,10 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
         },
         "Inspect without edits",
     ));
-    child
-        .entries
-        .push(Entry::new(EntryKind::Assistant, "Final inspection result"));
+    child.entries.push(Entry::new(
+        EntryKind::Reply { final_at: None },
+        "Final inspection result",
+    ));
     let child_id = child.id.clone();
     h.store.save_session(&child).unwrap();
     let finished = orbit_core::store::now();

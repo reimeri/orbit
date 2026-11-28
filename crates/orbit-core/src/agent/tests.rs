@@ -1503,7 +1503,7 @@ fn failed_submission_retry_is_idempotent_and_interrupted_load_keeps_positions() 
     session.updated = 77;
     session
         .entries
-        .push(Entry::new(EntryKind::Assistant, "original"));
+        .push(Entry::new(EntryKind::Reply { final_at: None }, "original"));
     store.save_session(&session).unwrap();
     let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
     let c = h.load(&id).unwrap();

@@ -8,7 +8,8 @@ async fn streaming_reparse_invalidates_even_a_zero_length_selection_anchor() {
     let h = app.harness.as_ref().unwrap().clone();
     let id = app.selected.clone().unwrap();
     h.edit(&id, |s| {
-        s.entries.push(Entry::new(EntryKind::Assistant, "*é"))
+        s.entries
+            .push(Entry::new(EntryKind::Reply { final_at: None }, "*é"))
     })
     .unwrap();
     dispatch(&mut app, Message::Changed).await;
@@ -29,8 +30,10 @@ async fn streaming_reparse_invalidates_even_a_zero_length_selection_anchor() {
             EntryKind::Reasoning,
             "**Unrelated later activity**",
         ));
-        s.entries
-            .push(Entry::new(EntryKind::Assistant, "Later response"));
+        s.entries.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            "Later response",
+        ));
     })
     .unwrap();
     dispatch(&mut app, Message::Changed).await;
@@ -55,7 +58,7 @@ async fn transcript_layout_work_is_bounded_across_scroll_resize_and_identity_cha
     let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
     for i in 0..64 {
         session.entries.push(Entry::new(
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             format!("Message {i:03}: asymmetric café text."),
         ));
     }
@@ -271,7 +274,7 @@ async fn fitting_chat_expansions_keep_prose_mounted_with_real_viewport_feedback(
         "Please examine these changes.\n\nKeep the first message visible.",
     ));
     session.entries.push(Entry::new(
-        EntryKind::Assistant,
+        EntryKind::Reply { final_at: None },
         "I will inspect the **implementation**.\n\nThen I will verify the behavior.",
     ));
     let mut groups = vec![];
@@ -301,7 +304,7 @@ async fn fitting_chat_expansions_keep_prose_mounted_with_real_viewport_feedback(
         }
         groups.push(session.entries[head].id.clone());
         prose.push(session.entries.len());
-        session.entries.push(Entry::new(EntryKind::Assistant,
+        session.entries.push(Entry::new(EntryKind::Reply { final_at: None },
             "Checks completed.\n\n- First result\n- Second result\nAll expected content remains visible."));
     }
     app.selected = Some(session.id.clone());
@@ -381,13 +384,14 @@ async fn cold_open_at_bottom_does_not_mount_a_long_historical_prompt() {
         .push(Entry::new(EntryKind::Reasoning, "Inspecting the project"));
     // Even with the activity folded, this response fills more than a viewport.
     session.entries.push(Entry::new(
-        EntryKind::Assistant,
+        EntryKind::Reply { final_at: None },
         "A detailed finding with supporting context. ".repeat(300),
     ));
     session.accept("What should I do next?".into());
-    session
-        .entries
-        .push(Entry::new(EntryKind::Assistant, "Latest recommendation"));
+    session.entries.push(Entry::new(
+        EntryKind::Reply { final_at: None },
+        "Latest recommendation",
+    ));
     app.harness
         .as_ref()
         .unwrap()
@@ -425,7 +429,7 @@ async fn opening_child_at_bottom_measures_offscreen_mounted_rows_without_scrolli
     // Keep a large history unmounted while the final exchange is measured.
     for i in 0..200 {
         session.entries.push(Entry::new(
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             format!("Historical finding {i}"),
         ));
     }
@@ -442,7 +446,7 @@ async fn opening_child_at_bottom_measures_offscreen_mounted_rows_without_scrolli
         ),
         (EntryKind::Reasoning, "Reviewing the implementation".into()),
         (
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             "An earlier finding with **details**.\n\n".repeat(20),
         ),
         (
@@ -457,12 +461,12 @@ async fn opening_child_at_bottom_measures_offscreen_mounted_rows_without_scrolli
         ),
         (EntryKind::Reasoning, "Checking the regression".into()),
         (
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             "Verification completed.\n\nThe result is consistent.".into(),
         ),
         (EntryKind::Reasoning, "Preparing the final report".into()),
         (
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             "Final report with **verified results**.\n\n".repeat(30),
         ),
     ] {
@@ -516,7 +520,7 @@ async fn chat_measurements_prepare_newly_exposed_rows_without_a_scroll() {
     let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
     for i in 0..30 {
         session.entries.push(Entry::new(
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             format!("**Row {i}** with λ"),
         ));
     }
@@ -562,7 +566,7 @@ async fn long_transcript_only_caches_viewport_and_appends_preserve_heights() {
     h.edit(&id, |s| {
         for i in 0..20000 {
             s.entries.push(Entry::new(
-                EntryKind::Assistant,
+                EntryKind::Reply { final_at: None },
                 format!("## Message {i}\n\nDistinct body"),
             ));
         }
@@ -575,7 +579,7 @@ async fn long_transcript_only_caches_viewport_and_appends_preserve_heights() {
     let before = app.transcript.total();
     h.edit(&id, |s| {
         s.entries
-            .push(Entry::new(EntryKind::Assistant, "new entry"))
+            .push(Entry::new(EntryKind::Reply { final_at: None }, "new entry"))
     })
     .unwrap();
     dispatch(&mut app, Message::Changed).await;
@@ -623,7 +627,7 @@ async fn popup_transitions_preserve_sidebar_and_chat_scroll() {
     let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
     for i in 0..64 {
         session.entries.push(Entry::new(
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             format!("Message {i}: asymmetric café text."),
         ));
         app.sessions.push(SessionSummary {

@@ -250,7 +250,7 @@ impl App {
                     visible_media.extend(files.iter().filter_map(|file| file.image.clone()));
                 }
                 // User text is literal, including newlines and Markdown syntax.
-                if matches!(entry.kind, EntryKind::Assistant | EntryKind::Reasoning) {
+                if matches!(entry.kind, EntryKind::Reply { .. } | EntryKind::Reasoning) {
                     let markdown = self.markdown.entry(entry.id.clone()).or_insert_with(|| {
                         let content = markdown::Content::parse(&entry.text);
                         let mut markdown = Markdown {

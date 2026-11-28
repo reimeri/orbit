@@ -323,7 +323,10 @@ pub enum EntryKind {
         /// Submitted during an active turn and not yet consumed at a model boundary.
         steering: bool,
     },
-    Assistant,
+    Reply {
+        /// Set on the last answer when a response completes without needing more work.
+        final_at: Option<u64>,
+    },
     Reasoning,
     Notice,
     Tool {
@@ -1506,7 +1509,9 @@ mod tests {
         let store = Store::open(dir.path().into()).unwrap();
         let mut session = Session::new(dir.path().into(), &Settings::default());
         for text in ["first", "middle", "last"] {
-            session.entries.push(Entry::new(EntryKind::Assistant, text));
+            session
+                .entries
+                .push(Entry::new(EntryKind::Reply { final_at: None }, text));
         }
         session.input = vec![serde_json::json!({"role":"user","content":"context"})].into();
         store.save_session(&session).unwrap();

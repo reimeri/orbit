@@ -49,7 +49,7 @@ fn main() -> Result<()> {
                     steering: false,
                 }
             } else {
-                EntryKind::Assistant
+                EntryKind::Reply { final_at: None }
             },
             format!("Message {i}: {}", "asymmetric λ text ".repeat(55)),
         ));

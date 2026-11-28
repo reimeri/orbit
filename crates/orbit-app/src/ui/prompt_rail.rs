@@ -388,7 +388,7 @@ mod tests {
             for i in 0..count / 2 {
                 session.accept(format!("Question {i:05}").into());
                 session.entries.push(Entry::new(
-                    orbit_core::store::EntryKind::Assistant,
+                    orbit_core::store::EntryKind::Reply { final_at: None },
                     "Answer",
                 ));
             }

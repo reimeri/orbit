@@ -256,8 +256,9 @@ impl Index {
             self.matcher = Some((query.to_owned(), re));
         }
         if previous.is_none() {
-            self.blocks
-                .retain(|&i, _| i < source.len() && matches!(source[i].kind, EntryKind::Assistant));
+            self.blocks.retain(|&i, _| {
+                i < source.len() && matches!(source[i].kind, EntryKind::Reply { .. })
+            });
         }
         let re = self.matcher.as_ref().unwrap().1.clone();
         let mut rows = previous.map_or_else(Vector::new, |p| p.rows.clone());
@@ -275,7 +276,7 @@ impl Index {
                 self.blocks.remove(&i);
                 continue;
             };
-            if !matches!(entry.kind, EntryKind::Assistant) {
+            if !matches!(entry.kind, EntryKind::Reply { .. }) {
                 self.blocks.remove(&i);
             }
             let mut found = Matches::default();
@@ -300,7 +301,7 @@ impl Index {
                 }
             };
             match entry.kind {
-                EntryKind::Assistant => {
+                EntryKind::Reply { .. } => {
                     let (blocks, from) = self.assistant(i, &source, previous);
                     if from > 0 {
                         let hits = &rows[i].hits.0;
@@ -367,7 +368,7 @@ mod tests {
     #[test]
     fn nearest_prefers_visible_then_compares_both_neighbors() {
         let entries = vec![Entry::new(
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             "hit 0123456789 hit 0123456789 hit",
         )]
         .into();
@@ -409,7 +410,7 @@ mod tests {
             ),
             Entry::new(EntryKind::Reasoning, "k."),
             Entry::new(
-                EntryKind::Assistant,
+                EntryKind::Reply { final_at: None },
                 "[**K**.](https://k.example) and k.\n\n```sh\n  k.\n```",
             ),
             Entry::new(EntryKind::Notice, "k."),
@@ -434,7 +435,10 @@ mod tests {
             [(0, 0, 8, 10), (2, 0, 0, 4), (2, 0, 9, 11), (2, 1, 2, 4)]
         );
         source[2].text = "replacement".into();
-        source.push(Entry::new(EntryKind::Assistant, "- k.\n- tail K."));
+        source.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            "- k.\n- tail K.",
+        ));
         let updated = index
             .search(source, Some(&result), "k.", &cancel)
             .unwrap()
@@ -448,7 +452,7 @@ mod tests {
     #[test]
     fn streamed_tail_reparses_old_references_without_discarding_prefix_matches() {
         let mut entries: History<Entry> = vec![Entry::new(
-            EntryKind::Assistant,
+            EntryKind::Reply { final_at: None },
             "**first** hit\n\n[hit][alias]\n\npartial hi",
         )]
         .into();
@@ -481,7 +485,7 @@ mod tests {
         let mut entries: History<Entry> = (0..20_000)
             .map(|i| {
                 Entry::new(
-                    EntryKind::Assistant,
+                    EntryKind::Reply { final_at: None },
                     format!("Reply {i}: **build** succeeded.\n\n```rust\nlet n = {i};\n```"),
                 )
             })

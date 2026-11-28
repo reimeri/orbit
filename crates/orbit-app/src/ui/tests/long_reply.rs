@@ -13,7 +13,7 @@ fn fixture(source: &str) -> App {
     let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
     session
         .entries
-        .push(Entry::new(EntryKind::Assistant, source));
+        .push(Entry::new(EntryKind::Reply { final_at: None }, source));
     app.selected = Some(session.id.clone());
     app.current_session = Some(session);
     app.rebuild_transcript();
@@ -138,9 +138,10 @@ async fn long_prompt_opens_at_its_tail_and_finds_and_copies_across_unmounted_tex
     let mut app = app();
     let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
     session.accept(source.clone().into());
-    session
-        .entries
-        .push(Entry::new(EntryKind::Assistant, "Short reply"));
+    session.entries.push(Entry::new(
+        EntryKind::Reply { final_at: None },
+        "Short reply",
+    ));
     app.harness
         .as_ref()
         .unwrap()
@@ -352,13 +353,14 @@ async fn returning_to_measured_reply_preserves_visible_text_and_scroll_anchor() 
     // A measured prefix that will revert to an estimate on a session switch.
     let mut app = fixture(&"Earlier line.  \n".repeat(24));
     let session = app.current_session.as_mut().unwrap();
-    let reply = Entry::new(EntryKind::Assistant, source);
+    let reply = Entry::new(EntryKind::Reply { final_at: None }, source);
     let id = reply.id.clone();
     session.entries.push(reply);
     for i in 0..90 {
-        session
-            .entries
-            .push(Entry::new(EntryKind::Assistant, format!("Following {i}")));
+        session.entries.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            format!("Following {i}"),
+        ));
     }
     let session_id = session.id.clone();
     let h = app.harness.as_ref().unwrap().clone();
@@ -669,13 +671,14 @@ async fn find_reveals_offscreen_occurrence_inside_a_virtual_reply_and_wide_code(
     let mut app = fixture("a different message");
     let session = app.current_session.as_mut().unwrap();
     for i in 0..250 {
-        session
-            .entries
-            .push(Entry::new(EntryKind::Assistant, format!("unrelated {i}")));
+        session.entries.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            format!("unrelated {i}"),
+        ));
     }
     session
         .entries
-        .push(Entry::new(EntryKind::Assistant, source));
+        .push(Entry::new(EntryKind::Reply { final_at: None }, source));
     app.rebuild_transcript();
     app.prepare_visible();
     let size = Size::new(680., 460.);
@@ -941,7 +944,7 @@ async fn prompt_rail_browses_independently_and_jumps_across_virtualized_history(
         session.accept(format!("Question {i}").into());
         session
             .entries
-            .push(Entry::new(EntryKind::Assistant, "Answer"));
+            .push(Entry::new(EntryKind::Reply { final_at: None }, "Answer"));
     }
     app.selected = Some(session.id.clone());
     app.current_session = Some(session);
@@ -1046,7 +1049,7 @@ async fn prompt_rail_jump_clamped_to_bottom_stays_put_as_reply_grows() {
     let prompt = session.entries[0].id.clone();
     session
         .entries
-        .push(Entry::new(EntryKind::Assistant, "Working…"));
+        .push(Entry::new(EntryKind::Reply { final_at: None }, "Working…"));
     app.selected = Some(session.id.clone());
     let h = app.harness.as_ref().unwrap().clone();
     h.insert(session);
@@ -1104,9 +1107,10 @@ async fn last_prompt_jump_keeps_the_whole_bottom_viewport_rendered() {
         session.accept(format!("Question {i}").into());
     }
     let last = session.entries[29].id.clone();
-    session
-        .entries
-        .push(Entry::new(EntryKind::Assistant, "Short final reply."));
+    session.entries.push(Entry::new(
+        EntryKind::Reply { final_at: None },
+        "Short final reply.",
+    ));
     app.selected = Some(session.id.clone());
     app.current_session = Some(session);
     app.rebuild_transcript();

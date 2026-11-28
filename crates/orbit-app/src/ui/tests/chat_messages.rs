@@ -47,14 +47,14 @@ async fn long_user_prompts_wrap_within_the_right_two_thirds_only() {
     session.accept(long.clone().into());
     session
         .entries
-        .push(Entry::new(EntryKind::Assistant, &long));
+        .push(Entry::new(EntryKind::Reply { final_at: None }, &long));
     app.current_session = Some(session);
     let session = app.current().unwrap();
     let mut renderer = header_renderer();
     for width in [330., 810.] {
         let rows = [0, 1].map(|i| {
             let mut ui = iced_runtime::UserInterface::build(
-                app.fork_row(session, &session.entries[i], ActivityRow::Entry(i)),
+                app.message_row(session, &session.entries[i], ActivityRow::Entry(i)),
                 iced::Size::new(width, 2000.),
                 iced_runtime::user_interface::Cache::new(),
                 &mut renderer,
@@ -111,8 +111,10 @@ async fn user_messages_render_and_copy_literally_after_newline_and_paste() {
     let id = app.selected.clone().unwrap();
     let h = app.harness.as_ref().unwrap().clone();
     h.edit(&id, |s| {
-        s.entries
-            .push(Entry::new(EntryKind::Assistant, "**Still Markdown**"));
+        s.entries.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            "**Still Markdown**",
+        ));
     })
     .unwrap();
     dispatch(&mut app, Message::Changed).await;
@@ -123,7 +125,7 @@ async fn user_messages_render_and_copy_literally_after_newline_and_paste() {
     let assistant = saved
         .entries
         .iter()
-        .position(|e| matches!(e.kind, EntryKind::Assistant))
+        .position(|e| matches!(e.kind, EntryKind::Reply { .. }))
         .unwrap();
     for (index, expected_text) in [(0, expected), (assistant, "Still Markdown")] {
         let mut ui = UserInterface::build(
@@ -277,8 +279,10 @@ async fn find_discards_obsolete_queries_and_sessions_without_touching_drafts() {
     let id = app.selected.clone().unwrap();
     let h = app.harness.clone().unwrap();
     h.edit(&id, |s| {
-        s.entries
-            .push(Entry::new(EntryKind::Assistant, "old **needle** new"))
+        s.entries.push(Entry::new(
+            EntryKind::Reply { final_at: None },
+            "old **needle** new",
+        ))
     })
     .unwrap();
     dispatch(&mut app, Message::Changed).await;
@@ -414,8 +418,10 @@ async fn settings_and_find_can_open_in_either_order() {
         .as_ref()
         .unwrap()
         .edit(app.selected.as_ref().unwrap(), |s| {
-            s.entries
-                .push(Entry::new(EntryKind::Assistant, "needle and needle"));
+            s.entries.push(Entry::new(
+                EntryKind::Reply { final_at: None },
+                "needle and needle",
+            ));
         })
         .unwrap();
     dispatch(&mut app, Message::Changed).await;
@@ -454,4 +460,87 @@ async fn settings_and_find_can_open_in_either_order() {
     assert!(chat_text(&app).contains("2 of 2"));
     dispatch(&mut app, escape).await;
     assert!(app.find.is_none() && app.right_panel == Some(RightPanel::Settings));
+}
+
+#[tokio::test]
+async fn message_footers_copy_source_and_only_date_recorded_replies() {
+    use chrono::TimeZone as _;
+    let mut app = app();
+    let mut session = Session::new("/chat".into(), &app.catalog.settings);
+    session.accept("First prompt".into());
+    session
+        .entries
+        .push(Entry::new(EntryKind::Reply { final_at: None }, "An update"));
+    let image = orbit_core::media::MediaStore::new(app.smoke_dir.as_ref().unwrap().join("images"))
+        .image(include_bytes!("../../fixtures/media.png"))
+        .unwrap();
+    session.accept(orbit_core::store::UserMessage {
+        images: vec![image],
+        ..Default::default()
+    });
+    let sent_at = chrono::Local
+        .with_ymd_and_hms(2025, 9, 15, 22, 34, 0)
+        .single()
+        .unwrap()
+        .timestamp() as u64;
+    session.entries.push(Entry::new(
+        EntryKind::Reply {
+            final_at: Some(sent_at),
+        },
+        "A **new reply**",
+    ));
+    app.current_session = Some(session);
+    app.rebuild_transcript();
+    app.prepare_visible();
+
+    let session = app.current().unwrap();
+    let mut renderer = header_renderer();
+    for i in 0..session.entries.len() {
+        let entry = &session.entries[i];
+        let mut ui = iced_runtime::UserInterface::build(
+            app.message_row(session, entry, ActivityRow::Entry(i)),
+            iced::Size::new(600., 160.),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = UiBounds::default();
+        ui.operate(&renderer, &mut bounds);
+        let body = bounds.labels[0].1;
+        // The only action in these rows is Copy (this prompt has no fork point).
+        let footer = bounds
+            .containers
+            .iter()
+            .filter(|r| r.y >= body.y + body.height && r.width == r.height && r.width > 0.)
+            .max_by(|a, b| a.x.total_cmp(&b.x));
+        if i == 1 || i == 2 {
+            assert!(
+                footer.is_none(),
+                "no copy for progress or image-only prompts"
+            );
+            continue;
+        }
+        let copy = footer.expect("copy control below the message");
+        if i == 3 {
+            let time = bounds.label("Monday 10:34 PM");
+            assert!(time.y > body.y && time.x + time.width < copy.x);
+            let width = time.x + copy.width + time.width / 2.;
+            let mut narrow = iced_runtime::UserInterface::build(
+                app.message_row(session, entry, ActivityRow::Entry(i)),
+                iced::Size::new(width, 160.),
+                iced_runtime::user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut compact = UiBounds::default();
+            narrow.operate(&renderer, &mut compact);
+            let date = compact.label("Monday 10:34 PM");
+            let button = compact.rightmost_control_at(date.center_y());
+            assert!(date.width < time.width && date.x + date.width <= button.x);
+            assert_eq!(button.width, copy.width);
+            assert!(button.x + button.width <= width);
+        }
+        assert!(
+            matches!(click_at(&mut ui, &mut renderer, copy.center()).as_slice(),
+            [Message::Copy(text)] if text == &entry.text)
+        );
+    }
 }

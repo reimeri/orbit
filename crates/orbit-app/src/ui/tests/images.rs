@@ -157,7 +157,7 @@ async fn markdown_images_load_in_chat_open_modal_and_retry_after_source_disappea
         s.entries.push(Entry {
             id: "markdown-image".into(),
             text: "Before\n\n![Caption](chat.gif)\n\nAfter".into(),
-            kind: EntryKind::Assistant,
+            kind: EntryKind::Reply { final_at: None },
         })
     })
     .unwrap();
@@ -195,7 +195,7 @@ async fn markdown_images_load_in_chat_open_modal_and_retry_after_source_disappea
         saved.entries[0].text,
         "Before\n\n![Caption](chat.gif)\n\nAfter"
     );
-    assert!(matches!(saved.entries[0].kind, EntryKind::Assistant));
+    assert!(matches!(saved.entries[0].kind, EntryKind::Reply { .. }));
 }
 
 #[tokio::test]
@@ -218,7 +218,7 @@ async fn relinking_a_replaced_image_refreshes_the_shared_chat_preview() {
                 s.entries.push(Entry {
                     id: id.into(),
                     text: format!("![{id} plot](plot.png)"),
-                    kind: EntryKind::Assistant,
+                    kind: EntryKind::Reply { final_at: None },
                 });
             })
             .unwrap();

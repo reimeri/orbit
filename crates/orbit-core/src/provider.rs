@@ -346,14 +346,16 @@ struct ResponseStream<'a> {
 }
 /// Output items may omit the (implicit assistant) role. Progress messages
 /// belong in the transcript, never in a final result, title or checkpoint.
+pub(crate) fn is_answer(item: &Value) -> bool {
+    item["type"] == "message"
+        && (item["role"].is_null() || item["role"] == "assistant")
+        && item["phase"] != "commentary"
+}
+
 pub(crate) fn final_text(output: &[Value]) -> String {
     output
         .iter()
-        .filter(|item| {
-            item["type"] == "message"
-                && (item["role"].is_null() || item["role"] == "assistant")
-                && item["phase"] != "commentary"
-        })
+        .filter(|item| is_answer(item))
         .flat_map(|item| text_parts(&item["content"], "output_text"))
         .collect::<Vec<_>>()
         .join("\n")

@@ -124,7 +124,7 @@ impl App {
             },
         )
     }
-    pub(super) fn fork_row<'a>(
+    pub(super) fn message_row<'a>(
         &'a self,
         session: &'a Session,
         entry: &'a Entry,
@@ -134,76 +134,102 @@ impl App {
         let ActivityRow::Entry(i) = projected else {
             return content;
         };
-        let EntryKind::User { sent_at, .. } = entry.kind else {
-            return content;
+        let (user, sent_at) = match entry.kind {
+            EntryKind::User { sent_at, .. } => (true, sent_at),
+            EntryKind::Reply {
+                final_at: Some(sent_at),
+            } => (false, sent_at),
+            _ => return content,
         };
-        let prompt = if session.can_fork(i) {
-            self.prompt_controls(session, &entry.id, sent_at, content)
-        } else {
-            content
-        };
-        // Size against the actual transcript lane, including after a panel resize.
-        use iced::Length::FillPortion;
-        row![
-            space().width(FillPortion(1)),
-            container(prompt).align_right(FillPortion(2))
-        ]
-        .into()
-    }
 
-    fn prompt_controls<'a>(
-        &'a self,
-        session: &'a Session,
-        eid: &str,
-        sent_at: u64,
-        content: Element<'a, Message>,
-    ) -> Element<'a, Message> {
         let sid = &session.id;
-        let mut controls = row![].align_y(iced::Center).height(CONTROLS_HEIGHT);
-        if let Some(n) = self.forks.descendants.get(sid).and_then(|m| m.get(eid)) {
-            controls = controls.push(
+        let eid = &entry.id;
+        let mut metadata = row![].align_y(iced::Center);
+        if user && let Some(n) = self.forks.descendants.get(sid).and_then(|m| m.get(eid)) {
+            metadata = metadata.push(
                 theme::button(Icon::GitFork.label(
                     text(format!("{n} {}", if *n == 1 { "fork" } else { "forks" })),
                     12.,
                 ))
                 .padding([2, 8])
                 .style(theme::text_button)
-                .on_press(Message::ShowForks(Some(eid.to_owned()))),
+                .on_press(Message::ShowForks(Some(eid.clone()))),
             );
         }
-        let fork = theme::button(container(Icon::GitFork.view(16.)).center(CONTROLS_HEIGHT))
-            .padding(0)
-            .style(theme::sidebar_control)
-            .on_press_maybe((!self.io_busy).then(|| Message::Fork(sid.clone(), eid.to_owned())));
-        let time: Element<'_, Message> = if let Ok(seconds) = i64::try_from(sent_at)
+        if let Ok(seconds) = i64::try_from(sent_at)
             && let Some(utc) = chrono::DateTime::from_timestamp(seconds, 0)
         {
             let local = utc
                 .with_timezone(&chrono::Local)
                 .format("%A %-I:%M %p")
                 .to_string();
-            container(crate::ellipsized_text::shrinking_ellipsized_text(
+            let time = container(crate::ellipsized_text::shrinking_ellipsized_text(
                 &local,
                 12.,
                 Some(self.preset().colors.muted),
             ))
-            .align_right(Fill)
-            .padding(iced::Padding::ZERO.right(4))
-            .into()
-        } else {
-            space().width(Fill).into()
+            .padding(iced::Padding::ZERO.right(4));
+            metadata = metadata.push(if user { time.align_right(Fill) } else { time });
+        }
+        let icon_button = |icon: Icon| {
+            theme::button(container(icon.view(16.)).center(CONTROLS_HEIGHT))
+                .padding(0)
+                .style(theme::sidebar_control)
         };
-        controls = controls.push(time).push(icon_tip(fork, "Fork from here"));
+        let copy = || {
+            icon_tip(
+                icon_button(Icon::Copy).on_press_with(|| Message::Copy(entry.text.clone())),
+                "Copy message",
+            )
+        };
+        let controls: Element<'_, Message> = if user {
+            let mut controls =
+                row![metadata.width(Fill).clip(true)].extend((!entry.text.is_empty()).then(copy));
+            if session.can_fork(i) {
+                controls = controls.push(icon_tip(
+                    icon_button(Icon::GitFork).on_press_maybe(
+                        (!self.io_busy).then(|| Message::Fork(sid.clone(), eid.clone())),
+                    ),
+                    "Fork from here",
+                ));
+            }
+            controls
+                .align_y(iced::Center)
+                .height(CONTROLS_HEIGHT)
+                .into()
+        } else {
+            // Shrink-wrap the date and Copy together, but reserve the button's
+            // width first so a narrow lane ellipsizes the date, not the button.
+            stack![
+                container(metadata)
+                    .padding(iced::Padding::ZERO.right(CONTROLS_HEIGHT))
+                    .center_y(CONTROLS_HEIGHT),
+                container(copy()).align_right(Fill),
+            ]
+            .into()
+        };
 
-        // The base includes the controls' space, so hovering either part reveals
-        // them without changing the measured row height or covering message text.
-        container(widget::hover(
+        // Reserve the controls' band so the pointer can move from text to button
+        // without hiding the actions, reflowing the row, or covering selectable text.
+        let message = widget::hover(
             column![content, space().height(CONTROLS_HEIGHT)]
                 .width(Fill)
-                .align_x(iced::Right),
-            container(controls).align_bottom(Fill),
-        ))
-        .padding(iced::Padding::ZERO.top(CONTROLS_HEIGHT))
+                .align_x(if user { iced::Right } else { iced::Left }),
+            container(controls)
+                .align_bottom(Fill)
+                .padding(iced::Padding::ZERO.left(if user { 0. } else { 12. })),
+        );
+        if !user {
+            return message;
+        }
+        // Size against the actual transcript lane, including after a panel resize.
+        use iced::Length::FillPortion;
+        row![
+            space().width(FillPortion(1)),
+            container(message)
+                .padding(iced::Padding::ZERO.top(CONTROLS_HEIGHT))
+                .align_right(FillPortion(2))
+        ]
         .into()
     }
 

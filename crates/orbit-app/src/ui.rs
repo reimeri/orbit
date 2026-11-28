@@ -3815,7 +3815,7 @@ impl App {
                 // Resize-only sensors measure every mounted row, even outside the
                 // viewport. Adding on_show would gate measurements on visibility,
                 // mixing real scroll offsets with stale height estimates.
-                let content = self.fork_row(session, entry, projected);
+                let content = self.message_row(session, entry, projected);
                 let content: Element<'_, Message> = match (&session.origin, boundary) {
                     (Some(o), Some(0)) if position == 0 => {
                         column![self.fork_separator(o), content].into()

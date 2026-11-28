@@ -95,7 +95,7 @@ async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
             .unwrap()
             .timestamp() as u64;
         let mut ui = iced_runtime::UserInterface::build(
-            app.fork_row(session, &example, ActivityRow::Entry(0)),
+            app.message_row(session, &example, ActivityRow::Entry(0)),
             size,
             iced_runtime::user_interface::Cache::new(),
             &mut renderer,
@@ -154,6 +154,27 @@ async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
         assert!(
             hidden != over_prompt && over_prompt == over_row,
             "the controls appear in place over either the prompt or the row"
+        );
+        // A panel resize can leave room for the two icons but not the metadata.
+        let narrow = iced::Size::new(3.5 * button.width, 400.);
+        let mut compact = iced_runtime::UserInterface::build(
+            app.message_row(session, &example, ActivityRow::Entry(0)),
+            narrow,
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut compact_bounds = UiBounds::default();
+        compact.operate(&renderer, &mut compact_bounds);
+        let y = compact_bounds.label("Monday 10:34 PM").center_y();
+        let target =
+            |from_right: f32| iced::Point::new(narrow.width - from_right * button.width, y);
+        assert!(
+            matches!(click_at(&mut compact, &mut renderer, target(0.5)).as_slice(),
+            [Message::Fork(s, e)] if s == &source && e == &entry)
+        );
+        assert!(
+            matches!(click_at(&mut compact, &mut renderer, target(1.5)).as_slice(),
+            [Message::Copy(value)] if value == "Explore the parser")
         );
         click_at(&mut ui, &mut renderer, count.center())
             .into_iter()
@@ -217,8 +238,10 @@ async fn fork_separator_marks_the_inherited_boundary_with_and_without_new_messag
     let parent = app.selected.clone().unwrap();
     let h = app.harness.as_ref().unwrap().clone();
     let mut fork = Session::new(root, &app.catalog.settings);
-    fork.entries
-        .push(Entry::new(EntryKind::Assistant, "Inherited reply"));
+    fork.entries.push(Entry::new(
+        EntryKind::Reply { final_at: None },
+        "Inherited reply",
+    ));
     fork.origin = Some(orbit_core::store::ForkOrigin {
         family: parent.clone(),
         parent: parent.clone(),
