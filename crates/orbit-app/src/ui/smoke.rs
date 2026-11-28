@@ -130,6 +130,23 @@ impl App {
             );
         }
         self.smoke_stage += 1;
+        if matches!(self.smoke_stage, 2 | 3) {
+            // Sample the outer rail padding before and after opening Settings.
+            let colors = &self.preset().colors;
+            let expected = if self.smoke_stage == 2 {
+                colors.background
+            } else {
+                colors.right_panel
+            }
+            .into_rgba8();
+            let width = screenshot.size.width as usize;
+            let offset = (width * (screenshot.size.height as usize / 2) + width - 1) * 4;
+            assert!(
+                (0..3).all(|i| pixels[offset + i].abs_diff(expected[i]) <= 1),
+                "unexpected right rail background at stage {}",
+                self.smoke_stage
+            );
+        }
         match self.smoke_stage {
             1 => {
                 let h = self.harness.as_ref().expect("smoke storage");

@@ -333,7 +333,7 @@ impl App {
     }
 
     pub(super) fn worktrees_panel(&self) -> Element<'_, Message> {
-        let mut content = column![right_panel_header("Worktrees", msg(Action::Panel))].spacing(12);
+        let mut content = column![right_panel_header("Worktrees")].spacing(12);
         let Some(s) = self.current() else {
             return self.panel_container(
                 content.push(text("Select a project to see its worktrees.").size(13)),

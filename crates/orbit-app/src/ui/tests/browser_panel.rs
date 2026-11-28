@@ -315,23 +315,18 @@ async fn native_browser_toolbar_preserves_page_until_close() {
     assert_eq!(page.y, wide.browser_page.unwrap().y);
     assert!(field.width > 0. && field.width < address.width);
     assert!(narrow.labels.iter().all(|(label, _)| label != "You drive"));
-    // The hide and options buttons are the last two toolbar controls before
-    // the app rail. Locate their centers in layout rather than hardcoding pixels.
-    let mut controls: Vec<_> = narrow
+    let hide = narrow.top_rail_control(size.width).center();
+    let options = narrow
         .containers
         .iter()
         .filter(|r| {
             r.x > field.x + field.width
                 && r.x + r.width <= page.x + page.width
-                && r.height > 0.
-                && r.width > 1.
                 && (r.center_y() - field.center_y()).abs() < 1.
         })
-        .map(|r| r.center())
-        .collect();
-    controls.sort_by(|a, b| b.x.total_cmp(&a.x));
-    controls.dedup();
-    let (hide, options) = (controls[0], controls[1]);
+        .max_by(|a, b| a.center_x().total_cmp(&b.center_x()))
+        .unwrap()
+        .center();
     for m in probe(&app, Some(options)).1 {
         dispatch(&mut app, m).await;
     }

@@ -694,12 +694,12 @@ async fn footer_selector_outside_click_focuses_editor_and_activates_buttons() {
     let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
     let mut bounds = UiBounds::default();
     ui.operate(&renderer, &mut bounds);
-    let close = bounds.rightmost_control_at(bounds.label("Settings").center_y());
+    let close = bounds.top_rail_control(size.width);
     let messages = click_at(&mut ui, &mut renderer, close.center());
     assert!(
         matches!(
             messages.as_slice(),
-            [Message::CloseFooterMenu, Message::ToggleSettings]
+            [Message::CloseFooterMenu, Message::CloseRightPanel]
         ),
         "{messages:?}"
     );

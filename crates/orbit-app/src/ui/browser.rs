@@ -449,9 +449,7 @@ impl App {
                 "Browser options",
                 Action::Menu(Some(Menu::More)),
                 true,
-            ))
-            .push(container(widget::rule::vertical(1)).height(16))
-            .push(nav(Icon::X, "Hide browser panel", Action::Toggle, true));
+            ));
         let mut content = column![
             container(bar).width(Fill).padding(TOOL_INSET),
             widget::rule::horizontal(1)
@@ -560,12 +558,9 @@ impl App {
                 .style(card),
         );
         // Align the menu's right edge with its trigger; stay inside the browser panel.
-        let button_width = tool_width(self.panel_width());
         let inset = TOOL_INSET
-            + button_width
-            + 5.
             + if menu == Menu::Driver {
-                button_width + 2.
+                tool_width(self.panel_width()) + 2.
             } else {
                 0.
             };

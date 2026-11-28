@@ -293,6 +293,15 @@ impl UiBounds {
     }
     // Locate icon-only controls by their relationship to the visible layout,
     // not by font glyphs or implementation-specific SVG paths.
+    fn top_rail_control(&self, width: f32) -> iced::Rectangle {
+        *self
+            .containers
+            .iter()
+            .filter(|r| r.x >= width - RAIL_WIDTH && r.width > 0.)
+            .min_by(|a, b| a.center_y().total_cmp(&b.center_y()))
+            .expect("control in right rail")
+    }
+
     fn rightmost_control_at(&self, y: f32) -> iced::Rectangle {
         *self
             .containers

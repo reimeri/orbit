@@ -342,8 +342,7 @@ impl App {
         }
         self.panel_container(
             column![
-                container(right_panel_header("Forks", Message::ShowForks(None)))
-                    .padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER)),
+                right_panel_header("Forks"),
                 text(format!("{count} related conversations"))
                     .size(12)
                     .style(theme::muted),

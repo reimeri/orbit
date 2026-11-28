@@ -456,6 +456,7 @@ pub enum Message {
     ComposerEnter(String),
     Send(String),
     ToggleSettings,
+    CloseRightPanel,
     ToggleAgents,
     Changes(changes::Action),
     Worktree(worktrees::Action),
@@ -2240,6 +2241,7 @@ impl App {
             Message::Worktree(action) => return self.worktree_action(action),
             Message::Changes(action) => return self.changes_action(action),
             Message::Browser(a) => return self.browser_action(a),
+            Message::CloseRightPanel => self.set_right_panel(None),
             Message::ToggleAgents => self.toggle_right_panel(RightPanel::Agents),
             Message::ToggleSettings => {
                 self.toggle_right_panel(RightPanel::Settings);
@@ -3432,6 +3434,7 @@ impl App {
                 .height(Fill)
         ]
         .height(Fill);
+        let mut controls = column![];
         if let Some(panel) = &self.right_panel {
             body = body.push(self.divider(true)).push(match panel {
                 RightPanel::Browser => self.browser_panel(),
@@ -3441,8 +3444,14 @@ impl App {
                 RightPanel::Agents => self.agents_panel(),
                 RightPanel::Forks(panel) => self.forks_panel(panel),
             });
+            controls = controls.push(rail_button(
+                Icon::X.view(22.),
+                "Close panel",
+                false,
+                Message::CloseRightPanel,
+            ));
         }
-        let mut controls = column![space().height(Fill)];
+        controls = controls.push(space().height(Fill));
         if self.fork_family().is_some() {
             controls = controls.push(rail_button(
                 Icon::GitFork.view(22.),
@@ -3491,7 +3500,11 @@ impl App {
         .padding([14, 8])
         .height(Fill)
         .width(RAIL_WIDTH)
-        .style(panel);
+        .style(if self.right_panel.is_some() {
+            right_panel
+        } else {
+            container::transparent
+        });
         // Keep the main UI at the same tree position when popups open/close,
         // otherwise iced discards its scroll offsets and other widget state.
         let layers = stack![body.push(rail)];
@@ -3697,7 +3710,7 @@ impl App {
     fn agents_panel(&self) -> Element<'_, Message> {
         let colors = &self.preset().colors;
         let mut content = column![
-            right_panel_header("Agents", Message::ToggleAgents),
+            right_panel_header("Agents"),
             text(format!("{} running", self.agent_count()))
                 .size(12)
                 .style(theme::muted)
@@ -4959,18 +4972,8 @@ fn rail_button<'a>(
     .into()
 }
 
-fn right_panel_header(title: &str, on_close: Message) -> Element<'_, Message> {
-    row![
-        text(title).size(22).width(Fill),
-        icon_tip(
-            theme::button(container(Icon::X.view(16.)).center_x(20).center_y(22))
-                .on_press(on_close)
-                .style(theme::text_button),
-            "Close panel"
-        ),
-    ]
-    .align_y(iced::Center)
-    .into()
+fn right_panel_header(title: &str) -> Element<'_, Message> {
+    text(title).size(22).width(Fill).into()
 }
 
 fn bottom() -> Task<Message> {

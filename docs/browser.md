@@ -3,7 +3,8 @@
 Open **Browser** (the globe in the right rail) in an existing session. Click the
 address, enter an HTTP(S) URL or a development server such as `localhost:5173`,
 and press Enter. Back, forward and stop/reload sit to the left of the address;
-the driver menu, **⋯** (browser options) and **×** (hide panel) sit to its right.
+the driver menu and **⋯** (browser options) sit to its right. Use **×** at
+the top of the right rail to hide the panel without closing the tab.
 On narrow panels the driver menu shows just the bot or person icon.
 
 Use **⋯** to find text, expand or restore the panel, change logins, or

@@ -147,9 +147,7 @@ async fn modal_backdrop_masks_controls_but_keeps_dialog_interactive() {
     let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
     let mut bounds = UiBounds::default();
     ui.operate(&renderer, &mut bounds);
-    let covered = bounds
-        .rightmost_control_at(bounds.label("Settings").center_y())
-        .center();
+    let covered = bounds.top_rail_control(size.width).center();
     let confirm = bounds.label("Stop and quit").center();
     for (point, interaction) in [
         (covered, mouse::Interaction::Idle),
@@ -197,18 +195,18 @@ async fn context_menu_outside_click_activates_controls_and_retargets_menu() {
         MenuTarget::Session("context-session".into()),
         MenuTarget::Project(project.clone()),
     ] {
-        // Keep the menu away from the project row and Settings header.
+        // Keep the menu away from the project row and rail close button.
         app.context_menu = Some(ContextMenu(target, iced::Point::ORIGIN));
         app.right_panel = Some(RightPanel::Settings);
         let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
         let mut bounds = UiBounds::default();
         ui.operate(&renderer, &mut bounds);
-        let close = bounds.rightmost_control_at(bounds.label("Settings").center_y());
+        let close = bounds.top_rail_control(size.width);
         let messages = click_at(&mut ui, &mut renderer, close.center());
         assert!(
             matches!(
                 messages.as_slice(),
-                [Message::CloseMenu, Message::ToggleSettings]
+                [Message::CloseMenu, Message::CloseRightPanel]
             ),
             "{messages:?}"
         );
@@ -251,41 +249,38 @@ async fn context_menu_outside_click_activates_controls_and_retargets_menu() {
 }
 
 #[tokio::test]
-async fn right_panel_headers_match_and_close_their_own_panel() {
+async fn right_panels_share_a_close_button_at_the_top_of_the_rail() {
+    use iced_runtime::{UserInterface, user_interface::Cache};
     let mut app = app();
     let mut renderer = header_renderer();
     for width in [1200., 860.] {
         app.window_width = width;
+        let size = iced::Size::new(width, 560.);
         let mut headers = Vec::new();
         for (name, panel) in [
-            ("Settings", app.settings_panel()),
-            ("Agents", app.agents_panel()),
-            ("Worktrees", app.worktrees_panel()),
-            ("Changes", app.changes_panel()),
+            ("Settings", RightPanel::Settings),
+            ("Agents", RightPanel::Agents),
+            ("Worktrees", RightPanel::Worktrees),
+            ("Changes", RightPanel::Changes),
         ] {
-            let mut ui = iced_runtime::UserInterface::build(
-                panel,
-                iced::Size::new(width, 560.),
-                iced_runtime::user_interface::Cache::new(),
-                &mut renderer,
-            );
+            app.set_right_panel(Some(panel));
+            let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
             let mut bounds = UiBounds::default();
             ui.operate(&renderer, &mut bounds);
             let title = bounds.label(name);
-            let close = bounds.rightmost_control_at(title.center_y());
-            assert_eq!(title.x, RIGHT_PANEL_PADDING);
-            assert!(title.y >= RIGHT_PANEL_PADDING);
-            assert_eq!(title.center_y(), close.center_y());
+            let close = bounds.top_rail_control(width);
+            assert!(close.center_y() < title.y + title.height);
             headers.push((title, close));
 
             let messages = click_at(&mut ui, &mut renderer, close.center());
-            assert!(matches!(
-                (name, messages.as_slice()),
-                ("Agents", [Message::ToggleAgents])
-                    | ("Settings", [Message::ToggleSettings])
-                    | ("Worktrees", [Message::Worktree(worktrees::Action::Panel)])
-                    | ("Changes", [Message::Changes(changes::Action::Toggle)])
-            ));
+            assert!(matches!(messages.as_slice(), [Message::CloseRightPanel]));
+            drop(ui);
+            for message in messages {
+                dispatch(&mut app, message).await;
+            }
+            assert!(app.right_panel.is_none());
+            let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
+            assert!(click_at(&mut ui, &mut renderer, close.center()).is_empty());
         }
         assert!(
             headers.iter().all(|header| header == &headers[0]),

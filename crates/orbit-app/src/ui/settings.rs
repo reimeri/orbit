@@ -96,7 +96,7 @@ impl App {
             tabs = tabs.push(column![button, underline].width(Fill));
         }
         let header = column![
-            right_panel_header("Settings", Message::ToggleSettings),
+            right_panel_header("Settings"),
             container(tabs).padding(iced::Padding::ZERO.right(crate::scrollbar::GUTTER))
         ]
         .spacing(12);

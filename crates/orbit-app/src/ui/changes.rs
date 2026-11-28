@@ -171,7 +171,7 @@ impl App {
     }
     pub(super) fn changes_panel(&self) -> Element<'_, Message> {
         let colors = &self.preset().colors;
-        let mut content = column![right_panel_header("Changes", msg(Action::Toggle))].spacing(12);
+        let mut content = column![right_panel_header("Changes")].spacing(12);
         let Some(s) = self.current() else {
             return self
                 .panel_container(content.push(text("Select a project to see changes.").size(13)));
