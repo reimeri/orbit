@@ -540,7 +540,44 @@ async fn message_footers_copy_source_and_only_date_recorded_replies() {
         }
         assert!(
             matches!(click_at(&mut ui, &mut renderer, copy.center()).as_slice(),
-            [Message::Copy(text)] if text == &entry.text)
+            [Message::CopyTranscript { entry_id, equation_block: None, source }]
+                if entry_id == &entry.id && source == &entry.text)
         );
+    }
+}
+
+#[tokio::test]
+async fn copying_again_keeps_the_check_until_the_new_timeout() {
+    use iced::futures::StreamExt as _;
+    let mut app = app();
+    let click = |id: &str| Message::CopyTranscript {
+        entry_id: id.into(),
+        equation_block: None,
+        source: "**Same text**, different rows".into(),
+    };
+    let clicks = ["prompt", "reply", "prompt"].map(|id| app.update_inner(click(id)));
+
+    // Deliver each click's real timeout in order. The first must not clear
+    // the renewed prompt, and clearing the reply must leave the prompt alone.
+    for (i, task) in clicks.into_iter().enumerate() {
+        let mut actions = iced_runtime::task::into_stream(task).unwrap();
+        let mut clipboard = None;
+        while let Some(action) = actions.next().await {
+            match action {
+                iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
+                    contents,
+                    ..
+                }) => {
+                    clipboard = Some(contents);
+                }
+                iced_runtime::Action::Output(message) => {
+                    let _ = app.update_inner(message);
+                }
+                _ => (),
+            }
+        }
+        assert_eq!(clipboard.as_deref(), Some("**Same text**, different rows"));
+        assert_eq!(app.copied_messages.contains_key("reply"), i == 0);
+        assert_eq!(app.copied_messages.contains_key("prompt"), i < 2);
     }
 }

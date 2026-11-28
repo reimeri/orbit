@@ -177,9 +177,18 @@ impl App {
                 .style(theme::sidebar_control)
         };
         let copy = || {
+            let (icon, label) = if self.copied_messages.contains_key(eid) {
+                (Icon::Check, "Copied")
+            } else {
+                (Icon::Copy, "Copy message")
+            };
             icon_tip(
-                icon_button(Icon::Copy).on_press_with(|| Message::Copy(entry.text.clone())),
-                "Copy message",
+                icon_button(icon).on_press_with(|| Message::CopyTranscript {
+                    entry_id: eid.clone(),
+                    equation_block: None,
+                    source: entry.text.clone(),
+                }),
+                label,
             )
         };
         let controls: Element<'_, Message> = if user {

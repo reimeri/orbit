@@ -198,9 +198,9 @@ impl Formula {
         let copy = crate::theme::button(glyph)
             .padding(4)
             .style(iced::widget::button::text)
-            .on_press_with(move || crate::ui::Message::CopyEquation {
+            .on_press_with(move || crate::ui::Message::CopyTranscript {
                 entry_id: entry_id.to_owned(),
-                block,
+                equation_block: Some(block),
                 source: source.to_owned(),
             });
         container(crate::scrollbar::horizontal(

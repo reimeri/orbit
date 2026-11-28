@@ -257,6 +257,7 @@ pub struct App {
     image_view: crate::image_view::Viewer,
     markdown_images: crate::markdown_images::Cache,
     equations: crate::equations::Cache,
+    copied_messages: HashMap<String, std::time::Instant>,
     api_key_draft: String,
     api_key_configured: bool,
     forks: forks::Index,
@@ -377,12 +378,12 @@ pub enum Message {
     OpenImageFrom(Box<Message>, crate::image_transition::Source),
     MarkdownImage(crate::markdown_images::Message),
     RequestEquation(String),
-    CopyEquation {
+    CopyTranscript {
         entry_id: String,
-        block: usize,
+        equation_block: Option<usize>,
         source: String,
     },
-    ClearEquationCopy(std::time::Instant),
+    ClearCopyFeedback(std::time::Instant),
     EquationRendered(crate::equations::Rendered),
     OpenMarkdownImage(String),
     RetryMarkdownImage(String),
@@ -633,6 +634,7 @@ impl App {
             image_view: Default::default(),
             markdown_images: Default::default(),
             equations: Default::default(),
+            copied_messages: HashMap::new(),
             api_key_draft: String::new(),
             api_key_configured: false,
             forks: Default::default(),
@@ -896,6 +898,7 @@ impl App {
             if self.current_session.take().is_some() {
                 self.details = Default::default();
                 self.equations.leave_session();
+                self.copied_messages.clear();
                 self.current_status = ConversationStatus::Ready;
                 self.find = None;
                 self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
@@ -923,6 +926,7 @@ impl App {
         let snapshot = conversation.snapshot();
         if previous.is_none() {
             self.equations.leave_session();
+            self.copied_messages.clear();
             self.hold_prompt_at_bottom = false;
             self.outputs.clear();
             self.historical_runs.clear();
@@ -2752,22 +2756,29 @@ impl App {
                     return iced::clipboard::write(value);
                 }
             }
-            Message::CopyEquation {
+            Message::CopyTranscript {
                 entry_id,
-                block,
+                equation_block,
                 source,
             } => {
                 let until = std::time::Instant::now() + Duration::from_secs(2);
-                self.equations.mark_copied(entry_id, block, until);
+                if let Some(block) = equation_block {
+                    self.equations.mark_copied(entry_id, block, until);
+                } else {
+                    self.copied_messages.insert(entry_id, until);
+                }
                 return Task::batch([
                     iced::clipboard::write(source),
                     Task::perform(
                         async move { tokio::time::sleep_until(until.into()).await },
-                        move |_| Message::ClearEquationCopy(until),
+                        move |_| Message::ClearCopyFeedback(until),
                     ),
                 ]);
             }
-            Message::ClearEquationCopy(until) => self.equations.clear_copied(until),
+            Message::ClearCopyFeedback(until) => {
+                self.equations.clear_copied(until);
+                self.copied_messages.retain(|_, expiry| *expiry > until);
+            }
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::Login => {
                 if self.login_cancel.is_none()

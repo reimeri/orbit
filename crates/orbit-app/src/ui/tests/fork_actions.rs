@@ -174,7 +174,8 @@ async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
         );
         assert!(
             matches!(click_at(&mut compact, &mut renderer, target(1.5)).as_slice(),
-            [Message::Copy(value)] if value == "Explore the parser")
+            [Message::CopyTranscript { entry_id, equation_block: None, source }]
+                if entry_id == &entry && source == "Explore the parser")
         );
         click_at(&mut ui, &mut renderer, count.center())
             .into_iter()
