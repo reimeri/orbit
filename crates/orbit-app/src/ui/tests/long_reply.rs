@@ -855,7 +855,7 @@ async fn prompt_rail_browses_independently_and_jumps_across_virtualized_history(
         (wide, false, true),
     ] {
         app.window_width = width;
-        app.agents_open = panel;
+        app.right_panel = panel.then_some(RightPanel::Agents);
         let size = Size::new(width, 700.);
         let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
         let mut before = Viewport::default();

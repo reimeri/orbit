@@ -73,6 +73,18 @@ pub(super) const COLLAPSED_ROW_GAP: f32 = 3.;
 pub(super) const COLLAPSED_VISIBLE_ROWS: usize = 10;
 
 impl App {
+    fn wave_offset(&self, _status: SessionStatus) -> f32 {
+        #[cfg(any(test, feature = "staged-capture"))]
+        if matches!(self.launch, crate::Launch::Marketing(_)) {
+            return match _status {
+                SessionStatus::Working => 0.125,
+                SessionStatus::Question => 0.4,
+                _ => 0.,
+            };
+        }
+        0.
+    }
+
     pub(super) fn session_status(&self, s: &SessionSummary) -> SessionStatus {
         let h = self.harness.as_ref();
         let c = h.and_then(|h| h.get(&s.id));
@@ -374,11 +386,6 @@ impl App {
                         };
                         project_line(badge, trailing).into()
                     };
-                    let phase_offset = match (&self.launch, status) {
-                        (crate::Launch::Marketing(_), SessionStatus::Working) => 0.125,
-                        (crate::Launch::Marketing(_), SessionStatus::Question) => 0.4,
-                        _ => 0.,
-                    };
                     let content = mouse_area(
                         theme::button(session_wave::wave(
                             container(
@@ -388,7 +395,7 @@ impl App {
                             .padding([crate::session_action::PADDING, SIDEBAR_CONTENT_PADDING])
                             .width(Fill),
                             status,
-                            phase_offset,
+                            self.wave_offset(status),
                         ))
                         .padding(0)
                         .width(Fill)
@@ -583,10 +590,6 @@ impl App {
                 let (_, badge) = self.session_project_label(&session.project, 16.);
                 let row: Element<'_, Message> = if kind == CollapsedSection::Working {
                     let age = self.session_age_label(session, SessionStatus::Working);
-                    let phase_offset = match self.launch {
-                        crate::Launch::Marketing(_) => 0.125,
-                        _ => 0.,
-                    };
                     mouse_area(
                         theme::button(session_wave::wave(
                             container(
@@ -602,7 +605,7 @@ impl App {
                             .width(Fill)
                             .height(COLLAPSED_ROW_HEIGHT),
                             SessionStatus::Working,
-                            phase_offset,
+                            self.wave_offset(SessionStatus::Working),
                         ))
                         .padding(0)
                         .width(Fill)

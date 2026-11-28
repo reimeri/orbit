@@ -1,8 +1,6 @@
-pico-reference
 /target/
 /result
 /result-*
-/.pico/
 /.orbit/
 /.build-deps/
 docs/mockups/

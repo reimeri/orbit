@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+staged-capture = []
+
 [dependencies]
 tempfile = "3"
 im = "15.1"

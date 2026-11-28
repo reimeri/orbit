@@ -360,56 +360,53 @@ pub(crate) fn capture_reusing(
     let mut wrote_snapshot = false;
     for path in paths {
         let name = encode(&path);
-        let attachment = (|| -> Result<Option<Attachment>> {
+        let mut capture_one = || -> Result<Option<Attachment>> {
             if let Some(file) = saved.iter().find(|file| file.name == name) {
-                if file.source_version.is_some_and(|v| !seen.insert(v)) || attachments.iter().any(|f: &Attachment| f.name == name) { return Ok(None); }
+                if file.source_version.is_some_and(|v| !seen.insert(v))
+                    || attachments.iter().any(|f: &Attachment| f.name == name)
+                {
+                    return Ok(None);
+                }
                 let mut file = file.clone();
                 if let Some(inline) = &file.inline {
-                    if inline.len() <= remaining { remaining -= inline.len(); }
-                    else { file.inline = None; file.materialize()?; }
+                    if inline.len() <= remaining {
+                        remaining -= inline.len();
+                    } else {
+                        file.inline = None;
+                        file.materialize()?;
+                    }
                 }
                 return Ok(Some(file));
             }
-            if root_fd.is_none() { root_fd = resolve_path(rustix::fs::open(root, rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())).context("Open workspace for file tags")?; }
-            let Some(root_fd) = &root_fd else { return Ok(None); };
-            let Some(mut source) = open_file(root_fd, &path)? else { return Ok(None); };
-            let before = source.metadata()?;
-            let version = SourceVersion::from(&before);
-            if !seen.insert(version) { return Ok(None); }
+            if root_fd.is_none() {
+                root_fd = resolve_path(rustix::fs::open(
+                    root,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                ))
+                .context("Open workspace for file tags")?;
+            }
+            let Some(root_fd) = &root_fd else {
+                return Ok(None);
+            };
+            let Some(source) = open_file(root_fd, &path)? else {
+                return Ok(None);
+            };
+            let version = SourceVersion::from(&source.metadata()?);
+            if !seen.insert(version) {
+                return Ok(None);
+            }
             if !wrote_snapshot {
                 wrote_snapshot = true;
                 fs::create_dir_all(storage)?;
                 fs::set_permissions(storage, fs::Permissions::from_mode(0o700))?;
             }
-            let snapshot = storage.join(crate::store::id());
-            let mut output = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&snapshot)?;
-            let mut prefix = Vec::new(); let mut buffer = [0u8; 64 * 1024]; let mut bytes = 0;
-            loop {
-                let n = source.read(&mut buffer)?; if n == 0 { break; }
-                output.write_all(&buffer[..n])?; bytes += n as u64;
-                let take = n.min((INLINE_FILE_BYTES + 1).saturating_sub(prefix.len()));
-                prefix.extend_from_slice(&buffer[..take]);
-            }
-            output.sync_all()?;
-            let after = source.metadata()?;
-            anyhow::ensure!((before.len(), before.mtime(), before.mtime_nsec(), before.ctime(), before.ctime_nsec()) == (after.len(), after.mtime(), after.mtime_nsec(), after.ctime(), after.ctime_nsec()) && bytes == after.len(), "File changed while being attached; retry once it stops changing");
-            let image_candidate = image::guess_format(&prefix).is_ok_and(|format| matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP | image::ImageFormat::Gif));
-            let image = if image_candidate && bytes <= crate::media::MAX_BYTES as u64 {
-                match crate::media::MediaStore::new(storage.join("images")).image(&crate::media::read(&snapshot)?) {
-                    Ok(media) => Some(media),
-                    Err(e) if e.is::<crate::media::InvalidImage>() => None,
-                    Err(e) => return Err(e),
-                }
-            } else { None };
-            let inline = if !image_candidate && bytes <= INLINE_FILE_BYTES as u64 && bytes <= remaining as u64 && !prefix.contains(&0) {
-                String::from_utf8(prefix).ok()
-            } else { None };
-            if let Some(text) = &inline { remaining -= text.len(); }
-            let attachment = Attachment {name:name.clone(), bytes, snapshot, inline, image, source_version: Some(version),
-                spill:PathBuf::from(format!("/tmp/orbit-file-{}/snapshot", crate::store::id()))};
-            if attachment.inline.is_none() && attachment.image.is_none() { attachment.materialize()?; }
+            let attachment = snapshot_file(source, version, name.clone(), storage, &mut remaining)?;
             Ok(Some(attachment))
-        })().with_context(|| format!("Could not attach {name}; your message is retained. Fix the file or remove its tag and retry"))?;
+        };
+        let attachment = capture_one().with_context(|| format!("Could not attach {name}; your message is retained. Fix the file or remove its tag and retry"))?;
         if let Some(attachment) = attachment {
             attachments.push(attachment);
         }
@@ -418,6 +415,87 @@ pub(crate) fn capture_reusing(
         File::open(storage)?.sync_all()?;
     }
     Ok(attachments)
+}
+
+/// Publish only a complete snapshot of the opened version; inline limits never
+/// limit the bytes copied to the durable file.
+fn snapshot_file(
+    mut source: File,
+    version: SourceVersion,
+    name: String,
+    storage: &Path,
+    remaining: &mut usize,
+) -> Result<Attachment> {
+    let snapshot = storage.join(crate::store::id());
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&snapshot)?;
+    let mut prefix = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut bytes = 0;
+    loop {
+        let n = source.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        output.write_all(&buffer[..n])?;
+        bytes += n as u64;
+        let take = n.min((INLINE_FILE_BYTES + 1).saturating_sub(prefix.len()));
+        prefix.extend_from_slice(&buffer[..take]);
+    }
+    output.sync_all()?;
+    let after = SourceVersion::from(&source.metadata()?);
+    anyhow::ensure!(
+        version == after && bytes == after.bytes,
+        "File changed while being attached; retry once it stops changing"
+    );
+    let image_candidate = image::guess_format(&prefix).is_ok_and(|format| {
+        matches!(
+            format,
+            image::ImageFormat::Png
+                | image::ImageFormat::Jpeg
+                | image::ImageFormat::WebP
+                | image::ImageFormat::Gif
+        )
+    });
+    let image = if image_candidate && bytes <= crate::media::MAX_BYTES as u64 {
+        match crate::media::MediaStore::new(storage.join("images"))
+            .image(&crate::media::read(&snapshot)?)
+        {
+            Ok(media) => Some(media),
+            Err(e) if e.is::<crate::media::InvalidImage>() => None,
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
+    let inline = if !image_candidate
+        && bytes <= INLINE_FILE_BYTES as u64
+        && bytes <= *remaining as u64
+        && !prefix.contains(&0)
+    {
+        String::from_utf8(prefix).ok()
+    } else {
+        None
+    };
+    if let Some(text) = &inline {
+        *remaining -= text.len();
+    }
+    let attachment = Attachment {
+        name,
+        bytes,
+        snapshot,
+        inline,
+        image,
+        source_version: Some(version),
+        spill: PathBuf::from(format!("/tmp/orbit-file-{}/snapshot", crate::store::id())),
+    };
+    if attachment.inline.is_none() && attachment.image.is_none() {
+        attachment.materialize()?;
+    }
+    Ok(attachment)
 }
 
 #[cfg(test)]

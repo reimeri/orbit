@@ -107,7 +107,7 @@ async fn escape_dismisses_ui_before_stopping_only_the_selected_running_agent() {
 
     selected.running.store(true, Ordering::Release);
     other.running.store(true, Ordering::Release);
-    app.settings_open = true;
+    app.right_panel = Some(RightPanel::Settings);
     dispatch(&mut app, Message::ToggleSearch).await;
     dispatch(&mut app, Message::Search("no matches".into())).await;
     app.modal = Some(Modal::AddProject);
@@ -118,24 +118,24 @@ async fn escape_dismisses_ui_before_stopping_only_the_selected_running_agent() {
     dispatch(&mut app, escape.clone()).await;
     assert!(app.context_menu.is_none());
     assert!(app.modal.is_some());
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     assert_eq!(selected.status(), idle_status);
     dispatch(&mut app, escape.clone()).await;
     assert!(app.modal.is_none());
     assert!(app.search_active);
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     assert_eq!(selected.status(), idle_status);
     dispatch(&mut app, escape.clone()).await;
     assert!(!app.search_active);
     assert!(app.search.is_empty());
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     assert_eq!(selected.status(), idle_status);
     dispatch(&mut app, escape.clone()).await;
-    assert!(!app.settings_open);
+    assert!(app.right_panel != Some(RightPanel::Settings));
     assert_eq!(selected.status(), idle_status);
-    app.browser.open = true;
+    app.right_panel = Some(RightPanel::Browser);
     dispatch(&mut app, escape.clone()).await;
-    assert!(!app.browser.open);
+    assert!(app.right_panel != Some(RightPanel::Browser));
     assert_eq!(
         selected.status(),
         idle_status,

@@ -14,6 +14,7 @@ use std::{
 
 pub const MAX_BYTES: usize = 79 * 1024 * 1024;
 pub const MAX_PIXELS: u64 = 10_240_000;
+const MAX_ANIMATION_FRAMES: usize = 512;
 pub const MAX_ANIMATION_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -215,21 +216,10 @@ pub fn remove(root: &Path) -> Result<()> {
         Err(e) => Err(e.into()),
     }
 }
-pub(crate) fn open(path: &Path) -> Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
-        .open(path)
-        .with_context(|| format!("Cannot open {}", path.display()))?;
-    if !file.metadata()?.is_file() {
-        bail!("{} is not a regular file", path.display());
-    }
-    Ok(file)
-}
 pub fn read(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    open(path)?
+    crate::open_regular(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {e}", path.display()))?
         .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_BYTES {
@@ -478,9 +468,9 @@ pub fn frames_from_bytes(
             std::time::Duration::from_secs_f64((f64::from(n) / f64::from(d) / 1000.).max(0.02));
         let rgba = frame.into_buffer();
         allocated += rgba.len();
-        if allocated > MAX_ANIMATION_BYTES || frames.len() >= 512 {
+        if allocated > MAX_ANIMATION_BYTES || frames.len() >= MAX_ANIMATION_FRAMES {
             bail!(
-                "Animation exceeds 512 frames or 256 MiB decoded memory; use a smaller animation"
+                "Animation exceeds {MAX_ANIMATION_FRAMES} frames or 256 MiB decoded memory; use a smaller animation"
             );
         }
         frames.push(Frame {
@@ -506,8 +496,8 @@ fn validate_gif(bytes: &[u8]) -> Result<()> {
     let mut total = 0usize;
     for (index, frame) in decoder.into_frames().enumerate() {
         total += frame?.buffer().len();
-        if index >= 512 || total > MAX_ANIMATION_BYTES {
-            bail!("Animation exceeds 512 frames or 256 MiB decoded memory");
+        if index >= MAX_ANIMATION_FRAMES || total > MAX_ANIMATION_BYTES {
+            bail!("Animation exceeds {MAX_ANIMATION_FRAMES} frames or 256 MiB decoded memory");
         }
     }
     Ok(())

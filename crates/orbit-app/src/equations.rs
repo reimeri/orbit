@@ -117,6 +117,7 @@ impl Cache {
         self.next()
     }
 
+    #[cfg(any(test, feature = "staged-capture"))]
     pub fn rendered(&self, source: &str) -> bool {
         self.completed
             .borrow()

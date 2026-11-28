@@ -67,6 +67,7 @@ impl Index {
 const CARD_HEIGHT: f32 = 64.;
 const CARD_GAP: f32 = 6.;
 
+#[derive(PartialEq, Eq)]
 pub(super) struct Panel {
     pub(super) family: String,
     source: Option<(String, String)>,
@@ -91,8 +92,8 @@ impl App {
             .then_some(family)
     }
     pub(super) fn show_forks(&mut self, entry: Option<String>) -> Task<Message> {
-        if entry.is_none() && self.fork_panel.take().is_some() {
-            self.view_epoch = self.view_epoch.wrapping_add(1);
+        if entry.is_none() && matches!(self.right_panel, Some(RightPanel::Forks(_))) {
+            self.set_right_panel(None);
             return Task::none();
         }
         let Some(family) = self.fork_family() else {
@@ -114,27 +115,14 @@ impl App {
                 }
             })
             .unwrap_or(0);
-        self.worktrees.panel = false;
-        self.changes.close();
-        self.worktrees.popup = None;
-        self.fork_panel = Some(panel);
-        self.agents_open = false;
-        self.view_epoch = self.view_epoch.wrapping_add(1);
-        let close_settings = if self.settings_open {
-            self.update_inner(Message::CancelSettings)
-        } else {
-            Task::none()
-        };
-        Task::batch([
-            close_settings,
-            widget::operation::scroll_to(
-                "fork-list",
-                scrollable::AbsoluteOffset {
-                    x: 0.,
-                    y: (index as f32) * (CARD_HEIGHT + CARD_GAP),
-                },
-            ),
-        ])
+        self.set_right_panel(Some(RightPanel::Forks(panel)));
+        widget::operation::scroll_to(
+            "fork-list",
+            scrollable::AbsoluteOffset {
+                x: 0.,
+                y: (index as f32) * (CARD_HEIGHT + CARD_GAP),
+            },
+        )
     }
     pub(super) fn fork_row<'a>(
         &'a self,

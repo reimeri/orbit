@@ -3,7 +3,7 @@ use super::sidebar::{COLLAPSED_VISIBLE_ROWS, CollapsedSection};
 use super::*;
 
 impl App {
-    pub(super) fn start_capture(&mut self, id: window::Id) -> Task<Message> {
+    pub(super) fn start_staged_capture(&mut self, id: window::Id) -> Task<Message> {
         match self.launch {
             crate::Launch::Normal => Task::none(),
             crate::Launch::Marketing(_) => {
@@ -94,16 +94,8 @@ impl App {
         self.rebuild_transcript();
         self.prepare_visible();
     }
-    pub(super) fn smoke_frame(&mut self, screenshot: window::Screenshot) -> Task<Message> {
+    pub(super) fn staged_frame(&mut self, screenshot: window::Screenshot) -> Task<Message> {
         let pixels = &screenshot.rgba;
-        let valid = screenshot.size.width > 0
-            && screenshot.size.height > 0
-            && pixels.len() == screenshot.size.width as usize * screenshot.size.height as usize * 4
-            && pixels.as_chunks::<4>().0.iter().any(|p| p != &pixels[..4]);
-        if !valid {
-            eprintln!("Window capture returned an empty or uniform frame.");
-            return iced::exit();
-        }
         if let crate::Launch::Marketing(path) = &self.launch {
             match image::save_buffer_with_format(
                 path,
@@ -211,7 +203,7 @@ impl App {
                         removed: 45,
                     },
                 );
-                self.settings_open = true;
+                self.right_panel = Some(RightPanel::Settings);
                 self.settings_tab = SettingsTab::General;
                 let _ = self.update_inner(Message::Theme("Solarized Light"));
                 return Task::batch([
@@ -246,7 +238,7 @@ impl App {
                 let _ = self.update_inner(Message::Theme(orbit_core::store::DEFAULT_THEME));
                 self.settings_tab = SettingsTab::Account;
                 self.modal = None;
-                self.settings_open = false;
+                self.right_panel = None;
                 self.context_menu = self
                     .selected
                     .clone()
@@ -372,7 +364,7 @@ impl App {
                     self.transcript.order.len(),
                     "auto-scroll reaches history tail"
                 );
-                self.settings_open = false;
+                self.right_panel = None;
                 self.view_epoch = self.view_epoch.wrapping_add(1);
                 return Task::batch([bottom(), delayed_capture()]);
             }
@@ -406,13 +398,13 @@ impl App {
                 ]);
             }
             17 => {
-                self.settings_open = false;
+                self.right_panel = None;
                 let _ = self.update_inner(Message::ToggleFooterMenu);
             }
             18 => {} // Keep the picker open across another redraw.
             19 => {
                 self.footer_menu_open = false;
-                self.settings_open = true;
+                self.right_panel = Some(RightPanel::Settings);
                 self.settings_tab = SettingsTab::General;
             }
             20 => self.settings_tab = SettingsTab::Models,
@@ -429,11 +421,10 @@ impl App {
             }
             22 => {
                 self.footer_menu_open = false;
-                self.settings_open = false;
-                self.agents_open = true;
+                self.right_panel = Some(RightPanel::Agents);
             }
             23 => {
-                self.agents_open = false;
+                self.right_panel = None;
                 let parent = self.selected.clone().expect("smoke parent");
                 let mut child = Session::new(
                     self.smoke_dir.clone().expect("smoke path"),
@@ -462,7 +453,7 @@ impl App {
                 self.select(Selection::Session(id));
             }
             24 => {
-                self.agents_open = true;
+                self.right_panel = Some(RightPanel::Agents);
                 self.window_width = 860.;
                 self.window_height = 560.;
                 self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -480,7 +471,7 @@ impl App {
                     .expect("smoke child")
                     .parent_id
                     .clone();
-                self.agents_open = false;
+                self.right_panel = None;
                 self.select(Selection::Session(parent));
                 if let Some(window) = self.window_id {
                     return Task::batch([
@@ -538,7 +529,7 @@ impl App {
                 self.stage_smoke_questionnaire(
                     orbit_core::questionnaire::Request::parse(&request.to_string()).unwrap(),
                 );
-                self.settings_open = true;
+                self.right_panel = Some(RightPanel::Settings);
                 self.settings_tab = SettingsTab::General;
                 if let Some(window) = self.window_id {
                     return Task::batch([
@@ -550,11 +541,11 @@ impl App {
             32 => {
                 self.smoke_fixtures.questionnaire = None;
                 self.sync_questionnaires();
-                self.settings_open = true;
+                self.right_panel = Some(RightPanel::Settings);
                 self.settings_tab = SettingsTab::Images;
             }
             33 => {
-                self.settings_open = false;
+                self.right_panel = None;
                 let media = orbit_core::media::MediaStore::new(
                     self.smoke_dir
                         .as_ref()
@@ -653,7 +644,7 @@ impl App {
             39 => {
                 self.modal = None;
                 self.image_view.close();
-                self.settings_open = true;
+                self.right_panel = Some(RightPanel::Settings);
                 self.settings_tab = SettingsTab::General;
                 let mut session = Session::new(
                     self.smoke_dir.as_ref().unwrap().clone(),
@@ -670,7 +661,7 @@ impl App {
                 self.stage_smoke_transcript(session);
             }
             40 => {
-                self.settings_open = false;
+                self.right_panel = None;
                 self.attachments = [
                     include_bytes!("../fixtures/media.png").as_slice(),
                     include_bytes!("../fixtures/media.gif").as_slice(),
@@ -696,8 +687,7 @@ impl App {
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
             41 => {
-                self.settings_open = false;
-                self.agents_open = false;
+                self.right_panel = None;
                 self.attachments.clear();
                 self.editor = text_editor::Content::new();
                 self.details.groups.clear();
@@ -763,7 +753,7 @@ impl App {
             44 => {
                 let _ = self.update_inner(Message::ToggleEntry("activity-reason".into()));
                 let _ = self.update_inner(Message::ToggleEntry("activity-check".into()));
-                self.settings_open = true;
+                self.right_panel = Some(RightPanel::Settings);
             }
             45 => {
                 return Task::batch([
@@ -774,8 +764,7 @@ impl App {
 
             46 => {
                 self.smoke_fixtures.sidebar = true;
-                self.settings_open = false;
-                self.agents_open = false;
+                self.right_panel = None;
                 self.search.clear();
                 self.sessions.clear();
                 self.sidebar_rows.clear();
@@ -900,8 +889,7 @@ impl App {
                 self.context_menu = None;
                 self.stashed_open = false;
                 self.collapsed[CollapsedSection::Settled as usize].open = false;
-                self.settings_open = false;
-                self.agents_open = false;
+                self.right_panel = None;
                 self.sessions.clear();
                 let root = self.smoke_dir.as_ref().unwrap().clone();
                 for name in ["smoke-file one.rs", "smoke-file two.rs", "smoke-file λ.md"] {

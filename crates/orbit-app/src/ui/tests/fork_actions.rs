@@ -163,7 +163,7 @@ async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
             .expect("fork count opens the branches from this prompt")
     };
     dispatch(&mut app, show_forks).await;
-    assert!(app.fork_panel.is_some() && app.modal.is_none());
+    assert!(matches!(app.right_panel, Some(RightPanel::Forks(_))) && app.modal.is_none());
     let open = {
         let mut renderer = header_renderer();
         let mut ui = iced_runtime::UserInterface::build(
@@ -203,12 +203,12 @@ async fn fork_action_opens_an_unsent_draft_and_links_both_sessions() {
     assert_eq!(app.selected.as_ref(), Some(&fork));
     assert_eq!(app.editor.text(), "Explore the parser");
     assert!(
-        app.fork_panel.is_some(),
+        matches!(app.right_panel, Some(RightPanel::Forks(_))),
         "stay open while switching within the family"
     );
     let other = app.smoke_dir.clone().unwrap();
     stored_session(&mut app, other).await;
-    assert!(app.fork_panel.is_none() && app.fork_family().is_none());
+    assert!(!matches!(app.right_panel, Some(RightPanel::Forks(_))) && app.fork_family().is_none());
 }
 
 #[tokio::test]
@@ -247,6 +247,6 @@ async fn fork_separator_marks_the_inherited_boundary_with_and_without_new_messag
     dispatch(&mut app, Message::ShowForks(None)).await;
     h.remove(&parent).unwrap();
     dispatch(&mut app, Message::Changed).await;
-    assert!(app.fork_panel.is_none());
+    assert!(!matches!(app.right_panel, Some(RightPanel::Forks(_))));
     assert!(chat_text(&app).contains("Parent deleted"));
 }

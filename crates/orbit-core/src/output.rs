@@ -7,8 +7,14 @@ use std::{
     path::PathBuf,
 };
 
+pub(crate) const DEFAULT_OUTPUT_TOKENS: usize = 10_000;
+
 pub(crate) fn character_budget(tokens: usize) -> usize {
     tokens.min(100_000) * 4
+}
+
+pub(crate) fn preserve_default(text: &str) -> String {
+    preserve_text(text, character_budget(DEFAULT_OUTPUT_TOKENS))
 }
 
 // Keep a possible token prefix for the next network chunk. Redact before

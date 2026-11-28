@@ -17,7 +17,7 @@ async fn dismissing_settings_discards_drafts_but_keeps_saved_values() {
             dispatch(&mut app, Message::Context("128000".into())).await;
             dispatch(&mut app, Message::Threshold("75".into())).await;
             dispatch(&mut app, Message::ApplySettings).await;
-            assert!(!app.settings_open);
+            assert!(app.right_panel != Some(RightPanel::Settings));
 
             dispatch(&mut app, Message::ToggleSettings).await;
             dispatch(&mut app, Message::ModelFast(model.into(), !saved_fast)).await;
@@ -28,10 +28,10 @@ async fn dismissing_settings_discards_drafts_but_keeps_saved_values() {
             assert_eq!(app.catalog.settings.models[model].fast, saved_fast);
 
             dispatch(&mut app, dismiss.clone()).await;
-            assert!(!app.settings_open);
+            assert!(app.right_panel != Some(RightPanel::Settings));
             assert!(app.api_key_draft.is_empty());
             dispatch(&mut app, Message::ToggleSettings).await;
-            assert!(app.settings_open);
+            assert!(app.right_panel == Some(RightPanel::Settings));
             assert_eq!(app.settings.models[model].fast, saved_fast);
             assert_eq!(app.context_text, "128000");
             assert_eq!(app.threshold_text, "75");
@@ -47,12 +47,12 @@ async fn dismissing_settings_discards_drafts_but_keeps_saved_values() {
 #[tokio::test]
 async fn save_closes_settings_only_after_success_and_autosave_keeps_it_open() {
     let mut app = app();
-    app.settings_open = true;
+    app.right_panel = Some(RightPanel::Settings);
     dispatch(&mut app, Message::Font(17.)).await;
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     dispatch(&mut app, Message::Context("invalid".into())).await;
     dispatch(&mut app, Message::ApplySettings).await;
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     assert!(
         app.error
             .as_ref()
@@ -70,7 +70,7 @@ async fn save_closes_settings_only_after_success_and_autosave_keeps_it_open() {
     std::fs::remove_file(&settings_path).unwrap();
     std::fs::create_dir(&settings_path).unwrap();
     dispatch(&mut app, Message::ApplySettings).await;
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     assert!(
         app.error
             .as_ref()
@@ -81,9 +81,12 @@ async fn save_closes_settings_only_after_success_and_autosave_keeps_it_open() {
     dispatch(&mut app, Message::ErrorDismiss).await;
     let epoch = app.view_epoch;
     let save = app.update(Message::ApplySettings);
-    assert!(app.settings_open, "wait for persistence before closing");
+    assert!(
+        app.right_panel == Some(RightPanel::Settings),
+        "wait for persistence before closing"
+    );
     drain(&mut app, save).await;
-    assert!(!app.settings_open);
+    assert!(app.right_panel != Some(RightPanel::Settings));
     assert_ne!(app.view_epoch, epoch);
     assert!(app.error.is_none());
     assert_eq!(
@@ -135,7 +138,7 @@ async fn delayed_settings_reply_respects_new_edits_and_overlapping_autosaves() {
         assert_eq!(saved.theme, "Solarized Light");
         drain(&mut app, apply).await;
         assert!(
-            app.settings_open,
+            app.right_panel == Some(RightPanel::Settings),
             "the reply must not close the current edit"
         );
         assert_eq!(app.context_text, "144000");
@@ -165,7 +168,7 @@ async fn successful_settings_save_does_not_close_an_untouched_reopened_panel() {
     dispatch(&mut app, Message::CancelSettings).await;
     dispatch(&mut app, Message::ToggleSettings).await;
     drain(&mut app, apply).await;
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     assert_eq!(app.threshold_text, "65");
     assert_eq!(app.catalog.settings.compact_percent, 65);
 }
@@ -479,7 +482,7 @@ fn settings_dropdown_outside_click_activates_controls() {
 async fn hide_working_sessions_setting_toggles_live_persists_and_defaults_off() {
     let mut app = app();
     assert!(!app.catalog.settings.hide_working_sessions);
-    app.settings_open = true;
+    app.right_panel = Some(RightPanel::Settings);
     app.settings_tab = SettingsTab::General;
     let mut renderer = header_renderer();
     let width = app.panel_width();

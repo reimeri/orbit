@@ -95,8 +95,7 @@ and strips internal `orbit_file` records from wire input.
   output. Non-Git/unavailable-Git discovery uses Rust's ignore-aware walker,
   including hidden files and `.gitignore`, `.ignore`, and `.rgignore`. There is no
   unfiltered whole-workspace fallback and no ripgrep runtime dependency.
-- Directory symlinks are not recursively followed. `.git`, `.orbit`, legacy `.pico` and `.pico-evo`,
-  the configured `orbit` state and its legacy `pico-evo` sibling,
+- Directory symlinks are not recursively followed. `.git`, `.orbit`, the configured Orbit state directory,
   and the service's own cache are excluded from normal discovery.
 - A directory-qualified query offers **Include ignored directory**. This explicit
   opt-in uses a separately cached, descriptor-pinned directory traversal. It does

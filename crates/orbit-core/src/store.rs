@@ -497,7 +497,19 @@ pub struct Session {
     pub filing: Option<Filing>,
     pub context_account: Option<String>,
 }
+pub(crate) fn title_excerpt(text: &str, limit: usize) -> Option<String> {
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take(limit).collect())
+}
+
 impl Session {
+    pub(crate) fn has_pending_input(&self) -> bool {
+        !self.pending.is_empty()
+            || !self.pending_tool_outputs.is_empty()
+            || !self.subagent_notices.is_empty()
+    }
+
     pub fn new(project: PathBuf, settings: &Settings) -> Self {
         Self {
             id: id(),
@@ -620,14 +632,7 @@ impl Session {
                     .as_ref()
                     .is_some_and(|o| o.inherited == self.entries.len()))
         {
-            self.title = message
-                .text
-                .lines()
-                .find(|s| !s.trim().is_empty())
-                .unwrap_or("Image message")
-                .chars()
-                .take(64)
-                .collect();
+            self.title = title_excerpt(&message.text, 64).unwrap_or_else(|| "Image message".into());
         }
         self.updated = accepted_at;
         self.unchecked_completion = false;

@@ -289,7 +289,7 @@ async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
             removed: 678,
         },
     );
-    app.settings_open = true;
+    app.right_panel = Some(RightPanel::Settings);
     let mut renderer = header_renderer();
     let mut wide_popup_height = None;
     for (width, height, left, right, fast) in [
@@ -500,7 +500,7 @@ async fn footer_selector_ignores_navigation_keys_and_selects_with_mouse() {
     use keyboard::key::Named;
     let mut app = app();
     dispatch(&mut app, Message::Create(PathBuf::from("/footer-project"))).await;
-    app.settings_open = true;
+    app.right_panel = Some(RightPanel::Settings);
     dispatch(&mut app, Message::ToggleFooterMenu).await;
     let session = app.current().unwrap();
     let before = (session.model.clone(), session.effort.clone(), session.fast);
@@ -564,7 +564,7 @@ async fn footer_selector_ignores_navigation_keys_and_selects_with_mouse() {
     }
     dispatch(&mut app, footer_key(Named::Escape)).await;
     assert!(!app.footer_menu_open);
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     dispatch(&mut app, Message::ToggleFooterMenu).await;
     let messages = {
         let mut renderer = header_renderer();
@@ -579,7 +579,7 @@ async fn footer_selector_ignores_navigation_keys_and_selects_with_mouse() {
     assert!(matches!(messages.as_slice(), [Message::CloseFooterMenu]));
     dispatch(&mut app, messages.into_iter().next().unwrap()).await;
     assert!(!app.footer_menu_open);
-    assert!(app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
 }
 
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn footer_selector_outside_click_focuses_editor_and_activates_buttons() {
         dispatch(&mut app, message).await;
     }
     assert!(!app.footer_menu_open);
-    assert!(!app.settings_open);
+    assert!(app.right_panel != Some(RightPanel::Settings));
 }
 
 #[tokio::test]
@@ -855,7 +855,7 @@ async fn changes_counts_toggle_panel_and_refresh_expanded_file_after_same_size_e
     for (label, expected_open) in [("+2", true), ("−0", false), ("+2", true)] {
         let click = click_count(&app, label);
         dispatch(&mut app, click).await;
-        assert_eq!(app.changes.open, expected_open);
+        assert_eq!(app.right_panel == Some(RightPanel::Changes), expected_open);
     }
     let expand = {
         use iced::advanced::Renderer as _;
@@ -947,5 +947,5 @@ async fn changes_counts_toggle_panel_and_refresh_expanded_file_after_same_size_e
     dispatch(&mut app, Message::GitTick).await;
     assert!(panel(&app).contains("No changed files"));
     dispatch(&mut app, Message::ToggleSettings).await;
-    assert!(!app.changes.open && app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
 }

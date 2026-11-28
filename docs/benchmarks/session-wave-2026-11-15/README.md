@@ -1,8 +1,9 @@
 # Sidebar wave CPU experiment — 2026-11-15
 
-This experiment compared sidebar wave redraw schedules before Pico adopted
+This experiment compared sidebar wave redraw schedules before the switch to
 `tick-driven` (reuse existing activity redraws). The [raw samples](results.json)
-are checked in; the temporary instrumented variants and runner are not.
+are checked in with local artifact paths and process names normalized; the
+temporary instrumented variants and runner are not.
 
 Base commit: `79d9a2f04e13c15f103806ec6e78d2fee4442763`.
 
@@ -12,7 +13,7 @@ Base commit: `79d9a2f04e13c15f103806ec6e78d2fee4442763`.
 - Native Wayland/niri, hardware Vulkan (RADV), wgpu; no Lavapipe or Xwayland.
 - 1714 × 1394 window, scale 1, on the 74.983 Hz output. The native window
   remained the same size within and between the reported runs.
-- `nix develop`, Rust 1.99.1, `cargo build --locked --release -p pico-evo`;
+- `nix develop`, Rust 1.99.1, a locked Cargo release build of the app package;
   unchanged compiler flags/features/linker. No compilation during sampling.
 - Real `App::view`, synthetic user/Markdown/tool transcript, expanded tool result,
   six sidebar sessions, one or six visible Working rows. No provider stream,

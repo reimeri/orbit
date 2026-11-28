@@ -220,7 +220,7 @@ impl WebSearch {
                 )
             } else if let Ok(response) = serde_json::from_slice::<Response>(&tail) {
                 return Ok(ToolResult {
-                    text: output::preserve_text(&response.output, 40_000),
+                    text: output::preserve_default(&response.output),
                     metadata: Metadata::new(searched_at, response.results.unwrap_or_default())?,
                 });
             } else {

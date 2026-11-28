@@ -464,7 +464,8 @@ impl Shell {
         let result = process.read(
             id,
             args.yield_time_ms,
-            args.max_output_tokens.unwrap_or(10_000),
+            args.max_output_tokens
+                .unwrap_or(crate::output::DEFAULT_OUTPUT_TOKENS),
             cancel,
             Read::Start(stop),
         );
@@ -523,7 +524,8 @@ impl Shell {
         let (output, complete) = process.read(
             args.session_id,
             args.yield_time_ms,
-            args.max_output_tokens.unwrap_or(10_000),
+            args.max_output_tokens
+                .unwrap_or(crate::output::DEFAULT_OUTPUT_TOKENS),
             cancel,
             if args.chars.is_empty() {
                 Read::Poll

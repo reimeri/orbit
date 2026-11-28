@@ -10,7 +10,6 @@ const LINE_PAGE: usize = 100;
 
 #[derive(Default)]
 pub(super) struct State {
-    pub open: bool,
     pub project: Option<PathBuf>,
     files: Option<Arc<Files>>,
     expanded: HashMap<PathBuf, Detail>,
@@ -31,10 +30,6 @@ impl State {
         self.files = None;
         self.expanded.clear();
         self.page = 0;
-    }
-    pub(super) fn close(&mut self) {
-        self.open = false;
-        self.clear()
     }
 }
 
@@ -63,25 +58,15 @@ impl App {
     }
     pub(super) fn changes_action(&mut self, action: Action) -> Task<Message> {
         match action {
-            Action::Toggle if self.changes.open => {
-                self.changes.close();
-                self.view_epoch = self.view_epoch.wrapping_add(1);
-            }
             Action::Toggle => {
-                self.worktrees.panel = false;
-                self.worktrees.popup = None;
-                self.agents_open = false;
-                self.fork_panel = None;
-                if self.settings_open {
-                    let close = self.update_inner(Message::CancelSettings);
-                    self.tasks.push(close);
+                self.toggle_right_panel(RightPanel::Changes);
+                if self.right_panel == Some(RightPanel::Changes) {
+                    return self.refresh_git();
                 }
-                self.changes.open = true;
-                self.view_epoch = self.view_epoch.wrapping_add(1);
-                return self.refresh_git();
             }
             Action::Snapshot(path, info, files) => {
-                let active = self.changes.open && self.current().is_some_and(|s| s.project == path);
+                let active = self.right_panel == Some(RightPanel::Changes)
+                    && self.current().is_some_and(|s| s.project == path);
                 self.store_git(path.clone(), info);
                 if !active {
                     return Task::none();

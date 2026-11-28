@@ -47,7 +47,9 @@ test use `just test <test-name>` or
 `just verify` checks formatting, Clippy, workspace tests, QuickJS under
 Valgrind, and rendered frames on a private headless Weston compositor.
 Tests use temporary state and local fixtures; they do not verify login or live
-model access. The package smoke test uses the wrapped installed binary.
+model access. The package smoke test captures and checks a real frame from the wrapped installed
+binary. The smoke and marketing recipes enable the `staged-capture` feature for
+the full fixture suite; those scenes and assets are not in the default binary.
 `just smoke-gpu` checks your desktop driver, which Lavapipe cannot validate.
 
 Keep `target/` and the same toolchain, linker (mold), profile and compiler flags
@@ -116,6 +118,9 @@ inside the dev shell.
 
 ## Implementation notes
 
+The [Part 3 architecture review](architecture-review.md) records the refactors
+and the reasoning behind the boundaries that were kept.
+
 `crates/orbit-core` owns persistence, OAuth, the provider, agent loop and tools.
 `crates/orbit-app` owns iced UI, clipboard, the browser panel and folder selection. `browser/host.cc` is the
 separate sandbox-enabled CEF host; see [the browser guide](browser.md).
@@ -124,8 +129,7 @@ for the optional folder chooser. Manual path entry needs no portal.
 
 The Wayland app ID, desktop entry and icon name are all `orbit`. Packaging resizes
 [`assets/icon/orbit.png`](../assets/icon/orbit.png) for the desktop icon theme. The square sRGB master keeps
-its transparent corners; the package downsizes it without cropping. Test the
-optional offline migration with `python3 -m unittest discover -s tests`.
+its transparent corners; the package downsizes it without cropping.
 
 - [Code mode](code-mode.md) documents execution, resource limits and recovery.
   [Responses transport](responses-websocket.md) covers connection reuse and fallback

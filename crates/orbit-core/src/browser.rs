@@ -48,6 +48,83 @@ pub struct Frame {
     pub view: (u32, u32),
     pub scale: f32,
 }
+/// Native UI commands. Agent leases, tab identity and host lifecycle commands
+/// are owned by Browser and cannot be supplied by a widget.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum UserCommand {
+    Navigate {
+        url: String,
+    },
+    Back,
+    Forward,
+    Stop,
+    Reload,
+    Size {
+        width: u32,
+        height: u32,
+        scale: f32,
+    },
+    Viewport {
+        fixed: Option<(u32, u32)>,
+    },
+    Visible {
+        show: bool,
+    },
+    Focus {
+        focus: bool,
+    },
+    Find {
+        text: String,
+        next: bool,
+    },
+    EndFind,
+    CaptureLost,
+    Down {
+        button: i32,
+        x: i32,
+        y: i32,
+        count: i32,
+        mods: i32,
+    },
+    Up {
+        button: i32,
+        x: i32,
+        y: i32,
+        mods: i32,
+    },
+    Move {
+        leave: bool,
+        x: i32,
+        y: i32,
+        mods: i32,
+    },
+    Scroll {
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+        mods: i32,
+    },
+    Keydown {
+        code: i32,
+        mods: i32,
+        text: String,
+    },
+    Keyup {
+        code: i32,
+        mods: i32,
+    },
+    Text {
+        text: String,
+    },
+    Preedit {
+        text: String,
+    },
+    Cut,
+    SelectAll,
+}
+
 struct Surface {
     id: u64,
     file: NamedTempFile,
@@ -371,9 +448,10 @@ impl Browser {
         s.send(json!({"op":"visible","tab":key,"show":true}))
     }
     pub fn hide(&self, id: &str) {
-        let _ = self.user(id, json!({"op":"visible","show":false}));
+        let _ = self.user(id, UserCommand::Visible { show: false });
     }
-    pub fn user(&self, id: &str, mut msg: Value) -> Result<()> {
+    pub fn user(&self, id: &str, command: UserCommand) -> Result<()> {
+        let mut msg = serde_json::to_value(command)?;
         let s = self.state.lock().unwrap();
         msg["tab"] = json!(
             s.tabs

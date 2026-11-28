@@ -140,7 +140,7 @@ async fn modal_backdrop_masks_controls_but_keeps_dialog_interactive() {
         user_interface::{Cache, State},
     };
     let mut app = app();
-    app.settings_open = true;
+    app.right_panel = Some(RightPanel::Settings);
     app.modal = Some(Modal::Quit);
     let mut renderer = header_renderer();
     let size = iced::Size::new(app.window_width, app.window_height);
@@ -199,7 +199,7 @@ async fn context_menu_outside_click_activates_controls_and_retargets_menu() {
     ] {
         // Keep the menu away from the project row and Settings header.
         app.context_menu = Some(ContextMenu(target, iced::Point::ORIGIN));
-        app.settings_open = true;
+        app.right_panel = Some(RightPanel::Settings);
         let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);
         let mut bounds = UiBounds::default();
         ui.operate(&renderer, &mut bounds);
@@ -218,7 +218,7 @@ async fn context_menu_outside_click_activates_controls_and_retargets_menu() {
             dispatch(&mut app, message).await;
         }
         assert!(app.context_menu.is_none());
-        assert!(!app.settings_open);
+        assert!(app.right_panel != Some(RightPanel::Settings));
 
         app.context_menu = original;
         let mut ui = UserInterface::build(app.view(), size, Cache::new(), &mut renderer);

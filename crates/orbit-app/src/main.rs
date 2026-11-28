@@ -21,6 +21,7 @@ mod notifications;
 mod pointer_input;
 mod questionnaire;
 mod recent_previews;
+#[cfg(any(test, feature = "staged-capture"))]
 mod screenshot_check;
 mod scrollbar;
 mod session_action;
@@ -50,6 +51,7 @@ use ui::App;
 enum Launch {
     Normal,
     Smoke,
+    #[cfg(any(test, feature = "staged-capture"))]
     Marketing(std::path::PathBuf),
 }
 
@@ -58,11 +60,14 @@ fn main() -> ExitCode {
     let launch = match args.as_slice() {
         [] => Launch::Normal,
         [arg] if arg == "--smoke-test" => Launch::Smoke,
+        #[cfg(any(test, feature = "staged-capture"))]
         [arg, path] if arg == "--marketing-shot" => Launch::Marketing(path.into()),
         [arg] if arg == "--help" || arg == "-h" => {
             println!(
-                "Usage: orbit [--smoke-test | --marketing-shot OUTPUT.png]\n\nNative Wayland coding harness. Settings and credentials: $XDG_CONFIG_HOME/orbit (or ~/.config/orbit).\nCapture modes use isolated temporary state and never connect to OpenAI. --marketing-shot saves a staged window as a PNG."
+                "Usage: orbit [--smoke-test]\n\nNative Wayland coding harness. Settings and credentials: $XDG_CONFIG_HOME/orbit (or ~/.config/orbit). --smoke-test checks native rendering using isolated temporary state."
             );
+            #[cfg(any(test, feature = "staged-capture"))]
+            println!("--marketing-shot OUTPUT.png saves a staged window as a PNG.");
             return ExitCode::SUCCESS;
         }
         _ => {

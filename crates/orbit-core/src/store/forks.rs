@@ -66,14 +66,8 @@ impl Session {
         let EntryKind::User { files, images, .. } = &selected.kind else {
             bail!("Only user messages can be forked");
         };
-        let excerpt: String = selected
-            .text
-            .lines()
-            .find(|s| !s.trim().is_empty())
-            .unwrap_or("Image message")
-            .chars()
-            .take(64)
-            .collect();
+        let excerpt: String =
+            title_excerpt(&selected.text, 64).unwrap_or_else(|| "Image message".into());
         let mut fork = Session::new(self.project.clone(), settings);
         fork.origin = Some(ForkOrigin {
             family: self.origin.as_ref().map_or(&self.id, |o| &o.family).clone(),

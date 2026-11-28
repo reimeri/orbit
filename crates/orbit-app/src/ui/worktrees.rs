@@ -4,7 +4,6 @@ use iced::widget::column;
 
 #[derive(Default)]
 pub(super) struct State {
-    pub panel: bool,
     pub popup: Option<f32>, // horizontal offset from the chat lane's left edge
     pub slow_popup_load: bool,
     pub bases: bool,
@@ -144,18 +143,9 @@ impl App {
             }
             _ if self.io_busy || self.close_requested || self.closing => {}
             Panel => {
-                self.changes.close();
-                self.worktrees.popup = None;
                 self.worktrees.bases = false;
-                self.worktrees.panel = !self.worktrees.panel;
-                self.agents_open = false;
-                self.fork_panel = None;
-                if self.settings_open {
-                    let task = self.update_inner(Message::CancelSettings);
-                    self.tasks.push(task);
-                }
-                self.view_epoch = self.view_epoch.wrapping_add(1);
-                if self.worktrees.panel {
+                self.toggle_right_panel(RightPanel::Worktrees);
+                if self.right_panel == Some(RightPanel::Worktrees) {
                     return self.load_worktrees();
                 }
             }
@@ -191,7 +181,8 @@ impl App {
                     return Task::none();
                 };
                 if self.composer_importing()
-                    || (!self.worktrees.panel && self.worktrees.popup.is_none())
+                    || (self.right_panel != Some(RightPanel::Worktrees)
+                        && self.worktrees.popup.is_none())
                 {
                     return Task::none();
                 }

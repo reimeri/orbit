@@ -158,7 +158,7 @@ async fn footer_selects_without_git_changes_and_quick_create_can_retry_only_the_
     type_message(&mut app, "compare the labels").await;
     let first = app.current().unwrap().id.clone();
     click(&mut app, "main").await;
-    assert!(!app.worktrees.panel);
+    assert!(app.right_panel != Some(RightPanel::Worktrees));
     click(&mut app, "contours").await;
     assert_ne!(app.current().unwrap().id, first);
     assert_eq!(app.current().unwrap().project, ext);

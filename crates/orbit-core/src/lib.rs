@@ -25,6 +25,21 @@ pub mod web_search;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::{fs, io, os::unix::fs::OpenOptionsExt};
+    let file = fs::File::options()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
 pub const APP_ID: &str = "orbit";
 
 /// Resolve the configuration directory without creating or modifying anything.

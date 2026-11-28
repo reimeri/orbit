@@ -1,12 +1,19 @@
 mod browser;
+mod capture;
 mod changes;
+mod composer;
 pub(crate) mod find;
 mod forks;
 mod imports;
+#[cfg(any(test, feature = "staged-capture"))]
 mod marketing;
+mod panels;
+mod transcript;
+use panels::RightPanel;
 mod prompt_rail;
 mod settings;
 mod sidebar;
+#[cfg(any(test, feature = "staged-capture"))]
 mod smoke;
 mod usage_panel;
 mod worktrees;
@@ -48,8 +55,8 @@ use orbit_core::{
     models::{MODELS, model},
     shell::CommandStatus,
     store::{
-        Catalog, Entry, EntryKind, Filing, FilingKind, NewSessionDraft, Project, Session,
-        SessionSummary, Settings, Store, UserMessage,
+        Catalog, Entry, EntryKind, FilingKind, NewSessionDraft, Project, Session, SessionSummary,
+        Settings, Store, UserMessage,
     },
 };
 use std::{
@@ -64,6 +71,8 @@ use std::{
 };
 
 use crate::questionnaire;
+#[cfg(any(test, feature = "staged-capture"))]
+use orbit_core::store::Filing;
 use unicode_segmentation::UnicodeSegmentation;
 
 // Measurement epochs reject stale sensor messages; they are not widget identity.
@@ -251,7 +260,7 @@ pub struct App {
     api_key_draft: String,
     api_key_configured: bool,
     forks: forks::Index,
-    fork_panel: Option<forks::Panel>,
+    right_panel: Option<RightPanel>,
     jump_after_select: Option<(String, String)>,
     context_menu: Option<ContextMenu>,
     stashed_open: bool,
@@ -274,8 +283,6 @@ pub struct App {
     markdown: HashMap<String, Markdown>,
     markdown_heights: HashMap<String, crate::markdown_window::Heights>,
     browser: browser::State,
-    settings_open: bool,
-    agents_open: bool,
     changes: changes::State,
     worktrees: worktrees::State,
     chat_positions: HashMap<String, ChatPosition>,
@@ -306,8 +313,10 @@ pub struct App {
     git_counts: Arc<crate::git::LineCounts>,
     draft_dirty: bool,
     launch: crate::Launch,
+    #[cfg(any(test, feature = "staged-capture"))]
     smoke_stage: usize,
     smoke_fixtures: SmokeFixtures,
+    #[cfg(any(test, feature = "staged-capture"))]
     screenshot_check: Option<crate::screenshot_check::Check>,
     smoke_passed: Arc<AtomicBool>,
     smoke_dir: Option<PathBuf>,
@@ -522,8 +531,11 @@ pub enum Message {
     Event(iced::Event),
     WindowOpened(window::Id),
     Screenshot(window::Screenshot),
+    #[cfg(any(test, feature = "staged-capture"))]
     CheckScreenshot(window::Screenshot),
+    #[cfg(any(test, feature = "staged-capture"))]
     SmokeOpenTool(String),
+    #[cfg(any(test, feature = "staged-capture"))]
     Capture,
     Exit(Result<(), String>),
 }
@@ -623,7 +635,7 @@ impl App {
             api_key_draft: String::new(),
             api_key_configured: false,
             forks: Default::default(),
-            fork_panel: None,
+            right_panel: None,
             jump_after_select: None,
             context_menu: None,
             stashed_open: false,
@@ -643,9 +655,7 @@ impl App {
             markdown: HashMap::new(),
             markdown_heights: HashMap::new(),
             browser: Default::default(),
-            settings_open: false,
             pending_settings: None,
-            agents_open: false,
             changes: Default::default(),
             worktrees: Default::default(),
             chat_positions: HashMap::new(),
@@ -675,8 +685,10 @@ impl App {
             git_counts: Arc::default(),
             draft_dirty: false,
             launch,
+            #[cfg(any(test, feature = "staged-capture"))]
             smoke_stage: 0,
             smoke_fixtures: SmokeFixtures::default(),
+            #[cfg(any(test, feature = "staged-capture"))]
             screenshot_check: None,
             smoke_passed,
             smoke_dir,
@@ -755,7 +767,7 @@ impl App {
             return Task::none();
         }
         let counts = self.git_counts.clone();
-        let detailed = self.changes.open;
+        let detailed = self.right_panel == Some(RightPanel::Changes);
         Task::future(async move {
             let (info, files) = crate::git::capture(path.clone(), counts, detailed).await;
             if detailed {
@@ -823,7 +835,7 @@ impl App {
                 previous.separate_edits();
             }
             if let Some(id) = &active
-                && !self.settings_open
+                && self.right_panel != Some(RightPanel::Settings)
                 && !self.search_active
                 && self.find.is_none()
                 && self.modal.is_none()
@@ -986,277 +998,6 @@ impl App {
         self.prepare_visible();
         true
     }
-    fn append_transcript(&mut self) {
-        let Some(session) = &self.current_session else {
-            return;
-        };
-        let Some(start) = self.activity.sync(&session.entries) else {
-            return;
-        };
-        let position = self
-            .transcript
-            .order
-            .partition_point(|&id| ActivityRow::from_id(id).source() < start);
-        let rows = self.activity.rows(
-            start,
-            &self.details.groups,
-            &self.details.execution,
-            &self.details.expanded,
-        );
-        let selection = self.chat_selection.borrow();
-        let selected = selection
-            .anchor
-            .zip(selection.focus)
-            .map(|(a, b)| a.entry.min(b.entry)..=a.entry.max(b.entry));
-        drop(selection);
-        if let Some(selected) = selected {
-            let selected_entry = |id| match ActivityRow::from_id(id) {
-                ActivityRow::Entry(i) if selected.contains(&i) => Some(i),
-                _ => None,
-            };
-            if !self.transcript.order[position..]
-                .iter()
-                .copied()
-                .filter_map(selected_entry)
-                .eq(rows.iter().map(|(id, _)| *id).filter_map(selected_entry))
-            {
-                self.chat_selection.borrow_mut().clear();
-            }
-        }
-        self.transcript.replace_tail(position, rows);
-    }
-    fn rebuild_transcript(&mut self) {
-        self.chat_selection.borrow_mut().clear();
-        let Some(session) = &self.current_session else {
-            return;
-        };
-        self.activity.sync(&session.entries);
-        self.transcript.reset(self.activity.rows(
-            0,
-            &self.details.groups,
-            &self.details.execution,
-            &self.details.expanded,
-        ));
-    }
-    fn jump_to_prompt(&mut self, entry: &str) -> Task<Message> {
-        let Some(index) = self.current().and_then(|s| s.entries.index_of(entry)) else {
-            return Task::none();
-        };
-        let Some(pos) = self.transcript.position(index) else {
-            return Task::none();
-        };
-        // Near the tail the prompt may not reach the top of the pane. Mount
-        // the rows for the reachable viewport: if already at the bottom, iced
-        // won't report any scroll change to correct an overshooting row window.
-        let max_scroll = (self.transcript.total() + 2. * CHAT_VERTICAL_PADDING
-            - self.transcript.viewport)
-            .max(0.);
-        let scroll_y = (self.transcript.prefix(pos) + CHAT_VERTICAL_PADDING).min(max_scroll);
-        if let Some(find) = &mut self.find {
-            find.reveal = None;
-        }
-        self.hold_prompt_at_bottom = true;
-        self.auto_scroll = false;
-        self.transcript.offset = (scroll_y - CHAT_VERTICAL_PADDING).max(0.);
-        self.prepare_visible();
-        widget::operation::scroll_to("chat", scrollable::AbsoluteOffset { x: 0., y: scroll_y })
-    }
-    fn measure_row(&mut self, index: usize, height: f32, inner: Option<f32>) -> Task<Message> {
-        let spacing = self
-            .current()
-            .map_or(8., |s| ActivityRow::from_id(index).spacing(&s.entries));
-        let visible = self.transcript.visible();
-        // Decide which layer owns the anchor using the SAME pre-measurement
-        // row bounds, including when a resizing row crosses the viewport edge.
-        let Some(pos) = self.transcript.position(index) else {
-            return Task::none();
-        };
-        let height = height + spacing;
-        let size_changed = (height - self.transcript.height(pos)).abs() >= 0.5;
-        let inside = if (self.transcript.prefix(pos)..self.transcript.prefix(pos + 1))
-            .contains(&self.transcript.offset)
-        {
-            inner.unwrap_or(0.)
-        } else {
-            0.
-        };
-        let corrected = self.transcript.measure(index, height);
-        if self.auto_scroll && size_changed {
-            self.transcript.end();
-            self.prepare_visible();
-            return bottom();
-        }
-        if !self.auto_scroll && (corrected || inside != 0.) {
-            self.transcript.offset = (self.transcript.offset + inside).max(0.);
-            self.prepare_visible();
-            return widget::operation::scroll_to(
-                "chat",
-                scrollable::AbsoluteOffset {
-                    x: 0.,
-                    y: self.transcript.offset + CHAT_VERTICAL_PADDING,
-                },
-            );
-        }
-        if inner.is_some() || self.transcript.visible() != visible {
-            self.prepare_visible();
-        }
-        Task::none()
-    }
-    fn prepare_visible(&mut self) {
-        let mut visible_media = self.attachments.clone();
-        let mut image_urls = HashMap::new();
-        if self.current_session.is_none() {
-            self.tool_previews.clear();
-        }
-        if let Some(session) = &self.current_session {
-            let visible: Vec<_> = self
-                .chat_range()
-                .filter_map(
-                    |pos| match ActivityRow::from_id(self.transcript.order[pos]) {
-                        ActivityRow::Entry(i) => Some((pos, i)),
-                        _ => None,
-                    },
-                )
-                .collect();
-            let ids: HashSet<_> = visible
-                .iter()
-                .map(|&(_, i)| session.entries[i].id.as_str())
-                .collect();
-            for (id, markdown) in self.markdown.extract_if(|id, _| !ids.contains(id.as_str())) {
-                // Keep only numerical measurements in this session, not the
-                // parsed items, text, images or widget trees.
-                if let Some(window) = markdown.window
-                    && !window.known.is_empty()
-                {
-                    self.markdown_heights.insert(id, window.known);
-                }
-            }
-            self.tool_previews.retain(|id, _| ids.contains(id.as_str()));
-            self.outputs
-                .retain(|id, _| ids.contains(id.as_str()) && self.details.expanded.contains(id));
-            self.historical_runs
-                .retain(|id, _| ids.contains(id.as_str()));
-            for &(position, index) in &visible {
-                let entry = &session.entries[index];
-                if let EntryKind::Tool { name, input, .. } = &entry.kind
-                    && self
-                        .tool_previews
-                        .get(&entry.id)
-                        .is_none_or(|(old, _)| !std::ptr::eq(old.as_ref(), entry))
-                {
-                    self.tool_previews.insert(
-                        entry.id.clone(),
-                        (
-                            session.entries.shared(index),
-                            activity::tool_preview(name, input),
-                        ),
-                    );
-                }
-                if !self.historical_read_pending
-                    && (matches!(entry.kind, EntryKind::Notice)
-                        || (self.details.expanded.contains(&entry.id)
-                            && matches!(entry.kind, EntryKind::Tool { complete: true, .. })))
-                    && let Some(key) = transcript_run_key(entry)
-                    && let Some(h) = &self.harness
-                    && !self.historical_runs.contains_key(&entry.id)
-                    && h.resident_subagent(&session.id, key).is_none()
-                {
-                    // Bound historical reads independently of the foreground job lanes.
-                    self.historical_read_pending = true;
-                    let parent = session.id.clone();
-                    let entry = session.entries.shared(index);
-                    let h = h.clone();
-                    self.tasks.push(Task::future(async move {
-                        tokio::task::spawn_blocking(move || {
-                            let result = h
-                                .subagent_run(
-                                    &parent,
-                                    transcript_run_key(&entry).expect("assignment row"),
-                                )
-                                .map_err(|e| format!("{e:#}"));
-                            Message::HistoricalRun(parent, entry.id.clone(), result)
-                        })
-                        .await
-                        .expect("historical run reader")
-                    }));
-                }
-                if let EntryKind::User { images, files, .. } = &entry.kind {
-                    visible_media.extend(images.iter().cloned());
-                    visible_media.extend(files.iter().filter_map(|file| file.image.clone()));
-                }
-                // User text is literal, including newlines and Markdown syntax.
-                if matches!(entry.kind, EntryKind::Assistant | EntryKind::Reasoning) {
-                    let markdown = self.markdown.entry(entry.id.clone()).or_insert_with(|| {
-                        let content = markdown::Content::parse(&entry.text);
-                        let mut markdown = Markdown {
-                            eager_heights: Default::default(),
-                            images: HashMap::new(),
-                            window: None,
-                            source: session.entries.shared(index),
-                            content,
-                        };
-                        markdown.sync_window(self.catalog.settings.font_size, 0);
-                        if let Some(window) = &mut markdown.window {
-                            window.restore(
-                                self.markdown_heights.remove(&entry.id).unwrap_or_default(),
-                                self.transcript.offset - self.transcript.prefix(position),
-                                self.transcript.viewport,
-                            );
-                        }
-                        markdown.refresh_images();
-                        markdown
-                    });
-                    // A value-equal final reconciliation is invisible to the
-                    // history diff, but geometry messages carry the Arc identity.
-                    if !std::ptr::eq(entry, markdown.source.as_ref()) {
-                        markdown.source = session.entries.shared(index);
-                    }
-                    // Rows are visited in transcript order, so the newest link wins.
-                    image_urls.extend(
-                        markdown
-                            .images
-                            .iter()
-                            .map(|(url, &position)| (url.clone(), (index, position))),
-                    );
-                }
-                if let EntryKind::Tool {
-                    name,
-                    input,
-                    output,
-                    media,
-                    ..
-                } = &entry.kind
-                    && self.details.expanded.contains(&entry.id)
-                {
-                    visible_media.extend(media.iter().cloned());
-                    self.outputs.entry(entry.id.clone()).or_insert_with(|| {
-                        tool_output::Output::new(
-                            name,
-                            input,
-                            output,
-                            self.details.raw_tool_inputs.contains(&entry.id),
-                        )
-                    });
-                }
-            }
-        }
-        self.tasks.push(
-            self.markdown_images
-                .prepare(
-                    &mut self.recent_previews,
-                    self.current_session
-                        .as_ref()
-                        .map(|s| (s.id.as_str(), s.project.as_path())),
-                    image_urls,
-                )
-                .map(Message::MarkdownImage),
-        );
-        self.tasks.push(
-            self.image_view
-                .prepare(&mut self.recent_previews, &visible_media)
-                .map(Message::Image),
-        );
-    }
     fn edit_session_settings(&mut self, edit: impl FnOnce(&mut Session) + Send + 'static) {
         if self.io_busy || self.running() || self.active_questionnaire.is_some() {
             return;
@@ -1298,137 +1039,6 @@ impl App {
         self.context_text = settings.context_limit.to_string();
         self.threshold_text = settings.compact_percent.to_string();
         self.settings = settings;
-    }
-    fn take_draft(&mut self) -> Option<(String, UserMessage)> {
-        if !self.draft_dirty {
-            return None;
-        }
-        let id = self.selected.clone()?;
-        self.draft_dirty = false;
-        Some((id, self.composer_message()))
-    }
-    fn save_draft(&mut self) {
-        if self.io_busy {
-            return;
-        }
-        if self.new_draft_dirty
-            && !self.saving_new_draft
-            && let Some(h) = &self.harness
-        {
-            let h = h.clone();
-            let draft = self.new_draft.clone();
-            self.new_draft_dirty = false;
-            self.saving_new_draft = true;
-            self.tasks.push(self.io.run_in([Lane::NewDraft], move || Message::NewDraftSaved(
-                h.store.save_new_draft(&draft).map_err(|e| format!("Could not save new-session draft: {e:#}. Keep Orbit open and retry after fixing storage."))
-            )));
-        }
-        if self.saving_session_draft.is_none()
-            && let Some((id, draft)) = self.take_draft()
-            && let Some(h) = &self.harness
-        {
-            let h = h.clone();
-            self.saving_session_draft = Some(id.clone());
-            self.tasks.push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
-                let result = h.edit(&id, |s| {
-                    s.draft = draft.text;
-                    s.draft_images = draft.images;
-                }).map_err(|e| {
-                    format!("Could not save draft: {e:#}. Keep Orbit open and retry after fixing storage.")
-                });
-                Message::DraftSaved(id, result)
-            }));
-        }
-    }
-    fn restore_draft(&mut self) {
-        let workspace = self
-            .current()
-            .filter(|s| s.child.is_none())
-            .map(|s| (s.id.clone(), s.project.clone()));
-        let cache = if let Some(dir) = &self.smoke_dir {
-            dir.join("file-cache")
-        } else {
-            orbit_core::file_index::cache_dir()
-        };
-        if let Err(error) = self.file_completion.workspace(workspace, cache) {
-            self.error = Some(format!("Could not start file search: {error:#}"));
-        }
-        let editor = text_editor::Content::with_text(if self.draft_session.is_some() {
-            &self.new_draft.message
-        } else {
-            self.current_session.as_ref().map_or("", |s| &s.draft)
-        });
-        let owner = self.draft_key();
-        self.histories.switch(&self.editor, owner, &editor);
-        self.editor = editor;
-        self.attachment_epoch += 1;
-        self.attachments = if self.draft_session.is_some() {
-            self.new_draft.images.clone()
-        } else {
-            self.current_session
-                .as_ref()
-                .map_or_else(Vec::new, |s| s.draft_images.clone())
-        };
-        self.draft_dirty = false;
-        self.spellcheck.clear();
-        self.check_draft(false);
-        self.prepare_visible();
-    }
-    fn queue_spellcheck(&mut self, debounce: bool) {
-        self.tasks
-            .push(self.spellcheck.schedule(debounce).map(Message::Spellcheck));
-    }
-    fn check_draft(&mut self, debounce: bool) {
-        if self.catalog.settings.spellcheck.enabled && !self.editor.is_empty() {
-            self.queue_spellcheck(debounce);
-        } else {
-            self.spellcheck.clear();
-        }
-    }
-    fn discover_dictionaries(&mut self) {
-        if self.spellcheck.languages.is_none() {
-            self.queue_spellcheck(false);
-        }
-    }
-    fn composer_edited(&mut self, before: spellcheck::BeforeEdit, typing: bool) {
-        before.retain_untouched(&mut self.spellcheck.marks, &self.editor);
-        self.spellcheck.typing_at = typing.then(|| self.editor.cursor().position);
-        self.check_draft(true);
-        if self.draft_session.is_some() {
-            self.new_draft.message = self.editor.text();
-            self.new_draft_dirty = true;
-        } else {
-            self.draft_dirty = true;
-        }
-    }
-    fn composer_message(&self) -> UserMessage {
-        UserMessage {
-            skills: vec![],
-            files: vec![],
-            text: self.editor.text(),
-            images: self.attachments.clone(),
-        }
-    }
-    fn attachment_changed(&mut self) {
-        self.attachment_epoch += 1;
-        if self.draft_session.is_some() {
-            self.new_draft.images = self.attachments.clone();
-            self.new_draft_dirty = true;
-        } else {
-            self.draft_dirty = true;
-        }
-        self.prepare_visible();
-    }
-    fn composer_available(&self) -> bool {
-        self.current().is_some_and(|s| s.child.is_none())
-            && !self.closing
-            && !self.close_requested
-            && !self.io_busy
-            && self.modal.is_none()
-            && self.active_questionnaire.is_none()
-            && self.context_menu.is_none()
-            && !self.footer_menu_open
-            && self.worktrees.popup.is_none()
     }
     fn remember_chat_position(&mut self) {
         if self.auto_scroll {
@@ -1585,101 +1195,6 @@ impl App {
                 Message::Evicted(id, result)
             }));
     }
-    fn send(&mut self, owner: String) {
-        if self.current().is_none_or(|s| s.id != owner) {
-            self.notice = Some((
-                "Not sent: the active draft changed.".into(),
-                std::time::Instant::now(),
-            ));
-            return;
-        };
-        if self.io_busy {
-            if !self.sending_message {
-                let reason = if self.switching_session {
-                    "the session is changing"
-                } else {
-                    "another operation is in progress"
-                };
-                self.notice = Some((
-                    format!("Not sent: {reason}. Press Enter again when ready."),
-                    std::time::Instant::now(),
-                ));
-            }
-            return;
-        }
-        if !self.composer_available() {
-            self.notice = Some((
-                "Not sent: return to the composer and press Enter again.".into(),
-                std::time::Instant::now(),
-            ));
-            return;
-        }
-        if self.composer_importing() {
-            self.send_after_import = Some(owner);
-            self.file_completion.dismiss();
-            return;
-        }
-        let message = self.composer_message();
-        if message.is_empty() {
-            self.notice = Some((
-                "Not sent: type a message or attach an image first.".into(),
-                std::time::Instant::now(),
-            ));
-            return;
-        }
-        let Some(h) = self.harness.clone() else {
-            return;
-        };
-        let id = owner;
-        let draft = self.draft_session.clone();
-        self.file_completion.dismiss();
-        let settings = self.catalog.settings.clone();
-        self.io_busy = true;
-        if message.text == crate::file_completion::COMPACT {
-            if draft.is_some() || !message.images.is_empty() {
-                self.io_busy = false;
-                self.error = Some(
-                    if !message.images.is_empty() {
-                        "Remove the attachments before running /compact."
-                    } else {
-                        "There is no conversation context to compact yet."
-                    }
-                    .into(),
-                );
-                return;
-            }
-            self.tasks
-                .push(self.io.run_in([Lane::Family(h.family_id(&id))], move || {
-                    let result = h.compact(&id, settings).map_err(|e| format!("{e:#}"));
-                    Message::Sent(id, message, result)
-                }));
-            return;
-        }
-        self.sending_message = true;
-        let submission = self
-            .submissions
-            .entry(id.clone())
-            .or_insert_with(|| (message.clone(), orbit_core::store::id()));
-        if submission.0 != message {
-            *submission = (message.clone(), orbit_core::store::id());
-        }
-        let submission = submission.1.clone();
-        let queued = orbit_core::send_trace::queued();
-        let mut lanes = vec![Lane::Family(h.family_id(&id))];
-        if draft.is_some() {
-            lanes.push(Lane::NewDraft);
-        }
-        self.tasks.push(self.io.run_in(lanes, move || {
-            let result = orbit_core::send_trace::run(queued, || {
-                if let Some(draft) = draft {
-                    h.send_new(draft, &submission, message.clone(), settings)
-                } else {
-                    h.send(&id, &submission, message.clone(), settings)
-                }
-            }).map_err(|e| format!("Could not send message: {e:#}. Your message is preserved; fix the problem and retry."));
-            Message::Sent(id, message, result)
-        }));
-    }
     fn acknowledge_focused_completion(&mut self) {
         if self.window_focused
             && !self.closing
@@ -1738,13 +1253,10 @@ impl App {
         let task = self.update_inner(message);
         self.sync_browser();
         self.advance_imports();
-        if self
-            .fork_panel
-            .as_ref()
-            .is_some_and(|p| self.fork_family() != Some(p.family.as_str()))
+        if let Some(RightPanel::Forks(panel)) = &self.right_panel
+            && self.fork_family() != Some(panel.family.as_str())
         {
-            self.fork_panel = None;
-            self.view_epoch = self.view_epoch.wrapping_add(1);
+            self.set_right_panel(None);
         }
         if geometry
             != (
@@ -2080,16 +1592,11 @@ impl App {
                 self.settings.images.model = orbit_core::image_tools::DEFAULT_API_MODEL.into()
             }
             Message::CancelSettings => {
-                let draft = if let Some(pending) = &mut self.pending_settings {
-                    pending.close_on_success = false;
-                    crate::io_worker::with_live_controls(&pending.submitted, &self.catalog.settings)
+                if self.right_panel == Some(RightPanel::Settings) {
+                    self.set_right_panel(None);
                 } else {
-                    self.catalog.settings.clone()
-                };
-                self.reset_settings_editor(draft);
-                self.settings_open = false;
-                self.api_key_draft.clear();
-                self.view_epoch = self.view_epoch.wrapping_add(1);
+                    self.discard_settings_edits();
+                }
             }
             Message::ApiKey(key) => self.api_key_draft = key,
             Message::SaveApiKey | Message::RemoveApiKey => {
@@ -2131,7 +1638,9 @@ impl App {
                     Ok((selection, notice)) => {
                         if self.worktrees.retry.as_ref().is_some_and(|(_, target)| matches!(&selection, Selection::Draft(path) if path == target)) {
                             self.worktrees.retry = None;
-                            self.worktrees.panel = false;
+                            if self.right_panel == Some(RightPanel::Worktrees) {
+                                self.set_right_panel(None);
+                            }
                         }
                         self.worktrees.popup = None;
                         self.worktrees.bases = false;
@@ -2197,7 +1706,7 @@ impl App {
                         }
                         let git = self.refresh_git();
                         self.tasks.push(git);
-                        if self.worktrees.panel {
+                        if self.right_panel == Some(RightPanel::Worktrees) {
                             let task = self.load_worktrees();
                             self.tasks.push(task);
                         }
@@ -2227,7 +1736,7 @@ impl App {
                         if self.worktrees.retry.as_ref().is_some_and(|(origin, _)| {
                             self.current().is_some_and(|s| &s.project == origin)
                         }) {
-                            if !self.worktrees.panel {
+                            if self.right_panel != Some(RightPanel::Worktrees) {
                                 let task = self.worktree_action(worktrees::Action::Panel);
                                 self.tasks.push(task);
                             }
@@ -2710,29 +2219,12 @@ impl App {
             Message::Worktree(action) => return self.worktree_action(action),
             Message::Changes(action) => return self.changes_action(action),
             Message::Browser(a) => return self.browser_action(a),
-            Message::ToggleAgents => {
-                self.changes.close();
-                self.worktrees.panel = false;
-                self.worktrees.popup = None;
-                self.fork_panel = None;
-                self.agents_open = !self.agents_open;
-                if self.settings_open {
-                    return self.update_inner(Message::CancelSettings);
-                }
-                self.view_epoch = self.view_epoch.wrapping_add(1);
-            }
+            Message::ToggleAgents => self.toggle_right_panel(RightPanel::Agents),
             Message::ToggleSettings => {
-                self.changes.close();
-                self.worktrees.panel = false;
-                self.worktrees.popup = None;
-                if self.settings_open {
-                    return self.update_inner(Message::CancelSettings);
-                }
-                self.view_epoch = self.view_epoch.wrapping_add(1);
-                self.settings_open = true;
-                self.agents_open = false;
-                self.fork_panel = None;
-                if self.settings_tab == SettingsTab::General {
+                self.toggle_right_panel(RightPanel::Settings);
+                if self.right_panel == Some(RightPanel::Settings)
+                    && self.settings_tab == SettingsTab::General
+                {
                     self.discover_dictionaries();
                 }
             }
@@ -2758,7 +2250,7 @@ impl App {
                     let submitted = self.settings.clone();
                     self.pending_settings = Some(PendingSettings {
                         submitted: self.settings.clone(),
-                        close_on_success: self.settings_open,
+                        close_on_success: self.right_panel == Some(RightPanel::Settings),
                     });
                     self.tasks.push(self.io.run_catalog(move |writer| {
                         Message::SettingsSaved(match writer.apply(&store, submitted) {
@@ -2792,9 +2284,11 @@ impl App {
                     }
                 }
                 match result {
-                    SettingsSave::Saved if pending.close_on_success && self.settings_open => {
-                        self.settings_open = false;
-                        self.view_epoch = self.view_epoch.wrapping_add(1);
+                    SettingsSave::Saved
+                        if pending.close_on_success
+                            && self.right_panel == Some(RightPanel::Settings) =>
+                    {
+                        self.set_right_panel(None);
                     }
                     SettingsSave::Saved => {}
                     SettingsSave::NotSaved(error) | SettingsSave::PublishedButNotSynced(error) => {
@@ -3332,8 +2826,8 @@ impl App {
                 }
             }
             Message::Git(path, info) => {
-                let needs_details =
-                    self.changes.open && self.current().is_some_and(|s| s.project == path);
+                let needs_details = self.right_panel == Some(RightPanel::Changes)
+                    && self.current().is_some_and(|s| s.project == path);
                 self.store_git(path, info);
                 if needs_details {
                     return self.refresh_git();
@@ -3516,25 +3010,17 @@ impl App {
                             return self.browser_action(browser::Action::EndFind);
                         } else if let Some(close_search) = close_search {
                             return self.update_inner(close_search);
-                        } else if self.browser.open {
-                            return self.browser_action(browser::Action::Toggle);
-                        } else if self.settings_open {
-                            return self.update_inner(Message::CancelSettings);
-                        } else if self.fork_panel.is_some() {
-                            return self.show_forks(None);
-                        } else if self.changes.open {
-                            return self.changes_action(changes::Action::Toggle);
-                        } else if self.worktrees.panel {
-                            if self.worktrees.bases {
-                                return self.worktree_action(worktrees::Action::Bases);
-                            }
-                            if self.worktrees.confirm.is_some() {
-                                return self.worktree_action(worktrees::Action::CancelRemove);
-                            }
-                            return self.worktree_action(worktrees::Action::Panel);
-                        } else if self.agents_open {
-                            self.agents_open = false;
-                            self.view_epoch = self.view_epoch.wrapping_add(1);
+                        } else if self.right_panel == Some(RightPanel::Worktrees) {
+                            let action = if self.worktrees.bases {
+                                worktrees::Action::Bases
+                            } else if self.worktrees.confirm.is_some() {
+                                worktrees::Action::CancelRemove
+                            } else {
+                                worktrees::Action::Panel
+                            };
+                            return self.worktree_action(action);
+                        } else if self.right_panel.is_some() {
+                            self.set_right_panel(None);
                         } else {
                             if let (Some(h), Some(id)) = (&self.harness, &self.selected)
                                 && (h.get(id).is_some_and(|s| s.is_executing())
@@ -3583,8 +3069,11 @@ impl App {
                     window::scale_factor(id).map(|s| Message::Browser(browser::Action::Scale(s))),
                 ]);
             }
+            #[cfg(any(test, feature = "staged-capture"))]
             Message::CheckScreenshot(screenshot) => return self.check_screenshot(screenshot),
+            #[cfg(any(test, feature = "staged-capture"))]
             Message::SmokeOpenTool(session_id) => return self.smoke_open_tool(&session_id),
+            #[cfg(any(test, feature = "staged-capture"))]
             Message::Capture => return self.capture_frame(),
             Message::Screenshot(screenshot) => return self.smoke_frame(screenshot),
         }
@@ -3850,6 +3339,7 @@ impl App {
     }
     fn content(&self) -> Element<'_, Message> {
         let colors = &self.preset().colors;
+        #[cfg(any(test, feature = "staged-capture"))]
         if let Some(check) = &self.screenshot_check {
             return check.view();
         }
@@ -3912,25 +3402,22 @@ impl App {
                 .height(Fill)
         ]
         .height(Fill);
-        if self.browser.open {
-            body = body.push(self.divider(true)).push(self.browser_panel());
-        } else if self.settings_open {
-            body = body.push(self.divider(true)).push(self.settings_panel());
-        } else if self.changes.open {
-            body = body.push(self.divider(true)).push(self.changes_panel());
-        } else if self.worktrees.panel {
-            body = body.push(self.divider(true)).push(self.worktrees_panel());
-        } else if self.agents_open {
-            body = body.push(self.divider(true)).push(self.agents_panel());
-        } else if let Some(panel) = &self.fork_panel {
-            body = body.push(self.divider(true)).push(self.forks_panel(panel));
+        if let Some(panel) = &self.right_panel {
+            body = body.push(self.divider(true)).push(match panel {
+                RightPanel::Browser => self.browser_panel(),
+                RightPanel::Settings => self.settings_panel(),
+                RightPanel::Changes => self.changes_panel(),
+                RightPanel::Worktrees => self.worktrees_panel(),
+                RightPanel::Agents => self.agents_panel(),
+                RightPanel::Forks(panel) => self.forks_panel(panel),
+            });
         }
         let mut controls = column![space().height(Fill)];
         if self.fork_family().is_some() {
             controls = controls.push(rail_button(
                 Icon::GitFork.view(22.),
                 "Forks",
-                self.fork_panel.is_some(),
+                matches!(self.right_panel, Some(RightPanel::Forks(_))),
                 Message::ShowForks(None),
             ));
         }
@@ -3938,7 +3425,7 @@ impl App {
             controls = controls.push(rail_button(
                 Icon::Globe.view(22.),
                 "Browser",
-                self.browser.open,
+                self.right_panel == Some(RightPanel::Browser),
                 Message::Browser(browser::Action::Toggle),
             ));
         }
@@ -3947,25 +3434,25 @@ impl App {
                 .push(rail_button(
                     Icon::Diff.view(22.),
                     "Changes",
-                    self.changes.open,
+                    self.right_panel == Some(RightPanel::Changes),
                     Message::Changes(changes::Action::Toggle),
                 ))
                 .push(rail_button(
                     Icon::FolderOpen.view(22.),
                     "Worktrees",
-                    self.worktrees.panel,
+                    self.right_panel == Some(RightPanel::Worktrees),
                     Message::Worktree(worktrees::Action::Panel),
                 ))
                 .push(rail_button(
                     crate::agent_icon::agent_icon(self.agent_count() > 0),
                     "Agents",
-                    self.agents_open,
+                    self.right_panel == Some(RightPanel::Agents),
                     Message::ToggleAgents,
                 ))
                 .push(rail_button(
                     Icon::Settings.view(24.),
                     "Settings",
-                    self.settings_open,
+                    self.right_panel == Some(RightPanel::Settings),
                     Message::ToggleSettings,
                 ))
                 .spacing(12)
@@ -4151,16 +3638,8 @@ impl App {
             .and_then(|id| self.harness.as_ref().map(|h| h.active_children(id)))
             .unwrap_or(0)
     }
-    fn right_panel_open(&self) -> bool {
-        self.browser.open
-            || self.settings_open
-            || self.agents_open
-            || self.fork_panel.is_some()
-            || self.worktrees.panel
-            || self.changes.open
-    }
     fn panel_width(&self) -> f32 {
-        if self.browser.open && self.browser.expanded {
+        if self.right_panel == Some(RightPanel::Browser) && self.browser.expanded {
             return (self.window_width
                 - self
                     .catalog
@@ -4507,7 +3986,7 @@ impl App {
                         && self.context_menu.is_none()
                         && !self.footer_menu_open
                         && self.worktrees.popup.is_none(),
-                    !self.settings_open
+                    self.right_panel != Some(RightPanel::Settings)
                         && !self.search_active
                         && self.find.is_none()
                         && self.modal.is_none()
@@ -4624,7 +4103,7 @@ impl App {
             .min(self.window_width * 0.4)
             + 5.;
         let right = RAIL_WIDTH
-            + if self.right_panel_open() {
+            + if self.right_panel.is_some() {
                 self.panel_width() + 5.
             } else {
                 0.
@@ -4707,508 +4186,6 @@ impl App {
             .into()
     }
 
-    fn file_completion_enabled(&self) -> bool {
-        !self.imports.holds_paste_cursor()
-            && !self.io_busy
-            && !self.closing
-            && !self.close_requested
-            && self.modal.is_none()
-            && self.context_menu.is_none()
-            && self.active_questionnaire.is_none()
-            && !self.footer_menu_open
-            && self.worktrees.popup.is_none()
-    }
-    fn composer_editor<'a>(&'a self, owner: &'a str, running: bool) -> Element<'a, Message> {
-        let line_height = self.catalog.settings.font_size * COMPOSER_LINE_HEIGHT_FACTOR;
-        let editor = text_editor(&self.editor)
-            .id("composer")
-            .style(theme::inline_answer_editor)
-            .placeholder(if running {
-                "Steer the agent after its current tool batch…"
-            } else {
-                "Message Orbit…"
-            })
-            .on_action(Message::Editor)
-            .key_binding(move |event| {
-                if self.file_completion_enabled()
-                    && self.file_completion.is_open()
-                    && event.key == keyboard::Key::Named(keyboard::key::Named::Escape)
-                {
-                    // Let the central handler dismiss the picker without the
-                    // native Unfocus binding taking focus away from the composer.
-                    return None;
-                }
-                self.file_completion_enabled()
-                    .then(|| self.file_completion.binding(&event))
-                    .flatten()
-                    .map(|message| text_editor::Binding::Custom(Message::FileCompletion(message)))
-                    .or_else(|| composer_key_binding(owner, event))
-            })
-            .line_height(iced::widget::text::LineHeight::Absolute(line_height.into()))
-            .min_height(COMPOSER_MIN_LINES as f32 * line_height)
-            .size(self.catalog.settings.font_size);
-        let revision = self.spellcheck.revision();
-        let editor = crate::growing_editor::growing_editor(
-            editor,
-            &self.editor,
-            Some(crate::growing_editor::Spelling {
-                marks: &self.spellcheck.marks,
-                typing_at: self.spellcheck.typing_at,
-                on_press: Box::new(move |mark| {
-                    Message::Press(Press::SpellingMenu(spellcheck::Target { revision, mark }))
-                }),
-            }),
-            COMPOSER_MAX_LINES as f32 * line_height + 2. * crate::growing_editor::PADDING,
-            Message::EditorScroll,
-            |message| match message {
-                Message::Editor(text_editor::Action::Scroll { lines }) => Some(*lines),
-                _ => None,
-            },
-        );
-        self.session_list_focus.composer(editor)
-    }
-
-    fn activity_row(&self, projected: ActivityRow) -> Element<'_, Message> {
-        let colors = &self.preset().colors;
-        let session = self.current().expect("visible transcript");
-        let index = projected.source();
-        let entry = &session.entries[index];
-        match projected {
-            ActivityRow::Entry(index) => self.entry_view(entry, index),
-            ActivityRow::Activity(_) => {
-                let block = self.activity.block(index);
-                let summary = block.summary.as_ref().expect("activity summary");
-                let active = block.range.end == session.entries.len() && self.running();
-                let working = active || summary.running > 0;
-                let mut header = row![space().width(12).height(12)]
-                    .spacing(8)
-                    .align_y(iced::Center);
-                header = header.push(ellipsized_text(
-                    &summary.label(active),
-                    12.,
-                    Some(colors.muted),
-                ));
-                if working && summary.tools > 0 {
-                    let progress = if summary.running > 0 {
-                        format!(
-                            "{} completed · {} running",
-                            summary.completed, summary.running
-                        )
-                    } else {
-                        format!("{} completed", summary.completed)
-                    };
-                    header = header.push(text(progress).size(11).style(theme::muted));
-                }
-                if summary.show_failures() {
-                    header = header.push(
-                        text(format!("{} failed", summary.failed))
-                            .size(12)
-                            .color(colors.danger),
-                    );
-                }
-                theme::button(stack![
-                    container(header).padding([6, 2]).width(Fill),
-                    crate::chevron_icon::activity_disclosure(
-                        self.details.groups.contains(&entry.id),
-                        working,
-                        self.tick,
-                    ),
-                ])
-                .padding(0)
-                .width(Fill)
-                .style(theme::text_button)
-                .on_press(Message::ToggleGroup(entry.id.clone()))
-                .into()
-            }
-            ActivityRow::Execution(_) => {
-                let wrappers = self.activity.block(index).folded.len();
-                container(
-                    theme::button(
-                        row![
-                            chevron_icon(self.details.execution.contains(&entry.id)),
-                            text(format!(
-                                "Execution details · {wrappers} code-mode call{}",
-                                if wrappers == 1 { "" } else { "s" }
-                            ))
-                            .size(11)
-                            .style(theme::muted)
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Center),
-                    )
-                    .padding([4, 2])
-                    .style(theme::text_button)
-                    .on_press(Message::ToggleExecution(entry.id.clone())),
-                )
-                .padding([0, 12])
-                .into()
-            }
-            ActivityRow::Thinking(_) => {
-                let range = &self.activity.block(index).thinking[&index];
-                let preview = range
-                    .clone()
-                    .rev()
-                    .map(|i| activity::reasoning_preview(&session.entries[i].text))
-                    .find(|s| !s.is_empty())
-                    .unwrap_or_else(|| "Thinking".into());
-                container(
-                    theme::button(
-                        row![
-                            chevron_icon(self.details.expanded.contains(&entry.id)),
-                            ellipsized_text(&preview, 12., Some(colors.muted))
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Center),
-                    )
-                    .padding([4, 2])
-                    .width(Fill)
-                    .style(theme::text_button)
-                    .on_press(Message::ToggleEntry(entry.id.clone())),
-                )
-                .padding([0, 12])
-                .width(Fill)
-                .into()
-            }
-        }
-    }
-    fn transcript_run(&self, entry: &Entry) -> Option<RunInfo> {
-        self.harness
-            .as_ref()?
-            .resident_subagent(&self.current()?.id, transcript_run_key(entry)?)
-            .or_else(|| self.historical_runs.get(&entry.id)?.clone())
-    }
-    fn subagent_notice_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
-        let colors = &self.preset().colors;
-        let open = self.details.expanded.contains(&entry.id);
-        let run = self.transcript_run(entry);
-        let (label, color) = match &run {
-            Some(run) => (
-                format!(
-                    "{} · {} · {}",
-                    run.profile.label(),
-                    run.title,
-                    run.status.label()
-                ),
-                if run.status.needs_attention() {
-                    colors.danger
-                } else if run.status == orbit_core::agent::subagents::RunStatus::Completed {
-                    colors.success
-                } else {
-                    colors.muted
-                },
-            ),
-            None => ("Subagent update".into(), colors.muted),
-        };
-        let mut block = column![
-            theme::button(
-                row![
-                    chevron_icon(open),
-                    text("●").size(11).color(color),
-                    ellipsized_text(&label, 12., Some(colors.muted))
-                ]
-                .spacing(8)
-                .align_y(iced::Center)
-            )
-            .on_press(Message::ToggleEntry(entry.id.clone()))
-            .padding([4, 2])
-            .style(theme::text_button)
-            .width(Fill)
-        ]
-        .spacing(6);
-        if open {
-            if let Some(run) = run {
-                block = block.push(
-                    theme::button(Icon::ArrowUpRight.label("Open subagent", 16.))
-                        .style(theme::text_button)
-                        .on_press(Message::Select(run.session_id)),
-                );
-            }
-            block = block.push(chat_selection::plain(
-                &entry.text,
-                12.,
-                Some(colors.muted),
-                self.chat_selection.clone(),
-                Position {
-                    entry: index,
-                    block: 0,
-                    byte: 0,
-                },
-            ));
-        }
-        container(block)
-            .padding(if open { [8, 12] } else { [0, 12] })
-            .width(Fill)
-            .style(if open { card } else { container::transparent })
-            .into()
-    }
-
-    fn entry_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
-        let colors = &self.preset().colors;
-        match &entry.kind {
-            EntryKind::Tool {
-                name,
-                input,
-                complete,
-                parent,
-                failed,
-                media,
-                web,
-                command_status,
-                ..
-            } => {
-                let open = self.details.expanded.contains(&entry.id);
-                let preview = self.tool_previews.get(&entry.id).map_or_else(
-                    || std::borrow::Cow::Owned(activity::tool_preview(name, input)),
-                    |(_, preview)| std::borrow::Cow::Borrowed(preview.as_str()),
-                );
-                let status = activity::tool_status(*complete, *failed, *command_status);
-                let status_color = match status {
-                    CommandStatus::Running => colors.warning,
-                    CommandStatus::Succeeded => colors.success,
-                    CommandStatus::Failed | CommandStatus::Interrupted => colors.danger,
-                };
-                let mut block = column![
-                    theme::button(
-                        row![
-                            chevron_icon(open),
-                            text("●").size(11).color(status_color),
-                            text(activity::tool_name(name)).size(12).color(colors.text),
-                            ellipsized_text(&preview, 12., Some(colors.muted)),
-                            text(match status {
-                                CommandStatus::Running => "running",
-                                CommandStatus::Succeeded => "",
-                                CommandStatus::Failed => "failed",
-                                CommandStatus::Interrupted => "interrupted",
-                            })
-                            .size(11)
-                            .color(
-                                if matches!(
-                                    status,
-                                    CommandStatus::Failed | CommandStatus::Interrupted
-                                ) {
-                                    colors.danger
-                                } else {
-                                    colors.muted
-                                }
-                            )
-                        ]
-                        .spacing(9)
-                        .align_y(iced::Center)
-                    )
-                    .on_press(Message::ToggleEntry(entry.id.clone()))
-                    .style(theme::text_button)
-                    .padding([4, 2])
-                    .width(Fill)
-                ]
-                .spacing(4);
-                let mut details = column![].spacing(8);
-                if open
-                    && name == "spawn_subagent"
-                    && let Some(run) = self.transcript_run(entry)
-                {
-                    details = details.push(
-                        theme::button(
-                            text(format!(
-                                "{} · {} · {} ↗",
-                                run.profile.label(),
-                                run.title,
-                                run.status.label()
-                            ))
-                            .size(12),
-                        )
-                        .on_press(Message::Select(run.session_id))
-                        .style(theme::text_button),
-                    );
-                }
-                if open {
-                    let stop = self.current().and_then(|session| {
-                        let state = self
-                            .harness
-                            .as_ref()?
-                            .get(&session.id)?
-                            .tool_stop_state(&entry.id)?;
-                        Some((session.id.as_str(), state))
-                    });
-                    details = details.push(tool_actions(
-                        &entry.id,
-                        self.details.raw_tool_inputs.contains(&entry.id),
-                        stop,
-                    ));
-                    if let Some(metadata) = web {
-                        details = details.push(
-                            text(format!(
-                                "{} web access · {}",
-                                metadata.mode,
-                                age(metadata.searched_at)
-                            ))
-                            .size(11)
-                            .style(theme::muted),
-                        );
-                        for source in &metadata.sources {
-                            details = details.push(
-                                theme::button(ellipsized_text(
-                                    &source.title,
-                                    12.,
-                                    Some(colors.accent),
-                                ))
-                                .on_press(Message::Link(source.url.clone()))
-                                .style(theme::text_button),
-                            );
-                        }
-                    }
-                    for item in media {
-                        if item.thumbnail.is_some() {
-                            details = details.push(self.image_view.thumbnail(item));
-                        }
-                    }
-                    if let Some(view) = self.outputs.get(&entry.id) {
-                        details = details.push(
-                            container(view.view(&entry.id, self.chat_selection.clone(), index))
-                                .padding(8)
-                                .width(Fill)
-                                .style(theme::tool_code),
-                        );
-                    }
-                    details = details.push(chat_selection::plain(
-                        &tool_reference(&entry.id, parent.as_deref()),
-                        11.,
-                        Some(colors.muted),
-                        self.chat_selection.clone(),
-                        Position {
-                            entry: index,
-                            block: 1,
-                            byte: 0,
-                        },
-                    ));
-                    block = block.push(
-                        container(container(details).padding(12).width(Fill).style(card))
-                            .padding(iced::Padding {
-                                left: 20.,
-                                ..iced::Padding::ZERO
-                            })
-                            .width(Fill),
-                    );
-                }
-                container(block).padding([0, 12]).width(Fill).into()
-            }
-            EntryKind::Notice if activity::subagent_notice(entry).is_some() => {
-                self.subagent_notice_view(entry, index)
-            }
-            EntryKind::Notice => container(chat_selection::plain(
-                &entry.text,
-                12.,
-                Some(colors.warning),
-                self.chat_selection.clone(),
-                Position {
-                    entry: index,
-                    block: 0,
-                    byte: 0,
-                },
-            ))
-            .padding(12)
-            .style(card)
-            .into(),
-            EntryKind::Reasoning => {
-                let content: Element<'_, Message> =
-                    if let Some(markdown) = self.markdown.get(&entry.id) {
-                        markdown.view(
-                            markdown::Settings::with_text_size(
-                                12.,
-                                theme::markdown_style(&self.preset().theme),
-                            ),
-                            &chat_selection::Viewer::new(self.chat_selection.clone(), index)
-                                .with_images(&self.markdown_images)
-                                .with_equations(&self.equations, &entry.id),
-                        )
-                    } else {
-                        chat_selection::plain(
-                            &entry.text,
-                            12.,
-                            Some(colors.muted),
-                            self.chat_selection.clone(),
-                            Position {
-                                entry: index,
-                                block: 0,
-                                byte: 0,
-                            },
-                        )
-                    };
-                container(content)
-                    .padding([6, 24])
-                    .style(card)
-                    .width(Fill)
-                    .into()
-            }
-            _ => {
-                let mut content = column![].spacing(8);
-                if let EntryKind::User {
-                    images,
-                    files,
-                    steering,
-                    ..
-                } = &entry.kind
-                {
-                    if *steering {
-                        content = content.push(
-                            text("Steering · waiting for the next boundary")
-                                .size(11)
-                                .color(colors.accent),
-                        );
-                    }
-                    for media in images {
-                        content = content.push(self.image_view.thumbnail(media));
-                    }
-                    for file in files {
-                        content = content.push(
-                            text(format!("{} · {} bytes captured", file.name, file.bytes))
-                                .size(11)
-                                .style(theme::muted),
-                        );
-                        if let Some(image) = &file.image {
-                            content = content.push(self.image_view.thumbnail(image));
-                        }
-                    }
-                }
-                let paint = self
-                    .find
-                    .as_ref()
-                    .map(|f| f.paint(index, entry))
-                    .unwrap_or_default();
-                if let Some(markdown) = self.markdown.get(&entry.id) {
-                    let mut viewer =
-                        chat_selection::Viewer::new(self.chat_selection.clone(), index)
-                            .with_images(&self.markdown_images)
-                            .with_equations(&self.equations, &entry.id);
-                    viewer.find = paint;
-                    content = content.push(markdown.view(
-                        markdown::Settings::with_text_size(
-                            self.catalog.settings.font_size,
-                            theme::markdown_style(&self.preset().theme),
-                        ),
-                        &viewer,
-                    ));
-                } else {
-                    content = content.push(chat_selection::plain_find(
-                        &entry.text,
-                        self.catalog.settings.font_size,
-                        None,
-                        self.chat_selection.clone(),
-                        Position {
-                            entry: index,
-                            block: 0,
-                            byte: 0,
-                        },
-                        paint,
-                    ));
-                }
-                if matches!(entry.kind, EntryKind::User { .. }) {
-                    container(content).padding(12).style(card).into()
-                } else {
-                    container(content).padding([6, 12]).width(Fill).into()
-                }
-            }
-        }
-    }
     fn session_project_label(
         &self,
         checkout: &Path,
@@ -5549,7 +4526,7 @@ impl App {
                         .spacing(4.),
                     )
                     .padding([2., pill_inset])
-                    .style(if self.changes.open {
+                    .style(if self.right_panel == Some(RightPanel::Changes) {
                         secondary
                     } else {
                         theme::text_button

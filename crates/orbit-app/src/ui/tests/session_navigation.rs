@@ -130,7 +130,7 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
     app.harness = Some(Harness::new(h.store.clone(), h.store.load().unwrap().1).unwrap());
     app.catalog_revision = u64::MAX;
     dispatch(&mut app, Message::ToggleAgents).await;
-    assert!(app.agents_open && !app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Agents));
     // A terminal run must not display stale runtime activity. The entire
     // card, including its padding outside the labels, opens the child.
     let inactive_child = app.harness.as_ref().unwrap().load(&child_id).unwrap();
@@ -318,9 +318,9 @@ async fn child_navigation_preserves_parent_draft_scroll_and_disables_child_edits
     let labels = chat_text(&app);
     assert!(labels.contains("Inspect retry") && labels.contains("Open subagent"));
     dispatch(&mut app, Message::ToggleSettings).await;
-    assert!(app.settings_open && !app.agents_open);
+    assert!(app.right_panel == Some(RightPanel::Settings));
     dispatch(&mut app, Message::ToggleAgents).await;
-    assert!(app.agents_open && !app.settings_open);
+    assert!(app.right_panel == Some(RightPanel::Agents));
     dispatch(&mut app, Message::Select(child_id.clone())).await;
     dispatch(&mut app, Message::Delete(parent.clone())).await;
     dispatch(&mut app, Message::Confirm).await;

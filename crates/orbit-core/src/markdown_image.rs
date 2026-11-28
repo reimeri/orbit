@@ -48,7 +48,7 @@ impl Source {
         match self {
             Self::File(path) => {
                 tokio::task::spawn_blocking(move || {
-                    let mut file = crate::media::open(&path)?;
+                    let mut file = crate::open_regular(&path)?;
                     let mut bytes = Vec::new();
                     let mut chunk = [0; 8192];
                     let mut probe = Probe::default();

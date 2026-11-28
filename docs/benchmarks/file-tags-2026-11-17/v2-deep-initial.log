@@ -1,72 +1,73 @@
-warning: Git tree '/home/toor/Documents/coding/AI/pico-evo' is dirty
+# Local workspace and crate names normalized; measurements unchanged.
+warning: Git tree '<workspace>' is dirty
 warning: rquickjs-sys@0.11.0: In file included from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/bits/libc-header-start.h:33,
 warning: rquickjs-sys@0.11.0:                  from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/stdlib.h:26,
-warning: rquickjs-sys@0.11.0:                  from /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/libregexp.c:24:
+warning: rquickjs-sys@0.11.0:                  from <workspace>/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/libregexp.c:24:
 warning: rquickjs-sys@0.11.0: /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/features.h:451:4: warning: #warning _FORTIFY_SOURCE requires compiling with optimization (-O) [-Wcpp]
 warning: rquickjs-sys@0.11.0:   451 | #  warning _FORTIFY_SOURCE requires compiling with optimization (-O)
 warning: rquickjs-sys@0.11.0:       |    ^~~~~~~
 warning: rquickjs-sys@0.11.0: cc1: note: unrecognized command-line option '-Wno-implicit-const-int-float-conversion' may have been intended to silence earlier diagnostics
 warning: rquickjs-sys@0.11.0: In file included from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/bits/libc-header-start.h:33,
 warning: rquickjs-sys@0.11.0:                  from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/stdlib.h:26,
-warning: rquickjs-sys@0.11.0:                  from /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/libunicode.c:24:
+warning: rquickjs-sys@0.11.0:                  from <workspace>/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/libunicode.c:24:
 warning: rquickjs-sys@0.11.0: /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/features.h:451:4: warning: #warning _FORTIFY_SOURCE requires compiling with optimization (-O) [-Wcpp]
 warning: rquickjs-sys@0.11.0:   451 | #  warning _FORTIFY_SOURCE requires compiling with optimization (-O)
 warning: rquickjs-sys@0.11.0:       |    ^~~~~~~
 warning: rquickjs-sys@0.11.0: cc1: note: unrecognized command-line option '-Wno-implicit-const-int-float-conversion' may have been intended to silence earlier diagnostics
 warning: rquickjs-sys@0.11.0: In file included from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/assert.h:35,
-warning: rquickjs-sys@0.11.0:                  from /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/cutils.c:25:
+warning: rquickjs-sys@0.11.0:                  from <workspace>/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/cutils.c:25:
 warning: rquickjs-sys@0.11.0: /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/features.h:451:4: warning: #warning _FORTIFY_SOURCE requires compiling with optimization (-O) [-Wcpp]
 warning: rquickjs-sys@0.11.0:   451 | #  warning _FORTIFY_SOURCE requires compiling with optimization (-O)
 warning: rquickjs-sys@0.11.0:       |    ^~~~~~~
 warning: rquickjs-sys@0.11.0: cc1: note: unrecognized command-line option '-Wno-implicit-const-int-float-conversion' may have been intended to silence earlier diagnostics
 warning: rquickjs-sys@0.11.0: In file included from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/bits/libc-header-start.h:33,
 warning: rquickjs-sys@0.11.0:                  from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/stdlib.h:26,
-warning: rquickjs-sys@0.11.0:                  from /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/quickjs.c:27:
+warning: rquickjs-sys@0.11.0:                  from <workspace>/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/quickjs.c:27:
 warning: rquickjs-sys@0.11.0: /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/features.h:451:4: warning: #warning _FORTIFY_SOURCE requires compiling with optimization (-O) [-Wcpp]
 warning: rquickjs-sys@0.11.0:   451 | #  warning _FORTIFY_SOURCE requires compiling with optimization (-O)
 warning: rquickjs-sys@0.11.0:       |    ^~~~~~~
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/quickjs.c: In function 'js_default_module_normalize_name':
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/quickjs.c:27907:7: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/quickjs.c: In function 'js_default_module_normalize_name':
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/quickjs.c:27907:7: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
 warning: rquickjs-sys@0.11.0: 27907 |     p = strrchr(base_name, '/');
 warning: rquickjs-sys@0.11.0:       |       ^
 warning: rquickjs-sys@0.11.0: At top level:
 warning: rquickjs-sys@0.11.0: cc1: note: unrecognized command-line option '-Wno-implicit-const-int-float-conversion' may have been intended to silence earlier diagnostics
 warning: rquickjs-sys@0.11.0: In file included from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/bits/libc-header-start.h:33,
 warning: rquickjs-sys@0.11.0:                  from /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/stdlib.h:26,
-warning: rquickjs-sys@0.11.0:                  from /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/dtoa.c:24:
+warning: rquickjs-sys@0.11.0:                  from <workspace>/target/release/build/rquickjs-sys-b2774743f9aee6fc/out/dtoa.c:24:
 warning: rquickjs-sys@0.11.0: /nix/store/2f69qaci676cq5kr8svry3gbf6i6iqzi-glibc-2.44-57-dev/include/features.h:451:4: warning: #warning _FORTIFY_SOURCE requires compiling with optimization (-O) [-Wcpp]
 warning: rquickjs-sys@0.11.0:   451 | #  warning _FORTIFY_SOURCE requires compiling with optimization (-O)
 warning: rquickjs-sys@0.11.0:       |    ^~~~~~~
 warning: rquickjs-sys@0.11.0: cc1: note: unrecognized command-line option '-Wno-implicit-const-int-float-conversion' may have been intended to silence earlier diagnostics
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c: In function 'js_default_module_normalize_name':
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:27907:7: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c: In function 'js_default_module_normalize_name':
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:27907:7: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
 warning: rquickjs-sys@0.11.0: 27907 |     p = strrchr(base_name, '/');
 warning: rquickjs-sys@0.11.0:       |       ^
 warning: rquickjs-sys@0.11.0: In function 'js_bigint_sign',
-warning: rquickjs-sys@0.11.0:     inlined from 'js_bigint_get_si_sat' at /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11313:13,
-warning: rquickjs-sys@0.11.0:     inlined from 'js_binary_logic_slow' at /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14278:25:
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11305:18: warning: 'buf2' may be used uninitialized [-Wmaybe-uninitialized]
+warning: rquickjs-sys@0.11.0:     inlined from 'js_bigint_get_si_sat' at <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11313:13,
+warning: rquickjs-sys@0.11.0:     inlined from 'js_binary_logic_slow' at <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14278:25:
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11305:18: warning: 'buf2' may be used uninitialized [-Wmaybe-uninitialized]
 warning: rquickjs-sys@0.11.0: 11305 |     return a->tab[a->len - 1] >> (JS_LIMB_BITS - 1);
 warning: rquickjs-sys@0.11.0:       |            ~~~~~~^~~~~~~~~~~~
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c: In function 'js_binary_logic_slow':
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14258:27: note: 'buf2' declared here
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c: In function 'js_binary_logic_slow':
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14258:27: note: 'buf2' declared here
 warning: rquickjs-sys@0.11.0: 14258 |         JSBigIntBuf buf1, buf2;
 warning: rquickjs-sys@0.11.0:       |                           ^~~~
 warning: rquickjs-sys@0.11.0: In function 'js_bigint_sign',
-warning: rquickjs-sys@0.11.0:     inlined from 'js_bigint_get_si_sat' at /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11313:13,
-warning: rquickjs-sys@0.11.0:     inlined from 'js_binary_logic_slow' at /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14278:25:
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11305:18: warning: 'buf2' may be used uninitialized [-Wmaybe-uninitialized]
+warning: rquickjs-sys@0.11.0:     inlined from 'js_bigint_get_si_sat' at <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11313:13,
+warning: rquickjs-sys@0.11.0:     inlined from 'js_binary_logic_slow' at <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14278:25:
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:11305:18: warning: 'buf2' may be used uninitialized [-Wmaybe-uninitialized]
 warning: rquickjs-sys@0.11.0: 11305 |     return a->tab[a->len - 1] >> (JS_LIMB_BITS - 1);
 warning: rquickjs-sys@0.11.0:       |            ~~~~~~^~~~~~~~~~~~
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c: In function 'js_binary_logic_slow':
-warning: rquickjs-sys@0.11.0: /home/toor/Documents/coding/AI/pico-evo/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14258:27: note: 'buf2' declared here
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c: In function 'js_binary_logic_slow':
+warning: rquickjs-sys@0.11.0: <workspace>/target/release/build/rquickjs-sys-36c80a63d9683afd/out/quickjs.c:14258:27: note: 'buf2' declared here
 warning: rquickjs-sys@0.11.0: 14258 |         JSBigIntBuf buf1, buf2;
 warning: rquickjs-sys@0.11.0:       |                           ^~~~
 warning: rquickjs-sys@0.11.0: At top level:
 warning: rquickjs-sys@0.11.0: cc1: note: unrecognized command-line option '-Wno-implicit-const-int-float-conversion' may have been intended to silence earlier diagnostics
-   Compiling pico-core v0.1.0 (/home/toor/Documents/coding/AI/pico-evo/crates/pico-core)
+   Compiling <core-crate> v0.1.0 (<workspace>/crates/<core-crate>)
     Finished `release` profile [optimized] target(s) in 19.92s
-     Running unittests src/lib.rs (target/release/deps/pico_core-2c97c8ffdc8ad12c)
+     Running unittests src/lib.rs (target/release/deps/<core-crate>-2c97c8ffdc8ad12c)
 
 running 1 test
 test file_index::tests::deep_paths_benchmark ... deep_paths=1000000 build_ms=3281 arena_bytes=128280758 retained_bytes=148280758

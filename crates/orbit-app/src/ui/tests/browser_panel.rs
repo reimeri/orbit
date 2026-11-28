@@ -106,7 +106,9 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
                 fit_bounds = Some(page);
                 b.user(
                     &first,
-                    serde_json::json!({"op":"viewport","fixed":[900,1100]}),
+                    orbit_core::browser::UserCommand::Viewport {
+                        fixed: Some((900, 1100)),
+                    },
                 )
                 .unwrap();
             } else if b.status(&first).viewport.is_some()
@@ -254,7 +256,7 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     dispatch(&mut app, Message::ToggleAgents).await;
-    assert!(!app.browser.open && app.agents_open);
+    assert!(app.right_panel == Some(RightPanel::Agents));
     b.shutdown().unwrap();
     http.abort();
 }
@@ -381,7 +383,7 @@ async fn native_browser_toolbar_preserves_page_until_close() {
     for m in probe(&app, Some(hide)).1 {
         dispatch(&mut app, m).await;
     }
-    assert!(!app.browser.open);
+    assert!(app.right_panel != Some(RightPanel::Browser));
     assert_eq!(browser.status(&id).surface_id, Some(tab));
     dispatch(&mut app, Message::Browser(Action::Toggle)).await;
     for m in probe(&app, Some(options)).1 {
@@ -391,6 +393,8 @@ async fn native_browser_toolbar_preserves_page_until_close() {
     for m in probe(&app, Some(close.center())).1 {
         dispatch(&mut app, m).await;
     }
-    assert!(!app.browser.open && browser.status(&id).surface_id.is_none());
+    assert!(
+        app.right_panel != Some(RightPanel::Browser) && browser.status(&id).surface_id.is_none()
+    );
     browser.shutdown().unwrap();
 }

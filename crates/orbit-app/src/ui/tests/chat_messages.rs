@@ -435,7 +435,7 @@ async fn settings_and_find_can_open_in_either_order() {
     dispatch(&mut app, Message::ToggleSettings).await;
     assert!(chat_text(&app).contains("1 of 2"));
     dispatch(&mut app, escape.clone()).await;
-    assert!(app.find.is_none() && app.settings_open);
+    assert!(app.find.is_none() && app.right_panel == Some(RightPanel::Settings));
 
     // Ctrl+F from Settings focuses Find, so Enter advances its match.
     drive_ui_messages(
@@ -453,5 +453,5 @@ async fn settings_and_find_can_open_in_either_order() {
     .await;
     assert!(chat_text(&app).contains("2 of 2"));
     dispatch(&mut app, escape).await;
-    assert!(app.find.is_none() && app.settings_open);
+    assert!(app.find.is_none() && app.right_panel == Some(RightPanel::Settings));
 }

@@ -289,7 +289,9 @@ impl CodeMode {
             &cell_id,
             cell,
             pragma.yield_time_ms.unwrap_or(10_000),
-            pragma.max_output_tokens.unwrap_or(10_000),
+            pragma
+                .max_output_tokens
+                .unwrap_or(crate::output::DEFAULT_OUTPUT_TOKENS),
             cancel,
             &CancellationToken::new(),
         )
@@ -322,7 +324,8 @@ impl CodeMode {
             &args.cell_id,
             cell,
             args.yield_time_ms.unwrap_or(10_000),
-            args.max_tokens.unwrap_or(10_000),
+            args.max_tokens
+                .unwrap_or(crate::output::DEFAULT_OUTPUT_TOKENS),
             cancel,
             stop,
         )
@@ -738,7 +741,7 @@ fn run_cell(
                                     web: web_metadata,
                                 }));
                                 let (output, failed) = match saved { Ok(()) => (output,failed), Err(e) => (format!("{}\nCould not save tool result: {e:#}. Side effects may have occurred; do not blindly repeat the command.",display.unwrap_or_else(||output.clone())),true) };
-                                let output = if name_for_output == "ask_user" { crate::output::preserve_text(&output, 40_000) } else { output };
+                                let output = if name_for_output == "ask_user" { crate::output::preserve_default(&output) } else { output };
                                 let _ = tx.send((request, output, failed, structured));
                             })
                             .map_err(|e| {

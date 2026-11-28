@@ -78,9 +78,8 @@ fn starts(a: &[u8], b: &[u8]) -> bool {
     a.len() >= b.len() && a[..b.len()].eq_ignore_ascii_case(b)
 }
 fn internal(path: &Path) -> bool {
-    path.components().any(
-        |c| matches!(c, Component::Normal(n) if n == ".git" || n == ".orbit" || n == ".pico" || n == ".pico-evo"),
-    )
+    path.components()
+        .any(|c| matches!(c, Component::Normal(n) if n == ".git" || n == ".orbit"))
 }
 fn safe(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))
@@ -518,8 +517,6 @@ fn discovery_exclusions(cache: &Path) -> Vec<PathBuf> {
         xdg.as_deref().map(Path::new),
         home.as_deref().map(Path::new),
     ) {
-        // An offline migration leaves a credential-bearing backup beside Orbit.
-        paths.push(config.with_file_name("pico-evo"));
         paths.push(config);
     }
     for path in paths.clone() {
@@ -545,17 +542,6 @@ fn discovery_walk(root: &Path, cache: &Path) -> ignore::Walk {
             }
         })
         .build()
-}
-fn walk(root: &Path, cache: &Path, cancelled: &impl Fn() -> bool) -> Result<Snapshot> {
-    let mut snapshot = Snapshot::new();
-    for entry in discovery_walk(root, cache) {
-        anyhow::ensure!(!cancelled(), "File discovery cancelled");
-        let entry = entry?;
-        if entry.file_type().is_some_and(|kind| kind.is_file()) {
-            snapshot.append(entry.path().strip_prefix(root)?.as_os_str().as_bytes())?;
-        }
-    }
-    snapshot.finish(cancelled)
 }
 // Enumerate explicit ignored directories through pinned descriptors, never re-open
 // the checked scope by a mutable pathname. Directory symlinks are not followed.
@@ -620,7 +606,13 @@ fn walk_scope(
     })?;
     index.finish(cancelled)
 }
-fn discover(root: &Path, shared: &Shared, cache: &Path) -> Result<(Snapshot, String)> {
+struct Discovery {
+    index: Snapshot,
+    status: String,
+    watches: WatchPaths,
+}
+
+fn discover(root: &Path, shared: &Shared, cache: &Path, watching: bool) -> Result<Discovery> {
     let child = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -639,21 +631,91 @@ fn discover(root: &Path, shared: &Shared, cache: &Path) -> Result<(Snapshot, Str
         .stderr(Stdio::null())
         .process_group(0)
         .spawn();
-    if let Ok(child) = child {
-        enumerate_git(child, root, shared, cache).and_then(|index| match index {
-            Some(index) => Ok((index, String::new())),
-            None => walk(root, cache, &|| stopped(shared))
-                .map(|index| (index, "Ignore-aware filesystem discovery".into())),
-        })
+    let (tracked, status) = match child {
+        Ok(child) => match enumerate_git(child, root, shared, cache)? {
+            Some(index) => (Some(index), ""),
+            None => (None, "Ignore-aware filesystem discovery"),
+        },
+        Err(_) => (
+            None,
+            "Git unavailable; using ignore-aware filesystem discovery",
+        ),
+    };
+    let mut watches = WatchPaths::default();
+    if watching {
+        watches.add_policy_paths(root);
+        // Git may track files in otherwise ignored directories.
+        if let Some(index) = &tracked {
+            for id in &index.paths {
+                anyhow::ensure!(!stopped(shared), "File discovery cancelled");
+                let path = Path::new(std::ffi::OsStr::from_bytes(index.path(*id)));
+                for parent in path.ancestors().skip(1) {
+                    watches.add(root.join(parent));
+                }
+                if watches.incomplete {
+                    break;
+                }
+            }
+        }
+    }
+    let index = scan_workspace(
+        root,
+        cache,
+        tracked,
+        watching.then_some(&mut watches),
+        &|| stopped(shared),
+    )?;
+    Ok(Discovery {
+        index,
+        status: status.into(),
+        watches,
+    })
+}
+
+// In a Git workspace the walker only discovers directories (including empty
+// ones). Outside Git the same traversal also supplies the complete file index.
+fn scan_workspace(
+    root: &Path,
+    cache: &Path,
+    tracked: Option<Snapshot>,
+    mut watches: Option<&mut WatchPaths>,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Snapshot> {
+    let collect_files = tracked.is_none();
+    let mut index = tracked.unwrap_or_else(Snapshot::new);
+    if collect_files || watches.as_ref().is_some_and(|w| !w.incomplete) {
+        for entry in discovery_walk(root, cache) {
+            anyhow::ensure!(!cancelled(), "File discovery cancelled");
+            match entry {
+                Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_dir()) => {
+                    if let Some(watches) = watches.as_mut() {
+                        watches.add(entry.into_path());
+                        if watches.incomplete && !collect_files {
+                            break;
+                        }
+                    }
+                }
+                Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_file()) => {
+                    if collect_files {
+                        index.append(entry.path().strip_prefix(root)?.as_os_str().as_bytes())?;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if collect_files => return Err(error.into()),
+                Err(_) => {
+                    watches.as_mut().expect("directory scan").incomplete = true;
+                    break;
+                }
+            }
+        }
+    }
+    if collect_files {
+        index.finish(cancelled)
     } else {
-        walk(root, cache, &|| stopped(shared)).map(|index| {
-            (
-                index,
-                "Git unavailable; using ignore-aware filesystem discovery".into(),
-            )
-        })
+        Ok(index)
     }
 }
+
 fn enumerate_git(
     child: std::process::Child,
     root: &Path,
@@ -833,74 +895,50 @@ fn global_policies() -> impl Iterator<Item = PathBuf> {
         [home.join(".gitconfig"), home.join(".config/git/ignore")]
     })
 }
-fn watch_paths(
-    root: &Path,
-    snapshot: &Snapshot,
-    shared: &Shared,
-    cache: &Path,
-) -> (HashSet<PathBuf>, bool) {
-    let mut paths = HashSet::new();
-    let mut bytes = 0;
-    let mut add = |path| add_watch_path(&mut paths, &mut bytes, path);
-    add(root.to_path_buf());
-    let git = root.join(".git");
-    if git.is_dir() {
-        add(git.clone());
-        add(git.join("info"));
-    } else if let Ok(text) = fs::read_to_string(git)
-        && let Some(dir) = text.trim().strip_prefix("gitdir: ")
-    {
-        let dir = root.join(dir);
-        add(dir.clone());
-        if let Ok(common) = fs::read_to_string(dir.join("commondir")) {
-            let common = dir.join(common.trim());
-            add(common.clone());
-            add(common.join("info"));
+#[derive(Default)]
+struct WatchPaths {
+    paths: HashSet<PathBuf>,
+    bytes: usize,
+    incomplete: bool,
+}
+impl WatchPaths {
+    fn add(&mut self, path: PathBuf) {
+        if !self.incomplete {
+            self.incomplete = !add_watch_path(&mut self.paths, &mut self.bytes, path);
         }
     }
-    // Parent ignore files and conventional global ignore/config locations can alter discovery.
-    for parent in root.ancestors().skip(1) {
-        for name in [".gitignore", ".ignore", ".rgignore"] {
-            let path = parent.join(name);
-            if path.is_file() {
-                add(path);
+    fn add_policy_paths(&mut self, root: &Path) {
+        self.add(root.to_path_buf());
+        let git = root.join(".git");
+        if git.is_dir() {
+            self.add(git.clone());
+            self.add(git.join("info"));
+        } else if let Ok(text) = fs::read_to_string(git)
+            && let Some(dir) = text.trim().strip_prefix("gitdir: ")
+        {
+            let dir = root.join(dir);
+            self.add(dir.clone());
+            if let Ok(common) = fs::read_to_string(dir.join("commondir")) {
+                let common = dir.join(common.trim());
+                self.add(common.clone());
+                self.add(common.join("info"));
             }
         }
-    }
-    for path in global_policies() {
-        if path.is_file() {
-            add(path);
-        }
-    }
-    // Parents of tracked-but-ignored files must be watched too.
-    for id in &snapshot.paths {
-        if stopped(shared) {
-            return (paths, false);
-        }
-        let path = Path::new(std::ffi::OsStr::from_bytes(snapshot.path(*id)));
-        for parent in path.ancestors().skip(1) {
-            if !add(root.join(parent)) {
-                return (paths, false);
-            }
-        }
-    }
-    // Directory discovery includes empty directories, without watching ignored build trees.
-    // Filenames are already indexed; visiting entries here also bounds cancellation latency.
-    for entry in discovery_walk(root, cache) {
-        if stopped(shared) {
-            return (paths, false);
-        }
-        match entry {
-            Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_dir()) => {
-                if !add(entry.into_path()) {
-                    return (paths, false);
+        // Parent ignore files and conventional global ignore/config locations can alter discovery.
+        for parent in root.ancestors().skip(1) {
+            for name in [".gitignore", ".ignore", ".rgignore"] {
+                let path = parent.join(name);
+                if path.is_file() {
+                    self.add(path);
                 }
             }
-            Ok(_) => {}
-            Err(_) => return (paths, false),
+        }
+        for path in global_policies() {
+            if path.is_file() {
+                self.add(path);
+            }
         }
     }
-    (paths, true)
 }
 // Reuse the normal directory set when the active ignored scope changes. This
 // traversal must not rediscover, sort or serialize the main filename corpus.
@@ -1160,14 +1198,17 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf, reconcil
             let started = SystemTime::now();
             let policy = policy_stamp(&root, &shared).ok();
             baseline = None;
-            match discover(&root, &shared, &cache) {
-                Ok((index, mut discovered_status)) => {
+            match discover(&root, &shared, &cache, watcher.is_some()) {
+                Ok(Discovery {
+                    index,
+                    status: mut discovered_status,
+                    watches,
+                }) => {
                     if stopped(&shared) {
                         return;
                     }
-                    if watcher.is_some() {
-                        (base_paths, base_complete) = watch_paths(&root, &index, &shared, &cache);
-                    }
+                    base_paths = watches.paths;
+                    base_complete = !watches.incomplete;
                     if let Err(error) = save_cache(&root, &cache, &index) {
                         discovered_status.push_str(&format!(
                             " Cache unavailable: {error:#}; live search remains available."
@@ -1401,7 +1442,14 @@ mod tests {
         fs::create_dir(root.path().join("generated")).unwrap();
         fs::write(root.path().join("generated/hidden"), "x").unwrap();
         fs::write(root.path().join("visible"), "x").unwrap();
-        let index = walk(root.path(), cache.path(), &|| false).unwrap();
+        fs::create_dir(root.path().join("empty")).unwrap();
+        let mut watches = WatchPaths::default();
+        let index = scan_workspace(root.path(), cache.path(), None, Some(&mut watches), &|| {
+            false
+        })
+        .unwrap();
+        assert!(watches.paths.contains(&root.path().join("empty")));
+        assert!(!watches.paths.contains(&root.path().join("generated")));
         assert!(
             index
                 .search(b"hidden", || false, |_| {})
@@ -1445,7 +1493,7 @@ mod tests {
         );
         let watch_cache = private_cache_dir();
         let service = Service::open(root.path().into(), watch_cache.path().into()).unwrap();
-        let (base, _) = watch_paths(root.path(), &index, &service.shared, watch_cache.path());
+        let base = HashSet::from([root.path().to_path_buf(), root.path().join("scope")]);
         let (watched, complete) = scope_watch_paths(
             root.path(),
             Some(Path::new("scope")),
@@ -1459,7 +1507,7 @@ mod tests {
         let cache = root.path().join("file-cache");
         fs::create_dir(&cache).unwrap();
         fs::write(cache.join("private"), "paths").unwrap();
-        let index = walk(root.path(), &cache, &|| false).unwrap();
+        let index = scan_workspace(root.path(), &cache, None, None, &|| false).unwrap();
         assert!(
             index
                 .search(b"private", || false, |_| {})
@@ -1522,6 +1570,52 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tracks_deletion_inside_git_ignored_directories_without_reconciliation() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = private_cache_dir();
+        fs::write(root.path().join(".gitignore"), "build/\n").unwrap();
+        let nested = root.path().join("build/nested");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("tracked");
+        fs::write(&file, "tracked despite the ignore rule").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "-f", "build/nested/tracked"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(root.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let service = Service::start(
+            root.path().into(),
+            cache.path().into(),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        let mut rx = service.subscribe();
+        service.query(1, b"tracked".to_vec(), None, false);
+        let found = until(&mut rx, |r| {
+            r.request == 1
+                && r.phase == SearchPhase::Complete
+                && r.paths == ["@build/nested/tracked"]
+        })
+        .await;
+        fs::remove_file(file).unwrap();
+        until(&mut rx, |r| {
+            r.request == 1
+                && r.phase == SearchPhase::Complete
+                && r.generation > found.generation
+                && r.paths.is_empty()
+        })
+        .await;
     }
 
     #[tokio::test]

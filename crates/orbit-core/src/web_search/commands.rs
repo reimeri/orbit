@@ -189,44 +189,54 @@ impl SearchCommands {
         use anyhow::{Context, bail};
         let mut commands: Self = serde_json::from_str(arguments)
             .context("Invalid web__run arguments; use the documented operation arrays")?;
-        let encoded = serde_json::to_value(&commands)?;
-        let mut count = 0;
-        for (name, value) in encoded.as_object().expect("commands object") {
-            if let Some(operations) = value.as_array() {
-                count += operations.len();
-                if name == "search_query" && operations.len() > 4 {
-                    bail!("search_query accepts at most four queries per call");
-                }
-                for operation in operations {
-                    for field in ["q", "ref_id", "pattern", "ticker", "location", "utc_offset"] {
-                        if operation
-                            .get(field)
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|s| s.trim().is_empty())
-                        {
-                            bail!("{name}.{field} must not be blank");
-                        }
-                    }
-                    if let Some(domains) = operation
-                        .get("domains")
-                        .and_then(serde_json::Value::as_array)
+        if commands.search_query.as_ref().is_some_and(|q| q.len() > 4) {
+            bail!("search_query accepts at most four queries per call");
+        }
+        let mut has_operations = commands.sports.as_ref().is_some_and(|ops| !ops.is_empty());
+        let mut required = |field: &str, value: &str| -> anyhow::Result<()> {
+            has_operations = true;
+            anyhow::ensure!(!value.trim().is_empty(), "{field} must not be blank");
+            Ok(())
+        };
+        for (name, queries) in [
+            ("search_query.q", &commands.search_query),
+            ("image_query.q", &commands.image_query),
+        ] {
+            for query in queries.iter().flatten() {
+                required(name, &query.q)?;
+                for domain in query.domains.iter().flatten() {
+                    if domain.is_empty()
+                        || domain.chars().any(char::is_whitespace)
+                        || domain.contains(['/', ':'])
                     {
-                        for domain in domains {
-                            let domain = domain.as_str().expect("typed domain");
-                            if domain.is_empty()
-                                || domain.chars().any(char::is_whitespace)
-                                || domain.contains(['/', ':'])
-                            {
-                                bail!(
-                                    "domains must contain host names such as example.com, not URLs"
-                                );
-                            }
-                        }
+                        bail!("domains must contain host names such as example.com, not URLs");
                     }
                 }
             }
         }
-        if count == 0 {
+        for op in commands.open.iter().flatten() {
+            required("open.ref_id", &op.ref_id)?;
+        }
+        for op in commands.click.iter().flatten() {
+            required("click.ref_id", &op.ref_id)?;
+        }
+        for op in commands.find.iter().flatten() {
+            required("find.ref_id", &op.ref_id)?;
+            required("find.pattern", &op.pattern)?;
+        }
+        for op in commands.screenshot.iter().flatten() {
+            required("screenshot.ref_id", &op.ref_id)?;
+        }
+        for op in commands.finance.iter().flatten() {
+            required("finance.ticker", &op.ticker)?;
+        }
+        for op in commands.time.iter().flatten() {
+            required("time.utc_offset", &op.utc_offset)?;
+        }
+        for op in commands.weather.iter().flatten() {
+            required("weather.location", &op.location)?;
+        }
+        if !has_operations {
             bail!("Provide at least one web operation; no request was sent");
         }
         if commands

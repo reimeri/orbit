@@ -5,8 +5,7 @@ use serde::Deserialize;
 use std::{
     collections::HashSet,
     fs,
-    io::{self, BufRead, BufReader, ErrorKind, Read},
-    os::unix::fs::OpenOptionsExt,
+    io::{BufRead, BufReader, ErrorKind, Read},
     path::{Path, PathBuf},
 };
 
@@ -101,7 +100,7 @@ pub(crate) fn discover_with_home(cwd: &Path, home: Option<&Path>) -> Result<Cata
         for entry in dirs {
             let result = (|| -> Result<()> {
                 let path = entry?.path().join("SKILL.md");
-                let file = match open_regular(&path) {
+                let file = match crate::open_regular(&path) {
                     Ok(file) => file,
                     Err(e)
                         if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
@@ -127,20 +126,6 @@ pub(crate) fn discover_with_home(cwd: &Path, home: Option<&Path>) -> Result<Cata
         .sort_by(|a, b| (&a.name, a.personal, &a.path).cmp(&(&b.name, b.personal, &b.path)));
     catalog.warnings.sort();
     Ok(catalog)
-}
-
-fn open_regular(path: &Path) -> io::Result<fs::File> {
-    let file = fs::File::options()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "expected a regular file",
-        ));
-    }
-    Ok(file)
 }
 
 fn load(path: &Path, file: fs::File, personal: bool) -> Result<Skill> {
@@ -186,7 +171,7 @@ fn load(path: &Path, file: fs::File, personal: bool) -> Result<Skill> {
         .parent()
         .expect("skill directory")
         .join("agents/openai.yaml");
-    let implicit = match open_regular(&sidecar) {
+    let implicit = match crate::open_regular(&sidecar) {
         Ok(file) => serde_yaml_ng::from_reader::<_, Option<Sidecar>>(BufReader::new(file))
             .with_context(|| sidecar.display().to_string())?
             .and_then(|s| s.policy.allow_implicit_invocation)
@@ -238,7 +223,7 @@ pub(crate) fn capture(cwd: &Path, home: Option<&Path>, text: &str) -> Result<Vec
         let skill = catalog.skills.iter().find(|s| s.mention() == mention)
             .with_context(|| format!("Skill {mention} is no longer available. Refresh the picker and reselect it, or remove the mention."))?;
         let mut contents = String::new();
-        open_regular(&skill.path)
+        crate::open_regular(&skill.path)
             .and_then(|mut file| file.read_to_string(&mut contents))
             .with_context(|| format!("Read selected skill {}", skill.path.display()))?;
         result.push(format!(

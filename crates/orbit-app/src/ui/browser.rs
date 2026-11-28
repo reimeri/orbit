@@ -2,11 +2,10 @@ mod gpu;
 mod surface;
 use super::*;
 use iced::widget::column;
+use orbit_core::browser::UserCommand as Cmd;
 use orbit_core::browser::{Frame, MAX_SIDE, Status, address};
-use serde_json::{Value, json};
 
 pub(super) struct State {
-    pub open: bool,
     pub expanded: bool,
     pub(super) mounted: Option<String>,
     frame: Option<Frame>,
@@ -22,7 +21,6 @@ pub(super) struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            open: false,
             expanded: false,
             mounted: None,
             frame: None,
@@ -46,10 +44,10 @@ impl State {
         )
     }
     pub(super) fn find_open(&self) -> bool {
-        self.open && self.find.is_some()
+        self.mounted.is_some() && self.find.is_some()
     }
     pub fn page_focused(&self) -> bool {
-        self.open && self.focus.0.get()
+        self.mounted.is_some() && self.focus.0.get()
     }
 }
 const TOOL_HEIGHT: f32 = 28.;
@@ -80,8 +78,8 @@ pub enum Action {
     Go,
     AddressFocus,
     PageFocus,
-    Input(String, Value),
-    Nav(&'static str),
+    Input(String, Cmd),
+    Nav(Cmd),
     Fit,
     FindFocus,
     Query(String),
@@ -98,19 +96,13 @@ fn msg(a: Action) -> Message {
 }
 impl App {
     pub(super) fn sync_browser(&mut self) {
-        if self.settings_open
-            || self.agents_open
-            || self.changes.open
-            || self.worktrees.panel
-            || self.fork_panel.is_some()
-            || self.current_session.is_none()
-        {
-            self.browser.open = false
+        if self.current_session.is_none() && self.right_panel == Some(RightPanel::Browser) {
+            self.set_right_panel(None);
         }
         let next = self
             .current_session
             .as_ref()
-            .filter(|_| self.browser.open)
+            .filter(|_| self.right_panel == Some(RightPanel::Browser))
             .map(|s| (s.id.clone(), s.project.clone()));
         if self.browser.mounted.as_deref() == next.as_ref().map(|x| x.0.as_str()) {
             return;
@@ -124,7 +116,6 @@ impl App {
         let size = self.browser.size;
         let scale = self.browser.scale;
         self.browser = State {
-            open: next.is_some(),
             size,
             scale,
             ..State::default()
@@ -160,16 +151,7 @@ impl App {
     }
     pub(super) fn browser_action(&mut self, a: Action) -> Task<Message> {
         if matches!(a, Action::Toggle) {
-            self.browser.open = !self.browser.open;
-            self.changes.close();
-            self.worktrees.panel = false;
-            self.worktrees.popup = None;
-            self.agents_open = false;
-            self.fork_panel = None;
-            self.view_epoch = self.view_epoch.wrapping_add(1);
-            if self.settings_open {
-                return self.update_inner(Message::CancelSettings);
-            }
+            self.toggle_right_panel(RightPanel::Browser);
             return Task::none();
         }
         if let Action::Scale(scale) = a {
@@ -208,7 +190,7 @@ impl App {
             Action::Go => match address(&self.browser.location) {
                 Ok(url) => {
                     self.browser.editing = false;
-                    json!({"op":"navigate","url":url})
+                    Cmd::Navigate { url }
                 }
                 Err(e) => {
                     self.error = Some(e.to_string());
@@ -218,11 +200,19 @@ impl App {
             Action::Size(ref owner, size) if owner == &id => {
                 self.browser.size = size;
                 let (w, h) = self.browser.dip();
-                json!({"op":"size","width":w,"height":h,"scale":self.browser.scale})
+                Cmd::Size {
+                    width: w,
+                    height: h,
+                    scale: self.browser.scale,
+                }
             }
             Action::Scale(_) => {
                 let (w, h) = self.browser.dip();
-                json!({"op":"size","width":w,"height":h,"scale":self.browser.scale})
+                Cmd::Size {
+                    width: w,
+                    height: h,
+                    scale: self.browser.scale,
+                }
             }
             Action::Input(owner, op) if owner == id => op,
             Action::PageFocus => {
@@ -232,46 +222,54 @@ impl App {
             }
             Action::AddressFocus => {
                 if self.browser.find.take().is_some() {
-                    let _ = b.user(&id, json!({"op":"end_find"}));
+                    let _ = b.user(&id, Cmd::EndFind);
                 }
-                let _ = b.user(&id, json!({"op":"focus","focus":false}));
+                let _ = b.user(&id, Cmd::Focus { focus: false });
                 return widget::operation::focus("browser-location")
                     .chain(widget::operation::select_all("browser-location"));
             }
             Action::Nav(op) => {
                 self.browser.editing = false;
-                if op == "reload"
+                if matches!(op, Cmd::Reload)
                     && let Some(s) = &self.current_session
                     && let Err(e) = b.show(&id, &s.project)
                 {
                     self.error = Some(e.to_string());
                     return Task::none();
                 }
-                json!({"op":op})
+                op
             }
             Action::Fit => {
                 self.browser.menu = None;
-                json!({"op":"viewport","fixed":null})
+                Cmd::Viewport { fixed: None }
             }
             Action::FindFocus => {
-                let _ = b.user(&id, json!({"op":"focus","focus":false}));
+                let _ = b.user(&id, Cmd::Focus { focus: false });
                 self.browser.menu = None;
                 self.browser.find.get_or_insert_with(String::new);
                 return widget::operation::focus("browser-find");
             }
             Action::EndFind => {
                 self.browser.find = None;
-                json!({"op":"end_find"})
+                Cmd::EndFind
             }
             Action::Query(s) => {
                 self.browser.find = Some(s.clone());
                 if s.is_empty() {
-                    json!({"op":"end_find"})
+                    Cmd::EndFind
                 } else {
-                    json!({"op":"find","text":s})
+                    Cmd::Find {
+                        text: s,
+                        next: false,
+                    }
                 }
             }
-            Action::Next => json!({"op":"find","text":self.browser.find,"next":true}),
+            Action::Next => {
+                let Some(text) = self.browser.find.clone() else {
+                    return Task::none();
+                };
+                Cmd::Find { text, next: true }
+            }
             Action::Control => {
                 self.browser.menu = None;
                 if let Err(e) = b.control(&id, !self.browser.status.user_control) {
@@ -303,7 +301,7 @@ impl App {
                 return Task::none();
             }
             Action::Close => {
-                self.browser.open = false;
+                self.set_right_panel(None);
                 b.close(&id);
                 return Task::none();
             }
@@ -377,11 +375,11 @@ impl App {
             );
         }
         let mut bar = row![
-            nav(Icon::ArrowLeft, "Back", Action::Nav("back"), state.back),
+            nav(Icon::ArrowLeft, "Back", Action::Nav(Cmd::Back), state.back),
             nav(
                 Icon::ArrowRight,
                 "Forward",
-                Action::Nav("forward"),
+                Action::Nav(Cmd::Forward),
                 state.forward
             ),
             nav(
@@ -395,7 +393,11 @@ impl App {
                 } else {
                     "Reload"
                 },
-                Action::Nav(if state.loading { "stop" } else { "reload" }),
+                Action::Nav(if state.loading {
+                    Cmd::Stop
+                } else {
+                    Cmd::Reload
+                }),
                 true
             ),
             prefix,

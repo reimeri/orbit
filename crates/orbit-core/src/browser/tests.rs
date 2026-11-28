@@ -316,14 +316,22 @@ async fn native_browser_responsive_accessibility_and_waits() -> Result<()> {
     tab.browser.show(&tab.id, &tab.project)?;
     tab.browser.user(
         &tab.id,
-        json!({"op":"size","width":900,"height":650,"scale":1}),
+        UserCommand::Size {
+            width: 900,
+            height: 650,
+            scale: 1.0,
+        },
     )?;
     act(&tab, json!({"action":"navigate","url":page})).await?;
     act(&tab, wait("heading", "900/650/1")).await?;
     act(&tab, json!({"action":"viewport","width":390,"height":844})).await?;
     tab.browser.user(
         &tab.id,
-        json!({"op":"size","width":960,"height":600,"scale":1.5}),
+        UserCommand::Size {
+            width: 960,
+            height: 600,
+            scale: 1.5,
+        },
     )?;
     act(&tab, wait("heading", "390/844/1")).await?;
     assert_eq!(tab.browser.status(&tab.id).viewport, Some((390, 844)));

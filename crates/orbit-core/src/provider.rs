@@ -159,15 +159,7 @@ impl Provider {
             "prompt_cache_key": request_id,
         });
         let response = self.request(&request_id, body, cancel, &|_| {}).await?;
-        let title = response
-            .output
-            .iter()
-            .filter(|item| item["type"] == "message" && item["role"] == "assistant")
-            .flat_map(|item| item["content"].as_array().into_iter().flatten())
-            .filter(|part| part["type"] == "output_text")
-            .filter_map(|part| part["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let title = final_text(&response.output);
         let title = title.trim();
         if title.is_empty() || title.chars().count() > 80 || title.chars().any(char::is_control) {
             bail!("Luna returned an unusable session title");
@@ -283,13 +275,7 @@ impl Provider {
             body["input"].as_array_mut().expect("request input").push(json!({"role":"user","content":format!("Previous summary:\n{summary}\n\nNext historical chunk:\n{chunk}")}));
             let response = self.request(&session.id, body, cancel, &|_| {}).await.context("Compaction failed; the original context and transcript are preserved. Check your connection and retry")?;
             account(&response);
-            summary = response
-                .output
-                .iter()
-                .flat_map(|v| v["content"].as_array().into_iter().flatten())
-                .filter_map(|v| v["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
+            summary = final_text(&response.output);
             if summary.trim().is_empty() {
                 bail!(
                     "Model returned an empty summary. Original context preserved; retry compaction."
@@ -358,6 +344,30 @@ struct ResponseStream<'a> {
     summary_indices: std::collections::HashMap<String, u64>,
     completed_items: std::collections::BTreeMap<usize, Value>,
 }
+/// Output items may omit the (implicit assistant) role. Progress messages
+/// belong in the transcript, never in a final result, title or checkpoint.
+pub(crate) fn final_text(output: &[Value]) -> String {
+    output
+        .iter()
+        .filter(|item| {
+            item["type"] == "message"
+                && (item["role"].is_null() || item["role"] == "assistant")
+                && item["phase"] != "commentary"
+        })
+        .flat_map(|item| text_parts(&item["content"], "output_text"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn text_parts<'a>(content: &'a Value, kind: &'a str) -> impl Iterator<Item = &'a str> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |part| part["type"] == kind)
+        .filter_map(|part| part["text"].as_str())
+}
+
 pub(crate) fn is_tool_call(item: &Value) -> bool {
     matches!(
         item["type"].as_str(),
@@ -367,6 +377,21 @@ pub(crate) fn is_tool_call(item: &Value) -> bool {
 
 fn validate_output_item(item: &Value) -> Result<()> {
     item["type"].as_str().context("Output item missing type")?;
+    if item["type"] == "message" {
+        for part in item["content"]
+            .as_array()
+            .context("Completed message missing content")?
+        {
+            let kind = part["type"]
+                .as_str()
+                .context("Completed message part missing type")?;
+            if kind == "output_text" {
+                part["text"]
+                    .as_str()
+                    .context("Completed output_text missing text")?;
+            }
+        }
+    }
     if is_tool_call(item) {
         for field in [
             "call_id",
@@ -1392,6 +1417,8 @@ mod tests {
         assert_eq!(events.lock().unwrap().len(), 1);
 
         for malformed in [
+            json!({"type":"message","content":[{"text":"not an empty answer"}]}),
+            json!({"type":"message","content":[{"type":"output_text"}]}),
             json!({"type":"custom_tool_call","call_id":"bad","name":"exec","input":"text('partial')","status":"in_progress"}),
             json!({"type":"function_call","call_id":"bad","name":"wait","arguments":{}}),
         ] {

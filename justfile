@@ -30,12 +30,12 @@ run:
 
 # Wgpu/Vulkan window check using the pinned CPU driver; no desktop/GPU required.
 smoke:
-    cargo build --locked -p orbit
+    cargo build --locked -p orbit --features staged-capture
     ./scripts/smoke-wayland.sh
 
 # Save a staged Orbit window on a private Wayland display.
 marketing-shot $output="target/orbit-marketing.png":
-    cargo build --locked -p orbit
+    cargo build --locked -p orbit --features staged-capture
     ./scripts/smoke-wayland.sh ./target/debug/orbit "$output"
 
 # Compose the README banner from an existing staged capture.
@@ -44,7 +44,7 @@ marketing-banner $screenshot="target/orbit-marketing.png" $output="assets/market
 
 # Requires a running Wayland desktop and a working graphics driver; no fallback.
 smoke-gpu:
-    cargo build --locked -p orbit
+    cargo build --locked -p orbit --features staged-capture
     env -u DISPLAY ICED_BACKEND=wgpu timeout 60s ./target/debug/orbit --smoke-test
 
 # Pre-commit checks. Not the edit/compile inner loop.
