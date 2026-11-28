@@ -827,6 +827,12 @@ fn add_watch_path(paths: &mut HashSet<PathBuf>, bytes: &mut usize, path: PathBuf
     paths.insert(path);
     true
 }
+fn global_policies() -> impl Iterator<Item = PathBuf> {
+    std::env::var_os("HOME").into_iter().flat_map(|home| {
+        let home = PathBuf::from(home);
+        [home.join(".gitconfig"), home.join(".config/git/ignore")]
+    })
+}
 fn watch_paths(
     root: &Path,
     snapshot: &Snapshot,
@@ -861,14 +867,9 @@ fn watch_paths(
             }
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        for path in [
-            PathBuf::from(&home).join(".gitconfig"),
-            PathBuf::from(&home).join(".config/git/ignore"),
-        ] {
-            if path.is_file() {
-                add(path);
-            }
+    for path in global_policies() {
+        if path.is_file() {
+            add(path);
         }
     }
     // Parents of tracked-but-ignored files must be watched too.
@@ -1088,6 +1089,7 @@ fn watches_unchanged(watched: &HashSet<PathBuf>, started: SystemTime, shared: &S
 
 fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf, reconcile: Duration) {
     let weak = Arc::downgrade(&shared);
+    let policies: Vec<_> = global_policies().collect();
     let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let relevant = match event {
             Ok(event) => {
@@ -1099,19 +1101,20 @@ fn discovery_worker(shared: Arc<Shared>, root: PathBuf, cache: PathBuf, reconcil
                                 | notify::event::ModifyKind::Metadata(_)
                         )
                     ) || event.paths.iter().any(|p| {
-                        p.file_name().is_some_and(|n| {
-                            [
-                                ".gitignore",
-                                ".ignore",
-                                ".rgignore",
-                                "index",
-                                "exclude",
-                                "config",
-                                "commondir",
-                            ]
-                            .iter()
-                            .any(|s| n == *s)
-                        })
+                        policies.contains(p)
+                            || p.file_name().is_some_and(|n| {
+                                [
+                                    ".gitignore",
+                                    ".ignore",
+                                    ".rgignore",
+                                    "index",
+                                    "exclude",
+                                    "config",
+                                    "commondir",
+                                ]
+                                .iter()
+                                .any(|s| n == *s)
+                            })
                     }))
             }
             Err(_) => true,

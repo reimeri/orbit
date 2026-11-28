@@ -165,11 +165,14 @@ impl App {
             }
             let follow_top = section.list.offset <= 1.;
             section.list.reset(section.rows.iter().map(|&index| {
-                let next = self.sidebar_keys.len() + 3;
                 let key = *self
                     .sidebar_keys
                     .entry(self.sessions[index].id.clone())
-                    .or_insert(next);
+                    .or_insert_with(|| {
+                        let key = self.next_sidebar_key;
+                        self.next_sidebar_key += 1;
+                        key
+                    });
                 (key, COLLAPSED_ROW_HEIGHT + COLLAPSED_ROW_GAP)
             }));
             if follow_top {
@@ -186,8 +189,8 @@ impl App {
             }
         }
         self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
-        self.sidebar_list
-            .reset(self.sidebar_rows.iter().map(|row| match row {
+        self.sidebar_list.reset(self.sidebar_rows.iter().map(|row| {
+            match row {
                 SidebarRow::Heading(name, _) => (
                     match *name {
                         "WORKING" => 0,
@@ -196,17 +199,19 @@ impl App {
                     },
                     36.,
                 ),
-                SidebarRow::Session(index, _) => {
-                    let next = self.sidebar_keys.len() + 3;
-                    (
-                        *self
-                            .sidebar_keys
-                            .entry(self.sessions[*index].id.clone())
-                            .or_insert(next),
-                        53.,
-                    )
-                }
-            }));
+                SidebarRow::Session(index, _) => (
+                    *self
+                        .sidebar_keys
+                        .entry(self.sessions[*index].id.clone())
+                        .or_insert_with(|| {
+                            let key = self.next_sidebar_key;
+                            self.next_sidebar_key += 1;
+                            key
+                        }),
+                    53.,
+                ),
+            }
+        }));
         // Reset normally preserves the visible row, but at the top new rows
         // and sections should remain visible instead of pushing us down.
         if self.sidebar_follow_top {
@@ -685,10 +690,10 @@ pub(super) fn branch_subscription(path: &Path) -> Subscription<Message> {
             loop {
                 let branch =
                     tokio::time::timeout(Duration::from_secs(5), crate::git::sidebar_branch(&path))
-                        .await
-                        .ok()
-                        .flatten();
-                if previous.as_ref() != Some(&branch) {
+                        .await;
+                if let Ok(Ok(branch)) = branch
+                    && previous.as_ref() != Some(&branch)
+                {
                     previous = Some(branch.clone());
                     if output
                         .send(Message::SidebarBranch(path.clone(), branch))

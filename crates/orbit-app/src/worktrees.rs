@@ -76,7 +76,12 @@ fn reflog_birth(common: &Path, branch: &OsStr) -> Result<Option<u64>> {
         Err(e) => return Err(e.into()),
     };
     let mut first = Vec::new();
-    std::io::BufReader::new(file).read_until(b'\n', &mut first)?;
+    match std::io::BufReader::new(file).read_until(b'\n', &mut first) {
+        Err(e) if e.kind() == ErrorKind::IsADirectory => return Ok(None),
+        result => {
+            result?;
+        }
+    }
     // The old object ID is all zeros on ref creation. An expired/pruned
     // first entry is not evidence of the branch's creation date.
     let header = first
@@ -124,13 +129,15 @@ impl Repo {
             ],
         )
         .await?;
-        let preferred = match origin.as_slice() {
-            b"refs/remotes/origin/master\n" => ["master", "main"],
-            _ => ["main", "master"],
-        };
-        let base = preferred
-            .iter()
-            .find_map(|b| branches.iter().find(|name| *name == OsStr::new(b)).cloned());
+        let remote = origin
+            .strip_suffix(b"\n")
+            .and_then(|v| v.strip_prefix(b"refs/remotes/origin/"))
+            .map(OsStr::from_bytes);
+        let base = remote
+            .into_iter()
+            .chain([OsStr::new("main"), OsStr::new("master")])
+            .find(|candidate| branches.iter().any(|b| b == candidate))
+            .map(OsStr::to_owned);
         let listing = git(project, ["worktree", "list", "--porcelain", "-z"]).await?;
         let mut fields = listing.split(|&b| b == 0);
         let mut trees = Vec::new();
@@ -175,6 +182,7 @@ impl Repo {
                         if branch.as_deref() == path.file_name() {
                             created = Some(
                                 stamp
+                                    .trim_end()
                                     .parse()
                                     .context("Invalid Orbit worktree creation date")?,
                             );
@@ -528,8 +536,18 @@ mod tests {
                 "refs/remotes/origin/master",
             ],
         );
+        assert_eq!(read().await.base.as_deref(), Some(OsStr::new("master")));
+        command(path, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+        command(
+            path,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        );
         let repo = read().await;
-        assert_eq!(repo.base.as_deref(), Some(OsStr::new("master")));
+        assert_eq!(repo.base.as_deref(), Some(OsStr::new("trunk")));
         assert_eq!(
             repo.trees.len(),
             1,

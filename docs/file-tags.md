@@ -39,7 +39,8 @@ diff’s `@@`) stays plain text without blocking the message or its other attach
   just during an earlier pathname check. Relative symlinks resolving inside the workspace can be used manually;
   absolute and escaping symlinks are rejected. Only regular files are accepted, with nonblocking
   opening so FIFOs cannot hang submission.
-- Repeated references to the same device/inode attach once, in first-mention order.
+- Repeated references to the same file version attach once, in first-mention order.
+  A fork can include both saved and newer bytes when the original file has changed.
 - The current shared policy in `file_tags.rs` inlines at most **64 KiB per text file**
   and **256 KiB of file text per message**. These are inline budgets, not read limits.
 - Larger files, non-UTF-8 data, and binary files remain complete. Private `/tmp`
@@ -49,7 +50,8 @@ diff’s `@@`) stays plain text without blocking the message or its other attach
   OS temporary-file cleanup does not destroy replay data.
   Missing temporary copies are recreated from those durable bytes at projection.
 - PNG/JPEG/WebP/GIF data uses the existing image pipeline and its documented
-  decode/size limits. Other binary data remains a file reference, not an unsupported
+  decode/size limits. If the bytes cannot be decoded within those limits, the complete
+  original is attached as a file instead. Other binary data remains a file reference, not an unsupported
   audio input. Image-generation billing is not involved.
 - File size/mtime/ctime are checked across capture. Once a file is opened for
   attachment, a concurrent modification or failure to read or preserve its bytes

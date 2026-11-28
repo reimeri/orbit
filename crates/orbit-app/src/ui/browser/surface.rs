@@ -58,17 +58,57 @@ impl Surface<'_> {
 }
 #[derive(Default)]
 struct Input {
-    down: bool,
+    buttons: i32,
     inside: bool,
     mods: keyboard::Modifiers,
     click: Option<iced::advanced::mouse::Click>,
     point: Point,
 }
-fn keycode(k: keyboard::Key<&str>, physical: keyboard::key::Physical) -> i32 {
+fn keycode(k: &keyboard::Key, physical: keyboard::key::Physical) -> i32 {
     use keyboard::key::{Code, Physical};
     // Windows VK constants are not ASCII punctuation (e.g. '.' is not Delete).
     if let Physical::Code(c) = physical {
         let vk = match c {
+            Code::Digit0 => 48,
+            Code::Digit1 => 49,
+            Code::Digit2 => 50,
+            Code::Digit3 => 51,
+            Code::Digit4 => 52,
+            Code::Digit5 => 53,
+            Code::Digit6 => 54,
+            Code::Digit7 => 55,
+            Code::Digit8 => 56,
+            Code::Digit9 => 57,
+            Code::F1 => 112,
+            Code::F2 => 113,
+            Code::F3 => 114,
+            Code::F4 => 115,
+            Code::F5 => 116,
+            Code::F6 => 117,
+            Code::F7 => 118,
+            Code::F8 => 119,
+            Code::F9 => 120,
+            Code::F10 => 121,
+            Code::F11 => 122,
+            Code::F12 => 123,
+            Code::Numpad0 => 96,
+            Code::Numpad1 => 97,
+            Code::Numpad2 => 98,
+            Code::Numpad3 => 99,
+            Code::Numpad4 => 100,
+            Code::Numpad5 => 101,
+            Code::Numpad6 => 102,
+            Code::Numpad7 => 103,
+            Code::Numpad8 => 104,
+            Code::Numpad9 => 105,
+            Code::NumpadEnter => 13,
+            Code::NumpadAdd => 107,
+            Code::NumpadSubtract => 109,
+            Code::NumpadMultiply => 106,
+            Code::NumpadDivide => 111,
+            Code::NumpadDecimal => 110,
+            Code::SuperLeft => 91,
+            Code::SuperRight => 92,
             Code::Backquote => 0xc0,
             Code::Minus => 0xbd,
             Code::Equal => 0xbb,
@@ -88,9 +128,10 @@ fn keycode(k: keyboard::Key<&str>, physical: keyboard::key::Physical) -> i32 {
     }
     use keyboard::key::Named::*;
     match k {
-        keyboard::Key::Character(c) if c.len() == 1 && c.as_bytes()[0].is_ascii_alphanumeric() => {
-            c.as_bytes()[0].to_ascii_uppercase() as i32
-        }
+        keyboard::Key::Character(_) => k
+            .to_latin(physical)
+            .filter(char::is_ascii_alphanumeric)
+            .map_or(0, |c| c.to_ascii_uppercase() as i32),
         keyboard::Key::Named(n) => match n {
             Enter => 13,
             Tab => 9,
@@ -116,7 +157,19 @@ fn keycode(k: keyboard::Key<&str>, physical: keyboard::key::Physical) -> i32 {
     }
 }
 fn modifiers(m: keyboard::Modifiers) -> i32 {
-    2 * i32::from(m.shift()) + 4 * i32::from(m.control()) + 8 * i32::from(m.alt())
+    2 * i32::from(m.shift())
+        + 4 * i32::from(m.control())
+        + 8 * i32::from(m.alt())
+        + 128 * i32::from(m.logo())
+}
+// cef_event_flags_t uses the same bits in click, move and wheel events.
+fn button_flag(button: mouse::Button) -> Option<i32> {
+    match button {
+        mouse::Button::Left => Some(16),
+        mouse::Button::Middle => Some(32),
+        mouse::Button::Right => Some(64),
+        _ => None,
+    }
 }
 impl Focusable for Surface<'_> {
     fn is_focused(&self) -> bool {
@@ -184,9 +237,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
             state.mods = *m;
             return;
         }
-        if self.disabled {
-            return;
-        }
         let bounds = self.preview(layout.bounds());
         let pos = cursor.position_in(bounds);
         if let Some(p) = cursor.position() {
@@ -199,8 +249,21 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
         let x = (state.point.x * self.dip.0 as f32 / bounds.width) as i32;
         let y = (state.point.y * self.dip.1 as f32 / bounds.height) as i32;
         let send = |msg: Value| Message::Browser(Action::Input(self.id.to_owned(), msg));
+        if self.disabled || matches!(event, Event::Window(iced::window::Event::Unfocused)) {
+            if state.buttons != 0 {
+                // Losing the drag target is not a click: cancel CEF's capture.
+                shell.publish(send(json!({"op":"capture_lost"})));
+                state.buttons = 0;
+            }
+            if self.disabled {
+                return;
+            }
+        }
         let action = match event {
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+            Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                let Some(flag) = button_flag(*button) else {
+                    return;
+                };
                 if pos.is_none() {
                     if self.focus.0.replace(false) {
                         shell.publish(send(json!({"op":"focus","focus":false})));
@@ -211,12 +274,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                     return;
                 }
                 self.focus.focus();
-                state.down = true;
-                let click = iced::advanced::mouse::Click::new(
-                    state.point,
-                    mouse::Button::Left,
-                    state.click,
-                );
+                state.buttons |= flag;
+                let click = iced::advanced::mouse::Click::new(state.point, *button, state.click);
                 let count = match click.kind() {
                     iced::advanced::mouse::click::Kind::Single => 1,
                     iced::advanced::mouse::click::Kind::Double => 2,
@@ -224,17 +283,33 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                 };
                 state.click = Some(click);
                 shell.publish(Message::Browser(Action::PageFocus));
-                send(json!({"op":"down","x":x,"y":y,"count":count,"mods":modifiers(state.mods)}))
+                send(
+                    json!({"op":"down","button":flag,"x":x,"y":y,"count":count,"mods":modifiers(state.mods) | state.buttons}),
+                )
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if state.down => {
-                state.down = false;
-                send(json!({"op":"up","x":x,"y":y,"mods":modifiers(state.mods)}))
+            Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                let Some(flag) = button_flag(*button) else {
+                    return;
+                };
+                if state.buttons & flag == 0 {
+                    return;
+                }
+                state.buttons &= !flag;
+                let up = send(
+                    json!({"op":"up","button":flag,"x":x,"y":y,"mods":modifiers(state.mods) | state.buttons}),
+                );
+                if state.buttons == 0 && pos.is_none() {
+                    shell.publish(up);
+                    send(json!({"op":"move","leave":true,"x":x,"y":y,"mods":modifiers(state.mods)}))
+                } else {
+                    up
+                }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. })
-                if pos.is_some() || left || state.down =>
+                if pos.is_some() || left || state.buttons != 0 =>
             {
                 send(
-                    json!({"op":"move","leave":pos.is_none(),"x":x,"y":y,"mods":modifiers(state.mods)+16*i32::from(state.down)}),
+                    json!({"op":"move","leave":pos.is_none() && state.buttons == 0,"x":x,"y":y,"mods":modifiers(state.mods)|state.buttons}),
                 )
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta })
@@ -245,13 +320,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                     mouse::ScrollDelta::Pixels { x, y } => (*x, *y),
                 };
                 send(
-                    json!({"op":"scroll","x":x,"y":y,"dx":dx.round() as i32,"dy":dy.round() as i32}),
+                    json!({"op":"scroll","mods":modifiers(state.mods) | state.buttons,"x":x,"y":y,"dx":dx.round() as i32,"dy":dy.round() as i32}),
                 )
             }
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modifiers: m,
                 physical_key,
+                location,
                 text,
                 ..
             }) if self.focus.is_focused() => {
@@ -292,17 +368,18 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                         send(json!({"op":"forward"}))
                     }
                     _ => send(
-                        json!({"op":"keydown","code":keycode(k,*physical_key),"mods":modifiers(*m),"text":if m.command(){""}else{text.as_deref().unwrap_or("")}}),
+                        json!({"op":"keydown","code":keycode(key,*physical_key),"mods":modifiers(*m) | (512 * i32::from(*location == keyboard::Location::Numpad)),"text":if m.command(){""}else{text.as_deref().unwrap_or("")}}),
                     ),
                 }
             }
             Event::Keyboard(keyboard::Event::KeyReleased {
                 key,
                 physical_key,
+                location,
                 modifiers: m,
                 ..
             }) if self.focus.is_focused() => send(
-                json!({"op":"keyup","code":keycode(key.as_ref(),*physical_key),"mods":modifiers(*m)}),
+                json!({"op":"keyup","code":keycode(key,*physical_key),"mods":modifiers(*m) | (512 * i32::from(*location == keyboard::Location::Numpad))}),
             ),
             Event::InputMethod(input_method::Event::Commit(s)) if self.focus.is_focused() => {
                 send(json!({"op":"text","text":s}))
@@ -311,7 +388,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Surface<'_> {
                 send(json!({"op":"preedit","text":s}))
             }
             Event::Window(iced::window::Event::Unfocused) if self.focus.0.replace(false) => {
-                state.down = false;
                 send(json!({"op":"focus","focus":false}))
             }
             Event::Window(iced::window::Event::RedrawRequested(_)) if self.focus.is_focused() => {

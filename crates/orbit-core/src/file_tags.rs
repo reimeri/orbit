@@ -25,6 +25,27 @@ pub struct Attachment {
     pub inline: Option<String>,
     pub image: Option<crate::media::Media>,
     spill: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_version: Option<SourceVersion>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct SourceVersion {
+    dev: u64,
+    ino: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    ctime: (i64, i64),
+}
+impl From<&fs::Metadata> for SourceVersion {
+    fn from(m: &fs::Metadata) -> Self {
+        Self {
+            dev: m.dev(),
+            ino: m.ino(),
+            bytes: m.len(),
+            modified: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        }
+    }
 }
 impl Attachment {
     pub fn content(&self) -> serde_json::Value {
@@ -226,6 +247,9 @@ fn end(text: &str, start: usize) -> usize {
 }
 /// Called with only the caret's logical line, not the whole composer document.
 pub fn active(text: &str, cursor: usize) -> Option<Token> {
+    if !text.is_char_boundary(cursor) {
+        return None;
+    }
     let mut i = 0;
     while i < cursor {
         if text.as_bytes()[i] == b'@' && boundary(text, i) {
@@ -333,11 +357,12 @@ pub(crate) fn capture_reusing(
     let mut seen = HashSet::new();
     let mut attachments = Vec::new();
     let mut remaining = INLINE_MESSAGE_BYTES;
+    let mut wrote_snapshot = false;
     for path in paths {
         let name = encode(&path);
         let attachment = (|| -> Result<Option<Attachment>> {
             if let Some(file) = saved.iter().find(|file| file.name == name) {
-                if attachments.iter().any(|f: &Attachment| f.name == name) { return Ok(None); }
+                if file.source_version.is_some_and(|v| !seen.insert(v)) || attachments.iter().any(|f: &Attachment| f.name == name) { return Ok(None); }
                 let mut file = file.clone();
                 if let Some(inline) = &file.inline {
                     if inline.len() <= remaining { remaining -= inline.len(); }
@@ -349,8 +374,10 @@ pub(crate) fn capture_reusing(
             let Some(root_fd) = &root_fd else { return Ok(None); };
             let Some(mut source) = open_file(root_fd, &path)? else { return Ok(None); };
             let before = source.metadata()?;
-            if !seen.insert((before.dev(), before.ino())) { return Ok(None); }
-            if seen.len() == 1 {
+            let version = SourceVersion::from(&before);
+            if !seen.insert(version) { return Ok(None); }
+            if !wrote_snapshot {
+                wrote_snapshot = true;
                 fs::create_dir_all(storage)?;
                 fs::set_permissions(storage, fs::Permissions::from_mode(0o700))?;
             }
@@ -366,14 +393,19 @@ pub(crate) fn capture_reusing(
             output.sync_all()?;
             let after = source.metadata()?;
             anyhow::ensure!((before.len(), before.mtime(), before.mtime_nsec(), before.ctime(), before.ctime_nsec()) == (after.len(), after.mtime(), after.mtime_nsec(), after.ctime(), after.ctime_nsec()) && bytes == after.len(), "File changed while being attached; retry once it stops changing");
-            let image = if image::guess_format(&prefix).is_ok_and(|format| matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP | image::ImageFormat::Gif)) {
-                Some(crate::media::MediaStore::new(storage.join("images")).image(&crate::media::read(&snapshot)?)?)
+            let image_candidate = image::guess_format(&prefix).is_ok_and(|format| matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP | image::ImageFormat::Gif));
+            let image = if image_candidate && bytes <= crate::media::MAX_BYTES as u64 {
+                match crate::media::MediaStore::new(storage.join("images")).image(&crate::media::read(&snapshot)?) {
+                    Ok(media) => Some(media),
+                    Err(e) if e.is::<crate::media::InvalidImage>() => None,
+                    Err(e) => return Err(e),
+                }
             } else { None };
-            let inline = if image.is_none() && bytes <= INLINE_FILE_BYTES as u64 && bytes <= remaining as u64 && !prefix.contains(&0) {
+            let inline = if !image_candidate && bytes <= INLINE_FILE_BYTES as u64 && bytes <= remaining as u64 && !prefix.contains(&0) {
                 String::from_utf8(prefix).ok()
             } else { None };
             if let Some(text) = &inline { remaining -= text.len(); }
-            let attachment = Attachment {name:name.clone(), bytes, snapshot, inline, image,
+            let attachment = Attachment {name:name.clone(), bytes, snapshot, inline, image, source_version: Some(version),
                 spill:PathBuf::from(format!("/tmp/orbit-file-{}/snapshot", crate::store::id()))};
             if attachment.inline.is_none() && attachment.image.is_none() { attachment.materialize()?; }
             Ok(Some(attachment))
@@ -382,7 +414,7 @@ pub(crate) fn capture_reusing(
             attachments.push(attachment);
         }
     }
-    if !seen.is_empty() {
+    if wrote_snapshot {
         File::open(storage)?.sync_all()?;
     }
     Ok(attachments)
@@ -424,6 +456,38 @@ mod tests {
             capture(root.path(), store.path(), unavailable)
                 .unwrap()
                 .is_empty()
+        );
+    }
+    #[test]
+    fn invalid_caret_offsets_are_not_file_queries() {
+        assert!(active("@λ", 2).is_none());
+        assert!(active("x", 4).is_none());
+        assert_eq!(active("@λ", 3).unwrap().query, "λ".as_bytes());
+    }
+
+    #[test]
+    fn reused_and_live_aliases_deduplicate_only_the_same_version() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a"), "old").unwrap();
+        std::os::unix::fs::symlink("a", root.path().join("alias")).unwrap();
+        let saved = capture(root.path(), store.path(), "@a").unwrap();
+        for tags in ["@a @alias", "@alias @a"] {
+            assert_eq!(
+                capture_reusing(&saved, root.path(), store.path(), tags)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        fs::write(root.path().join("new"), "replacement").unwrap();
+        fs::rename(root.path().join("new"), root.path().join("a")).unwrap();
+        let both = capture_reusing(&saved, root.path(), store.path(), "@a @alias").unwrap();
+        assert_eq!(
+            both.iter()
+                .map(|f| f.inline.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["old", "replacement"]
         );
     }
     #[test]
@@ -482,7 +546,11 @@ mod tests {
         let bytes = vec![b'x'; INLINE_FILE_BYTES + 1];
         fs::write(root.path().join("large"), &bytes).unwrap();
         fs::write(root.path().join("binary"), b"a\0b\xff").unwrap();
-        let files = capture(root.path(), store.path(), "@large @binary").unwrap();
+        let corrupt_png = b"\x89PNG\r\n\x1a\nnot an image";
+        fs::write(root.path().join("broken.png"), corrupt_png).unwrap();
+        let files = capture(root.path(), store.path(), "@large @binary @broken.png").unwrap();
+        assert_eq!(fs::read(&files[2].spill).unwrap(), corrupt_png);
+        assert!(files[2].image.is_none());
         assert!(files.iter().all(|f| f.inline.is_none()));
         assert_eq!(fs::read(&files[0].spill).unwrap(), bytes);
         assert_eq!(fs::read(&files[1].snapshot).unwrap(), b"a\0b\xff");

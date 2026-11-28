@@ -190,7 +190,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
                 shell.capture_event();
                 return;
             }
-            if matches!(key, keyboard::Key::Character(_))
+            if (matches!(key, keyboard::Key::Character(_))
+                && !modifiers.command()
+                && !modifiers.alt()
+                && !modifiers.logo())
                 || matches!(
                     key,
                     keyboard::Key::Named(
@@ -287,6 +290,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PointerInput<'_> {
         // in the same batch. No subscription installation race or idle motion messages.
         if state.dragging.get() {
             match event {
+                Event::Window(iced::window::Event::Unfocused) => state.dragging.set(false),
                 Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                     shell.publish(Message::Event(event.clone()));
                 }

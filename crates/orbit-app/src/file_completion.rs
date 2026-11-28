@@ -23,7 +23,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum Message {
     Results(Response),
-    Skills(u64, Result<orbit_core::skills::Catalog, String>),
+    Skills(u64, Option<Result<orbit_core::skills::Catalog, String>>),
     Move(bool),
     PendingEnter,
     Dismiss,
@@ -43,6 +43,7 @@ pub struct Completion {
     token: Option<(usize, Trigger, Token)>,
     dismissed: Option<(usize, Trigger, Token)>,
     in_code: bool,
+    skill_context: Option<Arc<(String, usize)>>,
     awaiting_path_check: bool,
     skill_epoch: u64,
     catalog: Option<Result<orbit_core::skills::Catalog, String>>,
@@ -95,6 +96,7 @@ impl Completion {
         }
         self.session = session.as_ref().map(|s| s.0.clone());
         self.token = None;
+        self.skill_context = None;
         self.dismissed = None;
         self.response = Response::default();
         self.request += 1;
@@ -168,30 +170,19 @@ impl Completion {
             .is_some_and(|(_, _, token)| token.full_path.is_some())
             && !(same_token && was_open);
         if !same_token {
-            // Only parse Markdown when entering a new skill token, not on each
-            // keystroke. A link embedded in a code example is not a selection.
-            self.in_code = next.as_ref().is_some_and(|(line, kind, token)| {
+            // A borrowed editor cannot leave the UI. Snapshot once on token
+            // entry; the discovery worker parses the Markdown, not the key handler.
+            self.in_code = false;
+            self.skill_context = next.as_ref().and_then(|(line, kind, token)| {
                 if *kind != Trigger::Skill {
-                    return false;
+                    return None;
                 }
                 let prefix: usize = editor
                     .lines()
                     .take(*line)
-                    .map(|line| line.text.len() + line.ending.as_str().len().max(1))
+                    .map(|l| l.text.len() + l.ending.as_str().len().max(1))
                     .sum();
-                let pos = prefix + token.range.start;
-                pulldown_cmark::Parser::new(&editor.text())
-                    .into_offset_iter()
-                    .any(|(e, r)| {
-                        r.contains(&pos)
-                            && matches!(
-                                e,
-                                pulldown_cmark::Event::Code(_)
-                                    | pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(
-                                        _
-                                    ))
-                            )
-                    })
+                Some(Arc::new((editor.text(), prefix + token.range.start)))
             });
             self.skill_epoch += 1;
             self.catalog = None;
@@ -271,10 +262,11 @@ impl Completion {
         !self.in_code && self.token.is_some() && self.token != self.dismissed
     }
     pub fn is_open(&self) -> bool {
-        self.active_query() && !self.awaiting_path_check
+        self.active_query() && !self.awaiting_path_check && self.skill_context.is_none()
     }
     pub fn dismiss(&mut self) {
         self.dismissed = self.token.clone();
+        self.skill_context = None;
         if let Some(service) = &self.service {
             service.cancel_query();
         }
@@ -285,9 +277,13 @@ impl Completion {
         match message {
             Message::Dismiss => self.dismiss(),
             Message::Skills(epoch, result) => {
-                if self.is_open() && self.picking_skill() && epoch == self.skill_epoch {
-                    self.catalog = Some(result);
-                    self.query();
+                if self.active_query() && self.picking_skill() && epoch == self.skill_epoch {
+                    self.skill_context = None;
+                    self.in_code = result.is_none();
+                    self.catalog = result;
+                    if !self.in_code {
+                        self.query();
+                    }
                 }
             }
             Message::Results(response) => {
@@ -424,11 +420,15 @@ impl Completion {
             .as_ref()
             .map_or_else(Subscription::none, |service| {
                 let files = Subscription::run_with(Events(service.clone()), events);
-                if self.is_open() && self.picking_skill() && self.catalog.is_none() {
+                if self.active_query() && self.picking_skill() && self.catalog.is_none() {
                     Subscription::batch([
                         files,
                         Subscription::run_with(
-                            (self.skill_epoch, service.root.clone()),
+                            SkillLoad {
+                                epoch: self.skill_epoch,
+                                root: service.root.clone(),
+                                context: self.skill_context.clone(),
+                            },
                             skill_events,
                         ),
                     ])
@@ -564,16 +564,49 @@ impl Completion {
             .into()
     }
 }
-fn skill_events(
-    (epoch, path): &(u64, PathBuf),
-) -> impl iced::futures::Stream<Item = Message> + use<> {
-    let (epoch, path) = (*epoch, path.clone());
+#[derive(Clone)]
+struct SkillLoad {
+    epoch: u64,
+    root: PathBuf,
+    context: Option<Arc<(String, usize)>>,
+}
+impl Hash for SkillLoad {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // The epoch changes with each context. Do not hash the draft on redraw.
+        self.epoch.hash(state);
+        self.root.hash(state);
+    }
+}
+fn skill_events(load: &SkillLoad) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let load = load.clone();
     iced::futures::stream::once(async move {
-        let result = tokio::task::spawn_blocking(move || orbit_core::skills::discover(&path))
-            .await
-            .expect("skill discovery worker")
-            .map_err(|e| format!("Could not discover skills: {e:#}"));
-        Message::Skills(epoch, result)
+        let result = tokio::task::spawn_blocking(move || {
+            if let Some(context) = load.context {
+                let (source, pos) = context.as_ref();
+                if pulldown_cmark::Parser::new(source)
+                    .into_offset_iter()
+                    .any(|(e, r)| {
+                        r.contains(pos)
+                            && matches!(
+                                e,
+                                pulldown_cmark::Event::Code(_)
+                                    | pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(
+                                        _
+                                    ))
+                            )
+                    })
+                {
+                    return None;
+                }
+            }
+            Some(
+                orbit_core::skills::discover(&load.root)
+                    .map_err(|e| format!("Could not discover skills: {e:#}")),
+            )
+        })
+        .await
+        .expect("skill discovery worker");
+        Message::Skills(load.epoch, result)
     })
 }
 #[derive(Clone)]
@@ -607,8 +640,18 @@ fn events(events: &Events) -> impl iced::futures::Stream<Item = Message> + use<>
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn skill_picker_filters_and_inserts_a_path_qualified_selection() {
+    #[tokio::test]
+    async fn skill_picker_filters_and_inserts_a_path_qualified_selection() {
+        use iced::futures::StreamExt;
+        async fn probe(picker: &mut Completion, editor: &mut text_editor::Content) {
+            let load = SkillLoad {
+                epoch: picker.skill_epoch,
+                root: picker.service.as_ref().unwrap().root.clone(),
+                context: picker.skill_context.clone(),
+            };
+            let message = Box::pin(skill_events(&load)).next().await.unwrap();
+            picker.update(message, editor);
+        }
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let dir = root.path().join(".agents/skills/work flow");
@@ -627,12 +670,8 @@ mod tests {
         cursor.position.column = "λ $fixture".len();
         editor.move_to(cursor);
         picker.edited(&editor);
+        probe(&mut picker, &mut editor).await;
         assert!(picker.is_open());
-        let catalog = orbit_core::skills::discover(root.path()).unwrap();
-        picker.update(
-            Message::Skills(picker.skill_epoch, Ok(catalog)),
-            &mut editor,
-        );
         assert!(picker.update(picker.accept_selected(), &mut editor));
         let authored = editor.text();
         assert!(authored.starts_with("λ [$fixture-lookup](<skill:///"));
@@ -644,6 +683,7 @@ mod tests {
         cursor.position.column = 1;
         example.move_to(cursor);
         picker.edited(&example);
+        probe(&mut picker, &mut example).await;
         assert!(!picker.is_open());
     }
     #[test]

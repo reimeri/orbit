@@ -276,7 +276,7 @@ impl<Key: Clone + Eq + Hash + 'static, Message> Widget<Message, iced::Theme, ice
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let layered = self.keys.iter().any(|(_, animated)| *animated);
+        let layered = tree.state.downcast_ref::<State<Key>>().animating;
         for ((child, tree), layout) in self
             .children
             .iter()

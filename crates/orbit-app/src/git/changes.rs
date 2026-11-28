@@ -24,6 +24,7 @@ pub struct File {
 pub enum Status {
     Added,
     Untracked,
+    Unreadable,
     Modified,
     Deleted,
     TypeChanged,
@@ -35,6 +36,7 @@ impl Status {
         match self {
             Self::Added => "Added",
             Self::Untracked => "Added (untracked)",
+            Self::Unreadable => "Unreadable · line count unknown",
             Self::Modified => "Modified",
             Self::Deleted => "Removed",
             Self::TypeChanged => "Type changed",
@@ -99,21 +101,29 @@ impl Files {
         }
         Ok(bytes)
     }
-    pub(super) fn add_untracked(&mut self, path: &Path, count: u64, stamp: FileVersion) {
+    pub(super) fn add_untracked(&mut self, path: &Path, count: u64, stamp: Option<FileVersion>) {
         self.entries
             .entry(path.to_owned())
             .and_modify(|f| {
                 f.added += count;
-                f.status = Status::Recreated;
+                f.status = if stamp.is_some() {
+                    Status::Recreated
+                } else {
+                    Status::Unreadable
+                };
                 f.gitlink = false;
-                f.stamp = Some(stamp);
+                f.stamp = stamp;
             })
             .or_insert(File {
-                status: Status::Untracked,
+                status: if stamp.is_some() {
+                    Status::Untracked
+                } else {
+                    Status::Unreadable
+                },
                 added: count,
                 removed: 0,
                 gitlink: false,
-                stamp: Some(stamp),
+                stamp,
             });
     }
     pub(super) fn set_counts(&mut self, path: &Path, a: u64, d: u64) -> Result<(), String> {
@@ -155,6 +165,11 @@ pub enum Line {
 }
 
 pub async fn patch(root: &Path, base: &str, path: &Path, file: &File) -> anyhow::Result<Patch> {
+    if file.status == Status::Unreadable {
+        return Ok(Patch::Notice(
+            "Permission denied. Restore read access to view the complete diff.".into(),
+        ));
+    }
     let spool = tempfile::Builder::new()
         .prefix("orbit-diff-")
         .suffix(".patch")
@@ -334,7 +349,7 @@ fn parse(diff: &str) -> anyhow::Result<Patch> {
                 .take_while(|(x, y)| x == y)
                 .map(|(x, _)| x.len_utf8())
                 .sum::<usize>();
-            if (prefix > 0 || suffix > 0) && !a[..prefix].trim().is_empty() {
+            if !a[..prefix].trim().is_empty() || !a[a.len() - suffix..].trim().is_empty() {
                 *ah = Some(prefix..a.len() - suffix);
                 *bh = Some(prefix..b.len() - suffix);
             }
@@ -354,6 +369,25 @@ fn parse(diff: &str) -> anyhow::Result<Patch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_edit_highlights_the_changed_prefix_not_the_common_suffix() {
+        let Patch::Rows(rows) = parse("@@ -1 +1 @@\n-旧 tail\n+new tail\n").unwrap() else {
+            panic!("rows")
+        };
+        let edits: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Line::Code {
+                    text,
+                    highlight: Some(h),
+                    ..
+                } => Some(&text[h.clone()]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(edits, ["旧", "new"]);
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")

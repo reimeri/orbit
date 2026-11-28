@@ -774,11 +774,7 @@ impl AgentTab {
         let a: AgentAction = serde_json::from_str(args)?;
         let evaluating = matches!(a, AgentAction::Evaluate { .. });
         let capture = matches!(a, AgentAction::Screenshot)
-            .then(|| {
-                tempfile::Builder::new()
-                    .permissions(fs::Permissions::from_mode(0o700))
-                    .tempdir_in(self.browser.store.root())
-            })
+            .then(|| tempfile::NamedTempFile::new_in(self.browser.store.root()))
             .transpose()?;
         let ms = match &a {
             AgentAction::Evaluate { timeout_ms, .. } | AgentAction::Wait { timeout_ms, .. } => {
@@ -799,7 +795,7 @@ impl AgentTab {
             AgentAction::Stop => json!({"op":"stop"}),
             AgentAction::Navigate { url } => json!({"op":"navigate","url":address(&url)?}),
             AgentAction::Screenshot => {
-                json!({"op":"screenshot","file":capture.as_ref().unwrap().path().join("page.png").to_str().context("CEF requires a UTF-8 screenshot path")?})
+                json!({"op":"screenshot","file":capture.as_ref().unwrap().path().to_str().context("CEF requires a UTF-8 screenshot path")?})
             }
             AgentAction::Click { x, y, r#ref } => match (x, y, r#ref) {
                 (Some(x), Some(y), None) => json!({"op":"click","x":x,"y":y}),
@@ -910,7 +906,8 @@ impl AgentTab {
                     raw.as_str().context("Invalid evaluation response")?,
                 );
             }
-            Ok(value)
+            let pixels = capture.map(|file| fs::read(file.path())).transpose()?;
+            Ok((value, pixels))
         });
         let result = result.map_err(|e| {
             if evaluating {
@@ -935,7 +932,7 @@ impl AgentTab {
                 && t.surface.as_ref().is_some_and(|f| f.id == key)),
             "Browser control was revoked"
         );
-        let mut value = result?;
+        let (mut value, pixels) = result?;
         if let Some(kind) = value.as_object_mut().unwrap().remove("eval_spill") {
             let file = eval_file.context("Unexpected evaluation spool response")?;
             match file.keep() {
@@ -964,12 +961,7 @@ impl AgentTab {
             }
         }
         value.as_object_mut().unwrap().remove("req");
-        Ok((
-            value,
-            capture
-                .map(|file| fs::read(file.path().join("page.png")))
-                .transpose()?,
-        ))
+        Ok((value, pixels))
     }
 }
 

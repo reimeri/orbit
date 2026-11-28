@@ -22,7 +22,9 @@ After compaction, only the latest guidance item is carried forward explicitly.
 
 A changed prefix, compaction, socket loss, cancellation, restart or account
 change invalidates continuation. The next request sends full current input.
-An explicit stale-ID rejection before output permits one full-input retry.
+An explicit stale-ID rejection before output permits one full-input retry. Likewise, if a reused
+connection is already dead or hits its lifetime limit before output, Orbit opens a fresh
+socket and sends the full input once, without spending a turn recovery attempt.
 Titles and compaction use separate full-input requests and cannot advance the
 agent's chain. For a drop *during* generation see
 [tool execution and recovery](code-mode.md#early-execution-and-recovery);

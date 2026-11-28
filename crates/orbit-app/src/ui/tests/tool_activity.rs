@@ -42,9 +42,9 @@ async fn activity_disclosure_swaps_on_header_hover_and_completion() {
                         .unwrap();
                     dispatch(&mut app, Message::Changed).await;
                     if open {
-                        app.groups.insert("group".into());
+                        app.details.groups.insert("group".into());
                     } else {
-                        app.groups.remove("group");
+                        app.details.groups.remove("group");
                     }
                     let size = iced::Size::new(width, 100.);
                     let mut ui = UserInterface::build(
@@ -298,13 +298,13 @@ fn tool_header_stays_fixed_above_padded_details_when_toggled() {
         let mut header = None;
         for open in [false, true, false] {
             if open {
-                app.expanded.insert(entry.id.clone());
+                app.details.expanded.insert(entry.id.clone());
                 app.outputs.insert(
                     entry.id.clone(),
                     tool_output::Output::new("exec_command", r#"{"cmd":"printf 'λ'"}"#, "λ", false),
                 );
             } else {
-                app.expanded.remove(&entry.id);
+                app.details.expanded.remove(&entry.id);
                 app.outputs.remove(&entry.id);
             }
             let mut ui = UserInterface::build(
@@ -375,7 +375,7 @@ async fn formatted_tool_copy_and_raw_disclosure_survive_viewport_eviction() {
     let formatted =
         "Command\nprintf 'λ\n'\n\nArguments\nworkdir: /tmp/a b\n\nOutput\n  result β\tend\r\n";
     for raw in [false, true, false] {
-        if app.raw_tool_inputs.contains("formatted-tool") != raw {
+        if app.details.raw_tool_inputs.contains("formatted-tool") != raw {
             dispatch(&mut app, Message::ToggleToolRaw("formatted-tool".into())).await;
             assert!(
                 app.chat_selection.borrow().range().is_none(),

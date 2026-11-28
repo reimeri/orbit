@@ -3,6 +3,14 @@ use browser::Action;
 use iced::advanced::Renderer as _;
 use iced_runtime::{UserInterface, user_interface::Cache};
 
+async fn refresh_frame(app: &mut App) {
+    let h = app.harness.clone().unwrap();
+    let id = app.selected.clone().unwrap();
+    let mut frames = browser::subscription(&(Updates(h), id));
+    let frame = iced::futures::StreamExt::next(&mut frames).await.unwrap();
+    dispatch(app, frame).await;
+}
+
 #[tokio::test]
 #[ignore = "requires packaged CEF; run just browser-smoke"]
 async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
@@ -30,7 +38,7 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
                 {
                     return;
                 }
-                let html = r#"<body style="background:#de317a"><input style="position:absolute;right:10px;top:10px;width:60px;height:40px" onkeydown="if(event.keyCode===46)window.bad=true" oninput="if(this.value==='.'&&!window.bad)document.body.style.background='#30c974'"><button style="position:absolute;left:65%;top:70%;width:80px;height:50px" onclick="document.body.style.background=window.hit?'red':'#31429a';window.hit=true">Open</button>"#;
+                let html = r#"<body style="background:#de317a" onmousedown="if(event.button===2)window.right=true"><input style="position:absolute;right:10px;top:10px;width:60px;height:40px" onkeydown="if(event.keyCode===46)window.bad=true; if(event.keyCode===120)window.f9=true; if(event.keyCode===49&amp;&amp;event.shiftKey)window.digit=true" oninput="if(this.value==='!.' &amp;&amp; !window.bad &amp;&amp; window.right &amp;&amp; window.f9 &amp;&amp; window.digit)document.body.style.background='#30c974'"><button style="position:absolute;left:65%;top:70%;width:80px;height:50px" onclick="document.body.style.background=window.hit?'red':'#31429a';window.hit=true">Open</button>"#;
                 let _=socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{html}",html.len()).as_bytes()).await;
             });
         }
@@ -49,7 +57,7 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
     let mut preview_clicked = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
-        app.refresh_browser();
+        refresh_frame(&mut app).await;
         let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
         let mut layout = UiBounds::default();
         ui.operate(&renderer, &mut layout);
@@ -156,22 +164,63 @@ async fn native_browser_panel_renders_and_routes_input_after_session_switch() {
                 &mut renderer,
                 iced::Point::new(page.x + page.width - 36., page.y + 27.),
             ));
-            let key = iced::keyboard::Key::Character(".".into());
+            let target = iced::Point::new(page.x + page.width - 36., page.y + 27.);
             ui.update(
-                &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: key.clone(),
-                    modified_key: key,
-                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Period),
-                    location: keyboard::Location::Standard,
-                    modifiers: keyboard::Modifiers::NONE,
-                    text: Some(".".into()),
-                    repeat: false,
-                })],
-                mouse::Cursor::Unavailable,
+                &[
+                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)),
+                ],
+                mouse::Cursor::Available(target),
                 &mut renderer,
                 &mut iced::advanced::clipboard::Null,
                 &mut messages,
             );
+            use keyboard::key::{Code, Named, Physical};
+            for (key, code, modifiers, text) in [
+                (
+                    keyboard::Key::Named(Named::F9),
+                    Code::F9,
+                    keyboard::Modifiers::NONE,
+                    None,
+                ),
+                (
+                    keyboard::Key::Character("!".into()),
+                    Code::Digit1,
+                    keyboard::Modifiers::SHIFT,
+                    Some("!"),
+                ),
+                (
+                    keyboard::Key::Character(".".into()),
+                    Code::Period,
+                    keyboard::Modifiers::NONE,
+                    Some("."),
+                ),
+            ] {
+                ui.update(
+                    &[
+                        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                            key: key.clone(),
+                            modified_key: key.clone(),
+                            physical_key: Physical::Code(code),
+                            location: keyboard::Location::Standard,
+                            modifiers,
+                            text: text.map(Into::into),
+                            repeat: false,
+                        }),
+                        iced::Event::Keyboard(keyboard::Event::KeyReleased {
+                            key: key.clone(),
+                            modified_key: key,
+                            physical_key: Physical::Code(code),
+                            location: keyboard::Location::Standard,
+                            modifiers,
+                        }),
+                    ],
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+            }
             clicked = true;
         }
         cache = ui.into_cache();
@@ -302,7 +351,7 @@ async fn native_browser_toolbar_preserves_page_until_close() {
     })
     .await
     .unwrap();
-    app.refresh_browser();
+    refresh_frame(&mut app).await;
     for m in probe(&app, Some(page.center())).1 {
         dispatch(&mut app, m).await;
     }

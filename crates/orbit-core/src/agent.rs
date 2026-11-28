@@ -105,6 +105,7 @@ pub struct Conversation {
     pending_activity: Mutex<Vec<crate::store::activity::Sample>>,
     submissions: AtomicU64,
     turn_generation: AtomicU64,
+    attention_pin: Arc<()>,
     loaded: AtomicBool,
     restart_after_stop: AtomicBool,
     store: Store,
@@ -672,6 +673,7 @@ impl Harness {
                 pending_activity: Mutex::default(),
                 submissions: AtomicU64::new(0),
                 turn_generation: AtomicU64::new(0),
+                attention_pin: Arc::new(()),
                 loaded: AtomicBool::new(true),
                 restart_after_stop: AtomicBool::new(false),
                 store: self.store.clone(),
@@ -813,6 +815,9 @@ impl Harness {
         let mut saved = c.persisted.lock().expect("persistence lock");
         c.save_locked(&mut saved)?;
         let mut state = c.state.lock().expect("session lock");
+        if Arc::strong_count(&c.attention_pin) > 1 {
+            return Ok(());
+        }
         self.summaries
             .lock()
             .expect("summary lock")
@@ -1169,10 +1174,11 @@ impl Harness {
                         .expect("cancel lock")
                         .is_cancelled();
                 let naming_message = candidate.needs_title().then(|| message.clone());
-                if idle_boundary && candidate.in_progress_response.is_none() {
-                    candidate.checkpoint();
-                }
-                let points = candidate.points.clone();
+                let checkpoint =
+                    (idle_boundary && candidate.in_progress_response.is_none()).then(|| {
+                        candidate.checkpoint();
+                        candidate.points.clone()
+                    });
                 let accepted_at = crate::store::now();
                 candidate.accept_submission_at(
                     submission.to_owned(),
@@ -1185,7 +1191,9 @@ impl Harness {
                 crate::send_trace::phase("publish acceptance");
                 *saved = Some(candidate);
                 let mut state = conversation.state.lock().expect("session lock");
-                state.points = points;
+                if let Some(points) = checkpoint {
+                    state.points = points;
+                }
                 state.accept_submission_at(
                     submission.to_owned(),
                     message,
@@ -1850,24 +1858,9 @@ fn repair_calls(session: &mut Session) {
         })
         .filter_map(|v| v["call_id"].as_str())
         .collect();
-    let unfinished: HashSet<_> = session
-        .entries
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.kind,
-                EntryKind::Tool {
-                    parent: None,
-                    complete: false,
-                    ..
-                }
-            )
-        })
-        .map(|e| e.id.as_str())
-        .collect();
-    let missing: Vec<_> = session.input.iter().filter(|v|matches!(v["type"].as_str(),Some("function_call"|"custom_tool_call"))).filter(|call| {
-        let id=call["call_id"].as_str().unwrap_or(""); !completed.contains(id) || unfinished.contains(id)
-    }).map(|call|json!({"type":if call["type"]=="custom_tool_call" {"custom_tool_call_output"}else{"function_call_output"},"call_id":call["call_id"],"output":"Execution interrupted. It may have performed side effects. Inspect the workspace before deciding whether to retry; do not assume it did nothing. Runtime cell IDs are no longer valid after restart."})).collect();
+    let missing: Vec<_> = session.input.iter()
+        .filter(|v| is_tool_call(v) && v["call_id"].as_str().is_some_and(|id| !completed.contains(id)))
+        .map(|call| json!({"type":if call["type"]=="custom_tool_call" {"custom_tool_call_output"}else{"function_call_output"},"call_id":call["call_id"],"output":"Execution interrupted. It may have performed side effects. Inspect the workspace before deciding whether to retry; do not assume it did nothing. Runtime cell IDs are no longer valid after restart."})).collect();
     session.input.extend(missing);
     let incomplete: Vec<_> = session
         .entries
@@ -3776,6 +3769,27 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         );
     }
     #[test]
+    fn deleting_a_cold_parent_does_not_deserialize_its_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut session = Session::new(dir.path().into(), &Settings::default());
+        session.accept("first".into());
+        store.save_session(&session).unwrap();
+        let h = Harness::new(store.clone(), store.load().unwrap().1).unwrap();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE entries SET data='broken' WHERE session=?1",
+                [&session.id],
+            )
+            .unwrap();
+        assert!(h.load(&session.id).is_err());
+        h.remove(&session.id).unwrap();
+        assert!(!store.contains_session(&session.id).unwrap());
+    }
+    #[test]
     fn repair_does_not_repeat_successful_calls_and_closes_orphans() {
         let mut s = Session::new(std::env::temp_dir(), &Settings::default());
         s.input = vec![
@@ -3784,6 +3798,22 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
             json!({"type":"function_call","call_id":"interrupted"}),
         ]
         .into();
+        s.entries.push(Entry {
+            id: "done".into(),
+            text: String::new(),
+            kind: EntryKind::Tool {
+                name: "exec".into(),
+                input: "text(1)".into(),
+                output: String::new(),
+                complete: false,
+                command_status: None,
+                failed: false,
+                cell_id: None,
+                parent: None,
+                media: vec![],
+                web: None,
+            },
+        });
         repair_calls(&mut s);
         assert_eq!(s.input.len(), 4);
         assert_eq!(s.input[3]["call_id"], "interrupted");

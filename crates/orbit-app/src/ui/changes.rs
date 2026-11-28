@@ -52,7 +52,9 @@ fn msg(a: Action) -> Message {
 
 impl App {
     pub(super) fn store_git(&mut self, path: PathBuf, info: Option<Info>) {
-        self.git_pending.remove(&path);
+        if !self.git_pending.remove(&path) && !self.current().is_some_and(|s| s.project == path) {
+            return;
+        }
         if let Some(info) = info {
             self.git.insert(path, info);
         } else {
@@ -215,6 +217,16 @@ impl App {
             };
             return self.panel_container(content.push(text(notice).size(13).style(theme::muted)));
         };
+        if let Some(Info::Changes { unreadable, .. }) = self.git_info()
+            && *unreadable > 0
+        {
+            content = content.push(
+                text(format!(
+                    "Partial line counts: {unreadable} unreadable file(s)."
+                ))
+                .size(12),
+            );
+        }
         if let Some(Info::Changes { added, removed, .. }) = self.git_info() {
             content = content.push(
                 row![
@@ -281,6 +293,7 @@ impl App {
             Status::TypeChanged => ("T", colors.warning),
             Status::Unmerged => ("U", colors.warning),
             Status::Recreated => ("C", colors.accent),
+            Status::Unreadable => ("?", colors.warning),
         };
         let surface = iced::theme::palette::mix(colors.panel, ink, theme::BADGE_ALPHA);
         let badge = |glyph: Element<'a, Message>| {

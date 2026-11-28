@@ -21,9 +21,9 @@ struct Vertex { @builtin(position) pos:vec4f, @location(0) uv:vec2f }
     return Vertex(vec4f(uv * vec2f(2,-2) + vec2f(-1,1),0,1),uv);
 }
 @group(0) @binding(0) var img:texture_2d<f32>;
+@group(0) @binding(1) var linear_sampler:sampler;
 @fragment fn fs(v:Vertex)->@location(0) vec4f {
-    let size=vec2i(textureDimensions(img));
-    return textureLoad(img, clamp(vec2i(v.uv*vec2f(size)), vec2i(0),size-1),0);
+    return textureSample(img, linear_sampler, v.uv);
 }"#
                 .into(),
             ),
@@ -89,12 +89,24 @@ impl shader::Primitive for Pixels {
             let group = device.create_bind_group(&BindGroupDescriptor {
                 label: None,
                 layout: &p.pipeline.get_bind_group_layout(0),
-                entries: &[BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(
-                        &texture.create_view(&Default::default()),
-                    ),
-                }],
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::TextureView(
+                            &texture.create_view(&Default::default()),
+                        ),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: BindingResource::Sampler(&device.create_sampler(
+                            &SamplerDescriptor {
+                                mag_filter: FilterMode::Linear,
+                                min_filter: FilterMode::Linear,
+                                ..Default::default()
+                            },
+                        )),
+                    },
+                ],
             });
             p.surface = Some((texture, group));
         }

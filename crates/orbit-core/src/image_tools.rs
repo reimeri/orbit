@@ -142,7 +142,8 @@ pub struct ToolResult {
     pub media: Media,
 }
 pub type History = Arc<dyn Fn() -> Result<crate::store::Session> + Send + Sync>;
-static IMAGE_CALLS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static LOCAL_VIEWS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static GENERATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub struct ImageTools {
     pub media: Arc<MediaStore>,
     pub generation: bool,
@@ -193,24 +194,38 @@ impl ImageTools {
         request: &str,
         cancel: &CancellationToken,
     ) -> Result<ToolResult> {
-        let _permit = tokio::select! {biased; _=cancel.cancelled()=>bail!("Image tool cancelled before dispatch"), permit=IMAGE_CALLS.acquire()=>permit.expect("image semaphore")};
+        let permits = if name == "view_image" {
+            &LOCAL_VIEWS
+        } else {
+            &GENERATIONS
+        };
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("Image tool cancelled before dispatch"),
+            permit = permits.acquire() => permit.expect("image semaphore"),
+        };
         match name {
             "view_image" => {
                 let args: ViewArgs = serde_json::from_str(args)
                     .context("view_image expects {path: string}; there is no detail argument")?;
                 let path = self.workspace.join(args.path);
-                let media = self.media.image(&media::read(&path)?)?;
-                let text = format!(
-                    "Viewed {}. {}{}",
-                    path.display(),
-                    media.description(),
-                    animation_notice(&media)
-                );
-                Ok(ToolResult {
-                    value: json!({"image_url":media.data_url()?}),
-                    text,
-                    media,
+                let store = self.media.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let media = store.image(&media::read(&path)?)?;
+                    let text = format!(
+                        "Viewed {}. {}{}",
+                        path.display(),
+                        media.description(),
+                        animation_notice(&media)
+                    );
+                    Ok(ToolResult {
+                        value: json!({"image_url":media.data_url()?}),
+                        text,
+                        media,
+                    })
                 })
+                .await?
             }
             "image_gen__imagegen" if self.generation => self.generate(args, request, cancel).await,
             _ => bail!("Image generation is only available to the main agent"),

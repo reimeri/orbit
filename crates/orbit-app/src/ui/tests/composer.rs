@@ -306,16 +306,20 @@ async fn file_picker_escape_is_local_but_hidden_picker_does_not_capture_modal_es
 }
 
 #[test]
-fn composer_history_shortcuts_require_focused_editor_and_control_only() {
-    for (key, direction) in [("z", Direction::Undo), ("y", Direction::Redo)] {
+fn composer_history_shortcuts_require_focus_and_their_exact_modifiers() {
+    for (key, modifiers, direction) in [
+        ("z", keyboard::Modifiers::CTRL, Direction::Undo),
+        ("y", keyboard::Modifiers::CTRL, Direction::Redo),
+        (
+            "z",
+            keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT,
+            Direction::Redo,
+        ),
+    ] {
         for (modifiers, status, expected) in [
+            (modifiers, text_editor::Status::Active, false),
             (
-                keyboard::Modifiers::CTRL,
-                text_editor::Status::Active,
-                false,
-            ),
-            (
-                keyboard::Modifiers::CTRL,
+                modifiers,
                 text_editor::Status::Focused { is_hovered: false },
                 true,
             ),

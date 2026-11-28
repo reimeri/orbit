@@ -10,7 +10,8 @@ use iced::{
     widget::{sensor, space},
 };
 use std::{ops::Range, sync::Arc};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const LINE_HEIGHT: f32 = 17.;
 const MAX_HEIGHT: f32 = 340.;
@@ -139,30 +140,26 @@ impl Output {
         self.rows.clear();
         let mut start = 0;
         let mut width = 0;
-        let mut chars = self.display.char_indices().peekable();
-        while let Some((offset, ch)) = chars.next() {
-            // Paragraph separators must not enter a shaped row: Cosmic Text strips
-            // them, which would desynchronize selection offsets. Keep their exact
-            // bytes between row ranges in the logical clipboard document instead.
+        for (offset, cluster) in self.display.grapheme_indices(true) {
+            // Keep exact separator bytes between (not in) shaped rows.
             if matches!(
-                ch,
-                '\n' | '\r' | '\u{1c}'..='\u{1e}' | '\u{85}' | '\u{2029}'
+                cluster,
+                "\r\n"
+                    | "\r"
+                    | "\n"
+                    | "\u{1c}"
+                    | "\u{1d}"
+                    | "\u{1e}"
+                    | "\u{85}"
+                    | "\u{2028}"
+                    | "\u{2029}"
             ) {
                 self.rows.push(start..offset);
-                start = offset + ch.len_utf8();
-                if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') {
-                    chars.next();
-                    start += 1;
-                }
+                start = offset + cluster.len();
                 width = 0;
                 continue;
             }
-            // Cosmic text uses eight-cell tab stops; budget the widest advance.
-            let cells = if ch == '\t' {
-                8
-            } else {
-                ch.width().unwrap_or(0)
-            };
+            let cells = if cluster == "\t" { 8 } else { cluster.width() };
             if width + cells > self.columns && offset > start {
                 self.rows.push(start..offset);
                 start = offset;
@@ -249,6 +246,18 @@ impl Output {
 mod tests {
     use super::*;
 
+    #[test]
+    fn narrow_wrap_keeps_clusters_whole_and_skips_line_separators() {
+        let mut output = Output::new("test", "", "x👩‍💻🇫🇮\u{2028}z\r\nw", false);
+        output.update(Event::Resize(1.));
+        let rows: Vec<_> = output
+            .rows
+            .iter()
+            .map(|r| &output.display[r.clone()])
+            .collect();
+        assert!(rows.ends_with(&["x", "👩‍💻", "🇫🇮", "z", "w"]));
+        assert!(output.display.ends_with("🇫🇮\u{2028}z\r\nw"));
+    }
     #[test]
     fn details_decode_commands_format_other_tools_and_preserve_raw_bytes() {
         let input = r#"{ "cmd": "python3 - <<'PY'\n\tprint(\"λ\")\nPY", "workdir": "/tmp/a b", "max_output_tokens": 1500 }"#;

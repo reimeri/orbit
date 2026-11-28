@@ -236,8 +236,9 @@ impl Cache {
         // upload, decoding, errors and retry never control the widget's size.
         responsive(move |available| {
             let (width, height) = (dimensions.0 as f32, dimensions.1 as f32);
-            let scale =
-                (available.width.min(MAX_PREVIEW_WIDTH) / width).min(MAX_PREVIEW_HEIGHT / height);
+            let scale = (available.width.min(MAX_PREVIEW_WIDTH) / width)
+                .min(MAX_PREVIEW_HEIGHT / height)
+                .min(1.);
             let size = Size::new(width * scale, height * scale);
             let content: Element<'_, crate::ui::Message> = match &result {
                 Some(Ok(loaded)) => crate::image_transition::preview(
@@ -551,7 +552,7 @@ mod tests {
 
     #[test]
     fn metadata_placeholder_loaded_error_and_retry_have_identical_layout_at_each_width() {
-        for dimensions in [(1200, 600), (300, 1200), (6000, 100)] {
+        for dimensions in [(1200, 600), (300, 1200), (6000, 100), (48, 32)] {
             let mut cache = Cache::default();
             let mut recent = RecentPreviews::default();
             let _task = cache.prepare(
@@ -569,7 +570,7 @@ mod tests {
             let narrow_width = wide.0.width / 2.;
             let loading = [wide, layout(&cache, narrow_width)];
             for (actual, available) in loading.iter().zip([700., narrow_width]) {
-                let width_limit = available.min(MAX_PREVIEW_WIDTH);
+                let width_limit = available.min(MAX_PREVIEW_WIDTH).min(dimensions.0 as f32);
                 assert!(actual.0.width > 0. && actual.0.width <= width_limit + 0.001);
                 assert!(actual.0.height > 0. && actual.0.height <= MAX_PREVIEW_HEIGHT + 0.001);
                 assert!(

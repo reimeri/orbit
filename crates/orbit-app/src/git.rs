@@ -15,6 +15,7 @@ use std::{
 pub enum Info {
     Changes {
         branch: String,
+        unreadable: usize,
         added: u64,
         removed: u64,
     },
@@ -27,10 +28,14 @@ impl fmt::Display for Info {
                 branch,
                 added,
                 removed,
+                unreadable,
             } => {
                 f.write_str(branch)?;
                 if *added != 0 || *removed != 0 {
                     write!(f, "  +{added} −{removed}")?;
+                }
+                if *unreadable != 0 {
+                    write!(f, " (partial: {unreadable} unreadable)")?;
                 }
                 Ok(())
             }
@@ -142,39 +147,49 @@ async fn git(path: &Path, args: &[&str]) -> Result<Output, String> {
     })
 }
 /// Sidebar rows need only refs, never a diff or an untracked-file scan.
-pub async fn sidebar_branch(path: &Path) -> Option<String> {
-    let head = git(path, &["symbolic-ref", "--quiet", "HEAD"]).await.ok()?;
+pub async fn sidebar_branch(path: &Path) -> Result<Option<String>, String> {
+    let head = git(path, &["symbolic-ref", "--quiet", "HEAD"]).await?;
+    if head.status.code() == Some(1) || head.stderr.starts_with(b"fatal: not a git repository") {
+        return Ok(None);
+    }
+    let head = successful(head)?;
     let branch = head
-        .stdout
-        .strip_suffix(b"\n")?
-        .strip_prefix(b"refs/heads/")?;
+        .strip_suffix(b"\n")
+        .and_then(|s| s.strip_prefix(b"refs/heads/"))
+        .ok_or("Invalid Git branch")?;
     let origin = git(
         path,
         &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
     )
-    .await
-    .ok()?;
-    let is_default = if let Some(default) = origin
-        .stdout
-        .strip_suffix(b"\n")
-        .and_then(|r| r.strip_prefix(b"refs/remotes/origin/"))
-    {
+    .await?;
+    let is_default = if origin.status.success() {
+        let default = origin
+            .stdout
+            .strip_suffix(b"\n")
+            .and_then(|r| r.strip_prefix(b"refs/remotes/origin/"))
+            .ok_or("Invalid Git origin HEAD")?;
         branch == default
-    } else {
+    } else if origin.status.code() == Some(1) {
         match branch {
             b"main" => true,
-            b"master" => !git(
-                path,
-                &["show-ref", "--verify", "--quiet", "refs/heads/main"],
-            )
-            .await
-            .ok()?
-            .status
-            .success(),
+            b"master" => {
+                let main = git(
+                    path,
+                    &["show-ref", "--verify", "--quiet", "refs/heads/main"],
+                )
+                .await?;
+                match main.status.code() {
+                    Some(0) => false,
+                    Some(1) => true,
+                    _ => return Err(String::from_utf8_lossy(&main.stderr).into_owned()),
+                }
+            }
             _ => false,
         }
+    } else {
+        return Err(String::from_utf8_lossy(&origin.stderr).into_owned());
     };
-    (!is_default).then(|| String::from_utf8_lossy(branch).into_owned())
+    Ok((!is_default).then(|| String::from_utf8_lossy(branch).into_owned()))
 }
 
 fn successful(output: Output) -> Result<Vec<u8>, String> {
@@ -242,7 +257,7 @@ async fn read_info(
     let untracked =
         successful(git(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?)?;
     let root = root.to_owned();
-    let (added, removed, files) = tokio::task::spawn_blocking(move || {
+    let (added, removed, unreadable, files) = tokio::task::spawn_blocking(move || {
         let mut files = detailed.then(|| changes::Files::new(root.clone(), base));
         let stats = if let Some(files) = files.as_mut() {
             files.read_status(&diff)?
@@ -250,14 +265,17 @@ async fn read_info(
             &diff
         };
         let (mut added, removed) = numstat(stats, files.as_mut())?;
-        added += untracked_lines(&root, &untracked, deadline, &counts, files.as_mut())?;
-        Ok::<_, String>((added, removed, files.map(Arc::new)))
+        let (untracked_added, unreadable) =
+            untracked_lines(&root, &untracked, deadline, &counts, files.as_mut())?;
+        added += untracked_added;
+        Ok::<_, String>((added, removed, unreadable, files.map(Arc::new)))
     })
     .await
     .map_err(|e| format!("Could not read changed files: {e}; will retry automatically"))??;
     Ok((
         Some(Info::Changes {
             branch,
+            unreadable,
             added,
             removed,
         }),
@@ -297,7 +315,8 @@ fn untracked_lines(
     deadline: Instant,
     counts: &LineCounts,
     mut files: Option<&mut changes::Files>,
-) -> Result<u64, String> {
+) -> Result<(u64, usize), String> {
+    let mut unreadable = 0;
     let root_fd = std::fs::File::open(root).map_err(|e| e.to_string())?;
     let scan_start = Instant::now();
     let mut total = 0;
@@ -350,10 +369,16 @@ fn untracked_lines(
             Ok((lines, stamp)) => {
                 total += lines;
                 if let Some(files) = files.as_mut() {
-                    files.add_untracked(relative, lines, stamp);
+                    files.add_untracked(relative, lines, Some(stamp));
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // Removed during refresh.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                unreadable += 1;
+                if let Some(files) = files.as_mut() {
+                    files.add_untracked(relative, 0, None);
+                }
+            }
             Err(e) => {
                 return Err(format!(
                     "Could not count {}: {e}; will retry automatically",
@@ -362,7 +387,7 @@ fn untracked_lines(
             }
         }
     }
-    Ok(total)
+    Ok((total, unreadable))
 }
 
 // Pin the directory entry itself. In particular, a symlink replacement of an
@@ -436,18 +461,48 @@ mod tests {
     async fn sidebar_branch_falls_back_to_main_then_master_without_origin() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path();
-        assert_eq!(sidebar_branch(path).await, None);
+        assert_eq!(sidebar_branch(path).await.unwrap(), None);
         command(path, &["init", "--template=", "-b", "master"]);
         command(path, &["commit", "--allow-empty", "-m", "base"]);
-        assert_eq!(sidebar_branch(path).await, None);
+        assert_eq!(sidebar_branch(path).await.unwrap(), None);
         command(path, &["branch", "main"]);
-        assert_eq!(sidebar_branch(path).await.as_deref(), Some("master"));
+        assert_eq!(
+            sidebar_branch(path).await.unwrap().as_deref(),
+            Some("master")
+        );
         command(path, &["switch", "main"]);
-        assert_eq!(sidebar_branch(path).await, None);
+        assert_eq!(sidebar_branch(path).await.unwrap(), None);
         command(path, &["checkout", "--detach"]);
-        assert_eq!(sidebar_branch(path).await, None);
+        assert_eq!(sidebar_branch(path).await.unwrap(), None);
     }
 
+    #[tokio::test]
+    async fn unreadable_untracked_keeps_other_changes_and_marks_partial_totals() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        command(path, &["init", "--template=", "-b", "trunk"]);
+        std::fs::write(path.join("readable"), "two\nlines").unwrap();
+        let locked = path.join("locked");
+        std::fs::write(&locked, "hidden").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&locked).is_ok() {
+            return;
+        } // root bypasses mode bits
+        let (info, files) = capture(path.into(), Arc::default(), true).await;
+        assert!(matches!(
+            info,
+            Some(Info::Changes {
+                added: 2,
+                unreadable: 1,
+                ..
+            })
+        ));
+        assert_eq!(
+            files.unwrap().entries[Path::new("locked")].status,
+            changes::Status::Unreadable
+        );
+    }
     #[tokio::test]
     async fn diff_counts_net_lines_and_untracked_text_from_the_repository_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -477,6 +532,7 @@ mod tests {
                 branch,
                 added,
                 removed,
+                unreadable: 0,
             }) => {
                 assert_eq!(branch, "main");
                 assert_eq!(added, 7); // net tracked +1, replacement +2, staged +2, untracked +2
@@ -590,7 +646,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert_eq!(total, expected);
+            assert_eq!(total, (expected, 0));
             let mut buf = [0; 4096];
             match watcher.read_events(&mut buf) {
                 Ok(events) => events.filter_map(|e| e.name).collect::<HashSet<_>>().len(),
@@ -624,7 +680,7 @@ mod tests {
         let status = info(dir.path().to_owned(), Arc::default()).await.unwrap();
         assert!(matches!(
             &status,
-            Info::Changes { branch, added: 0, removed: 0 } if branch == "main"
+            Info::Changes { branch, added: 0, removed: 0, unreadable: 0 } if branch == "main"
         ));
         assert_eq!(status.to_string(), "main");
 
@@ -646,6 +702,7 @@ mod tests {
                 branch,
                 added,
                 removed,
+                unreadable: 0,
             }) => {
                 assert_eq!(branch, "new");
                 assert_eq!((added, removed), (3, 0));

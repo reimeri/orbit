@@ -1,5 +1,5 @@
 //! A low-contrast row background. Widget-local motion advances on existing app redraws.
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use iced::{
     Color, Element, Event, Length, Rectangle, Size, Vector,
@@ -66,7 +66,15 @@ struct Wave<'a, Message> {
     phase_offset: f32,
 }
 
+struct Frozen {
+    bounds: Rectangle,
+    color: Color,
+    phase: f32,
+    mesh: mesh::Cache,
+}
+
 struct Motion {
+    frozen: RefCell<Option<Frozen>>,
     working: bool,
     last_frame: Option<Instant>,
     elapsed: f32,
@@ -83,6 +91,9 @@ impl Motion {
         if matches!(status, Status::Unchecked | Status::Idle) {
             self.elapsed = 0.;
             self.displayed.set(0.);
+        }
+        if !matches!(status, Status::Question | Status::Error) {
+            self.frozen.get_mut().take();
         }
         self.working = working;
     }
@@ -104,6 +115,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Wave<'_, Message>
     }
     fn state(&self) -> tree::State {
         tree::State::new(Motion {
+            frozen: RefCell::default(),
             working: self.status == Status::Working,
             last_frame: None,
             elapsed: 0.,
@@ -213,12 +225,24 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Wave<'_, Message>
         {
             let motion = tree.state.downcast_ref::<Motion>();
             renderer.with_layer(clip, |renderer| {
-                draw_wave(
-                    renderer,
-                    bounds,
-                    color,
-                    motion.elapsed + self.phase_offset * PERIOD,
-                );
+                let phase = motion.elapsed + self.phase_offset * PERIOD;
+                if motion.working {
+                    renderer.draw_mesh(wave_mesh(bounds, color, phase));
+                } else {
+                    let mut frozen = motion.frozen.borrow_mut();
+                    if frozen
+                        .as_ref()
+                        .is_none_or(|f| (f.bounds, f.color, f.phase) != (bounds, color, phase))
+                    {
+                        *frozen = Some(Frozen {
+                            bounds,
+                            color,
+                            phase,
+                            mesh: mesh::Cache::new([wave_mesh(bounds, color, phase)].into()),
+                        });
+                    }
+                    renderer.draw_mesh_cache(frozen.as_ref().unwrap().mesh.clone());
+                }
                 // Keep all foreground primitives above the mesh, including badges.
                 renderer.with_layer(clip, draw_content);
             });
@@ -246,7 +270,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Wave<'_, Message>
     }
 }
 
-fn draw_wave(renderer: &mut iced::Renderer, bounds: Rectangle, color: Color, elapsed: f32) {
+fn wave_mesh(bounds: Rectangle, color: Color, elapsed: f32) -> mesh::Mesh {
     // V1's small untextured grid: each horizontal slice follows the rounded
     // outline; vertex alpha gives two broad, counter-moving Gaussian crests.
     const COLUMNS: usize = 24;
@@ -285,11 +309,11 @@ fn draw_wave(renderer: &mut iced::Renderer, bounds: Rectangle, color: Color, ela
             }
         }
     }
-    renderer.draw_mesh(mesh::Mesh::Solid {
+    mesh::Mesh::Solid {
         buffers: mesh::Indexed { vertices, indices },
         transformation: iced::Transformation::IDENTITY,
         clip_bounds: bounds,
-    });
+    }
 }
 
 #[cfg(test)]

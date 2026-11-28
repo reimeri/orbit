@@ -64,7 +64,7 @@ pub struct Rendered(String, Option<Formula>);
 /// A viewport sensor requests only formulas that are about to scroll into view,
 /// including formulas deep within a single long entry. Cache failures as well.
 pub struct Cache {
-    completed: LruCache<String, Option<Formula>>,
+    completed: std::cell::RefCell<LruCache<String, Option<Formula>>>,
     queue: VecDeque<String>,
     active: Option<String>,
     copied: Option<(String, usize, Instant)>,
@@ -72,7 +72,7 @@ pub struct Cache {
 impl Default for Cache {
     fn default() -> Self {
         Self {
-            completed: LruCache::new(NonZeroUsize::new(CACHE_ENTRIES).unwrap()),
+            completed: LruCache::new(NonZeroUsize::new(CACHE_ENTRIES).unwrap()).into(),
             queue: VecDeque::new(),
             active: None,
             copied: None,
@@ -82,8 +82,9 @@ impl Default for Cache {
 
 impl Cache {
     pub fn request(&mut self, source: String) -> Task<Rendered> {
-        if self.completed.get(&source).is_some()
+        if self.completed.get_mut().get(&source).is_some()
             || self.active.as_ref() == Some(&source)
+            || self.queue.len() >= CACHE_ENTRIES
             || self.queue.contains(&source)
         {
             return Task::none();
@@ -112,12 +113,19 @@ impl Cache {
 
     pub fn update(&mut self, Rendered(src, result): Rendered) -> Task<Rendered> {
         self.active = None;
-        self.completed.put(src, result);
+        self.completed.get_mut().put(src, result);
         self.next()
     }
 
-    pub fn get(&self, source: &str) -> Option<&Formula> {
-        self.completed.peek(source)?.as_ref()
+    pub fn rendered(&self, source: &str) -> bool {
+        self.completed
+            .borrow()
+            .peek(source)
+            .is_some_and(Option::is_some)
+    }
+    pub fn leave_session(&mut self) {
+        self.queue.clear();
+        self.copied = None;
     }
 
     pub fn mark_copied(&mut self, entry_id: String, block: usize, until: Instant) {
@@ -154,14 +162,16 @@ impl Cache {
         size: Pixels,
         literal: Element<'a, crate::ui::Message>,
     ) -> Element<'a, crate::ui::Message> {
-        match self.completed.peek(source) {
+        match self.completed.borrow_mut().get(source) {
             Some(Some(formula)) => formula.view(source, size, at, self.copy_label(at)),
             Some(None) => literal,
-            None if source.len() <= MAX_SOURCE => iced::widget::sensor(literal)
-                .key_ref(source)
-                .anticipate(120.)
-                .on_show(move |_| crate::ui::Message::RequestEquation(source.to_owned()))
-                .into(),
+            None if source.len() <= MAX_SOURCE && self.queue.len() < CACHE_ENTRIES => {
+                iced::widget::sensor(literal)
+                    .key_ref(source)
+                    .anticipate(120.)
+                    .on_show(move |_| crate::ui::Message::RequestEquation(source.to_owned()))
+                    .into()
+            }
             None => literal,
         }
     }
@@ -360,8 +370,8 @@ $$"]
         assert!(iced_runtime::task::into_stream(cache.request(first.clone())).is_none());
         let work = cache.update(finish(work).await);
         let _ = cache.update(finish(work).await);
-        assert!(cache.get(&first).is_some());
-        assert!(cache.get(bad).is_none());
+        assert!(cache.rendered(&first));
+        assert!(!cache.rendered(bad));
         assert!(iced_runtime::task::into_stream(cache.request(bad.into())).is_none());
     }
 }

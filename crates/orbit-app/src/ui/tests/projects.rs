@@ -405,3 +405,19 @@ async fn invalid_project_stays_in_modal_without_creating_state() {
     assert!(app.error.as_ref().unwrap().contains("Cannot open"));
     assert!(app.catalog.projects.is_empty());
 }
+
+#[tokio::test]
+async fn dismissed_project_operations_cannot_update_a_new_modal() {
+    let mut app = app();
+    dispatch(&mut app, Message::AddProject).await;
+    let request = app.project_request;
+    dispatch(&mut app, Message::Dismiss).await;
+    dispatch(&mut app, Message::AddProject).await;
+    let before = app.modal_input.clone();
+    let late = PathBuf::from("/stale-picker-result");
+    dispatch(&mut app, Message::Folder(request, Some(late.clone()))).await;
+    dispatch(&mut app, Message::ProjectResolved(request, Ok(late))).await;
+    assert_eq!(app.modal_input, before);
+    assert!(matches!(app.modal, Some(Modal::AddProject)));
+    assert!(app.catalog.projects.is_empty());
+}

@@ -6,7 +6,7 @@ pub struct List {
     pub order: Vec<usize>,
     positions: HashMap<usize, usize>,
     heights: Vec<f32>,
-    tree: Vec<f32>,
+    tree: Vec<f64>,
     pub offset: f32,
     pub viewport: f32,
     overscan: Option<f32>,
@@ -50,7 +50,7 @@ impl List {
         }
         self.tree = vec![0.; self.order.len() + 1];
         for i in 1..self.tree.len() {
-            self.tree[i] += self.heights[i - 1];
+            self.tree[i] += f64::from(self.heights[i - 1]);
             let parent = i + (i & i.wrapping_neg());
             if parent < self.tree.len() {
                 self.tree[parent] += self.tree[i];
@@ -93,7 +93,7 @@ impl List {
     pub fn push(&mut self, id: usize, height: f32) {
         let index = self.order.len();
         let i = index + 1;
-        let value = height + self.prefix(index) - self.prefix(i - (i & i.wrapping_neg()));
+        let value = f64::from(height) + self.sum(index) - self.sum(i - (i & i.wrapping_neg()));
         if self.tree.is_empty() {
             self.tree.push(0.);
         }
@@ -102,7 +102,7 @@ impl List {
         self.heights.push(height);
         self.tree.push(value);
     }
-    fn add(&mut self, index: usize, delta: f32) {
+    fn add(&mut self, index: usize, delta: f64) {
         let mut i = index + 1;
         while i < self.tree.len() {
             self.tree[i] += delta;
@@ -110,6 +110,9 @@ impl List {
         }
     }
     pub fn prefix(&self, end: usize) -> f32 {
+        self.sum(end) as f32
+    }
+    fn sum(&self, end: usize) -> f64 {
         let mut i = end;
         let mut sum = 0.;
         while i > 0 {
@@ -127,7 +130,7 @@ impl List {
         let mut bit = self.order.len().next_power_of_two();
         while bit > 0 {
             let next = index + bit;
-            if next < self.tree.len() && sum + self.tree[next] <= offset {
+            if next < self.tree.len() && (sum + self.tree[next]) as f32 <= offset {
                 index = next;
                 sum += self.tree[next];
             }
@@ -160,7 +163,7 @@ impl List {
             return false;
         };
         let height = height.max(1.);
-        let delta = height - self.heights[index];
+        let delta = f64::from(height) - f64::from(self.heights[index]);
         if delta.abs() < 0.5 {
             return false;
         }
@@ -168,7 +171,7 @@ impl List {
         self.heights[index] = height;
         self.add(index, delta);
         if before {
-            self.offset = (self.offset + delta).max(0.);
+            self.offset = (self.offset + delta as f32).max(0.);
         }
         before
     }
@@ -179,6 +182,20 @@ impl List {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fractional_measurements_accumulate_without_losing_small_deltas() {
+        let mut list = List::default();
+        let heights: Vec<_> = (0..512).map(|i| 80_000.25 + (i % 3) as f32).collect();
+        list.reset(heights.iter().copied().enumerate());
+        let mut expected = 0.0_f64;
+        for (i, height) in heights.into_iter().enumerate() {
+            list.measure(i, height + 0.75);
+            assert_eq!(list.prefix(i), expected as f32);
+            assert_eq!(list.at(expected as f32), i);
+            expected += f64::from(height) + 0.75;
+        }
+        assert_eq!(list.total(), expected as f32);
+    }
     #[test]
     fn fixed_chat_margin_respects_small_viewports_edges_and_tail() {
         let mut chat = List::with_overscan(120.);

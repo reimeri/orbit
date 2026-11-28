@@ -74,6 +74,7 @@ async fn git_cache_follows_projects_and_retains_background_results() {
     let b = PathBuf::from("/project-b");
     let changes = |added| {
         Some(crate::git::Info::Changes {
+            unreadable: 0,
             branch: "main".into(),
             added,
             removed: 0,
@@ -141,6 +142,7 @@ async fn footer_omits_absent_git_and_zero_diff_counts() {
     for (status, expected_branch, expected_counts) in [
         (
             Some(crate::git::Info::Changes {
+                unreadable: 0,
                 branch: "main".into(),
                 added: 0,
                 removed: 0,
@@ -150,6 +152,7 @@ async fn footer_omits_absent_git_and_zero_diff_counts() {
         ),
         (
             Some(crate::git::Info::Changes {
+                unreadable: 0,
                 branch: "main".into(),
                 added: 0,
                 removed: 3,
@@ -198,6 +201,7 @@ async fn footer_hides_whole_items_in_priority_order_without_wrapping() {
     app.git.insert(
         path,
         crate::git::Info::Changes {
+            unreadable: 0,
             branch: "main".into(),
             added: 0,
             removed: 0,
@@ -279,6 +283,7 @@ async fn footer_stays_at_chat_bottom_and_controls_fit_with_both_sidebars() {
     app.git.insert(
         app.current().unwrap().project.clone(),
         crate::git::Info::Changes {
+            unreadable: 0,
             branch: "long-feature-branch-name".into(),
             added: 12345,
             removed: 678,

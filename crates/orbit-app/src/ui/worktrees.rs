@@ -37,7 +37,7 @@ pub enum Action {
 pub enum Outcome {
     Opened(PathBuf),
     Created { path: PathBuf, origin: PathBuf },
-    Removed,
+    Removed(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +114,15 @@ impl App {
                         Some(path)
                     }
                     Ok(Outcome::Opened(path)) => Some(path),
-                    Ok(Outcome::Removed) => None,
+                    Ok(Outcome::Removed(path)) => {
+                        // Keep identity for historical sessions in a removed checkout.
+                        if !self.sessions.iter().any(|s| s.project == path)
+                            && self.catalog.worktree_origins.remove(&path).is_some()
+                        {
+                            self.save_catalog();
+                        }
+                        None
+                    }
                     Err(e) => {
                         self.error = Some(e);
                         None
@@ -208,7 +216,7 @@ impl App {
                             } else {
                                 repo.remove(&path, h.store.root())
                                     .await
-                                    .map(|()| Outcome::Removed)
+                                    .map(|()| Outcome::Removed(path))
                             }
                         }
                     };

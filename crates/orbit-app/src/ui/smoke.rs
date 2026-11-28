@@ -205,6 +205,7 @@ impl App {
                 self.git.insert(
                     self.current().unwrap().project.clone(),
                     crate::git::Info::Changes {
+                        unreadable: 0,
                         branch: "main".into(),
                         added: 123,
                         removed: 45,
@@ -583,8 +584,8 @@ impl App {
                     },
                 };
                 session.entries.push(entry);
-                self.expanded.insert("smoke-image".into());
-                self.groups.insert("smoke-image".into());
+                self.details.expanded.insert("smoke-image".into());
+                self.details.groups.insert("smoke-image".into());
                 self.stage_smoke_transcript(session);
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
@@ -664,8 +665,8 @@ impl App {
                     output:"Rust documentation (https://doc.rust-lang.org/book/)\nThe Rust Programming Language".into(),complete:true,failed:false, cell_id: None,parent:None,media:vec![],
                     web:Some(orbit_core::web_search::Metadata{mode:orbit_core::web_search::Mode::Live,searched_at:orbit_core::store::now(),sources:vec![orbit_core::web_search::Source{title:"The Rust Programming Language — a long source title that should fit in a constrained chat column".into(),url:"https://doc.rust-lang.org/book/".into()}],details:r#"[{"type":"text_result","url":"https://doc.rust-lang.org/book/"}]"#.into()})
                 }});
-                self.expanded.insert("smoke-web".into());
-                self.groups.insert("smoke-web".into());
+                self.details.expanded.insert("smoke-web".into());
+                self.details.groups.insert("smoke-web".into());
                 self.stage_smoke_transcript(session);
             }
             40 => {
@@ -699,9 +700,9 @@ impl App {
                 self.agents_open = false;
                 self.attachments.clear();
                 self.editor = text_editor::Content::new();
-                self.groups.clear();
-                self.expanded.clear();
-                self.execution.clear();
+                self.details.groups.clear();
+                self.details.expanded.clear();
+                self.details.execution.clear();
                 self.auto_scroll = false;
                 self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
                 self.activity = activity::Projection::default();
@@ -802,7 +803,8 @@ impl App {
                 }
                 self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
                 // These are new sessions, not movements of previously mounted rows.
-                let key_base = self.sidebar_keys.len() + 3;
+                let key_base = self.next_sidebar_key;
+                self.next_sidebar_key += self.sidebar_rows.len();
                 self.sidebar_list
                     .reset(self.sidebar_rows.iter().enumerate().map(|(key, row)| {
                         (
@@ -929,10 +931,9 @@ impl App {
                 self.restore_draft();
                 return Task::batch(std::iter::once(delayed_capture()).chain(self.tasks.drain(..)));
             }
-            54 if self
+            54 if !self
                 .equations
-                .get(include_str!("../fixtures/search-chance.md").trim_end())
-                .is_none() =>
+                .rendered(include_str!("../fixtures/search-chance.md").trim_end()) =>
             {
                 self.smoke_stage -= 1;
                 return delayed_capture();

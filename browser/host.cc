@@ -6,6 +6,7 @@
 #include "include/cef_devtools_message_observer.h"
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -57,6 +58,8 @@ public:
 class Tab;
 static std::map<uint64_t, CefRefPtr<Tab>> tabs;
 static bool quitting;
+// TID_UI owns admission; at most two detached paint buffers process-wide.
+static int encoders;
 static void command(Json);
 static bool web(const std::string &u) {
   return u.starts_with("http://") || u.starts_with("https://") ||
@@ -107,6 +110,7 @@ public:
   bool visible = false, allowed = true, closing = false;
   std::string url = "about:blank", title;
   std::map<uint64_t, std::string> captures;
+  bool encoding = false;
   CefRect popup;
   bool popup_open = false;
   Tab(uint64_t id, const std::string &file) : id(id) {
@@ -146,7 +150,12 @@ public:
     s.device_scale_factor = scale;
     return true;
   }
-  void OnPopupSize(B, const CefRect &r) override { popup = r; }
+  void OnPopupSize(B b, const CefRect &r) override {
+    if (popup_open && (popup.x != r.x || popup.y != r.y ||
+                       popup.width != r.width || popup.height != r.height))
+      b->GetHost()->Invalidate(PET_VIEW); // restore the old popup footprint
+    popup = r;
+  }
   void OnPopupShow(B b, bool show) override {
     popup_open = show;
     if (!show)
@@ -202,26 +211,58 @@ public:
       emit({{"tab", id}, {"event", "paint"}});
     if (type == PET_VIEW && popup_open)
       b->GetHost()->Invalidate(PET_POPUP);
-    if (captures.empty() || b->IsLoading() || (type == PET_VIEW && popup_open))
+    if (captures.empty() || encoding || encoders == 2 || b->IsLoading() ||
+        (type == PET_VIEW && popup_open))
       return;
-    for (auto &[req, path] : captures) {
-      png_image img{};
-      img.version = PNG_IMAGE_VERSION;
-      img.width = mem->width;
-      img.height = mem->height;
-      img.format = PNG_FORMAT_BGRA;
-      if (png_image_write_to_file(&img, path.c_str(), 0, dst, 0, nullptr))
-        emit({{"req", req},
-              {"url", url},
-              {"width", img.width},
-              {"height", img.height}});
-      else
-        emit({{"req", req}, {"error", img.message}});
-      png_image_free(&img);
+    const auto cw = mem->width, ch = mem->height;
+    std::vector<unsigned char> frame(dst, dst + size_t(cw) * ch * 4);
+    auto encode = [tab = CefRefPtr<Tab>(this), jobs = captures, page = url,
+                   cw, ch, frame = std::move(frame)]() {
+      std::map<uint64_t, Json> results;
+      for (const auto &[req, path] : jobs) {
+        png_image img{};
+        img.version = PNG_IMAGE_VERSION;
+        img.width = cw;
+        img.height = ch;
+        img.format = PNG_FORMAT_BGRA;
+        // Rust owns the private temporary file. Never recreate it if a
+        // cancellation unlinks it before this job runs.
+        int fd = open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        FILE *out = fd < 0 ? nullptr : fdopen(fd, "wb");
+        if (!out) {
+          results[req] = {{"req", req}, {"error", std::strerror(errno)}};
+          if (fd >= 0)
+            close(fd);
+          continue;
+        }
+        bool written = png_image_write_to_stdio(&img, out, 0, frame.data(), 0, nullptr);
+        int closed = fclose(out);
+        if (written && closed == 0)
+          results[req] = {{"req", req}, {"url", page}, {"width", cw}, {"height", ch}};
+        else
+          results[req] = {{"req", req}, {"error", written ? std::strerror(errno) : img.message}};
+        png_image_free(&img);
+      }
+      CefPostTask(TID_UI, new Work([tab, results = std::move(results)] {
+        for (const auto &[req, result] : results)
+          if (tab->captures.erase(req)) // cancel/handoff/close may have won
+            emit(result);
+        tab->encoding = false;
+        --encoders;
+        if (tab->browser && !tab->closing && !tab->visible && tab->captures.empty())
+          tab->browser->GetHost()->WasHidden(true);
+        for (const auto &[id, pending] : tabs)
+          if (pending->browser && !pending->encoding && !pending->closing && !pending->captures.empty())
+            pending->browser->GetHost()->Invalidate(PET_VIEW);
+      }));
+    };
+    if (CefPostTask(TID_FILE_USER_BLOCKING, new Work(std::move(encode)))) {
+      encoding = true;
+      ++encoders;
+    } else {
+      cancel_captures("Screenshot worker unavailable; retry the capture");
+      refresh_visibility();
     }
-    captures.clear();
-    if (!visible)
-      b->GetHost()->WasHidden(true);
   }
   void state(B b) {
     emit({{"tab", id},
@@ -456,6 +497,8 @@ static void command(Json j) {
       host->StopFinding(true);
     else if (op == "focus")
       host->SetFocus(j.at("focus"));
+    else if (op == "capture_lost")
+      host->SendCaptureLostEvent();
     else if (op == "cut")
       frame->Cut();
     else if (op == "preedit") {
@@ -516,10 +559,13 @@ static void command(Json j) {
         host->SendMouseMoveEvent(e, j.value("leave", false));
       else {
         host->SetFocus(true);
+        auto flag = j.value("button", int(EVENTFLAG_LEFT_MOUSE_BUTTON));
+        auto button = flag == EVENTFLAG_RIGHT_MOUSE_BUTTON ? MBT_RIGHT
+                    : flag == EVENTFLAG_MIDDLE_MOUSE_BUTTON ? MBT_MIDDLE : MBT_LEFT;
         if (op != "up")
-          host->SendMouseClickEvent(e, MBT_LEFT, false, j.value("count", 1));
+          host->SendMouseClickEvent(e, button, false, j.value("count", 1));
         if (op != "down")
-          host->SendMouseClickEvent(e, MBT_LEFT, true, j.value("count", 1));
+          host->SendMouseClickEvent(e, button, true, j.value("count", 1));
       }
     } else if (op == "screenshot") {
       t->captures.emplace(req, j.at("file").get<std::string>());

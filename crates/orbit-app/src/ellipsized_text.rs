@@ -74,8 +74,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Label {
         let state = tree.state.downcast_mut::<State>();
         let width = limits.max().width;
         let font = renderer.default_font();
-        let key = (self.value.clone(), width, self.size, font);
-        if state.key.as_ref() != Some(&key) {
+        if !state.key.as_ref().is_some_and(|(text, w, s, f)| {
+            text == &self.value && (*w, *s, *f) == (width, self.size, font)
+        }) {
             let format = widget::text::Format {
                 size: Some(self.size.into()),
                 font: Some(font),
@@ -91,7 +92,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Label {
                 .size()
                 .width
             });
-            state.key = Some(key);
+            state.key = Some((self.value.clone(), width, self.size, font));
         }
         layout::Node::new(limits.resolve(
             self.width,

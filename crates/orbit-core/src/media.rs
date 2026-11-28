@@ -145,11 +145,15 @@ impl MediaStore {
     pub fn image(&self, bytes: &[u8]) -> Result<Media> {
         static DECODER: Mutex<()> = Mutex::new(());
         let _decoder = DECODER.lock().expect("image decoder lock");
-        let (mut decoded, format) = decode_image(bytes)?;
+        let (mut decoded, format) = decode_image(bytes)
+            .and_then(|decoded| {
+                if decoded.1 == ImageFormat::Gif {
+                    validate_gif(bytes)?;
+                }
+                Ok(decoded)
+            })
+            .context(InvalidImage)?;
         let (width, height) = (decoded.width(), decoded.height());
-        if format == ImageFormat::Gif {
-            validate_gif(bytes)?;
-        }
         let path = self.save(bytes, extension(format))?;
         // Codex unified budget: original detail, at most 6000px/10000 32px patches.
         let scale = (6000. / width.max(height) as f64)
@@ -323,6 +327,14 @@ pub fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
         | Orientation::Rotate270FlipH => (height, width),
         _ => (width, height),
     })
+}
+/// Distinguishes unusable image bytes from a failure to publish a valid image.
+#[derive(Debug)]
+pub(crate) struct InvalidImage;
+impl std::fmt::Display for InvalidImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Invalid image data")
+    }
 }
 pub fn decode_image(bytes: &[u8]) -> Result<(image::DynamicImage, ImageFormat)> {
     let (mut decoder, format) = image_decoder(bytes)?;

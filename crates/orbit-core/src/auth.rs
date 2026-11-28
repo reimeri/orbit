@@ -221,7 +221,7 @@ impl Auth {
                 let query: std::collections::HashMap<_, _> =
                     url.query_pairs().into_owned().collect();
                 if url.path() != "/auth/callback" || query.get("state") != Some(&login.state) {
-                    socket.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 22\r\n\r\nInvalid login callback").await?;
+                    let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 22\r\n\r\nInvalid login callback").await;
                     continue;
                 }
                 if let Some(error) = query.get("error") {

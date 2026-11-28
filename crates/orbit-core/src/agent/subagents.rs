@@ -822,7 +822,15 @@ impl Harness {
         let local = (!project_deletion).then(|| self.library.read().expect("library lock"));
         let parents: HashSet<String> = match target {
             Deletion::Session(session) => {
-                if self.load(session)?.snapshot().child.is_some() {
+                if !self
+                    .summaries
+                    .lock()
+                    .expect("summary lock")
+                    .contains_key(session)
+                {
+                    bail!("Session not found: {session}");
+                }
+                if self.family_id(session) != session {
                     bail!("Delete children together with their parent");
                 }
                 [session.to_owned()].into()
@@ -834,7 +842,12 @@ impl Harness {
                 .map(|s| s.id)
                 .collect(),
         };
-        let gates: Vec<_> = parents.iter().map(|id| self.family(id)).collect();
+        let mut ordered_parents: Vec<_> = parents.iter().collect();
+        ordered_parents.sort_unstable();
+        let gates: Vec<_> = ordered_parents
+            .into_iter()
+            .map(|id| self.family(id))
+            .collect();
         let mut reservations: Vec<_> = gates
             .iter()
             .map(|f| f.lock().expect("family lifecycle"))
@@ -881,7 +894,7 @@ impl Harness {
             .iter()
             .map(|gate| gate.lock().expect("loading lock"))
             .collect();
-        let family: Vec<_> = ids.iter().filter_map(|id| self.get(id)).collect();
+        let family: Vec<_> = order.into_iter().filter_map(|id| self.get(id)).collect();
         // Exclude late native callbacks: none can recreate a just-deleted row.
         let _saved: Vec<_> = family
             .iter()
@@ -904,6 +917,7 @@ impl Harness {
                 c.naming_cancel.cancel();
                 c.cancel();
             }
+            self.provider.discard_continuation(id);
             self.browser.forget(id);
             self.notifications.clear(id);
             self.conversations

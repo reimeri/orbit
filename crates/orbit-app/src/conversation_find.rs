@@ -255,6 +255,10 @@ impl Index {
                 .map_err(|e| e.to_string())?;
             self.matcher = Some((query.to_owned(), re));
         }
+        if previous.is_none() {
+            self.blocks
+                .retain(|&i, _| i < source.len() && matches!(source[i].kind, EntryKind::Assistant));
+        }
         let re = self.matcher.as_ref().unwrap().1.clone();
         let mut rows = previous.map_or_else(Vector::new, |p| p.rows.clone());
         let empty = History::default();
@@ -271,6 +275,9 @@ impl Index {
                 self.blocks.remove(&i);
                 continue;
             };
+            if !matches!(entry.kind, EntryKind::Assistant) {
+                self.blocks.remove(&i);
+            }
             let mut found = Matches::default();
             let scan = |found: &mut Matches, block, text: &str| {
                 let mut matches = Vec::new();

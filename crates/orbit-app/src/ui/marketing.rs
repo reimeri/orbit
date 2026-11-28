@@ -74,8 +74,10 @@ impl App {
             "running 3 tests\ntest evicts_the_oldest_tile ... ok\ntest keeps_visible_tiles ... ok\ntest reuses_tiles_after_pan ... ok",
             true,
         );
-        self.groups.extend([inspect.id.clone(), test.id.clone()]);
-        self.expanded.insert(test.id.clone());
+        self.details
+            .groups
+            .extend([inspect.id.clone(), test.id.clone()]);
+        self.details.expanded.insert(test.id.clone());
         session.entries = vec![
             Entry::new(EntryKind::User { skills: vec![], files: vec![], images: vec![], sent_at: None, steering: false }, "Panning back to a trail reloads the same map tiles. Can we reuse them without growing memory usage?"),
             Entry::new(EntryKind::Assistant, "I’ll trace how tiles leave the viewport, then add a test for panning away and back."),
@@ -87,6 +89,7 @@ impl App {
         self.git.insert(
             project,
             crate::git::Info::Changes {
+                unreadable: 0,
                 branch: "tile-cache".into(),
                 added: 48,
                 removed: 12,

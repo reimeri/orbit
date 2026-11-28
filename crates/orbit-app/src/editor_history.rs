@@ -22,16 +22,17 @@ pub enum Direction {
 }
 impl Direction {
     pub fn from_key_press(event: &text_editor::KeyPress) -> Option<Self> {
-        if matches!(event.status, text_editor::Status::Focused { .. })
-            && event.modifiers == keyboard::Modifiers::CTRL
-        {
-            match event.key.as_ref() {
-                keyboard::Key::Character("z") => Some(Self::Undo),
-                keyboard::Key::Character("y") => Some(Self::Redo),
-                _ => None,
+        use keyboard::{Key, Modifiers};
+        if !matches!(event.status, text_editor::Status::Focused { .. }) {
+            return None;
+        }
+        match (event.key.as_ref(), event.modifiers) {
+            (Key::Character("z"), Modifiers::CTRL) => Some(Self::Undo),
+            (Key::Character("y"), Modifiers::CTRL) => Some(Self::Redo),
+            (Key::Character("z" | "Z"), m) if m == Modifiers::CTRL | Modifiers::SHIFT => {
+                Some(Self::Redo)
             }
-        } else {
-            None
+            _ => None,
         }
     }
 }

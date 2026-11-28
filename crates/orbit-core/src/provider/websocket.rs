@@ -273,6 +273,7 @@ impl Provider {
                 Ok::<_, anyhow::Error>(serde_json::to_string(&frame)?)
             })
             .await??;
+            let reused = checkpoint.is_some();
             let mut socket = if let Some(c) = checkpoint {
                 c.socket
             } else {
@@ -280,10 +281,14 @@ impl Provider {
                     .await?
             };
             let sent_at = Instant::now();
-            timeout(Duration::from_secs(90), send_create(&mut socket, frame))
+            let sent = timeout(Duration::from_secs(90), send_create(&mut socket, frame))
                 .await
-                .map_err(|_| StreamInterrupted)?
-                .map_err(transport_error)?;
+                .map_err(|_| anyhow::Error::from(StreamInterrupted))
+                .and_then(|r| r.map_err(transport_error));
+            if reused && sent.as_ref().is_err_and(|e| e.is::<StreamInterrupted>()) {
+                continue;
+            }
+            sent?;
             let mut stream = ResponseStream {
                 previous_calls: history
                     .into_iter()
@@ -294,21 +299,27 @@ impl Provider {
                 ..ResponseStream::new(sent_at)
             };
             loop {
-                let msg = timeout(Duration::from_secs(120), socket.next())
-                    .await
-                    .map_err(|_| StreamInterrupted)?
-                    .ok_or(StreamInterrupted)?
-                    .map_err(transport_error)?;
+                let before_output =
+                    stream.first_token.is_none() && stream.completed_items.is_empty();
+                let msg = match timeout(Duration::from_secs(120), socket.next()).await {
+                    Ok(Some(Ok(msg))) if !msg.is_close() => msg,
+                    Ok(Some(Err(error))) => {
+                        let error = transport_error(error);
+                        if reused && before_output && error.is::<StreamInterrupted>() {
+                            continue 'attempt;
+                        }
+                        return Err(error);
+                    }
+                    _ if reused && before_output => continue 'attempt,
+                    _ => return Err(StreamInterrupted.into()),
+                };
                 let event: Value = match msg {
                     Message::Text(text) => {
                         serde_json::from_str(&text).context("Invalid JSON in WebSocket event")?
                     }
-                    Message::Close(_) => return Err(StreamInterrupted.into()),
                     Message::Ping(_) | Message::Pong(_) => continue,
                     _ => bail!("Unexpected non-text ChatGPT WebSocket message"),
                 };
-                let before_output =
-                    stream.first_token.is_none() && stream.completed_items.is_empty();
                 if chained
                     && before_output
                     && event["type"] == "error"
@@ -318,6 +329,9 @@ impl Provider {
                 }
                 if event["type"] == "error" {
                     if event["error"]["code"] == "websocket_connection_limit_reached" {
+                        if reused && before_output {
+                            continue 'attempt;
+                        }
                         return Err(StreamInterrupted.into());
                     }
                     if before_output
@@ -507,6 +521,22 @@ mod tests {
                 json!([full["input"][0], full["input"][1], call, result, question])
             );
             reply.send(completion("R3", json!([]))).unwrap();
+            for (prior, next) in [("R3", "R4"), ("R4", "R5")] {
+                let (parked, reply) = requests.recv().await.unwrap();
+                assert_eq!(body(&parked)["previous_response_id"], prior);
+                if prior == "R3" {
+                    reply.send((200,json!({"type":"error","error":{"code":"websocket_connection_limit_reached"}}).to_string())).unwrap();
+                } else {
+                    drop(reply); // transport closes after checkout, before output
+                }
+                let (fresh, reply) = requests.recv().await.unwrap();
+                assert_ne!(
+                    header(&parked, "sec-websocket-key"),
+                    header(&fresh, "sec-websocket-key")
+                );
+                assert_eq!(body(&fresh), body(&reset));
+                reply.send(completion(next, json!([]))).unwrap();
+            }
         };
         let client = async {
             let cancel = CancellationToken::new();
@@ -524,10 +554,12 @@ mod tests {
                 .unwrap();
             std::fs::rename(&parked, &image_path).unwrap();
             session.input.push(question.clone());
-            provider
-                .respond(&session, "fixture", &cancel, &|_| {})
-                .await
-                .unwrap();
+            for _ in 0..3 {
+                provider
+                    .respond(&session, "fixture", &cancel, &|_| {})
+                    .await
+                    .unwrap();
+            }
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(client, fixture);

@@ -4,7 +4,7 @@ use super::*;
 /// The attention visible at one user action. Later failures must not be acknowledged
 /// by a storage job queued for an earlier view of the session.
 pub struct Attention {
-    conversation: Option<(Arc<Conversation>, u64)>,
+    conversation: Option<(Arc<Conversation>, u64, Arc<()>)>,
     parent: String,
     ranges: Vec<(String, usize)>,
 }
@@ -14,12 +14,13 @@ impl Harness {
         let conversation = self.get(session).and_then(|c| {
             let state = c.state.lock().expect("session lock");
             let generation = c.turn_generation.load(Ordering::Acquire);
-            let needs_attention = !c.is_executing()
+            let needs_attention = c.loaded.load(Ordering::Acquire)
+                && !c.is_executing()
                 && (state.needs_attention
                     || state.interrupted
                     || c.status() == ConversationStatus::NeedsAttention);
-            drop(state);
-            needs_attention.then_some((c, generation))
+            // Eviction checks this pin under the same state lock.
+            needs_attention.then(|| (c.clone(), generation, c.attention_pin.clone()))
         });
         let parent = self.family_id(session);
         let ranges = self.run_index().attention_ranges(&parent, session);
@@ -98,18 +99,18 @@ impl Harness {
                 skipped.join("; ")
             ))
         };
-        if let Some((c, generation)) = attention.conversation {
+        if let Some((c, generation, _pin)) = attention.conversation {
             let mut saved = c.persisted.lock().expect("persistence lock");
             {
                 let mut state = c.state.lock().expect("session lock");
                 // Selection, deletion and new work may overtake a queued action.
                 if c.turn_generation.load(Ordering::Acquire) != generation
                     || c.is_executing()
-                    || !c.loaded.load(Ordering::Acquire)
                     || c.deleted.load(Ordering::Acquire)
                 {
                     return result;
                 }
+                c.notifications.clear_terminal(&c.id);
                 state.needs_attention = false;
                 state.interrupted = false;
                 c.set_status(ConversationStatus::Ready);
@@ -164,12 +165,14 @@ mod tests {
         // must not invalidate acknowledgement of the same stopped turn.
         h.edit(&c.id, |s| s.draft = "Keep this unsent draft λ".into())
             .unwrap();
+        h.evict_idle(&c.id).unwrap(); // an already-queued acknowledgement must still apply
         let before = c.snapshot();
         let db = rusqlite::Connection::open(store.root().join("sessions.sqlite3")).unwrap();
         db.execute_batch("CREATE TRIGGER fail_ack BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL,'disk fixture'); END;").unwrap();
         assert!(h.acknowledge_attention(earlier.unwrap()).is_err());
         assert!(store.load_session(&c.id).unwrap().needs_attention);
         db.execute_batch("DROP TRIGGER fail_ack;").unwrap();
+        assert!(h.take_notifications().is_empty());
         h.flush().unwrap();
         h.evict_inactive(None).unwrap();
         let reloaded = h.load(&c.id).unwrap();

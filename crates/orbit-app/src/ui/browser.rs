@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 pub(super) struct State {
     pub open: bool,
     pub expanded: bool,
-    mounted: Option<String>,
+    pub(super) mounted: Option<String>,
     frame: Option<Frame>,
     status: Status,
     location: String,
@@ -73,7 +73,7 @@ pub enum Menu {
 #[derive(Clone, Debug)]
 pub enum Action {
     Toggle,
-    Data,
+    Data(String, Result<Option<Frame>, String>),
     Size(String, Size),
     Scale(f32),
     Location(String),
@@ -150,12 +150,11 @@ impl App {
             s.location = status.url.clone();
         }
         s.status = status;
-        match h.browser.frame(id, s.frame.as_ref().map(|f| f.key)) {
-            Ok(Some(f)) => s.frame = Some(f),
-            Ok(None) => {}
-            Err(e) => s.status.error = Some(e.to_string()),
-        }
-        if s.status.error.is_some() {
+        if s.status.error.is_some()
+            || s.frame
+                .as_ref()
+                .is_some_and(|f| Some(f.key.0) != s.status.surface_id)
+        {
             s.frame = None;
         }
     }
@@ -181,8 +180,24 @@ impl App {
         };
         let b = h.browser.clone();
         let op = match a {
-            Action::Data => {
+            Action::Data(owner, frame) => {
+                if owner != id {
+                    return Task::none();
+                }
                 self.refresh_browser();
+                let s = &mut self.browser;
+                match frame {
+                    Ok(Some(f))
+                        if Some(f.key.0) == s.status.surface_id && s.status.error.is_none() =>
+                    {
+                        s.frame = Some(f)
+                    }
+                    Err(e) => {
+                        s.frame = None;
+                        s.status.error = Some(e);
+                    }
+                    _ => (),
+                }
                 return Task::none();
             }
             Action::Location(s) => {
@@ -564,13 +579,31 @@ impl App {
             .into()
     }
 }
-pub(super) fn subscription(data: &Updates) -> iced::futures::stream::BoxStream<'static, Message> {
-    let mut changed = data.0.browser.subscribe();
+pub(super) fn subscription(
+    (data, id): &(Updates, String),
+) -> iced::futures::stream::BoxStream<'static, Message> {
+    let id = id.clone();
+    let browser = data.0.browser.clone();
+    let mut changed = browser.subscribe();
     changed.mark_changed();
     Box::pin(iced::stream::channel(1, async move |mut output| {
+        let mut last = None;
         while changed.changed().await.is_ok() {
             changed.borrow_and_update();
-            if output.send(msg(Action::Data)).await.is_err() {
+            let b = browser.clone();
+            let owner = id.clone();
+            let frame = tokio::task::spawn_blocking(move || b.frame(&owner, last))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+            if let Ok(Some(f)) = &frame {
+                last = Some(f.key);
+            }
+            if output
+                .send(msg(Action::Data(id.clone(), frame)))
+                .await
+                .is_err()
+            {
                 break;
             }
         }

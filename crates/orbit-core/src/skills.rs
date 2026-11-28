@@ -60,11 +60,22 @@ pub(crate) fn discover_with_home(cwd: &Path, home: Option<&Path>) -> Result<Cata
     let cwd = cwd
         .canonicalize()
         .with_context(|| format!("Locate workspace {}", cwd.display()))?;
+    let mut catalog = Catalog::default();
     let mut root = cwd.as_path();
     for dir in cwd.ancestors() {
-        if dir.join(".git").try_exists()? {
-            root = dir;
-            break;
+        let marker = dir.join(".git");
+        match marker.try_exists() {
+            Ok(true) => {
+                root = dir;
+                break;
+            }
+            Ok(false) => (),
+            Err(e) => {
+                catalog.warnings.push(format!("{}: {e}", marker.display()));
+                // Do not cross an unknown repository boundary.
+                root = dir;
+                break;
+            }
         }
     }
     let mut roots = vec![];
@@ -77,7 +88,6 @@ pub(crate) fn discover_with_home(cwd: &Path, home: Option<&Path>) -> Result<Cata
     if let Some(home) = home {
         roots.push((home.join(".agents/skills"), true));
     }
-    let mut catalog = Catalog::default();
     let mut seen = HashSet::new();
     for (root, personal) in roots {
         let dirs = match fs::read_dir(&root) {
@@ -177,10 +187,9 @@ fn load(path: &Path, file: fs::File, personal: bool) -> Result<Skill> {
         .expect("skill directory")
         .join("agents/openai.yaml");
     let implicit = match open_regular(&sidecar) {
-        Ok(file) => serde_yaml_ng::from_reader::<_, Sidecar>(BufReader::new(file))
+        Ok(file) => serde_yaml_ng::from_reader::<_, Option<Sidecar>>(BufReader::new(file))
             .with_context(|| sidecar.display().to_string())?
-            .policy
-            .allow_implicit_invocation
+            .and_then(|s| s.policy.allow_implicit_invocation)
             .unwrap_or(true),
         Err(e) if e.kind() == ErrorKind::NotFound => true,
         Err(e) => return Err(e).with_context(|| sidecar.display().to_string()),
@@ -278,6 +287,9 @@ mod tests {
             aux.join("openai.yaml"),
             "policy:\n  allow_implicit_invocation: false\n",
         )?;
+        let empty_policy = local.parent().unwrap().join("agents");
+        fs::create_dir(&empty_policy)?;
+        fs::write(empty_policy.join("openai.yaml"), "  \n")?;
         let broken = write(&pkg, "broken", "bad!", "");
         let catalog = discover_with_home(&pkg, Some(&home))?;
         assert_eq!(

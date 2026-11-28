@@ -80,6 +80,14 @@ enum TranscriptKey {
     Bottom,
 }
 
+#[derive(Default, PartialEq)]
+struct Disclosures {
+    groups: HashSet<String>,
+    execution: HashSet<String>,
+    expanded: HashSet<String>,
+    raw_tool_inputs: HashSet<String>,
+}
+
 // Only keep geometry for the row being read, not an inactive transcript.
 struct ChatPosition {
     row: usize,
@@ -205,7 +213,8 @@ pub struct App {
     usage_summary: Option<Result<Arc<orbit_core::store::activity::Summary>, String>>,
     transcript: crate::virtual_list::List,
     activity: activity::Projection,
-    execution: HashSet<String>,
+    details: Disclosures,
+    parked_details: HashMap<String, Disclosures>,
     session_list_focus: crate::session_list_focus::SessionListFocus,
     sidebar_rows: Vec<SidebarRow>,
     child_statuses: HashMap<String, ChildStatus>,
@@ -215,6 +224,7 @@ pub struct App {
     view_epoch: u64,
     sidebar_epoch: u64,
     sidebar_keys: HashMap<String, usize>,
+    next_sidebar_key: usize,
     io: crate::io_worker::Worker,
     // One pending cleanup per body; the bit records a sweep requested since enqueue.
     evictions: HashMap<String, bool>,
@@ -231,9 +241,9 @@ pub struct App {
     submissions: HashMap<String, (UserMessage, String)>,
     current_revision: u64,
     outputs: HashMap<String, tool_output::Output>,
+    tool_previews: HashMap<String, (Arc<Entry>, String)>,
     historical_runs: HashMap<String, Option<RunInfo>>,
     historical_read_pending: bool,
-    raw_tool_inputs: HashSet<String>,
     recent_previews: crate::recent_previews::RecentPreviews,
     image_view: crate::image_view::Viewer,
     markdown_images: crate::markdown_images::Cache,
@@ -263,8 +273,6 @@ pub struct App {
     chat_selection: chat_selection::Shared,
     markdown: HashMap<String, Markdown>,
     markdown_heights: HashMap<String, crate::markdown_window::Heights>,
-    expanded: HashSet<String>,
-    groups: HashSet<String>,
     browser: browser::State,
     settings_open: bool,
     agents_open: bool,
@@ -279,11 +287,13 @@ pub struct App {
     threshold_text: String,
     modal: Option<Modal>,
     modal_input: String,
+    project_request: u64,
     error: Option<String>,
     account: Option<String>,
     login_cancel: Option<CancellationToken>,
     login_url: Option<String>,
     tick: u64,
+    footer_widths: std::cell::RefCell<lru::LruCache<String, f32>>,
     window_width: f32,
     window_height: f32,
     drag: Option<(bool, f32, f32)>,
@@ -468,7 +478,8 @@ pub enum Message {
     HideWorking(bool),
     AddProject,
     Browse,
-    Folder(Option<PathBuf>),
+    Folder(u64, Option<PathBuf>),
+    ProjectResolved(u64, Result<PathBuf, String>),
     ModalInput(String),
     Confirm,
     Dismiss,
@@ -574,7 +585,8 @@ impl App {
             usage_summary: None,
             transcript: crate::virtual_list::List::with_overscan(CHAT_OVERSCAN),
             activity: activity::Projection::default(),
-            execution: HashSet::new(),
+            details: Default::default(),
+            parked_details: Default::default(),
             session_list_focus: Default::default(),
             sidebar_rows: vec![],
             child_statuses: HashMap::new(),
@@ -584,6 +596,7 @@ impl App {
             view_epoch: 0,
             sidebar_epoch: 0,
             sidebar_keys: HashMap::new(),
+            next_sidebar_key: 3,
             io,
             evictions: HashMap::new(),
             catalog_save_after_delete: None,
@@ -600,9 +613,9 @@ impl App {
             imports: Default::default(),
             current_revision: 0,
             outputs: HashMap::new(),
+            tool_previews: Default::default(),
             historical_runs: HashMap::new(),
             historical_read_pending: false,
-            raw_tool_inputs: HashSet::new(),
             recent_previews: Default::default(),
             image_view: Default::default(),
             markdown_images: Default::default(),
@@ -629,8 +642,6 @@ impl App {
             chat_selection: Default::default(),
             markdown: HashMap::new(),
             markdown_heights: HashMap::new(),
-            expanded: HashSet::new(),
-            groups: HashSet::new(),
             browser: Default::default(),
             settings_open: false,
             pending_settings: None,
@@ -645,11 +656,13 @@ impl App {
             settings,
             modal: None,
             modal_input: String::new(),
+            project_request: 0,
             error,
             account: None,
             login_cancel: None,
             login_url: None,
             tick: 0,
+            footer_widths: std::cell::RefCell::new(lru::LruCache::new(32.try_into().unwrap())),
             window_width: 1200.,
             window_height: 800.,
             drag: None,
@@ -708,6 +721,28 @@ impl App {
     }
     fn git_info(&self) -> Option<&crate::git::Info> {
         self.git.get(&self.current()?.project)
+    }
+    // Only run after deletion: don't scan the library on a scroll or timer tick.
+    fn prune_deleted_views(&mut self) {
+        let ids: HashSet<_> = self.sessions.iter().map(|s| &s.id).collect();
+        self.sidebar_keys.retain(|id, _| ids.contains(id));
+        self.chat_positions.retain(|id, _| ids.contains(id));
+        self.parked_details.retain(|id, _| ids.contains(id));
+        self.submissions.retain(|id, _| {
+            ids.contains(id) || self.draft_session.as_ref().is_some_and(|s| s.id == *id)
+        });
+        self.histories
+            .retain(|key| !matches!(key, DraftKey::Session(id) if !ids.contains(id)));
+        let paths: HashSet<_> = self
+            .sessions
+            .iter()
+            .map(|s| &s.project)
+            .chain(self.catalog.projects.iter().map(|p| &p.path))
+            .chain(self.new_draft.project.iter())
+            .collect();
+        self.sidebar_branches.retain(|p, _| paths.contains(p));
+        self.git.retain(|p, _| paths.contains(p));
+        self.git_pending.retain(|p| paths.contains(p));
     }
     fn refresh_git(&mut self) -> Task<Message> {
         let Some(session) = self.current() else {
@@ -845,6 +880,8 @@ impl App {
         let h = self.harness.as_ref().expect("harness");
         let Some(conversation) = self.selected.as_ref().and_then(|id| h.get(id)) else {
             if self.current_session.take().is_some() {
+                self.details = Default::default();
+                self.equations.leave_session();
                 self.current_status = ConversationStatus::Ready;
                 self.find = None;
                 self.transcript = crate::virtual_list::List::with_overscan(CHAT_OVERSCAN);
@@ -870,6 +907,7 @@ impl App {
         self.current_revision = revision;
         let snapshot = conversation.snapshot();
         if previous.is_none() {
+            self.equations.leave_session();
             self.hold_prompt_at_bottom = false;
             self.outputs.clear();
             self.historical_runs.clear();
@@ -959,9 +997,12 @@ impl App {
             .transcript
             .order
             .partition_point(|&id| ActivityRow::from_id(id).source() < start);
-        let rows = self
-            .activity
-            .rows(start, &self.groups, &self.execution, &self.expanded);
+        let rows = self.activity.rows(
+            start,
+            &self.details.groups,
+            &self.details.execution,
+            &self.details.expanded,
+        );
         let selection = self.chat_selection.borrow();
         let selected = selection
             .anchor
@@ -990,10 +1031,12 @@ impl App {
             return;
         };
         self.activity.sync(&session.entries);
-        self.transcript.reset(
-            self.activity
-                .rows(0, &self.groups, &self.execution, &self.expanded),
-        );
+        self.transcript.reset(self.activity.rows(
+            0,
+            &self.details.groups,
+            &self.details.execution,
+            &self.details.expanded,
+        ));
     }
     fn jump_to_prompt(&mut self, entry: &str) -> Task<Message> {
         let Some(index) = self.current().and_then(|s| s.entries.index_of(entry)) else {
@@ -1062,6 +1105,9 @@ impl App {
     fn prepare_visible(&mut self) {
         let mut visible_media = self.attachments.clone();
         let mut image_urls = HashMap::new();
+        if self.current_session.is_none() {
+            self.tool_previews.clear();
+        }
         if let Some(session) = &self.current_session {
             let visible: Vec<_> = self
                 .chat_range()
@@ -1085,15 +1131,30 @@ impl App {
                     self.markdown_heights.insert(id, window.known);
                 }
             }
+            self.tool_previews.retain(|id, _| ids.contains(id.as_str()));
             self.outputs
-                .retain(|id, _| ids.contains(id.as_str()) && self.expanded.contains(id));
+                .retain(|id, _| ids.contains(id.as_str()) && self.details.expanded.contains(id));
             self.historical_runs
                 .retain(|id, _| ids.contains(id.as_str()));
             for &(position, index) in &visible {
                 let entry = &session.entries[index];
+                if let EntryKind::Tool { name, input, .. } = &entry.kind
+                    && self
+                        .tool_previews
+                        .get(&entry.id)
+                        .is_none_or(|(old, _)| !std::ptr::eq(old.as_ref(), entry))
+                {
+                    self.tool_previews.insert(
+                        entry.id.clone(),
+                        (
+                            session.entries.shared(index),
+                            activity::tool_preview(name, input),
+                        ),
+                    );
+                }
                 if !self.historical_read_pending
                     && (matches!(entry.kind, EntryKind::Notice)
-                        || (self.expanded.contains(&entry.id)
+                        || (self.details.expanded.contains(&entry.id)
                             && matches!(entry.kind, EntryKind::Tool { complete: true, .. })))
                     && let Some(key) = transcript_run_key(entry)
                     && let Some(h) = &self.harness
@@ -1165,7 +1226,7 @@ impl App {
                     media,
                     ..
                 } = &entry.kind
-                    && self.expanded.contains(&entry.id)
+                    && self.details.expanded.contains(&entry.id)
                 {
                     visible_media.extend(media.iter().cloned());
                     self.outputs.entry(entry.id.clone()).or_insert_with(|| {
@@ -1173,7 +1234,7 @@ impl App {
                             name,
                             input,
                             output,
-                            self.raw_tool_inputs.contains(&entry.id),
+                            self.details.raw_tool_inputs.contains(&entry.id),
                         )
                     });
                 }
@@ -1662,9 +1723,8 @@ impl App {
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        if matches!(message, Message::Browser(browser::Action::Data)) {
-            self.refresh_browser();
-            return Task::none();
+        if let Message::Browser(action @ browser::Action::Data(..)) = message {
+            return self.browser_action(action);
         }
         let apply_timer = (matches!(message, Message::Selected(_))
             && std::env::var_os("ORBIT_TRACE_SESSION_SWITCH").is_some())
@@ -2104,6 +2164,19 @@ impl App {
                         self.context_menu = None;
                         if self.current_session.as_ref().map(|s| &s.id) != self.selected.as_ref() {
                             self.remember_chat_position();
+                            let outgoing = std::mem::take(&mut self.details);
+                            if outgoing != Disclosures::default()
+                                && let Some(previous) = &self.current_session
+                            {
+                                self.parked_details.insert(previous.id.clone(), outgoing);
+                            }
+                            if let Some(saved) = self
+                                .selected
+                                .as_ref()
+                                .and_then(|id| self.parked_details.remove(id))
+                            {
+                                self.details = saved;
+                            }
                             self.auto_scroll = true;
                         }
                         self.refresh();
@@ -2220,17 +2293,19 @@ impl App {
             }
             Message::Deleted(id, result) => {
                 self.io_busy = false;
-                let deleted =
-                    result.is_ok() || self.harness.as_ref().is_some_and(|h| h.get(&id).is_none());
+                let deleted = result.is_ok()
+                    || self
+                        .harness
+                        .as_ref()
+                        .is_some_and(|h| !h.summaries().iter().any(|s| s.id == id));
                 if deleted {
-                    self.histories
-                        .retain(|key| !matches!(key, DraftKey::Session(s) if s == &id));
                     let selected = self.parent_id() == Some(id.as_str());
                     if selected {
                         self.draft_dirty = false;
                         self.selected = None;
                     }
                     self.refresh();
+                    self.prune_deleted_views();
                     if selected {
                         self.restore_draft();
                     }
@@ -2329,12 +2404,7 @@ impl App {
                     self.modal = None;
                 }
                 self.refresh();
-                if result.is_ok() {
-                    self.histories.retain(|key| match key {
-                        DraftKey::New => true,
-                        DraftKey::Session(id) => self.sessions.iter().any(|s| &s.id == id),
-                    });
-                }
+                self.prune_deleted_views();
                 if selected_deleted {
                     self.restore_draft();
                 }
@@ -2835,11 +2905,14 @@ impl App {
             Message::SessionEffort(value) => self.edit_session_settings(move |s| s.effort = value),
             Message::SessionFast(value) => self.edit_session_settings(move |s| s.fast = value),
             Message::AddProject => {
+                self.project_request += 1;
                 self.modal_input = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 self.modal = Some(Modal::AddProject);
                 return widget::operation::focus("modal-input");
             }
             Message::Browse => {
+                self.project_request += 1;
+                let request = self.project_request;
                 return Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
@@ -2848,12 +2921,43 @@ impl App {
                             .await
                             .map(|f| f.path().to_owned())
                     },
-                    Message::Folder,
+                    move |path| Message::Folder(request, path),
                 );
             }
-            Message::Folder(Some(path)) => self.modal_input = path.display().to_string(),
-            Message::Folder(None) => {}
-            Message::ModalInput(value) => self.modal_input = value,
+            Message::Folder(request, Some(path))
+                if request == self.project_request
+                    && matches!(self.modal, Some(Modal::AddProject)) =>
+            {
+                self.modal_input = path.display().to_string()
+            }
+            Message::Folder(..) => {}
+            Message::ProjectResolved(request, result) => {
+                if !self.closing
+                    && !self.close_requested
+                    && request == self.project_request
+                    && matches!(self.modal, Some(Modal::AddProject))
+                {
+                    match result {
+                        Ok(path) => {
+                            if !self.catalog.projects.iter().any(|p| p.path == path) {
+                                self.catalog.projects.push(Project {
+                                    path,
+                                    favorite: false,
+                                    display_name: None,
+                                    stashed: false,
+                                });
+                                self.save_catalog();
+                            }
+                            self.modal = None;
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            }
+            Message::ModalInput(value) => {
+                self.project_request += 1;
+                self.modal_input = value;
+            }
             Message::Dismiss => {
                 if matches!(self.modal, Some(Modal::Quit)) {
                     self.close_requested = false;
@@ -2876,11 +2980,11 @@ impl App {
                 self.modal = Some(Modal::Delete(id));
             }
             Message::ToggleToolRaw(id) => {
-                if !self.raw_tool_inputs.remove(&id) {
-                    self.raw_tool_inputs.insert(id.clone());
+                if !self.details.raw_tool_inputs.remove(&id) {
+                    self.details.raw_tool_inputs.insert(id.clone());
                 }
                 if let Some(view) = self.outputs.get_mut(&id) {
-                    view.set_raw(self.raw_tool_inputs.contains(&id));
+                    view.set_raw(self.details.raw_tool_inputs.contains(&id));
                 }
                 if let Some(index) = self.current().and_then(|s| s.entries.index_of(&id)) {
                     self.chat_selection.borrow_mut().invalidate_entry(index);
@@ -2909,7 +3013,7 @@ impl App {
             }
             Message::ToggleEntry(id) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
-                if self.expanded.remove(&id) {
+                if self.details.expanded.remove(&id) {
                     self.outputs.remove(&id);
                 } else {
                     if let Some(Entry {
@@ -2929,33 +3033,33 @@ impl App {
                                 name,
                                 input,
                                 output,
-                                self.raw_tool_inputs.contains(&id),
+                                self.details.raw_tool_inputs.contains(&id),
                             ),
                         );
                     }
-                    self.expanded.insert(id.clone());
+                    self.details.expanded.insert(id.clone());
                 }
                 if let Some(session) = &self.current_session
                     && let Some(index) = session.entries.index_of(&id)
                 {
                     let head = self.activity.block(index).range.start;
-                    self.groups.insert(session.entries[head].id.clone());
+                    self.details.groups.insert(session.entries[head].id.clone());
                 }
                 self.rebuild_transcript();
                 self.prepare_visible();
             }
             Message::ToggleExecution(id) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
-                if !self.execution.remove(&id) {
-                    self.execution.insert(id);
+                if !self.details.execution.remove(&id) {
+                    self.details.execution.insert(id);
                 }
                 self.rebuild_transcript();
                 self.prepare_visible();
             }
             Message::ToggleGroup(id) => {
                 self.view_epoch = self.view_epoch.wrapping_add(1);
-                if !self.groups.remove(&id) {
-                    self.groups.insert(id);
+                if !self.details.groups.remove(&id) {
+                    self.details.groups.insert(id);
                 }
                 self.rebuild_transcript();
                 self.prepare_visible();
@@ -3063,15 +3167,17 @@ impl App {
                         self.catalog.settings.font_size,
                         theme::markdown_style(&self.preset().theme),
                     );
-                    let entries = self
-                        .transcript
-                        .order
+                    let order = &self.transcript.order;
+                    let lo = order
+                        .partition_point(|&id| ActivityRow::from_id(id).source() < start.entry);
+                    let hi =
+                        order.partition_point(|&id| ActivityRow::from_id(id).source() <= end.entry);
+                    let entries = order[lo..hi]
                         .iter()
                         .filter_map(|&id| match ActivityRow::from_id(id) {
                             ActivityRow::Entry(i) => Some(i),
                             _ => None,
                         })
-                        .filter(|i| (start.entry..=end.entry).contains(i))
                         .map(|index| {
                             let entry = &session.entries[index];
                             let blocks = match &entry.kind {
@@ -3081,14 +3187,14 @@ impl App {
                                     output,
                                     parent,
                                     ..
-                                } if self.expanded.contains(&entry.id) => {
+                                } if self.details.expanded.contains(&entry.id) => {
                                     vec![
                                         chat_selection::Block {
                                             text: tool_output::display(
                                                 name,
                                                 input,
                                                 output,
-                                                self.raw_tool_inputs.contains(&entry.id),
+                                                self.details.raw_tool_inputs.contains(&entry.id),
                                             ),
                                             separator: "\n\n",
                                         },
@@ -3101,7 +3207,7 @@ impl App {
                                 EntryKind::Tool { .. } => vec![],
                                 EntryKind::Notice
                                     if activity::subagent_notice(entry).is_some()
-                                        && !self.expanded.contains(&entry.id) =>
+                                        && !self.details.expanded.contains(&entry.id) =>
                                 {
                                     vec![]
                                 }
@@ -3112,7 +3218,13 @@ impl App {
                                     }]
                                 }
                                 _ => {
-                                    let content = markdown::Content::parse(&entry.text);
+                                    let parsed;
+                                    let content = if let Some(md) = self.markdown.get(&entry.id) {
+                                        &md.content
+                                    } else {
+                                        parsed = markdown::Content::parse(&entry.text);
+                                        &parsed
+                                    };
                                     let viewer = chat_selection::Viewer::new(
                                         self.chat_selection.clone(),
                                         index,
@@ -3164,6 +3276,11 @@ impl App {
                     );
                 }
             }
+            Message::LoginStarted(_)
+                if self.login_cancel.as_ref().is_some_and(|c| c.is_cancelled()) =>
+            {
+                self.login_cancel = None;
+            }
             Message::LoginStarted(result) => match result {
                 Ok((login, url)) => {
                     let auth = self.harness.as_ref().expect("auth harness").auth.clone();
@@ -3206,7 +3323,9 @@ impl App {
             }
             Message::Logout => self.modal = Some(Modal::Logout),
             Message::SidebarBranch(path, branch) => {
-                if let Some(branch) = branch {
+                if let Some(branch) = branch
+                    && self.sessions.iter().any(|s| s.project == path)
+                {
                     self.sidebar_branches.insert(path, branch);
                 } else {
                     self.sidebar_branches.remove(&path);
@@ -3277,6 +3396,9 @@ impl App {
                 }
                 iced::Event::Window(window::Event::Unfocused) => {
                     self.window_focused = false;
+                    if self.drag.take().is_some() {
+                        self.save_catalog();
+                    }
                     self.browser.menu = None;
                     if matches!(
                         self.context_menu,
@@ -3487,26 +3609,29 @@ impl App {
             return Task::none();
         }
         match self.modal.clone() {
-            Some(Modal::AddProject) => match std::fs::canonicalize(self.modal_input.trim()) {
-                Ok(path) if path.is_dir() => {
-                    if !self.catalog.projects.iter().any(|p| p.path == path) {
-                        self.catalog.projects.push(Project {
-                            path,
-                            favorite: false,
-                            display_name: None,
-                            stashed: false,
-                        });
-                        self.save_catalog();
-                    }
-                    self.modal = None;
-                }
-                Ok(_) => self.error = Some("Select a directory, not a file.".into()),
-                Err(e) => {
-                    self.error = Some(format!(
-                        "Cannot open that project: {e}. Check the path or choose Browse."
-                    ))
-                }
-            },
+            Some(Modal::AddProject) => {
+                self.project_request += 1;
+                let request = self.project_request;
+                let path = self.modal_input.trim().to_owned();
+                return Task::perform(
+                    async move {
+                        let path = tokio::fs::canonicalize(path).await.map_err(|e| {
+                            format!(
+                                "Cannot open that project: {e}. Check the path or choose Browse."
+                            )
+                        })?;
+                        if !tokio::fs::metadata(&path)
+                            .await
+                            .map_err(|e| format!("Cannot inspect project: {e}"))?
+                            .is_dir()
+                        {
+                            return Err("Select a directory, not a file.".into());
+                        }
+                        Ok(path)
+                    },
+                    move |r| Message::ProjectResolved(request, r),
+                );
+            }
             Some(Modal::RenameProject(path)) => {
                 let name = self.modal_input.trim().to_owned();
                 if name.is_empty() {
@@ -3654,9 +3779,9 @@ impl App {
         let mounted_rows = &self.sidebar_rows[self.sidebar_list.visible()];
         if let Some(harness) = &self.harness {
             subscriptions.push(Subscription::run_with(Updates(harness.clone()), updates));
-            if self.browser.open {
+            if let Some(id) = &self.browser.mounted {
                 subscriptions.push(Subscription::run_with(
-                    Updates(harness.clone()),
+                    (Updates(harness.clone()), id.clone()),
                     browser::subscription,
                 ));
             }
@@ -4684,7 +4809,7 @@ impl App {
                 theme::button(stack![
                     container(header).padding([6, 2]).width(Fill),
                     crate::chevron_icon::activity_disclosure(
-                        self.groups.contains(&entry.id),
+                        self.details.groups.contains(&entry.id),
                         working,
                         self.tick,
                     ),
@@ -4700,7 +4825,7 @@ impl App {
                 container(
                     theme::button(
                         row![
-                            chevron_icon(self.execution.contains(&entry.id)),
+                            chevron_icon(self.details.execution.contains(&entry.id)),
                             text(format!(
                                 "Execution details · {wrappers} code-mode call{}",
                                 if wrappers == 1 { "" } else { "s" }
@@ -4729,7 +4854,7 @@ impl App {
                 container(
                     theme::button(
                         row![
-                            chevron_icon(self.expanded.contains(&entry.id)),
+                            chevron_icon(self.details.expanded.contains(&entry.id)),
                             ellipsized_text(&preview, 12., Some(colors.muted))
                         ]
                         .spacing(8)
@@ -4754,7 +4879,7 @@ impl App {
     }
     fn subagent_notice_view<'a>(&'a self, entry: &'a Entry, index: usize) -> Element<'a, Message> {
         let colors = &self.preset().colors;
-        let open = self.expanded.contains(&entry.id);
+        let open = self.details.expanded.contains(&entry.id);
         let run = self.transcript_run(entry);
         let (label, color) = match &run {
             Some(run) => (
@@ -4831,8 +4956,11 @@ impl App {
                 command_status,
                 ..
             } => {
-                let open = self.expanded.contains(&entry.id);
-                let preview = activity::tool_preview(name, input);
+                let open = self.details.expanded.contains(&entry.id);
+                let preview = self.tool_previews.get(&entry.id).map_or_else(
+                    || std::borrow::Cow::Owned(activity::tool_preview(name, input)),
+                    |(_, preview)| std::borrow::Cow::Borrowed(preview.as_str()),
+                );
                 let status = activity::tool_status(*complete, *failed, *command_status);
                 let status_color = match status {
                     CommandStatus::Running => colors.warning,
@@ -4903,7 +5031,7 @@ impl App {
                     });
                     details = details.push(tool_actions(
                         &entry.id,
-                        self.raw_tool_inputs.contains(&entry.id),
+                        self.details.raw_tool_inputs.contains(&entry.id),
                         stop,
                     ));
                     if let Some(metadata) = web {
@@ -5298,7 +5426,16 @@ impl App {
             compact_tokens(session.usage.total_input),
         );
         let (name, badge) = self.session_project_label(&session.project, 16.);
-        let name_width = text_width(&name, 11.).ceil().min(160.);
+        let label_width = |label: &str| {
+            let mut widths = self.footer_widths.borrow_mut();
+            if let Some(width) = widths.get(label) {
+                return *width;
+            }
+            let width = text_width(label, 11.).ceil();
+            widths.put(label.to_owned(), width);
+            width
+        };
+        let name_width = label_width(&name).min(160.);
         let rate_label = format!("TPS: {rate:.0}");
         let cache_label = format!("{cache:.0}% cache");
         let draft = self.draft_session.is_some();
@@ -5312,16 +5449,25 @@ impl App {
                     branch,
                     added,
                     removed,
+                    unreadable,
                 } => (
                     branch,
-                    (*added != 0 || *removed != 0)
-                        .then(|| (format!("+{added}"), format!("−{removed}"))),
+                    (*added != 0 || *removed != 0 || *unreadable != 0).then(|| {
+                        (
+                            if *unreadable == 0 {
+                                format!("+{added}")
+                            } else {
+                                format!("≥+{added}")
+                            },
+                            format!("−{removed}"),
+                        )
+                    }),
                 ),
                 crate::git::Info::Unavailable(message) => (message, None),
             };
-            let label_width = text_width(label, 11.).ceil().min(126.);
+            let measured_label = label_width(label).min(126.);
             let pill = matches!(git, crate::git::Info::Changes { .. });
-            let mut width = label_width;
+            let mut width = measured_label;
             if pill {
                 width += 2. * pill_inset + branch_icon_size + icon_gap;
                 if draft {
@@ -5329,12 +5475,9 @@ impl App {
                 }
             }
             if let Some((added, removed)) = &counts {
-                width += 8.
-                    + 2. * pill_inset
-                    + text_width(added, 11.).ceil()
-                    + text_width(removed, 11.).ceil();
+                width += 8. + 2. * pill_inset + label_width(added) + label_width(removed);
             }
-            (width, label_width, label, counts, pill, git)
+            (width, measured_label, label, counts, pill, git)
         });
 
         // Reserve from most to least important. Once an item doesn't fit, no
@@ -5344,11 +5487,11 @@ impl App {
             remaining -= cost;
             remaining >= 0.
         };
-        let context = reserve(text_width(&tokens, 11.).ceil());
+        let context = reserve(label_width(&tokens));
         let show_git = git.as_ref().is_none_or(|(width, ..)| reserve(10. + width));
         let project = reserve(10. + 16. + 4. + name_width);
-        let cache = reserve(16. + text_width(&cache_label, 11.).ceil());
-        let tps = reserve(16. + text_width(&rate_label, 11.).ceil());
+        let cache = reserve(16. + label_width(&cache_label));
+        let tps = reserve(16. + label_width(&rate_label));
 
         let mut info = row![].align_y(iced::Center);
         if project {
