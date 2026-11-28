@@ -8,9 +8,10 @@ use std::{
     fs::{self, File},
     hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader, Read},
+    os::fd::AsRawFd,
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
-        fs::MetadataExt,
+        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
         process::CommandExt,
     },
     path::{Component, Path, PathBuf},
@@ -754,11 +755,30 @@ fn identity(root: &Path) -> Result<Vec<u8>> {
     header.push(0);
     Ok(header)
 }
-fn load_cache(root: &Path, cache: &Path, cancelled: &impl Fn() -> bool) -> Result<Snapshot> {
-    let mut file = File::open(cache_path(root, cache))?;
-    let metadata = file.metadata()?;
+fn private_cache(cache: &Path) -> Result<File> {
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+        .open(cache)?;
+    let metadata = directory.metadata()?;
     anyhow::ensure!(
         metadata.uid() == rustix::process::geteuid().as_raw() && metadata.mode() & 0o077 == 0,
+        "Filename cache directory is not private"
+    );
+    Ok(directory)
+}
+fn load_cache(root: &Path, cache: &Path, cancelled: &impl Fn() -> bool) -> Result<Snapshot> {
+    let directory = private_cache(cache)?;
+    let cache = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(cache_path(root, &cache))?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file()
+            && metadata.uid() == rustix::process::geteuid().as_raw()
+            && metadata.mode() & 0o077 == 0,
         "Filename cache is not private to this user"
     );
     let expected = identity(root)?;
@@ -783,12 +803,15 @@ fn load_cache(root: &Path, cache: &Path, cancelled: &impl Fn() -> bool) -> Resul
     snapshot.finish(cancelled)
 }
 fn save_cache(root: &Path, cache: &Path, snapshot: &Snapshot) -> Result<()> {
-    fs::create_dir_all(cache)?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(cache)?;
+    let directory = private_cache(cache)?;
+    let cache = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     let mut bytes = identity(root)?;
     bytes.extend(&snapshot.arena);
-    crate::store::atomic_write(&cache_path(root, cache), &bytes)
+    crate::store::atomic_write(&cache_path(root, &cache), &bytes)
 }
 const MAX_WATCHES: usize = 8192;
 const WATCH_BYTES: usize = 8 * 1024 * 1024;
@@ -1271,18 +1294,25 @@ pub fn cache_dir() -> PathBuf {
                 .filter(|p| p.is_absolute())
                 .map(|p| p.join(".cache"))
         })
+        .map(|p| p.join("orbit/files"))
         .unwrap_or_else(|| {
+            // A single component under sticky /tmp; validate before use.
             PathBuf::from(format!(
-                "/tmp/orbit-cache-{}",
+                "/tmp/orbit-file-cache-{}",
                 rustix::process::geteuid().as_raw()
             ))
         })
-        .join("orbit/files")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn private_cache_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
     #[test]
     fn ranking_long_paths_bytes_and_cancellation() {
         let long = format!("{}/main.rs", "deep/".repeat(100));
@@ -1363,7 +1393,7 @@ mod tests {
     #[test]
     fn ignore_aware_discovery_cache_and_explicit_scope() {
         let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = private_cache_dir();
         fs::write(root.path().join(".gitignore"), "generated/\n").unwrap();
         fs::create_dir(root.path().join("generated")).unwrap();
         fs::write(root.path().join("generated/hidden"), "x").unwrap();
@@ -1410,7 +1440,7 @@ mod tests {
             index.search(b"", || false, |_| {}).unwrap(),
             vec!["@scope/inside"]
         );
-        let watch_cache = tempfile::tempdir().unwrap();
+        let watch_cache = private_cache_dir();
         let service = Service::open(root.path().into(), watch_cache.path().into()).unwrap();
         let (base, _) = watch_paths(root.path(), &index, &service.shared, watch_cache.path());
         let (watched, complete) = scope_watch_paths(
@@ -1441,7 +1471,7 @@ mod tests {
     #[tokio::test]
     async fn latest_request_refresh_and_shutdown() {
         let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = private_cache_dir();
         fs::write(root.path().join("first"), "body").unwrap();
         fs::create_dir(root.path().join("empty")).unwrap();
         let service = Service::open(root.path().into(), cache.path().into()).unwrap();
@@ -1495,7 +1525,7 @@ mod tests {
     async fn clean_reconciliation_reuses_index_but_unwatched_ignore_change_rebuilds() {
         let root = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = private_cache_dir();
         let git = |args: &[&str]| {
             assert!(
                 Command::new("git")
@@ -1553,7 +1583,7 @@ mod tests {
     #[tokio::test]
     async fn ignored_scope_changes_keep_main_index_and_refresh_live() {
         let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = private_cache_dir();
         fs::write(
             root.path().join(".gitignore"),
             "generated-a/\ngenerated-b/\n",
@@ -1634,7 +1664,7 @@ mod tests {
     #[test]
     fn cancelling_scope_watches_preserves_shared_base_directories() {
         let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = private_cache_dir();
         for dir in ["generated/shared", "generated/scoped-only"] {
             fs::create_dir_all(root.path().join(dir)).unwrap();
         }
@@ -1678,7 +1708,7 @@ mod tests {
     #[tokio::test]
     async fn failed_refresh_keeps_results_and_root_replacement_recovers_watching() {
         let parent = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = private_cache_dir();
         let root = parent.path().join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("original"), "x").unwrap();
@@ -1730,7 +1760,7 @@ mod tests {
             ("exec 3<&0; read -r line <&3 & exit 0", true),
         ] {
             let root = tempfile::tempdir().unwrap();
-            let cache = tempfile::tempdir().unwrap();
+            let cache = private_cache_dir();
             let service = Service::open(root.path().into(), cache.path().into()).unwrap();
             let mut child = Command::new("sh")
                 .args(["-c", script])
@@ -1851,7 +1881,7 @@ mod tests {
             fixture.path().to_path_buf()
         };
         for sample in 1..=3 {
-            let cache = tempfile::tempdir().unwrap();
+            let cache = private_cache_dir();
             for phase in ["cold", "cached"] {
                 let start = Instant::now();
                 let service = Service::open(root.clone(), cache.path().into()).unwrap();

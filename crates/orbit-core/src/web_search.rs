@@ -179,31 +179,58 @@ impl WebSearch {
                 credentials = self.auth.token(Some(&credentials.access_token)).await?;
                 continue;
             }
-            let mut bytes = Vec::new();
-            loop {
+            const MAX_RESPONSE: usize = 8 * 1024 * 1024;
+            let secrets = [
+                credentials.access_token.as_bytes(),
+                credentials.refresh_token.as_bytes(),
+            ];
+            let mut tail = Vec::new();
+            let mut large = None;
+            let failure = loop {
                 match response.chunk().await {
-                    Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
-                    Ok(None) => break,
-                    Err(error) => return Err(Failure::response(
-                        format!("Web response was interrupted: {error}. No automatic replay was made. Received bytes are preserved in the tool's transcript details."),
-                        searched_at, &bytes,
-                    ).into()),
+                    Ok(Some(chunk)) => {
+                        tail.extend_from_slice(&chunk);
+                        if large.is_some() || tail.len() > MAX_RESPONSE {
+                            let spool = large.get_or_insert_with(output::OutputBuffer::default);
+                            output::redact_prefix(&mut tail, &secrets, false, |part| {
+                                spool.append(part, 0)
+                            });
+                        }
+                    }
+                    Ok(None) => break None,
+                    Err(error) => {
+                        break Some(format!(
+                            "Web response was interrupted: {error}. No automatic replay was made. Received bytes are preserved in the tool's transcript details."
+                        ));
+                    }
                 }
+            };
+            if let Some(mut spool) = large {
+                output::redact_prefix(&mut tail, &secrets, true, |part| spool.append(part, 0));
+                let notice = spool.finish_diagnostic();
+                return Err(Failure::response(failure.unwrap_or_else(|| format!(
+                    "Web response ({status}) exceeds the supported size. Complete redacted response preserved in transcript details; do not repeat the request.")),
+                    searched_at, notice.as_bytes()).into());
             }
-            if !status.is_success() {
-                return Err(Failure::response(
-                    format!("Web request failed ({status}). Check ChatGPT sign-in and account access, or retry later for rate limits/service failures. No backend fallback or retry of uncertain work was used. Complete diagnostics are in the tool's transcript details."),
-                    searched_at, &bytes,
-                ).into());
-            }
-            let response: Response = serde_json::from_slice(&bytes).map_err(|_| Failure::response(
-                "Invalid web response: expected output text and optional result metadata. No automatic replay was made. Complete diagnostics are in the tool's transcript details.".into(),
-                searched_at, &bytes,
-            ))?;
-            return Ok(ToolResult {
-                text: output::preserve_text(&response.output, 40_000),
-                metadata: Metadata::new(searched_at, response.results.unwrap_or_default())?,
+            let failure = if let Some(error) = failure {
+                error
+            } else if !status.is_success() {
+                format!(
+                    "Web request failed ({status}). Check ChatGPT sign-in and account access, or retry later for rate limits/service failures. No backend fallback or retry of uncertain work was used. Complete diagnostics are in the tool's transcript details."
+                )
+            } else if let Ok(response) = serde_json::from_slice::<Response>(&tail) {
+                return Ok(ToolResult {
+                    text: output::preserve_text(&response.output, 40_000),
+                    metadata: Metadata::new(searched_at, response.results.unwrap_or_default())?,
+                });
+            } else {
+                "Invalid web response: expected output text and optional result metadata. No automatic replay was made. Complete diagnostics are in the tool's transcript details.".into()
+            };
+            let mut redacted = Vec::new();
+            output::redact_prefix(&mut tail, &secrets, true, |part| {
+                redacted.extend_from_slice(part)
             });
+            return Err(Failure::response(failure, searched_at, &redacted).into());
         }
         unreachable!("second authentication rejection returns an HTTP error")
     }

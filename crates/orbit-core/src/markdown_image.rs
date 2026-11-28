@@ -73,22 +73,28 @@ impl Source {
                 .await?
             }
             Self::Remote(url) => {
-                let client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                        let url = attempt.url();
-                        if attempt.previous().len() >= 5 {
-                            attempt.error("Too many image redirects")
-                        } else if !matches!(url.scheme(), "http" | "https")
-                            || !url.username().is_empty()
-                            || url.password().is_some()
-                        {
-                            attempt.error("Unsupported image redirect")
-                        } else {
-                            attempt.follow()
-                        }
-                    }))
-                    .build()?;
+                static CLIENT: tokio::sync::OnceCell<reqwest::Client> =
+                    tokio::sync::OnceCell::const_new();
+                let client = CLIENT
+                    .get_or_try_init(|| async {
+                        reqwest::Client::builder()
+                            .timeout(Duration::from_secs(30))
+                            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                                let url = attempt.url();
+                                if attempt.previous().len() >= 5 {
+                                    attempt.error("Too many image redirects")
+                                } else if !matches!(url.scheme(), "http" | "https")
+                                    || !url.username().is_empty()
+                                    || url.password().is_some()
+                                {
+                                    attempt.error("Unsupported image redirect")
+                                } else {
+                                    attempt.follow()
+                                }
+                            }))
+                            .build()
+                    })
+                    .await?;
                 let mut response = client.get(url).send().await?.error_for_status()?;
                 if !response.status().is_success() {
                     bail!(

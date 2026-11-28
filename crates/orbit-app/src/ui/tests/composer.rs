@@ -175,7 +175,10 @@ async fn image_paste_preserves_composer_focus_across_attachment_changes() {
                 )
                 .await;
             }
-            _ => dispatch(&mut app, Message::RemoveAttachment(0)).await,
+            _ => {
+                let msg = Message::RemoveAttachment(0, app.attachment_epoch);
+                dispatch(&mut app, msg).await
+            }
         }
         assert_eq!(app.attachments.len(), [1, 2, 1, 0][change]);
         for ch in keys.chars() {

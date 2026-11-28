@@ -342,25 +342,29 @@ impl ImageTools {
                 );
             }
         }
-        let mut response: Value = serde_json::from_slice(&bytes)
-            .context("Image backend returned invalid JSON. No automatic retry was made")?;
         if !status.is_success() {
             // Redact our secrets even if a service echoes request data in an error.
-            let mut error = response.to_string();
-            for secret in key.iter().map(String::as_str).chain(
-                credentials
-                    .iter()
-                    .flat_map(|c| [c.access_token.as_str(), c.refresh_token.as_str()]),
-            ) {
-                if !secret.is_empty() {
-                    error = error.replace(secret, "[redacted]");
-                }
-            }
+            let secrets: Vec<_> = key
+                .iter()
+                .map(String::as_str)
+                .chain(
+                    credentials
+                        .iter()
+                        .flat_map(|c| [c.access_token.as_str(), c.refresh_token.as_str()]),
+                )
+                .map(str::as_bytes)
+                .collect();
+            let mut error = Vec::new();
+            crate::output::redact_prefix(&mut bytes, &secrets, true, |part| {
+                error.extend_from_slice(part)
+            });
             bail!(
-                "Image backend rejected the request ({status}). Check credentials, account access, model, quality and GIF support. No fallback or automatic retry was made. {}",
-                crate::output::preserve_text(&error, 2000)
+                "Image backend rejected the request ({status}). Check credentials, account access, model, quality and GIF support. No fallback or further retry was made. {}",
+                crate::output::preserve_bytes(&error, 2000)
             );
         }
+        let mut response: Value = serde_json::from_slice(&bytes)
+            .context("Image backend returned invalid JSON. No automatic retry was made")?;
         let encoded = response["data"]
             .as_array_mut()
             .and_then(|a| a.get_mut(0))
@@ -668,7 +672,7 @@ mod tests {
         let (url, mut requests, task) = server([
             (
                 503,
-                json!({"error":{"message":"subscription-token unavailable"}}).to_string(),
+                "<html>Proxy error: subscription-token unavailable</html>".into(),
             ),
             (200, response(&png())), // Any retry or billing fallback would publish a file.
         ])

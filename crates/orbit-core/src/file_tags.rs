@@ -79,23 +79,17 @@ impl Attachment {
             );
             return Ok(());
         }
-        let temporary = directory.join(format!("staging-{}", crate::store::id()));
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
+        let mut output = tempfile::NamedTempFile::new_in(directory)?;
         let mut input = File::open(&self.snapshot)?;
         anyhow::ensure!(
             std::io::copy(&mut input, &mut output)? == self.bytes,
             "Incomplete durable file snapshot"
         );
-        output.sync_all()?;
-        // Hard-link publication is atomic and cannot overwrite another publisher.
-        match fs::hard_link(&temporary, &self.spill) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(error) => Err(error.into()),
+        output.as_file().sync_all()?;
+        match output.persist_noclobber(&self.spill) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error.error.into()),
         }
     }
 }

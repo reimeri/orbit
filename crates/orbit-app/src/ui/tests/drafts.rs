@@ -67,11 +67,16 @@ async fn image_drafts_survive_navigation_storage_and_failed_image_only_send() {
     )
     .await;
     assert_eq!(app.attachments.len(), 2);
-    dispatch(&mut app, Message::RemoveAttachment(0)).await;
+    let remove = Message::RemoveAttachment(0, app.attachment_epoch);
+    dispatch(&mut app, remove.clone()).await;
+    dispatch(&mut app, remove).await; // stale second click must not remove the next image
     assert_eq!(app.attachments, images);
     dispatch(&mut app, Message::OpenImage(images[0].clone())).await;
     assert!(matches!(app.modal, Some(Modal::Image(_))));
-    dispatch(&mut app, Message::RemoveAttachment(0)).await;
+    {
+        let msg = Message::RemoveAttachment(0, app.attachment_epoch);
+        dispatch(&mut app, msg).await
+    };
     assert_eq!(app.attachments, images, "modal blocks background edits");
     dispatch(&mut app, Message::Dismiss).await;
     let db = rusqlite::Connection::open(h.store.root().join("sessions.sqlite3")).unwrap();
@@ -110,7 +115,10 @@ async fn image_drafts_survive_navigation_storage_and_failed_image_only_send() {
     );
     dispatch(&mut app, Message::Select(existing)).await;
     assert_eq!(app.attachments, images);
-    dispatch(&mut app, Message::RemoveAttachment(0)).await;
+    {
+        let msg = Message::RemoveAttachment(0, app.attachment_epoch);
+        dispatch(&mut app, msg).await
+    };
     dispatch(&mut app, Message::SaveDraft).await;
     assert!(
         h.store

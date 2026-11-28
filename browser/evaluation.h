@@ -8,6 +8,7 @@ public:
     enum Next { Done, Promise, Properties, Compare } next;
     Json data;
   };
+  static constexpr size_t budget = 64 * 1024 * 1024;
   explicit Evaluation(const std::string &path) {
     // Rust owns the temporary file. Never recreate it after cancellation.
     int fd = open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
@@ -24,6 +25,10 @@ public:
   }
   Step receive(bool success, const std::string &bytes) {
     try {
+      // Bound work before parsing descriptors or expanding shared subtrees.
+      if (bytes.size() > budget - received || ++steps > 16384)
+        return error("Result exceeds the evaluation traversal budget; return a smaller projection");
+      received += bytes.size();
       Json reply = Json::parse(bytes);
       if (!success)
         return error(reply.at("message").get<std::string>());
@@ -37,8 +42,11 @@ public:
         return visit(std::move(reply.at("result")));
       case PromiseState: {
         const Json *state = nullptr, *result = nullptr;
+        if (!reply.contains("internalProperties"))
+          return error("Chromium did not provide the promise state");
         for (const auto &p : reply.at("internalProperties")) {
-          if (p.at("name") == "[[PromiseState]]")
+          if (!p.contains("value")) continue;
+          if (p.at("name") == "[[PromiseState]]" && p.at("value").contains("value"))
             state = &p.at("value").at("value");
           if (p.at("name") == "[[PromiseResult]]")
             result = &p.at("value");
@@ -56,6 +64,9 @@ public:
           return error("Not JSON data: cyclic object");
         return properties();
       case Descriptors:
+        descriptors += reply.at("result").size();
+        if (descriptors > 262144)
+          return error("Result exceeds evaluation property budget; return a smaller projection");
         frames.back().props = std::move(reply.at("result"));
         return advance();
       }
@@ -74,6 +85,7 @@ private:
     std::string key;
     size_t length = 0;
   };
+  size_t received = 0, steps = 0, descriptors = 0;
   std::vector<Frame> frames;
   std::unique_ptr<FILE, decltype(&fclose)> file{nullptr, &fclose};
 
@@ -120,6 +132,8 @@ private:
             {{"objectId", frames.back().id}, {"ownProperties", true}}};
   }
   Step descend(const Json &r) {
+    if (frames.size() >= 128)
+      return error("Result exceeds evaluation depth limit; return a shallower projection");
     bool array = r.value("subtype", std::string()) == "array";
     if (r.at("type") != "object" ||
         (!array && (r.contains("subtype") ||

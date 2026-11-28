@@ -683,16 +683,18 @@ impl TextIndex {
             .map(|(byte, _)| byte)
             .chain([content.len()])
             .collect();
-        let lines = buffer
-            .lines
-            .iter()
-            .scan(0, |offset, line| {
-                let start = *offset;
-                let end = start + line.text().len();
-                *offset = end + line.ending().as_str().len();
-                Some(start..end)
+        // Rich text lines use bidi paragraph separators, but their stored
+        // LineEnding is always LF. Take offsets from the original string.
+        let mut lines: Vec<_> = cosmic_text::BidiParagraphs::new(content)
+            .map(|line| {
+                let start = line.as_ptr() as usize - content.as_ptr() as usize;
+                start..start + line.len()
             })
             .collect();
+        if lines.is_empty() {
+            lines.push(0..0);
+        }
+        debug_assert_eq!(lines.len(), buffer.lines.len());
         Self { graphemes, lines }
     }
     fn nearest(&self, byte: usize) -> usize {
@@ -709,8 +711,9 @@ impl TextIndex {
         index
     }
     fn cursor(&self, byte: usize) -> cosmic_text::Cursor {
-        let line = self.lines.partition_point(|range| range.end < byte);
-        cosmic_text::Cursor::new(line, byte - self.lines[line].start)
+        let line = self.lines.partition_point(|range| range.start <= byte) - 1;
+        let range = &self.lines[line];
+        cosmic_text::Cursor::new(line, byte.min(range.end) - range.start)
     }
 }
 struct Hit {
@@ -1374,6 +1377,38 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn rich_selection_uses_source_offsets_across_separators_and_trailing_breaks() {
+        let renderer = renderer();
+        for sep in ["\n", "\r\n", "\u{85}", "\u{2029}"] {
+            let value = format!("alpha{sep}界{sep}");
+            let mut view = plain(
+                &value,
+                16.,
+                None,
+                Shared::default(),
+                Position {
+                    entry: 0,
+                    block: 0,
+                    byte: 0,
+                },
+            );
+            let mut tree = Tree::new(view.as_widget());
+            view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(300., 400.)),
+            );
+            let state = tree.state.downcast_ref::<State>();
+            let at = value.find('界').unwrap();
+            let cursor = state.index.cursor(at);
+            assert_eq!(cursor.index, 0);
+            assert_eq!(state.index.lines[cursor.line].start, at);
+            let end = state.index.cursor(value.len());
+            let range = &state.index.lines[end.line];
+            assert_eq!(end.index, range.len());
+        }
+    }
     #[test]
     fn indexed_boundaries_follow_unicode_and_hard_lines_after_reflow_and_edits() {
         let mut renderer = renderer();

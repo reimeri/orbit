@@ -11,6 +11,54 @@ pub(crate) fn character_budget(tokens: usize) -> usize {
     tokens.min(100_000) * 4
 }
 
+// Keep a possible token prefix for the next network chunk. Redact before
+// bytes reach either the transcript or an oversized diagnostic's spool.
+pub(crate) fn redact_prefix(
+    bytes: &mut Vec<u8>,
+    secrets: &[&[u8]],
+    eof: bool,
+    mut emit: impl FnMut(&[u8]),
+) {
+    let keep = if eof {
+        0
+    } else {
+        secrets
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(1)
+    };
+    let end = bytes.len().saturating_sub(keep);
+    let mut at = 0;
+    let mut matches: Vec<_> = secrets
+        .iter()
+        .copied()
+        .filter(|s| !s.is_empty())
+        .map(|s| (s, memchr::memmem::find(bytes, s)))
+        .collect();
+    while at < end {
+        let found = matches
+            .iter()
+            .filter_map(|(s, next)| next.map(|i| (i, s.len())))
+            .min_by_key(|&(offset, len)| (offset, std::cmp::Reverse(len)));
+        let Some((start, len)) = found.filter(|(start, _)| *start < end) else {
+            emit(&bytes[at..end]);
+            at = end;
+            break;
+        };
+        emit(&bytes[at..start]);
+        emit(b"[redacted]");
+        at = start + len;
+        for (secret, next) in &mut matches {
+            if next.is_some_and(|i| i < at) {
+                *next = memchr::memmem::find(&bytes[at..], secret).map(|i| at + i);
+            }
+        }
+    }
+    bytes.drain(..at);
+}
+
 struct Spill {
     file: File,
     path: PathBuf,
@@ -91,6 +139,21 @@ impl OutputBuffer {
         Ok(())
     }
 
+    /// A completed request cannot be polled again. Even if the spool fails
+    /// mid-write, expose the saved prefix and all remaining bytes in order.
+    pub(crate) fn finish_diagnostic(mut self) -> String {
+        match self.read(0) {
+            Ok(notice) => notice,
+            Err(error) => {
+                let prefix = self.spill.as_ref().map(Spill::notice);
+                format!(
+                    "Could not finish saving diagnostics: {error:#}. {}Remaining bytes:\n{}",
+                    prefix.map(|p| p + "\n").unwrap_or_default(),
+                    preserve_bytes(&self.pending, usize::MAX)
+                )
+            }
+        }
+    }
     /// Consume only after successful preservation. A returned file is a closed,
     /// immutable snapshot of this read, not a live log. Files are left to the OS.
     pub(crate) fn read(&mut self, characters: usize) -> Result<String> {
@@ -151,6 +214,22 @@ mod tests {
     use super::*;
     use crate::test_support::saved_output;
 
+    #[test]
+    fn diagnostics_redact_split_and_overlapping_secrets_without_changing_other_bytes() {
+        let secrets: &[&[u8]] = &[b"key", b"key-long"];
+        let mut tail = Vec::new();
+        let mut output = Vec::new();
+        for chunk in [b"\xffke".as_slice(), b"y-lo", b"ng:ke", b"y!"] {
+            tail.extend_from_slice(chunk);
+            redact_prefix(&mut tail, secrets, false, |part| {
+                output.extend_from_slice(part)
+            });
+        }
+        redact_prefix(&mut tail, secrets, true, |part| {
+            output.extend_from_slice(part)
+        });
+        assert_eq!(output, b"\xff[redacted]:[redacted]!");
+    }
     #[test]
     fn budgets_preserve_unicode_boundaries_and_zero_budget_output() {
         let text = "first λ\nimportant middle 界\nlast";

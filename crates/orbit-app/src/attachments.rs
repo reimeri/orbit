@@ -16,13 +16,13 @@ pub enum Source {
     File(PathBuf),
     Clipboard {
         offer: Result<std::sync::mpsc::Receiver<std::io::Result<Option<Vec<u8>>>>, String>,
-        text: tokio::sync::oneshot::Receiver<Option<String>>,
+        text: std::sync::mpsc::Receiver<Option<String>>,
     },
 }
 
 impl Source {
     pub fn clipboard(
-        text: tokio::sync::oneshot::Receiver<Option<String>>,
+        text: std::sync::mpsc::Receiver<Option<String>>,
         on_image: impl FnOnce() + Send + 'static,
     ) -> Self {
         Self::Clipboard {
@@ -45,7 +45,7 @@ impl Source {
                 match bytes {
                     Some(bytes) => image(root, &bytes),
                     None => Ok(text
-                        .blocking_recv()
+                        .recv_timeout(Duration::from_secs(12))
                         .map_err(|e| {
                             format!("Could not read clipboard text: {e}. Copy it again and retry.")
                         })?

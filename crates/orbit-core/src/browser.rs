@@ -12,6 +12,7 @@ use std::{
     os::unix::{
         ffi::OsStrExt,
         fs::{DirBuilderExt, FileExt, PermissionsExt},
+        process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -57,10 +58,47 @@ struct Tab {
     status: Status,
     epoch: u32,
 }
-type Reply = oneshot::Sender<Result<Value>>;
+enum Reply {
+    Host(Value),
+    Retired(String),
+}
+#[derive(Deserialize)]
+struct TabEvent {
+    tab: u64,
+    #[serde(flatten)]
+    kind: EventKind,
+}
+#[derive(Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum EventKind {
+    State {
+        url: String,
+        title: String,
+        back: bool,
+        forward: bool,
+        loading: bool,
+    },
+    Viewport {
+        fixed: Option<(u32, u32)>,
+    },
+    Control {
+        epoch: u32,
+    },
+    Selection {
+        text: String,
+    },
+    Error {
+        error: String,
+    },
+    OpenFailed {
+        error: String,
+    },
+    Closed,
+    Paint,
+}
 struct Pending {
     id: String,
-    reply: Reply,
+    reply: oneshot::Sender<Reply>,
     cancel: CancellationToken,
 }
 struct Job {
@@ -70,8 +108,8 @@ struct Job {
 struct Host {
     surfaces: tempfile::TempDir,
     id: u64,
-    tx: mpsc::Sender<Job>,
-    exit: mpsc::Receiver<Result<()>>,
+    tx: Option<mpsc::Sender<Job>>,
+    child: Arc<Mutex<std::process::Child>>,
 }
 #[derive(Default)]
 struct State {
@@ -90,6 +128,8 @@ impl State {
             .as_ref()
             .context("Browser is not running")?
             .tx
+            .as_ref()
+            .context("Browser is shutting down")?
             .send(Job { msg, project: None })
             .map_err(|_| anyhow!("Browser host stopped; reopen the tab"))
     }
@@ -172,6 +212,7 @@ impl Browser {
             .tempdir()?;
         root.to_str().context("CEF requires a UTF-8 state path")?;
         let mut child = Command::new(executable)
+            .process_group(0)
             .env("ORBIT_BROWSER_ROOT", &root)
             .env_remove("DISPLAY")
             .args([
@@ -188,7 +229,8 @@ impl Browser {
         let mut input = child.stdin.take().unwrap();
         let output = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel::<Job>();
-        let (done, exit) = mpsc::channel();
+        let child = Arc::new(Mutex::new(child));
+        let reap = child.clone();
         let host_id = state.serial();
         let weak = Arc::downgrade(self);
         let reader = weak.clone();
@@ -198,11 +240,11 @@ impl Browser {
                 let Some(browser) = reader.upgrade() else {
                     break;
                 };
-                match line
-                    .map_err(anyhow::Error::from)
-                    .and_then(|s| Ok(serde_json::from_str(&s)?))
-                {
-                    Ok(msg) => browser.event(host_id, msg),
+                match line {
+                    Ok(line) => match serde_json::from_str(&line) {
+                        Ok(msg) => browser.event(host_id, msg),
+                        Err(_) => eprintln!("Ignoring non-protocol browser output"),
+                    },
                     Err(e) => {
                         error = Some(format!("Browser connection failed: {e}"));
                         break;
@@ -212,6 +254,10 @@ impl Browser {
             if let Some(browser) = reader.upgrade() {
                 let mut s = browser.state.lock().unwrap();
                 if s.host.as_ref().is_some_and(|h| h.id == host_id) {
+                    if s.host.as_ref().unwrap().tx.is_none() {
+                        // shutdown owns reaping, including the forced-exit path.
+                        return;
+                    }
                     s.host = None;
                     for tab in s.tabs.values_mut() {
                         if tab.surface.take().is_some() {
@@ -228,17 +274,14 @@ impl Browser {
                     browser.changed();
                 }
             }
-            let result = child
-                .wait()
-                .context("Waiting for CEF shutdown")
-                .and_then(|status| {
-                    ensure!(
-                        status.success(),
-                        "Browser host exited with {status}; site data may not have finished saving"
-                    );
-                    Ok(())
-                });
-            let _ = done.send(result);
+            // stdin has closed; the reader owns reaping an unexpected exit.
+            let mut child = reap.lock().unwrap();
+            if error.is_some() {
+                let _ = child.kill();
+            }
+            if let Err(error) = child.wait() {
+                eprintln!("Waiting for browser helper: {error}");
+            }
         });
         thread::spawn(move || {
             for mut job in rx {
@@ -278,8 +321,8 @@ impl Browser {
         state.host = Some(Host {
             surfaces,
             id: host_id,
-            tx,
-            exit,
+            tx: Some(tx),
+            child,
         });
         Ok(())
     }
@@ -295,13 +338,6 @@ impl Browser {
             .set_len(64 + u64::from(MAX_SIDE).pow(2) * 4)?;
         let key = s.serial();
         let t = s.tabs.entry(id.to_owned()).or_default();
-        t.status = Status {
-            isolated: t.status.isolated,
-            user_control: t.status.user_control,
-            loading: true,
-            ..Status::default()
-        };
-        t.status.surface_id = Some(key);
         file.as_file().write_all_at(&t.epoch.to_ne_bytes(), 12)?;
         let epoch = t.epoch;
         let isolated = t.status.isolated;
@@ -309,13 +345,21 @@ impl Browser {
         s.host
             .as_ref()
             .unwrap()
-            .tx
+            .tx.as_ref().context("Browser is shutting down")?
             .send(Job {
                 project: (!isolated).then(|| project.to_owned()),
                 msg: json!({"op":"open","tab":key,"file":file.path().to_str().context("CEF requires a UTF-8 temporary path")?,"profile":""}),
             })
             .map_err(|_| anyhow!("Browser host stopped"))?;
-        s.tabs.get_mut(id).unwrap().surface = Some(Arc::new(Surface { id: key, file }));
+        let t = s.tabs.get_mut(id).unwrap();
+        t.status = Status {
+            isolated: t.status.isolated,
+            user_control: t.status.user_control,
+            loading: true,
+            ..Status::default()
+        };
+        t.status.surface_id = Some(key);
+        t.surface = Some(Arc::new(Surface { id: key, file }));
         if deny {
             s.send(json!({"op":"control","tab":key,"allow":false,"epoch":epoch}))?
         }
@@ -342,26 +386,34 @@ impl Browser {
     }
     pub fn control(&self, id: &str, user: bool) -> Result<()> {
         let mut s = self.state.lock().unwrap();
-        s.revoke(id);
-        let t = s.tabs.entry(id.into()).or_default();
-        let isolated = t.status.isolated;
+        let isolated = s.tabs.entry(id.into()).or_default().status.isolated;
         if !user {
             self.save_policy(id, isolated, false)?;
         }
+        s.revoke(id);
+        let t = s.tabs.get_mut(id).unwrap();
         t.status.user_control = user;
-        if let Some(ref f) = t.surface {
+        t.status.handoff_pending = false;
+        let handoff = if let Some(ref f) = t.surface {
             let key = f.id;
             let epoch = t.epoch;
-            f.file.as_file().write_all_at(&epoch.to_ne_bytes(), 12)?;
-            t.status.handoff_pending = true;
-            s.send(json!({"tab":key,"op":"control","allow":!user,"epoch":epoch}))?
-        }
+            f.file
+                .as_file()
+                .write_all_at(&epoch.to_ne_bytes(), 12)
+                .map_err(anyhow::Error::from)
+                .and_then(|()| {
+                    s.send(json!({"tab":key,"op":"control","allow":!user,"epoch":epoch}))
+                })
+                .map(|()| s.tabs.get_mut(id).unwrap().status.handoff_pending = true)
+        } else {
+            Ok(())
+        };
         self.changed();
         if user {
             self.save_policy(id, isolated, true)
                 .context("Agent blocked now, but could not save takeover for restart")?;
         }
-        Ok(())
+        handoff
     }
     fn close_locked(s: &mut State, id: &str) {
         s.revoke(id);
@@ -401,24 +453,64 @@ impl Browser {
         Ok(())
     }
     pub fn shutdown(&self) -> Result<()> {
-        let host = {
+        let mut lease_error = None;
+        let (generation, child) = {
             let mut s = self.state.lock().unwrap();
             for t in s.tabs.values_mut() {
-                t.surface = None;
+                t.epoch += 1;
+                if let Some(surface) = t.surface.take()
+                    && let Err(error) = surface
+                        .file
+                        .as_file()
+                        .write_all_at(&t.epoch.to_ne_bytes(), 12)
+                {
+                    lease_error = Some(error);
+                }
                 t.status = Status {
                     user_control: t.status.user_control,
                     isolated: t.status.isolated,
                     ..Default::default()
                 };
-                t.epoch += 1;
             }
             s.pending.clear();
-            s.host.take()
+            let Some(host) = &mut s.host else {
+                return Ok(());
+            };
+            host.tx.take(); // EOF asks CEF to flush cookies before closing.
+            (host.id, host.child.clone())
         };
-        if let Some(Host { tx, exit, .. }) = host {
-            drop(tx);
-            exit.recv_timeout(Duration::from_secs(20))
-                .context("Waiting for the browser to finish saving site data")??;
+        let mut deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut killed = false;
+        let status = loop {
+            {
+                let mut child = child.lock().unwrap();
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    ensure!(!killed, "Browser is still shutting down; retry closing");
+                    // The unreaped leader still owns its process group ID.
+                    nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(child.id() as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    )
+                    .context("Stopping unresponsive browser")?;
+                    killed = true;
+                    deadline = std::time::Instant::now() + Duration::from_secs(2);
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let mut s = self.state.lock().unwrap();
+        if s.host.as_ref().is_some_and(|h| h.id == generation) {
+            s.host = None;
+        }
+        ensure!(
+            status.success(),
+            "Browser host exited with {status}; site data may not have finished saving"
+        );
+        if let Some(error) = lease_error {
+            return Err(error).context("Retiring browser frame lease during shutdown");
         }
         Ok(())
     }
@@ -429,60 +521,64 @@ impl Browser {
         }
         if let Some(req) = v["req"].as_u64().filter(|r| *r != 0) {
             if let Some(p) = s.pending.remove(&req) {
-                let _ = p.reply.send(if let Some(e) = v["error"].as_str() {
-                    Err(anyhow!("{e}"))
-                } else {
-                    Ok(v)
-                });
+                let _ = p.reply.send(Reply::Host(v));
             }
             return;
         }
-        let key = v["tab"].as_u64();
-        let Some(t) = s
+        let Ok(event) = serde_json::from_value::<TabEvent>(v) else {
+            eprintln!("Ignoring malformed browser tab event");
+            return;
+        };
+        let Some((session, t)) = s
             .tabs
-            .values_mut()
-            .find(|t| t.surface.as_ref().is_some_and(|f| Some(f.id) == key))
+            .iter_mut()
+            .find(|(_, t)| t.surface.as_ref().is_some_and(|f| f.id == event.tab))
         else {
             return;
         };
-        match v["event"].as_str() {
-            Some("state") => {
+        match event.kind {
+            EventKind::State {
+                url,
+                title,
+                back,
+                forward,
+                loading,
+            } => {
                 let a = &mut t.status;
-                a.url = v["url"].as_str().unwrap().into();
-                a.title = v["title"].as_str().unwrap().into();
-                a.back = v["back"].as_bool().unwrap();
-                a.forward = v["forward"].as_bool().unwrap();
-                a.loading = v["loading"].as_bool().unwrap();
-                if a.loading {
+                a.url = url;
+                a.title = title;
+                a.back = back;
+                a.forward = forward;
+                a.loading = loading;
+                if loading {
                     a.error = None;
                 }
             }
-            Some("viewport") => {
-                t.status.viewport =
-                    serde_json::from_value(v["fixed"].clone()).expect("native viewport");
-            }
-            Some("control") => {
-                if v["epoch"].as_u64() == Some(u64::from(t.epoch)) {
+            EventKind::Viewport { fixed } => t.status.viewport = fixed,
+            EventKind::Control { epoch } => {
+                if epoch == t.epoch {
                     t.status.handoff_pending = false;
                 }
             }
-            Some("selection") => t.status.selection = Arc::from(v["text"].as_str().unwrap()),
-            Some("open_failed") => {
+            EventKind::Selection { text } => t.status.selection = Arc::from(text),
+            EventKind::Error { error } => t.status.error = Some(error),
+            EventKind::OpenFailed { .. } | EventKind::Closed => {
+                let reason = if let EventKind::OpenFailed { error } = event.kind {
+                    t.status.error = Some(error.clone());
+                    error
+                } else {
+                    "Browser tab closed".to_owned()
+                };
                 t.surface = None;
                 t.status.surface_id = None;
-                t.status.handoff_pending = false;
                 t.status.loading = false;
-                t.status.error = Some(v["error"].as_str().unwrap().into());
-            }
-            Some("error") => t.status.error = Some(v["error"].as_str().unwrap().into()),
-            Some("closed") => {
-                t.surface = None;
-                t.status.surface_id = None;
                 t.status.handoff_pending = false;
-                t.status.loading = false;
+                let session = session.clone();
+                for (_, p) in s.pending.extract_if(|_, p| p.id == session) {
+                    let _ = p.reply.send(Reply::Retired(reason.clone()));
+                }
             }
-            Some("paint") => {}
-            _ => return,
+            EventKind::Paint => {}
         }
         self.changed()
     }
@@ -507,10 +603,14 @@ impl Browser {
         }
         let w = u32::from_ne_bytes(header[4..8].try_into()?);
         let h = u32::from_ne_bytes(header[8..12].try_into()?);
-        ensure!(
-            (1..=MAX_SIDE).contains(&w) && (1..=MAX_SIDE).contains(&h),
-            "Invalid CEF frame dimensions"
-        );
+        if !(1..=MAX_SIDE).contains(&w) || !(1..=MAX_SIDE).contains(&h) {
+            let mut end = [0; 4];
+            file.read_exact_at(&mut end, 0)?;
+            if u32::from_ne_bytes(end) != seq {
+                return Ok(None);
+            }
+            bail!("Invalid CEF frame dimensions");
+        }
         let mut pixels = vec![0; (w * h * 4) as usize];
         file.read_exact_at(&mut pixels, 64)?;
         let mut end = [0; 4];
@@ -699,7 +799,7 @@ impl AgentTab {
             AgentAction::Stop => json!({"op":"stop"}),
             AgentAction::Navigate { url } => json!({"op":"navigate","url":address(&url)?}),
             AgentAction::Screenshot => {
-                json!({"op":"screenshot","file":capture.as_ref().unwrap().path().join("page.png")})
+                json!({"op":"screenshot","file":capture.as_ref().unwrap().path().join("page.png").to_str().context("CEF requires a UTF-8 screenshot path")?})
             }
             AgentAction::Click { x, y, r#ref } => match (x, y, r#ref) {
                 (Some(x), Some(y), None) => json!({"op":"click","x":x,"y":y}),
@@ -787,7 +887,21 @@ impl AgentTab {
             );
             (id, key, epoch, rx)
         };
-        let result = tokio::select! {biased;_=cancel.cancelled()=>Err(anyhow!("Browser action cancelled")), v=tokio::time::timeout(timeout,rx)=>match v {Ok(Ok(reply))=>reply,Ok(Err(_))=>Err(anyhow!("Browser control revoked or tab closed")),Err(_)=>Err(anyhow!("Browser timed out; check the page before retrying"))}};
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(anyhow!("Browser action cancelled")),
+            reply = tokio::time::timeout(timeout, rx) => match reply {
+                // Already removed from pending. A local lifecycle error has no
+                // page payload and belongs to this request, even after a reopen.
+                Ok(Ok(Reply::Retired(reason))) => bail!("{reason}"),
+                Ok(Ok(Reply::Host(v))) => match v["error"].as_str() {
+                    Some(error) => Err(anyhow!("{error}")),
+                    None => Ok(v),
+                },
+                Ok(Err(_)) => Err(anyhow!("Browser control revoked or tab closed")),
+                Err(_) => Err(anyhow!("Browser timed out; check the page before retrying")),
+            }
+        };
         // Decode/spill outside the shared browser lock, before the final lease check.
         let result = result.and_then(|mut value| {
             if let Some(raw) = value.as_object_mut().unwrap().remove("evaluation_json") {
@@ -823,7 +937,7 @@ impl AgentTab {
         );
         let mut value = result?;
         if let Some(kind) = value.as_object_mut().unwrap().remove("eval_spill") {
-            let file = eval_file.expect("evaluation spool");
+            let file = eval_file.context("Unexpected evaluation spool response")?;
             match file.keep() {
                 Ok((_, path)) => {
                     if kind == "error" {

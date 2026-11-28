@@ -110,6 +110,36 @@ pub struct Conversation {
     store: Store,
 }
 impl Conversation {
+    // The guard is owned by the spawned future (including before its first poll).
+    // An obsolete task must never release a newer generation's reservation.
+    fn activity_guard(
+        self: &Arc<Self>,
+        generation: u64,
+    ) -> scopeguard::ScopeGuard<Arc<Self>, impl FnOnce(Arc<Self>) + use<>> {
+        scopeguard::guard(self.clone(), move |c| {
+            let Ok(mut state) = c.state.lock() else {
+                // A poisoned session cannot safely be admitted for another turn.
+                eprintln!(
+                    "Session {} panicked under its state lock; restart for recovery",
+                    c.id
+                );
+                return;
+            };
+            if c.turn_generation.load(Ordering::Acquire) == generation {
+                state.needs_attention = true;
+                state.entries.push(Entry::new(
+                    EntryKind::Notice,
+                    "Session worker stopped unexpectedly. Inspect completed work before resuming.",
+                ));
+                c.set_status(ConversationStatus::NeedsAttention);
+                c.running.store(false, Ordering::Release);
+                c.finishing.store(false, Ordering::Release);
+                c.manual_compaction.store(false, Ordering::Release);
+                c.changed();
+            }
+        })
+    }
+
     pub fn status(&self) -> ConversationStatus {
         self.status.lock().expect("status lock").clone()
     }
@@ -992,7 +1022,12 @@ impl Harness {
         self.check_workspace(&session.project)?;
         message.files = crate::file_tags::capture(
             &session.project,
-            &self.store.root().join("files"),
+            &self
+                .store
+                .root()
+                .join("media")
+                .join(&session.id)
+                .join("files"),
             &message.text,
         )?;
         message.skills =
@@ -1095,7 +1130,7 @@ impl Harness {
             message.files = crate::file_tags::capture_reusing(
                 &snapshot.draft_files,
                 &snapshot.project,
-                &self.store.root().join("files"),
+                &self.store.root().join("media").join(id).join("files"),
                 &message.text,
             )?;
         }
@@ -1249,11 +1284,14 @@ impl Harness {
         let is_child = conversation.snapshot().child.is_some();
         let generation = conversation.turn_generation.load(Ordering::Acquire);
         let harness = self.clone();
+        let activity = conversation.activity_guard(generation);
         self.runtime.as_ref().expect("live runtime").spawn(async move {
             let mut recovery = execution::Recovery::default();
             loop {
                 let submission = conversation.submissions.load(Ordering::Acquire);
-                let result = harness.run(&conversation, &settings, &cancel, &mut recovery).await;
+                let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                    harness.run(&conversation, &settings, &cancel, &mut recovery)
+                )).await.unwrap_or_else(|_| Err(anyhow::anyhow!("Turn worker panicked. Inspect tool results before retrying.")));
                 if result.is_err() || cancel.is_cancelled() {
                     harness.provider.discard_continuation(&conversation.id);
                     recovery.stopped(&conversation, cancel.is_cancelled());
@@ -1287,13 +1325,6 @@ impl Harness {
                         format!("Could not save session: {error:#}. Keep Orbit open, free disk space or fix permissions, then retry saving."),
                     ));
                 }
-                conversation.set_status(if cancel.is_cancelled() {
-                    ConversationStatus::Stopped
-                } else if result.is_ok() && save_result.is_ok() {
-                    ConversationStatus::Completed
-                } else {
-                    ConversationStatus::NeedsAttention
-                });
                 {
                     // Submission/start uses the same state lock. No accepted work can
                     // slip between this final check and the transition to idle.
@@ -1303,51 +1334,66 @@ impl Harness {
                     if !cancel.is_cancelled() && pending && (submitted || result.is_ok()) {
                         continue;
                     }
+                    conversation.set_status(if cancel.is_cancelled() {
+                        ConversationStatus::Stopped
+                    } else if result.is_ok() && save_result.is_ok() {
+                        ConversationStatus::Completed
+                    } else {
+                        ConversationStatus::NeedsAttention
+                    });
                     conversation.finishing.store(true, Ordering::Release);
                     conversation.running.store(false, Ordering::Release);
                 }
                 if !is_child {
-                    let (_library, family) = harness.admit(&conversation.id);
-                    let _coordinator = family.lock().expect("family lifecycle");
-                    let mut state = conversation.state.lock().expect("session lock");
-                    if conversation.turn_generation.load(Ordering::Acquire) == generation {
-                        if !cancel.is_cancelled() {
-                            if result.is_err() || save_result.is_err() {
-                                conversation.notifications.publish(&state, notifications::Kind::Failed);
-                            } else if state.async_questions.is_empty() && !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
-                                && harness.active_children(&conversation.id) == 0
-                            {
-                                // This sidebar hint uses ordinary session saves (eviction,
-                                // edits, shutdown), not a separate completion transaction.
-                                state.unchecked_completion = true;
-                                state.updated = crate::store::now();
-                                conversation.notifications.publish(&state, notifications::Kind::Finished);
+                    let failed = result.is_err() || save_result.is_err();
+                    let harness = harness.clone();
+                    let conversation = conversation.clone();
+                    let cancel = cancel.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let (_library, family) = harness.admit(&conversation.id);
+                        let _coordinator = family.lock().expect("family lifecycle");
+                        let mut state = conversation.state.lock().expect("session lock");
+                        if conversation.turn_generation.load(Ordering::Acquire) == generation {
+                            if !cancel.is_cancelled() {
+                                if failed {
+                                    conversation.notifications.publish(&state, notifications::Kind::Failed);
+                                } else if state.async_questions.is_empty() && !conversation.questionnaires.as_ref().is_some_and(|q| q.has_pending())
+                                    && harness.active_children(&conversation.id) == 0
+                                {
+                                    // This sidebar hint uses ordinary session saves (eviction,
+                                    // edits, shutdown), not a separate completion transaction.
+                                    state.unchecked_completion = true;
+                                    state.updated = crate::store::now();
+                                    conversation.notifications.publish(&state, notifications::Kind::Finished);
+                                }
+                            }
+                            // A newer turn may already be finishing. An old task must
+                            // not clear its eviction/deletion guard after releasing this lock.
+                            conversation.finishing.store(false, Ordering::Release);
+                            drop(state);
+                            if conversation.restart_after_stop.swap(false, Ordering::AcqRel) {
+                                let settings = conversation.last_settings.lock().expect("settings lock").clone();
+                                harness.start_turn(conversation.clone(), settings);
                             }
                         }
-                        // A newer turn may already be finishing. An old task must
-                        // not clear its eviction/deletion guard after releasing this lock.
-                        conversation.finishing.store(false, Ordering::Release);
-                        drop(state);
-                        if conversation.restart_after_stop.swap(false, Ordering::AcqRel) {
-                            let settings = conversation.last_settings.lock().expect("settings lock").clone();
-                            harness.start_turn(conversation.clone(), settings);
+                    }).await.expect("parent completion worker");
+                } else {
+                    let finish_harness = harness.clone();
+                    let child = conversation.clone();
+                    let cancelled = cancel.is_cancelled();
+                    if let Err(error) = tokio::task::spawn_blocking(move || finish_harness.finish_assignment(&child, result, cancelled)).await.expect("assignment completion worker") {
+                        let mut state = conversation.state.lock().expect("session lock");
+                        state.entries.push(Entry::new(EntryKind::Notice, format!("Could not save/deliver subagent completion: {error:#}. Result retained in memory; fix storage and retry saving before quitting.")));
+                        if conversation.turn_generation.load(Ordering::Acquire) == generation {
+                            conversation.set_status(ConversationStatus::NeedsAttention);
                         }
                     }
-                }
-                if is_child {
-                let finish_harness = harness.clone();
-                let child = conversation.clone();
-                let cancelled = cancel.is_cancelled();
-                if let Err(error) = tokio::task::spawn_blocking(move || finish_harness.finish_assignment(&child, result, cancelled)).await.expect("assignment completion worker") {
-                    conversation.state.lock().expect("session lock").entries.push(Entry::new(EntryKind::Notice, format!("Could not save/deliver subagent completion: {error:#}. Result retained in memory; fix storage and retry saving before quitting.")));
-                    conversation.set_status(ConversationStatus::NeedsAttention);
-                }
-                conversation.finishing.store(false, Ordering::Release);
                 }
                 harness.catalog_revision.fetch_add(1, Ordering::Release);
                 conversation.changed();
                 break;
             }
+            scopeguard::ScopeGuard::into_inner(activity);
         });
     }
     /// Compact the current context without accepting a submission or starting an agent turn.
@@ -1382,6 +1428,8 @@ impl Harness {
         conversation.changed();
         let harness = self.clone();
         let runtime = self.runtime.as_ref().expect("live runtime");
+        let activity =
+            conversation.activity_guard(conversation.turn_generation.load(Ordering::Acquire));
         runtime.spawn(async move {
             let result = async {
                 let instructions = harness.prepare_context(&conversation, &cancel).await?;
@@ -1424,6 +1472,7 @@ impl Harness {
             }
             harness.catalog_revision.fetch_add(1, Ordering::Release);
             conversation.changed();
+            scopeguard::ScopeGuard::into_inner(activity);
         });
         Ok(())
     }
@@ -1505,6 +1554,7 @@ impl Harness {
             }
             let snapshot = {
                 let mut s = conversation.state.lock().expect("session lock");
+                s.prepare_effort();
                 s.consume_pending();
                 conversation.changed();
                 s.clone()
@@ -1773,9 +1823,13 @@ fn recover_after_restart(before: &Session) -> Option<Session> {
 fn commit_progress(session: &mut Session) {
     // Completed response items survive stream failure/restart even if response.completed
     // never arrived. Preserve successful results before repairing uncertain executions.
-    if let Some(progress) = session.in_progress_response.take() {
-        let output: Vec<_> = progress.items.into_iter().map(|(_, value)| value).collect();
+    if let Some(progress) = &mut session.in_progress_response {
+        let output: Vec<_> = std::mem::take(&mut progress.items)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
         reconcile_text(session, &output);
+        let progress = session.in_progress_response.take().unwrap();
         session.input.extend(output);
         session
             .input
@@ -1846,6 +1900,23 @@ fn repair_calls(session: &mut Session) {
         }
     }
 }
+fn response_row(session: &mut Session, wire: &str) -> String {
+    let progress = session
+        .in_progress_response
+        .as_mut()
+        .expect("active response");
+    progress
+        .text_rows
+        .entry(wire.to_owned())
+        .or_insert_with(|| {
+            if session.entries.by_id(wire).is_some() {
+                crate::store::id()
+            } else {
+                wire.to_owned()
+            }
+        })
+        .clone()
+}
 fn reconcile_text(session: &mut Session, output: &[Value]) {
     for item in output {
         let (kind, content) = match item["type"].as_str() {
@@ -1865,7 +1936,7 @@ fn reconcile_text(session: &mut Session, output: &[Value]) {
         }
         let id = item["id"]
             .as_str()
-            .map(str::to_owned)
+            .map(|id| response_row(session, id))
             .unwrap_or_else(crate::store::id);
         if let Some(entry) = session.entries.by_id_mut(&id) {
             entry.text = text;
@@ -3257,7 +3328,9 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         session.draft = text.into();
         std::fs::write(project.join("source.rs"), "captured λ").unwrap();
         // A real attachment still needs durable storage before accepting the draft.
-        let files_dir = store.root().join("files");
+        let owner = store.root().join("media").join(&session.id);
+        std::fs::create_dir_all(&owner).unwrap();
+        let files_dir = owner.join("files");
         std::fs::write(&files_dir, "not a directory").unwrap();
         let id = session.id.clone();
         store.save_session(&session).unwrap();
@@ -3295,6 +3368,22 @@ text(await tools.ask_user({questions:[{id:'choice',question:'Target?',kind:'text
         let mut replay = serde_json::json!(plaintext_context(&saved));
         crate::media::project(&mut replay, false).unwrap();
         assert!(replay.to_string().contains("captured λ"));
+        while c.is_turn_active() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let fork = h.fork(&id, "files", &Settings::default()).unwrap();
+        h.remove(&id).unwrap();
+        let snapshot_path = &captured.files[0].snapshot;
+        assert_eq!(
+            std::fs::read_to_string(snapshot_path).unwrap(),
+            "captured λ"
+        );
+        h.remove(&fork).unwrap();
+        assert!(
+            !snapshot_path.exists(),
+            "last fork releases the durable capture"
+        );
         // First-send retries use the accepted session, not the original unsaved draft.
         let mut fresh = Session::new(project.clone(), &Settings::default());
         fresh.title = "Fixture".into();

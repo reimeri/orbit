@@ -155,12 +155,11 @@ impl Worker {
                 for mut prior in before {
                     let _ = prior.changed().await;
                 }
-                tokio::task::spawn_blocking(move || {
-                    let _ = reply.send(job());
-                    drop(done);
-                })
-                .await
-                .expect("storage job completes");
+                let result = tokio::task::spawn_blocking(job).await.unwrap_or_else(|e| {
+                    Message::External(Err(format!("Storage operation did not finish normally: {e}. Check saved state before retrying; the operation was not replayed.")))
+                });
+                let _ = reply.send(result);
+                drop(done);
             }))
             .expect("storage scheduler alive");
         Task::future(async move { result.await.expect("storage job completes") })

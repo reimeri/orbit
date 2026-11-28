@@ -117,7 +117,7 @@ impl App {
                     self.error = Some("Two clipboard pastes are pending. Wait for them to finish, then paste again.".into());
                     return;
                 }
-                let (send, text) = tokio::sync::oneshot::channel();
+                let (send, text) = std::sync::mpsc::channel();
                 let mut send = Some(send);
                 self.tasks.push(iced::clipboard::read().then(move |text| {
                     // A deleted draft may already have released its pending request.
@@ -224,7 +224,9 @@ impl App {
                         Message::AttachmentLoaded(
                             tokio::task::spawn_blocking(move || source.prepare(&root))
                                 .await
-                                .expect("attachment preparation"),
+                                .unwrap_or_else(|e| {
+                                    Err(format!("Attachment preparation failed: {e}"))
+                                }),
                         )
                     }));
                     break;

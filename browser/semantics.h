@@ -184,6 +184,10 @@ class Semantics final : public CefDevToolsMessageObserver {
     // CEF owns p only during the callback. Copy once; keep this call counted
     // while decoding and spooling, even if cancelled. Only one step per
     // request is in flight, so the decoder is never accessed concurrently.
+    if (size > Evaluation::budget) {
+      finish(t, {{"error", "Inspector response exceeds the evaluation byte budget; return a smaller projection"}});
+      return;
+    }
     calls.emplace(id, Call{t, {}});
     auto decoder = requests.at(t).evaluation;
     auto work = [self = CefRefPtr<Semantics>(this), t, id, success,
@@ -201,7 +205,7 @@ class Semantics final : public CefDevToolsMessageObserver {
     };
     if (!CefPostTask(TID_FILE_USER_BLOCKING, new Work(std::move(work)))) {
       calls.erase(id);
-      evaluated(t, decoder->receive(success, std::string(p, size)));
+      finish(t, {{"error", "Evaluation decoder is unavailable"}});
     }
   }
   void sample(Ticket t) {
@@ -245,8 +249,10 @@ class Semantics final : public CefDevToolsMessageObserver {
           std::set<int> known;
           for (const auto &n : nodes) {
             int backend = n.value("backendDOMNodeId", 0);
+            if (!backend)
+              continue;
             known.insert(backend);
-            if (!backend || !n.contains("value"))
+            if (!n.contains("value"))
               continue;
             const Json *ancestor = &n;
             while (ancestor) {
@@ -317,7 +323,8 @@ class Semantics final : public CefDevToolsMessageObserver {
                     key == "required" || key == "expanded" ||
                     key == "selected" || key == "readonly" || key == "level" ||
                     key == "pressed")
-                  node[key] = p.at("value").at("value");
+                  if (p.contains("value") && p.at("value").contains("value"))
+                    node[key] = p.at("value").at("value");
               }
             if (shown && inspect) {
               node["depth"] = depth;
@@ -371,7 +378,7 @@ class Semantics final : public CefDevToolsMessageObserver {
            for (const auto &node : tree.at("nodes")) {
              if (!node.at("ignored").get<bool>() &&
                  node.value("backendDOMNodeId", 0) == target.backend &&
-                 node.at("role").at("value").get<std::string>() ==
+                 node.contains("role") && node.at("role").value("value", std::string()) ==
                      target.role &&
                  (node.contains("name")
                       ? node.at("name").value("value", std::string())

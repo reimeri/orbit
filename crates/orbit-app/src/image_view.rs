@@ -228,7 +228,12 @@ impl Viewer {
             None => text("Loading image preview…").size(12).into(),
         }
     }
-    pub fn attachment(&self, media: &Media, index: usize) -> Element<'_, crate::ui::Message> {
+    pub fn attachment(
+        &self,
+        media: &Media,
+        index: usize,
+        epoch: u64,
+    ) -> Element<'_, crate::ui::Message> {
         let preview: Element<'_, crate::ui::Message> = match media
             .thumbnail
             .as_ref()
@@ -260,7 +265,7 @@ impl Viewer {
             theme::button(container(Icon::X.view(14.)).center_y(20))
                 .padding([0, 5])
                 .style(theme::attachment_remove)
-                .on_press(crate::ui::Message::RemoveAttachment(index)),
+                .on_press(crate::ui::Message::RemoveAttachment(index, epoch)),
             "Remove attachment",
         ))
         .width(ATTACHMENT_SIDE)
@@ -1060,7 +1065,7 @@ mod tests {
             Ok(image::Handle::from_rgba(48, 16, vec![255; 48 * 16 * 4])),
         );
         let mut renderer = crate::test_renderer::new(16.);
-        let mut view = viewer.attachment(&media, 3);
+        let mut view = viewer.attachment(&media, 3, 17);
         let mut tree = Tree::new(view.as_widget());
         let size = view
             .as_widget_mut()
@@ -1072,7 +1077,7 @@ mod tests {
             .size();
         let mut ui = iced_runtime::UserInterface::build(
             crate::pointer_input::pointer_input(
-                viewer.attachment(&media, 3),
+                viewer.attachment(&media, 3, 17),
                 false,
                 Default::default(),
             ),
@@ -1142,7 +1147,7 @@ mod tests {
             if remove {
                 assert!(matches!(
                     messages.as_slice(),
-                    [crate::ui::Message::RemoveAttachment(3)]
+                    [crate::ui::Message::RemoveAttachment(3, 17)]
                 ));
             } else {
                 let [crate::ui::Message::OpenImageFrom(message, source)] = messages.as_slice()

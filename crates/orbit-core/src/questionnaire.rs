@@ -152,6 +152,30 @@ struct Waiting {
     reply: oneshot::Sender<String>,
 }
 /// One queue per main conversation; UI drafts are separately keyed by request ID.
+struct Registration<'a> {
+    owner: &'a Questionnaires,
+    id: &'a str,
+}
+
+impl Registration<'_> {
+    fn remove(&self) -> bool {
+        let mut waiting = self.owner.waiting.lock().expect("questionnaires");
+        if let Some(i) = waiting.iter().position(|w| w.pending.id == self.id) {
+            waiting.remove(i);
+            drop(waiting);
+            (self.owner.changed)();
+            true
+        } else {
+            false
+        }
+    }
+}
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 pub struct Questionnaires {
     waiting: Mutex<Vec<Waiting>>,
     changed: Box<dyn Fn() + Send + Sync>,
@@ -194,18 +218,20 @@ impl Questionnaires {
                 reply,
             });
         }
+        let registration = Registration { owner: self, id };
         (self.changed)();
-        let result = tokio::select! {
+        let mut answer = answer;
+        tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(anyhow::anyhow!("Questionnaire cancelled")),
-            answer = answer => answer.context("Questionnaire closed"),
-        };
-        self.waiting
-            .lock()
-            .expect("questionnaires")
-            .retain(|w| w.pending.id != id);
-        (self.changed)();
-        result
+            result = &mut answer => result.context("Questionnaire closed"),
+            _ = cancel.cancelled() => {
+                if registration.remove() {
+                    bail!("Questionnaire cancelled");
+                }
+                // Submit won the queue lock and sent before removing its entry.
+                answer.await.context("Questionnaire closed")
+            }
+        }
     }
     /// A failed validation leaves the request and all UI drafts available for retry.
     pub fn submit(&self, id: &str, answers: Vec<String>) -> Result<()> {
@@ -215,12 +241,10 @@ impl Questionnaires {
             .position(|w| w.pending.id == id && !w.cancel.is_cancelled())
             .context("This questionnaire is no longer active")?;
         let answer = waiting[index].pending.request.answer(answers)?;
-        if waiting.remove(index).reply.send(answer).is_err() {
-            bail!("This questionnaire is no longer active");
-        }
+        let sent = waiting.remove(index).reply.send(answer);
         drop(waiting);
         (self.changed)();
-        Ok(())
+        sent.map_err(|_| anyhow::anyhow!("This questionnaire is no longer active"))
     }
 }
 
@@ -228,6 +252,22 @@ impl Questionnaires {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn dropping_a_wait_removes_it_and_submitted_answers_survive_stop() {
+        let q = Questionnaires::new(|| {});
+        let cancel = CancellationToken::new();
+        let args = r#"{"questions":[{"id":"q","kind":"text","question":"Why?"}]}"#;
+        let mut first = Box::pin(q.ask("first", args, &cancel));
+        assert!(futures_util::poll!(&mut first).is_pending());
+        drop(first);
+        assert!(!q.has_pending());
+        let mut second = Box::pin(q.ask("second", args, &cancel));
+        assert!(futures_util::poll!(&mut second).is_pending());
+        q.submit("second", vec!["Because".into()]).unwrap();
+        cancel.cancel();
+        assert!(second.await.unwrap().contains("Because"));
+    }
 
     #[test]
     fn validates_boundaries_and_keeps_complete_ordered_answers() {

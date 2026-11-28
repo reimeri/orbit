@@ -59,10 +59,10 @@ pub struct ModelDefaults {
     pub effort: String,
     pub fast: bool,
 }
-impl Default for ModelDefaults {
-    fn default() -> Self {
+impl ModelDefaults {
+    fn for_model(model: &crate::models::Model) -> Self {
         Self {
-            effort: "medium".into(),
+            effort: model.preferred_effort("medium").into(),
             fast: false,
         }
     }
@@ -70,7 +70,7 @@ impl Default for ModelDefaults {
 fn model_defaults() -> BTreeMap<String, ModelDefaults> {
     MODELS
         .iter()
-        .map(|m| (m.id.into(), ModelDefaults::default()))
+        .map(|m| (m.id.into(), ModelDefaults::for_model(m)))
         .collect()
 }
 
@@ -158,14 +158,24 @@ impl Settings {
     fn refresh_models(&mut self) {
         self.models.retain(|id, _| model(id).is_some());
         for m in MODELS {
-            self.models.entry(m.id.into()).or_default();
+            let defaults = self
+                .models
+                .entry(m.id.into())
+                .or_insert_with(|| ModelDefaults::for_model(m));
+            if !m.efforts.contains(&defaults.effort.as_str()) {
+                defaults.effort = ModelDefaults::for_model(m).effort;
+            }
         }
         for profile in Profile::ALL {
             let config = self
                 .subagents
                 .entry(profile)
                 .or_insert_with(|| profile.defaults());
-            if model(&config.model).is_none() {
+            if let Some(m) = model(&config.model) {
+                if !m.efforts.contains(&config.effort.as_str()) {
+                    config.effort = self.models[m.id].effort.clone();
+                }
+            } else {
                 *config = profile.defaults();
             }
         }
@@ -398,6 +408,8 @@ impl Usage {
 /// completed items and results durable until they can be committed in model order.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InProgressResponse {
+    #[serde(default)]
+    pub(crate) text_rows: im::HashMap<String, String>,
     pub items: im::OrdMap<usize, Value>,
     pub results: im::OrdMap<usize, Value>,
 }
@@ -1329,7 +1341,10 @@ mod tests {
             ("gpt-6.1-sol", crate::models::SOL.id),
         ] {
             catalog.settings.models.remove(replacement);
-            expected.insert(replacement.into(), ModelDefaults::default());
+            expected.insert(
+                replacement.into(),
+                ModelDefaults::for_model(model(replacement).unwrap()),
+            );
             catalog.settings.models.insert(
                 retired.into(),
                 ModelDefaults {
@@ -1338,8 +1353,20 @@ mod tests {
                 },
             );
         }
-        catalog.settings.models.remove(crate::models::TERRA.id);
-        expected.insert(crate::models::TERRA.id.into(), ModelDefaults::default());
+        catalog
+            .settings
+            .models
+            .get_mut(crate::models::TERRA.id)
+            .unwrap()
+            .effort = "retired-effort".into();
+        let subagent = catalog
+            .settings
+            .subagents
+            .get_mut(&Profile::ALL[0])
+            .unwrap();
+        subagent.effort = "retired-effort".into();
+        expected.get_mut(crate::models::TERRA.id).unwrap().effort =
+            ModelDefaults::for_model(&crate::models::TERRA).effort;
         catalog.settings.model = "gpt-6.1-sol".into();
         catalog.settings.context_limit = 128_000;
         catalog.settings.images.model = "gpt-image-2.5-sunburst".into();

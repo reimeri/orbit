@@ -256,6 +256,7 @@ pub struct App {
     spellcheck: spellcheck::State,
     file_completion: crate::file_completion::Completion,
     attachments: Vec<orbit_core::media::Media>,
+    attachment_epoch: u64,
     imports: imports::Imports,
     questionnaires: HashMap<String, questionnaire::Draft>,
     active_questionnaire: Option<String>,
@@ -389,7 +390,7 @@ pub enum Message {
     AttachmentLoaded(Result<crate::attachments::Input, String>),
     AttachmentPublished(Result<(), String>),
     AttachmentSaveFailed(String, Option<crate::attachments::Input>),
-    RemoveAttachment(usize),
+    RemoveAttachment(usize, u64),
     Deleted(String, Result<(), String>),
     Edited(Result<(), String>),
     Tick,
@@ -595,6 +596,7 @@ impl App {
             close_requested: false,
             submissions: HashMap::new(),
             attachments: vec![],
+            attachment_epoch: 0,
             imports: Default::default(),
             current_revision: 0,
             outputs: HashMap::new(),
@@ -1298,6 +1300,7 @@ impl App {
         let owner = self.draft_key();
         self.histories.switch(&self.editor, owner, &editor);
         self.editor = editor;
+        self.attachment_epoch += 1;
         self.attachments = if self.draft_session.is_some() {
             self.new_draft.images.clone()
         } else {
@@ -1346,6 +1349,7 @@ impl App {
         }
     }
     fn attachment_changed(&mut self) {
+        self.attachment_epoch += 1;
         if self.draft_session.is_some() {
             self.new_draft.images = self.attachments.clone();
             self.new_draft_dirty = true;
@@ -1882,8 +1886,11 @@ impl App {
             Message::AttachmentSaveFailed(error, pending) => {
                 self.import_save_failed(error, pending)
             }
-            Message::RemoveAttachment(index) => {
-                if !self.composer_available() {
+            Message::RemoveAttachment(index, epoch) => {
+                if !self.composer_available()
+                    || epoch != self.attachment_epoch
+                    || index >= self.attachments.len()
+                {
                     return Task::none();
                 }
                 self.cancel_import_send("Pending send cancelled because the attachments changed.");
@@ -3296,8 +3303,9 @@ impl App {
                         self.sidebar_epoch = self.sidebar_epoch.wrapping_add(1);
                         let delta = position.x - start;
                         let limit = (self.window_width * 0.4).min(if right { 700. } else { 600. });
+                        let minimum: f32 = if right { 260. } else { 160. };
                         let value = (width + if right { -delta } else { delta })
-                            .clamp(if right { 260. } else { 160. }, limit);
+                            .clamp(minimum, limit.max(minimum));
                         if right {
                             self.catalog.settings.settings_width = value;
                             self.settings.settings_width = value;
@@ -3386,6 +3394,8 @@ impl App {
                             return self.browser_action(browser::Action::EndFind);
                         } else if let Some(close_search) = close_search {
                             return self.update_inner(close_search);
+                        } else if self.browser.open {
+                            return self.browser_action(browser::Action::Toggle);
                         } else if self.settings_open {
                             return self.update_inner(Message::CancelSettings);
                         } else if self.fork_panel.is_some() {
@@ -3619,7 +3629,11 @@ impl App {
                 // Ordered after earlier jobs: no queued Send can start behind this barrier.
                 h.stop_all();
                 let result=(|| {
-                    while h.all().iter().any(|s|s.is_executing()) {std::thread::sleep(Duration::from_millis(20));}
+                    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                    while h.all().iter().any(|s| s.is_executing()) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "Agent work has not stopped yet; wait for it to finish and retry closing");
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
                     if let Some((id,draft))=draft {h.edit(&id,|s| { s.draft=draft.text; s.draft_images=draft.images; })?;}
                     h.store.save_new_draft(&new_draft)?;
                     writer.save_state(&h.store, catalog)?;
@@ -3627,7 +3641,7 @@ impl App {
                     h.browser.shutdown()?;
                     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(h.auth.flush())
                 })();
-                Message::Exit(result.map_err(|e|format!("Could not finish saving: {e:#}. Keep Orbit open, fix storage, then retry closing.")))
+                Message::Exit(result.map_err(|e|format!("Could not finish saving or closing: {e:#}. Orbit remains open; resolve the issue and retry.")))
             });
         }
         iced::exit()
@@ -4400,7 +4414,10 @@ impl App {
                 .attachments
                 .iter()
                 .enumerate()
-                .map(|(index, media)| self.image_view.attachment(media, index))
+                .map(|(index, media)| {
+                    self.image_view
+                        .attachment(media, index, self.attachment_epoch)
+                })
                 .chain(pending.map(crate::image_view::PendingAttachment::view)))
             .spacing(8);
             above_editor = above_editor

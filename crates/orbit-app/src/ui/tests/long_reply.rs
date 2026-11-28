@@ -414,7 +414,10 @@ async fn image_paste_preserves_tail_following_and_scrolled_up_position() {
         let expected = if following { end + shrink } else { offset };
         assert!((after - expected).abs() <= 1.);
 
-        dispatch(&mut app, Message::RemoveAttachment(0)).await;
+        {
+            let msg = Message::RemoveAttachment(0, app.attachment_epoch);
+            dispatch(&mut app, msg).await
+        };
         settle(&mut app, &mut renderer, &mut cache, size, None).await;
     }
 }

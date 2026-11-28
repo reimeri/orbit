@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+scopeguard = { version = "1", default-features = false }
 tempfile = "3"
 url = "2"
 anyhow = "1"

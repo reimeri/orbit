@@ -99,11 +99,12 @@ fn reflog_birth(common: &Path, branch: &OsStr) -> Result<Option<u64>> {
 impl Repo {
     pub async fn read(project: &Path, state: &Path) -> Result<Self> {
         let current = git_path(project, "--show-toplevel").await?;
-        let common = git_path(project, "--git-common-dir")
-            .await?
-            .canonicalize()?;
+        let common = tokio::fs::canonicalize(git_path(project, "--git-common-dir").await?).await?;
         let key = format!("{:x}", Sha256::digest(common.as_os_str().as_bytes()));
-        let managed = state.canonicalize()?.join("worktrees").join(key);
+        let managed = tokio::fs::canonicalize(state)
+            .await?
+            .join("worktrees")
+            .join(key);
         let refs = git(
             project,
             ["for-each-ref", "--format=%(refname)", "refs/heads/"],
@@ -163,12 +164,12 @@ impl Repo {
             if bare {
                 continue;
             }
-            let available = !missing && path.is_dir();
+            let available = !missing && tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir());
             let mut created = None;
             let mut owned = false;
             if available && path.parent() == Some(&managed) {
                 let marker = git_path(&path, "--absolute-git-dir").await?.join(MARKER);
-                match fs::read_to_string(marker) {
+                match tokio::fs::read_to_string(marker).await {
                     Ok(stamp) => {
                         owned = true;
                         if branch.as_deref() == path.file_name() {
@@ -186,7 +187,10 @@ impl Repo {
             if created.is_none()
                 && let Some(branch) = &branch
             {
-                created = reflog_birth(&common, branch)?;
+                let common = common.clone();
+                let branch = branch.clone();
+                created =
+                    tokio::task::spawn_blocking(move || reflog_birth(&common, &branch)).await??;
             }
             let label = branch
                 .as_ref()
@@ -224,7 +228,8 @@ impl Repo {
     pub async fn open(&self, path: &Path) -> Result<PathBuf> {
         ensure!(
             git_path(path, "--show-toplevel").await? == path
-                && git_path(path, "--git-common-dir").await?.canonicalize()? == self.common,
+                && tokio::fs::canonicalize(git_path(path, "--git-common-dir").await?).await?
+                    == self.common,
             "{} is no longer this repository’s checkout. Refresh the list.",
             path.display()
         );
@@ -266,10 +271,10 @@ impl Repo {
         self.open(&self.current).await?;
         let mut reference = OsString::from("refs/heads/");
         reference.push(base);
-        fs::create_dir_all(&self.managed)?;
+        tokio::fs::create_dir_all(&self.managed).await?;
         for name in candidates {
             let path = self.managed.join(&name);
-            match fs::create_dir(&path) {
+            match tokio::fs::create_dir(&path).await {
                 Ok(()) => (),
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e.into()),
@@ -289,8 +294,8 @@ impl Repo {
             .await
             {
                 // Only release our empty reservation. Never recursively undo Git.
-                if path.exists() {
-                    fs::remove_dir(&path).with_context(|| {
+                if tokio::fs::try_exists(&path).await? {
+                    tokio::fs::remove_dir(&path).await.with_context(|| {
                         format!(
                             "{error}. Inspect the preserved directory {}",
                             path.display()
@@ -306,10 +311,11 @@ impl Repo {
                 return Err(error);
             }
             let mark = async {
-                fs::write(
+                tokio::fs::write(
                     git_path(&path, "--absolute-git-dir").await?.join(MARKER),
                     orbit_core::store::now().to_string(),
-                )?;
+                )
+                .await?;
                 Ok::<_, anyhow::Error>(())
             }
             .await;

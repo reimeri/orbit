@@ -6,13 +6,7 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -30,12 +24,17 @@ pub struct Credentials {
     pub account_id: Option<String>,
     pub email: Option<String>,
 }
+#[derive(Default)]
+struct LoginState {
+    current: Option<Credentials>,
+    needs_save: bool,
+}
+
 pub struct Auth {
     store: Store,
-    credentials: Mutex<Option<Credentials>>,
+    credentials: Arc<Mutex<LoginState>>,
     client: Client,
     issuer: String,
-    needs_save: AtomicBool,
 }
 impl Auth {
     pub fn new(store: Store) -> Result<Arc<Self>> {
@@ -43,8 +42,10 @@ impl Auth {
         Ok(Arc::new(Self {
             store,
             issuer: ISSUER.into(),
-            needs_save: AtomicBool::new(false),
-            credentials: Mutex::new(credentials),
+            credentials: Arc::new(Mutex::new(LoginState {
+                current: credentials,
+                needs_save: false,
+            })),
             client: Client::builder().timeout(Duration::from_secs(60)).build()?,
         }))
     }
@@ -58,6 +59,7 @@ impl Auth {
         self.credentials
             .lock()
             .await
+            .current
             .as_ref()
             .map(|c| c.email.clone().unwrap_or_else(|| "ChatGPT account".into()))
     }
@@ -69,12 +71,17 @@ impl Auth {
     }
     async fn token_inner(&self, rejected: Option<&str>) -> Result<Credentials> {
         // One refresh per account, including concurrent conversations receiving a 401.
-        let mut guard = self.credentials.lock().await;
+        let mut guard = self.credentials.clone().lock_owned().await;
         let current = guard
+            .current
             .as_ref()
             .context("Sign in to ChatGPT in Settings before sending a message")?;
         if current.expires_at > now() + 90 && rejected != Some(current.access_token.as_str()) {
-            return Ok(current.clone());
+            let current = current.clone();
+            if guard.needs_save {
+                self.save(guard).await?;
+            }
+            return Ok(current);
         }
         let response = self
             .client
@@ -90,37 +97,54 @@ impl Auth {
         let status = response.status();
         let bytes = response.bytes().await?;
         if !status.is_success() {
+            let secrets = [
+                current.access_token.as_bytes(),
+                current.refresh_token.as_bytes(),
+            ];
+            let mut redacted = Vec::new();
+            crate::output::redact_prefix(&mut bytes.to_vec(), &secrets, true, |part| {
+                redacted.extend_from_slice(part)
+            });
             bail!(
                 "ChatGPT login refresh failed ({status}). Sign in again in Settings. {}",
-                service_error(&bytes)
+                service_error(&redacted)
             );
         }
         let credentials = parse_tokens(serde_json::from_slice(&bytes)?, Some(current))?;
-        *guard = Some(credentials.clone());
-        self.needs_save.store(true, Ordering::Relaxed);
-        self.store.write("auth.json", &credentials).context("Refreshed login is retained in memory but could not be saved. Fix disk space/permissions and retry before quitting")?;
-        self.needs_save.store(false, Ordering::Relaxed);
+        guard.current = Some(credentials.clone());
+        guard.needs_save = true;
+        self.save(guard).await?;
         Ok(credentials)
     }
+    async fn save(&self, mut state: tokio::sync::OwnedMutexGuard<LoginState>) -> Result<()> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            store.write("auth.json", state.current.as_ref().expect("unsaved credentials"))
+                .context("Login is retained in memory but could not be saved. Fix disk space/permissions and retry before quitting")?;
+            state.needs_save = false;
+            Ok(())
+        }).await?
+    }
     pub async fn flush(&self) -> Result<()> {
-        let credentials = self.credentials.lock().await;
-        if self.needs_save.load(Ordering::Relaxed) {
-            self.store.write("auth.json", credentials.as_ref().expect("unsaved credentials"))
-                .context("Login could not be saved. Keep Orbit open, fix disk space/permissions, then retry closing")?;
-            self.needs_save.store(false, Ordering::Relaxed);
+        let state = self.credentials.clone().lock_owned().await;
+        if state.needs_save {
+            self.save(state).await?;
         }
         Ok(())
     }
     pub async fn logout(&self) -> Result<()> {
-        let mut guard = self.credentials.lock().await;
-        match std::fs::remove_file(self.store.root().join("auth.json")) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        *guard = None;
-        self.needs_save.store(false, Ordering::Relaxed);
-        Ok(())
+        let mut state = self.credentials.clone().lock_owned().await;
+        let path = self.store.root().join("auth.json");
+        tokio::task::spawn_blocking(move || {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            *state = LoginState::default();
+            Ok(())
+        })
+        .await?
     }
     pub async fn begin(&self) -> Result<Login> {
         let listener = match TcpListener::bind("127.0.0.1:1455").await {
@@ -233,11 +257,10 @@ impl Auth {
                     .email
                     .clone()
                     .unwrap_or_else(|| "ChatGPT account".into());
-                let mut guard = self.credentials.lock().await;
-                *guard = Some(credentials.clone());
-                self.needs_save.store(true, Ordering::Relaxed);
-                self.store.write("auth.json", &credentials)?;
-                self.needs_save.store(false, Ordering::Relaxed);
+                let mut guard = self.credentials.clone().lock_owned().await;
+                guard.current = Some(credentials);
+                guard.needs_save = true;
+                self.save(guard).await?;
                 // Login remains successful even if the browser closes the callback socket.
                 let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<h1>Signed in to Orbit</h1><p>You can close this tab and return to Orbit.</p>").await;
                 return Ok(label);
@@ -378,7 +401,7 @@ mod tests {
         assert!(auth.token(None).await.is_err());
         server.await.unwrap();
         std::fs::remove_dir(store.root().join("auth.json")).unwrap();
-        auth.flush().await.unwrap();
+        auth.token(None).await.unwrap();
         let credentials: Credentials = store.read_optional("auth.json").unwrap().unwrap();
         assert_eq!(credentials.refresh_token, "rotated");
         assert_eq!(auth.token(None).await.unwrap().access_token, "new");

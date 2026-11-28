@@ -133,6 +133,14 @@ async fn escape_dismisses_ui_before_stopping_only_the_selected_running_agent() {
     dispatch(&mut app, escape.clone()).await;
     assert!(!app.settings_open);
     assert_eq!(selected.status(), idle_status);
+    app.browser.open = true;
+    dispatch(&mut app, escape.clone()).await;
+    assert!(!app.browser.open);
+    assert_eq!(
+        selected.status(),
+        idle_status,
+        "hiding the browser must not stop the turn"
+    );
     let other_status = other.status();
     // Hold an earlier session job open. Both stop controls must return to
     // the event loop without overtaking it or disabling unrelated input.

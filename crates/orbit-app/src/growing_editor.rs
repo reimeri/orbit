@@ -367,14 +367,21 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for GrowingEditor<'_
                     } else {
                         let row = target / state.line_height;
                         let line = state.row_ends.partition_point(|&end| end <= row);
-                        let start = if line == 0 {
-                            0.
+                        if line == state.row_ends.len() {
+                            ScrollTo {
+                                line: line - 1,
+                                fraction: 1.,
+                            }
                         } else {
-                            state.row_ends[line - 1]
-                        };
-                        ScrollTo {
-                            line,
-                            fraction: (row - start) / (state.row_ends[line] - start),
+                            let start = if line == 0 {
+                                0.
+                            } else {
+                                state.row_ends[line - 1]
+                            };
+                            ScrollTo {
+                                line,
+                                fraction: (row - start) / (state.row_ends[line] - start),
+                            }
                         }
                     };
                     shell.publish((self.on_scroll)(request));

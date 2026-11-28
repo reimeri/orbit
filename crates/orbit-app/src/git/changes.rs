@@ -91,8 +91,8 @@ impl Files {
                     status,
                     added: 0,
                     removed: 0,
-                    gitlink: header.starts_with(b":160000 ")
-                        || header.get(8..14) == Some(b"160000"),
+                    // Only a live submodule needs polling without a changed file stamp.
+                    gitlink: header.get(8..14) == Some(b"160000"),
                     stamp,
                 },
             );
@@ -105,6 +105,7 @@ impl Files {
             .and_modify(|f| {
                 f.added += count;
                 f.status = Status::Recreated;
+                f.gitlink = false;
                 f.stamp = Some(stamp);
             })
             .or_insert(File {

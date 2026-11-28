@@ -30,9 +30,10 @@ struct Header {
   uint32_t seq, width, height, lease, view_width, view_height;
   float scale;
 };
+static FILE *events;
 static void emit(const Json &j) {
-  std::cout << j.dump(-1, ' ', false, Json::error_handler_t::replace) << '\n'
-            << std::flush;
+  std::fprintf(events, "%s\n", j.dump(-1, ' ', false, Json::error_handler_t::replace).c_str());
+  std::fflush(events);
 }
 class Work : public CefTask {
   std::function<void()> work;
@@ -304,8 +305,9 @@ public:
       semantics->clear("Browser closed");
     cancel_captures("Browser closed");
     auto host = browser->GetHost();
-    auto cookies = host->GetRequestContext()->GetCookieManager(nullptr);
-    if (!cookies->FlushStore(new Flushed(browser)))
+    auto context = host->GetRequestContext();
+    auto cookies = context ? context->GetCookieManager(nullptr) : nullptr;
+    if (!cookies || !cookies->FlushStore(new Flushed(browser)))
       host->CloseBrowser(true);
   }
   void OnBeforeClose(B) override {
@@ -322,9 +324,12 @@ public:
 };
 
 static void command(Json j) {
-  auto req = j.value("req", uint64_t(0)), id = j.value("tab", uint64_t(0));
+  uint64_t req = 0, id = 0;
+  std::string op;
   try {
-    std::string op = j.at("op");
+    req = j.value("req", uint64_t(0));
+    id = j.value("tab", uint64_t(0));
+    op = j.at("op").get<std::string>();
     if (op == "quit") {
       quitting = true;
       if (tabs.empty())
@@ -533,7 +538,7 @@ static void command(Json j) {
     emit({{"req", req},
           {"tab", id},
           {"event",
-           j.value("op", std::string()) == "open" ? "open_failed" : "error"},
+           op == "open" ? "open_failed" : "error"},
           {"error", err.what()}});
   }
 }
@@ -542,6 +547,10 @@ int main(int argc, char **argv) {
   int sub = CefExecuteProcess(args, nullptr, nullptr);
   if (sub >= 0)
     return sub;
+  // Keep protocol output separate from CEF and native-library diagnostics.
+  events = fdopen(fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3), "w");
+  if (!events || dup2(STDERR_FILENO, STDOUT_FILENO) == -1)
+    return 2;
   CefSettings settings;
   settings.windowless_rendering_enabled = true;
   const char *root = getenv("ORBIT_BROWSER_ROOT");
@@ -552,9 +561,14 @@ int main(int argc, char **argv) {
     return 3;
   std::thread input([] {
     for (std::string s; std::getline(std::cin, s);) {
-      CefPostTask(TID_UI, new Work([line = std::move(s)] {
-                    command(Json::parse(line));
-                  }));
+      auto message = Json::parse(s, nullptr, false);
+      if (!message.is_object()) {
+        std::cerr << "Ignoring invalid Orbit browser command\n";
+        continue;
+      }
+      if (message.contains("op") && message["op"] == "quit")
+        break;
+      CefPostTask(TID_UI, new Work([j = std::move(message)] { command(j); }));
     }
     CefPostTask(TID_UI, new Work([] { command({{"op", "quit"}}); }));
   });

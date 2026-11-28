@@ -82,6 +82,7 @@ struct Shown {
     event: Event,
     id: u32,
     notified_at: zbus::message::Sequence,
+    close_rejected: bool,
     token: Option<String>,
 }
 
@@ -164,10 +165,23 @@ impl Desktop {
             .cloned()
             .collect();
         for session in obsolete {
-            let id = delivery.shown[&session].id;
-            self.proxy
-                .call::<_, _, ()>("CloseNotification", &(id,))
-                .await?;
+            let shown = delivery.shown.get_mut(&session).unwrap();
+            // The spec doesn't prescribe an error name for an expired ID.
+            // Retry an ambiguous daemon rejection once, but not forever.
+            match self
+                .proxy
+                .call::<_, _, ()>("CloseNotification", &(shown.id,))
+                .await
+            {
+                Err(zbus::Error::MethodError(name, _, _))
+                    if shown.close_rejected
+                        || name.as_str() == "org.freedesktop.DBus.Error.InvalidArgs" => {}
+                Err(e @ zbus::Error::MethodError(..)) => {
+                    shown.close_rejected = true;
+                    return Err(e);
+                }
+                result => result?,
+            }
             delivery.shown.remove(&session);
         }
         delivery
@@ -204,6 +218,7 @@ impl Desktop {
                     event: event.clone(),
                     id: reply.body().deserialize()?,
                     notified_at: reply.recv_position(),
+                    close_rejected: false,
                     token: None,
                 },
             );
@@ -642,5 +657,15 @@ mod tests {
         desktop.sync(&HashMap::new(), &mut delivery).await.unwrap();
         assert_eq!(*closed.lock().unwrap(), [45]);
         assert!(delivery.delivered.is_empty());
+
+        desktop.sync(&desired, &mut delivery).await.unwrap();
+        fail_close.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(desktop.sync(&HashMap::new(), &mut delivery).await.is_err());
+        fail_close.store(true, std::sync::atomic::Ordering::Relaxed);
+        desktop.sync(&HashMap::new(), &mut delivery).await.unwrap();
+        assert!(
+            delivery.shown.is_empty(),
+            "an already-dismissed ID cannot wedge delivery"
+        );
     }
 }

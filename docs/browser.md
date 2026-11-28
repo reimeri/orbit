@@ -52,6 +52,10 @@ await tools.browser({action:"navigate", url:"http://localhost:5173"});
 image(await tools.browser({action:"screenshot"}));
 ```
 
+Evaluation rejects results whose traversal exceeds 128 levels, 262,144 properties,
+16,384 inspector replies, or 64 MiB of cumulative inspector traffic. Return a smaller projection rather than retrying
+the original script. These limits are separate from the inline output budget.
+
 Use `click` with `x,y`, `type` with `text`, `key` for named keys, or `scroll`
 with `x,y,dy` (negative is down). Back, forward, stop and reload are also
 available. Agent tool calls and requested screenshots become session history;

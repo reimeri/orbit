@@ -186,16 +186,20 @@ impl Provider {
         let input = body["input"].as_array_mut().expect("request input");
         input.extend(session.input.iter().map(crate::project_guidance::wire_item));
         input.push(json!({"type":"compaction_trigger"}));
-        if serde_json::to_vec(&body)?.len() as u64 / 3 < context_limit
-            && let Ok(response) = self.request(&session.id, body, cancel, &|_| {}).await
-        {
-            account(&response);
-            if valid_compaction(&response.output) {
-                return Ok(Compaction {
-                    input: response.output,
-                    summary: None,
-                    summarized_entries: session.summarized_entries,
-                });
+        if serde_json::to_vec(&body)?.len() as u64 / 3 < context_limit {
+            match self.request(&session.id, body, cancel, &|_| {}).await {
+                Ok(response) => {
+                    account(&response);
+                    if valid_compaction(&response.output) {
+                        return Ok(Compaction {
+                            input: response.output,
+                            summary: None,
+                            summarized_entries: session.summarized_entries,
+                        });
+                    }
+                }
+                Err(e) if e.is::<ContextLimit>() => {}
+                Err(e) => return Err(e),
             }
         }
         if cancel.is_cancelled() {
@@ -207,27 +211,15 @@ impl Provider {
         let mut history = session
             .entries
             .range(session.summarized_entries)
-            .filter_map(|entry| match &entry.kind {
-                crate::store::EntryKind::User { images, .. } => Some(format!(
-                    "USER: {}\n{}\n\n",
-                    entry.text,
-                    images
-                        .iter()
-                        .map(crate::media::Media::description)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )),
-                crate::store::EntryKind::Assistant => {
-                    Some(format!("ASSISTANT: {}\n\n", entry.text))
+            .filter(|entry| !matches!(entry.kind, crate::store::EntryKind::Reasoning))
+            .map(|entry| {
+                // Keep references, tool relationships and notices, but never put
+                // display-only backend metadata in a summarizer request.
+                let mut entry = entry.clone();
+                if let crate::store::EntryKind::Tool { web, .. } = &mut entry.kind {
+                    *web = None;
                 }
-                crate::store::EntryKind::Tool {
-                    name,
-                    input,
-                    output,
-                    parent: None,
-                    ..
-                } => Some(format!("TOOL {name}: {input}\nRESULT: {output}\n\n")),
-                _ => None,
+                serde_json::to_string(&entry).map(|s| s + "\n")
             });
         let mut record = String::new();
         let mut position = 0;
@@ -265,7 +257,7 @@ impl Provider {
                     let Some(next) = history.next() else {
                         break;
                     };
-                    record = next;
+                    record = next?;
                     position = 0;
                 }
                 let rest = &record[position..];

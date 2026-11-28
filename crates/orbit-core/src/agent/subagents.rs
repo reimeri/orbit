@@ -32,7 +32,7 @@ impl Profile {
         };
         SubagentSettings {
             model: model.id.into(),
-            effort: effort.into(),
+            effort: model.preferred_effort(effort).into(),
             fast: false,
         }
     }
@@ -635,6 +635,11 @@ impl Harness {
             .clone();
         let (_library, family) = self.admit(&parent);
         let mut coordinator = family.lock().expect("family lifecycle");
+        // Release the finishing reservation before another assignment can
+        // acquire this family lock, including when delivery fails.
+        let _finishing = scopeguard::guard(&child.finishing, |flag| {
+            flag.store(false, Ordering::Release)
+        });
         let Some(mut run) = self
             .run_index()
             .latest_run(&parent, &child.id)

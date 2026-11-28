@@ -8,6 +8,16 @@ pub struct Model {
     pub audio_input: bool,
 }
 
+impl Model {
+    pub(crate) fn preferred_effort(self, preferred: &str) -> &'static str {
+        self.efforts
+            .iter()
+            .copied()
+            .find(|&effort| effort == preferred)
+            .unwrap_or(self.efforts[0])
+    }
+}
+
 impl std::fmt::Display for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name)

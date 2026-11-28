@@ -185,7 +185,7 @@ async fn http_and_malformed_failures_preserve_details_without_replay() {
     let (_dir, _, mut web, _) = fixture();
     let large_error = "service λ\n".repeat(1000);
     let (url, _requests, server) = server(vec![
-        (429, large_error.clone()),
+        (429, format!("{large_error} fixture-access fixture-refresh")),
         (200, "{broken".into()),
         (200, json!({"results":[]}).to_string()),
     ])
@@ -202,7 +202,7 @@ async fn http_and_malformed_failures_preserve_details_without_replay() {
     let failure = error.downcast_ref::<Failure>().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&failure.metadata.details).unwrap()["response_body"],
-        large_error
+        format!("{large_error} [redacted] [redacted]")
     );
     for expected in ["Invalid web response", "Invalid web response"] {
         let error = web

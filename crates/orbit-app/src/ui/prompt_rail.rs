@@ -158,7 +158,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Rail<'_> {
         _: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
-        let y = cursor.position_in(layout.bounds()).map(|p| p.y);
+        let y = cursor
+            .position_in(layout.bounds())
+            .map(|p| p.y)
+            .filter(|y| ((*y / PITCH) as usize) < state.slots);
         if state.hover_y != y {
             state.hover_y = y;
             shell.request_redraw();
@@ -228,7 +231,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Rail<'_> {
         let bounds = layout.bounds();
         let state = tree.state.downcast_ref::<State>();
         let colors = theme::colors(theme);
-        let hover = cursor.position_in(bounds).map(|p| p.y);
+        let hover = cursor
+            .position_in(bounds)
+            .map(|p| p.y)
+            .filter(|y| ((*y / PITCH) as usize) < state.slots);
         let selected = hover.map(|y| (y / PITCH) as usize);
         for slot in 0..state.slots {
             let center = (slot as f32 + 0.5) * PITCH;

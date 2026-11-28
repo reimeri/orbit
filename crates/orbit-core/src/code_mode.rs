@@ -94,6 +94,7 @@ struct State {
     output: OutputBuffer,
     parts: Vec<BufferedPart>,
     done: bool,
+    collected: bool,
     error: Option<String>,
     yielded: bool,
 }
@@ -278,7 +279,7 @@ impl CodeMode {
                 state.error = Some(format!("{error:#}"));
             }
             state.done = true;
-            worker.state.1.notify_one();
+            worker.state.1.notify_waiters();
             drop(state);
             if tracked && let Err(error) = observer(Event::ExecutionStatus { id: parent, status }) {
                 eprintln!("Could not record code cell exit: {error:#}");
@@ -336,10 +337,12 @@ impl CodeMode {
         stop_wait: &CancellationToken,
     ) -> Result<Output> {
         let interrupted = self.services.shell.runtime().block_on(async {
-            let deadline = tokio::time::Instant::now() + Duration::from_millis(ms.min(300_000));
+            let mut deadline = tokio::time::Instant::now() + Duration::from_millis(ms.min(300_000));
             let mut interrupted = false;
             loop {
                 let notified = cell.state.1.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 {
                     let state = cell.state.0.lock().expect("cell state");
                     if state.done || (!interrupted && state.yielded) {
@@ -351,11 +354,12 @@ impl CodeMode {
                     _ = cancel.cancelled(), if !interrupted => {
                         cell.cancel.cancel();
                         interrupted = true;
+                        deadline = tokio::time::Instant::now() + Duration::from_secs(2);
                         // Wait for the cell to finish emitting before draining its output.
                         // Returning an error here would discard buffered text and media.
                     }
                     _ = stop_wait.cancelled(), if !interrupted => break,
-                    _ = tokio::time::sleep_until(deadline), if !interrupted => break,
+                    _ = tokio::time::sleep_until(deadline) => break,
                     _ = notified => {}
                 }
             }
@@ -365,8 +369,8 @@ impl CodeMode {
         if stop_wait.is_cancelled() && !interrupted {
             bail!("Wait stopped. Use wait with cell_id {id} to collect remaining output.");
         }
+        anyhow::ensure!(!state.collected, "Cell result was already collected");
         let result = (|| {
-            state.yielded = false;
             let mut budget = character_budget(tokens);
             let mut pending = Vec::new();
             for part in &mut state.parts {
@@ -389,9 +393,11 @@ impl CodeMode {
             if !output.is_empty() {
                 pending.push(Part::InputText { text: output });
             }
+            state.yielded = false;
             state.parts.clear();
             state.output = OutputBuffer::default();
             let status = if state.done {
+                state.collected = true;
                 self.cells.lock().expect("cell lock").remove(id);
                 match &state.error {
                     Some(e) => format!(
@@ -414,14 +420,13 @@ impl CodeMode {
                 cell_id: Some(id.to_owned()),
             })
         })();
-        drop(state);
-        if result.is_err() {
+        if result.is_err() || (interrupted && !state.done) {
             // Stop may have removed the ID while this observation was active. Failed
             // output preservation must still leave its unread buffers available to wait.
             self.cells
                 .lock()
                 .expect("cell lock")
-                .insert(id.to_owned(), cell);
+                .insert(id.to_owned(), cell.clone());
         }
         result
     }
@@ -502,7 +507,7 @@ fn run_cell(
         cancel.is_cancelled() || interrupt_exit.load(Ordering::Relaxed)
     })));
     let context = Context::full(&runtime).map_err(|e| anyhow::anyhow!("{e}"))?;
-    context.with(|ctx| -> Result<()> {
+    let result = context.with(|ctx| -> Result<()> {
         let exit = exited.clone();
         ctx.globals()
             .set(
@@ -540,7 +545,7 @@ fn run_cell(
                     if immediate {
                         s.yielded = true;
                     }
-                    state.1.notify_one();
+                    state.1.notify_waiters();
                 }),
             )
             .map_err(js_error)?;
@@ -563,7 +568,7 @@ fn run_cell(
                 let note=crate::image_tools::animation_notice(&media);
                 state.parts.push(BufferedPart::Media(media.clone()));
                 if !note.is_empty() {state.output.append(note.as_bytes(),4*1024*1024);}
-                media_state.1.notify_one();
+                media_state.1.notify_waiters();
                 Ok(())
             })();
             result.map_err(|e|rquickjs::Error::new_from_js_message("media","output",format!("{e:#}")))
@@ -601,7 +606,7 @@ fn run_cell(
             )
             .map_err(js_error)?;
         let definitions = catalog::definitions(Capabilities {
-            browser: browser.is_some(),
+            browser: browser.is_some() && images.is_some(),
             delegation: delegation.is_some(),
             web: web.is_some(),
             questionnaires: questionnaires.is_some(),
@@ -744,8 +749,11 @@ fn run_cell(
                 ),
             )
             .map_err(js_error)?;
-        ctx.eval::<(), _>(include_str!("code_mode.js"))
+        let scheduler: rquickjs::Object = ctx.eval(include_str!("code_mode.js"))
             .map_err(|e| exception(&ctx, e))?;
+        let next_timer: Function = scheduler.get("nextTimer").map_err(js_error)?;
+        let tick: Function = scheduler.get("tick").map_err(js_error)?;
+        let deliver: Function = scheduler.get("deliver").map_err(js_error)?;
         let promise =
             Module::evaluate(ctx.clone(), "cell", code).map_err(|e| exception(&ctx, e))?;
         loop {
@@ -768,7 +776,7 @@ fn run_cell(
             if let Some(result) = promise.result::<JsValue>() {
                 return result.map(|_| ()).map_err(|e| exception(&ctx, e));
             }
-            let delay: Option<f64>=ctx.globals().get::<_,Function>("__nextTimer").map_err(js_error)?.call(()).map_err(js_error)?;
+            let delay: Option<f64>=next_timer.call(()).map_err(js_error)?;
             let completion=executor.block_on(async {
                 tokio::select! {
                     biased;
@@ -778,11 +786,16 @@ fn run_cell(
                 }
             });
             if let Some((id,output,failed,structured))=completion {
-                ctx.globals().get::<_,Function>("__deliver").map_err(js_error)?.call::<_,()>((id,output,failed,structured)).map_err(|e|exception(&ctx,e))?;
+                deliver.call::<_,()>((id,output,failed,structured)).map_err(|e|exception(&ctx,e))?;
             }
-            ctx.globals().get::<_,Function>("__tick").map_err(js_error)?.call::<_,()>(()).map_err(|e|exception(&ctx,e))?;
+            tick.call::<_,()>(()).map_err(|e|exception(&ctx,e))?;
         }
-    })
+    });
+    if exited.load(Ordering::Relaxed) && !cell.cancel.is_cancelled() {
+        Ok(())
+    } else {
+        result
+    }
 }
 struct WorkerPermit(Arc<AtomicUsize>);
 impl Drop for WorkerPermit {
@@ -982,9 +995,13 @@ mod tests {
         assert!(out.media().is_empty());
         assert!(out.summary().contains("preserved at"));
         let out = mode
-            .exec_output("__call('image_gen__imagegen','{}');", "forbidden", &cancel)
+            .exec_output(
+                "text([typeof __call, typeof tools.image_gen__imagegen]);",
+                "forbidden",
+                &cancel,
+            )
             .unwrap();
-        assert!(out.summary().contains("Unknown nested tool"));
+        assert!(out.summary().contains(r#"["undefined","undefined"]"#));
     }
     #[test]
     fn questionnaires_yield_preserve_full_results_and_follow_cell_lifetime() {
@@ -1075,12 +1092,10 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
                 "{result}"
             );
         }
-        for name in ["ask_user", "ask_user_async"] {
-            let result = child
-                .exec(&format!("__call('{name}','{{}}');"), "child", &cancel)
-                .unwrap();
-            assert!(result.contains("Unknown nested tool"), "{result}");
-        }
+        let result = child
+            .exec("text(typeof __call);", "child", &cancel)
+            .unwrap();
+        assert!(result.ends_with("undefined"), "{result}");
     }
     #[test]
     fn stopped_wait_does_not_reopen_a_cell_removed_by_session_stop() {
@@ -1147,6 +1162,13 @@ text(await tools.ask_user({questions:[{id:"target",question:"Target?",kind:"text
             thread::yield_now();
         }
     }
+    #[test]
+    fn timer_exit_uses_the_private_scheduler_and_keeps_prior_output() {
+        let out = mode().exec("globalThis.__tick = () => { throw Error('wrong timer') }; text(typeof __store); await new Promise(() => setTimeout(() => {text('before exit'); exit()}, 1));", "timer", &CancellationToken::new()).unwrap();
+        assert!(out.starts_with("Script completed"), "{out}");
+        assert!(out.ends_with("undefined\nbefore exit"), "{out}");
+    }
+
     #[test]
     fn timer_callbacks_yield_to_resolved_module_and_storage_failure_blocks_commands() {
         let mode = mode();

@@ -13,7 +13,10 @@ impl Harness {
         // Set before spawning so an idle session cannot be evicted underneath the result.
         conversation.naming.store(true, Ordering::Release);
         let harness = self.clone();
-        let conversation = conversation.clone();
+        let conversation = scopeguard::guard(conversation.clone(), |c| {
+            c.naming.store(false, Ordering::Release);
+            c.changed();
+        });
         self.runtime.as_ref().expect("live runtime").spawn(async move {
             let result = tokio::time::timeout(
                 Duration::from_secs(60),
@@ -21,7 +24,7 @@ impl Harness {
             ).await.context("Session naming timed out").and_then(|result| result);
             match result {
                 Ok(title) => {
-                    let worker = conversation.clone();
+                    let worker = Arc::clone(&conversation);
                     tokio::task::spawn_blocking(move || {
                         let mut saved = worker.persisted.lock().expect("persistence lock");
                         if worker.deleted.load(Ordering::Acquire) {
@@ -50,9 +53,7 @@ impl Harness {
                     }
                 }
             }
-            conversation.naming.store(false, Ordering::Release);
             harness.catalog_revision.fetch_add(1, Ordering::Release);
-            conversation.changed();
         });
     }
 }

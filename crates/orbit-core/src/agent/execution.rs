@@ -115,6 +115,7 @@ impl Harness {
                     ConversationStatus::Writing
                 });
                 let mut session = conversation.state.lock().expect("session lock");
+                let id = response_row(&mut session, &id);
                 if let Some(entry) = session.entries.by_id_mut(&id) {
                     entry.text.push_str(&text);
                 } else {
@@ -131,9 +132,18 @@ impl Harness {
                 conversation.changed();
             }
         };
-        let request = self
-            .provider
-            .respond(snapshot, instructions, &work_cancel, &emit);
+        let request = async {
+            futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                self.provider
+                    .respond(snapshot, instructions, &work_cancel, &emit),
+            ))
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "Provider task panicked. Inspect completed tool work before continuing."
+                ))
+            })
+        };
         tokio::pin!(request);
         let mut response = None;
         let mut next_index = 0;
@@ -227,8 +237,7 @@ impl Harness {
                     return Ok(response.take().expect("completed response"));
                 }
             }
-        }
-        .await;
+        }.await;
         if result.is_err() {
             let dropped = result
                 .as_ref()
@@ -278,7 +287,12 @@ impl Harness {
                 let completed_ids: HashSet<_> = progress
                     .items
                     .values()
-                    .filter_map(|item| item["id"].as_str())
+                    .filter_map(|item| {
+                        progress
+                            .text_rows
+                            .get(item["id"].as_str()?)
+                            .map(String::as_str)
+                    })
                     .collect();
                 let partial: Vec<_> = session
                     .entries

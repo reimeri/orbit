@@ -45,7 +45,8 @@ diff’s `@@`) stays plain text without blocking the message or its other attach
 - Larger files, non-UTF-8 data, and binary files remain complete. Private `/tmp`
   snapshots are identified to the model by absolute path and exact byte size.
   Accepted attachments also retain durable copies under the `orbit` store's
-  `files/` directory; OS temporary-file cleanup does not destroy replay data.
+  `media/<session>/files/` directory, shared with forks until the last owner is deleted;
+  OS temporary-file cleanup does not destroy replay data.
   Missing temporary copies are recreated from those durable bytes at projection.
 - PNG/JPEG/WebP/GIF data uses the existing image pipeline and its documented
   decode/size limits. Other binary data remains a file reference, not an unsupported

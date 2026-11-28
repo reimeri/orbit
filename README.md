@@ -18,7 +18,7 @@ codex CLI is limited by the terminal and the ChatGPT desktop app is slow garbage
 - Subagents
 - File tags and attachements
 - Spell checking
-- Markdown and LaTEX rendering
+- Markdown and LaTEX rendering. Image rendering from local and remote files also supported
 - Git worktrees for parallel sessions
 - Skill support
 
@@ -71,7 +71,7 @@ Orbit stores state under `$XDG_CONFIG_HOME/orbit` (default `~/.config/orbit`):
 | Path                              | Contents                                                                    |
 | --------------------------------- | --------------------------------------------------------------------------- |
 | `settings.json`                   | Projects, favorites, layout and defaults                                    |
-| `browser/`                       | CEF state and per-project browser profiles (cookies and site storage)       |
+| `browser/`                        | CEF state and per-project browser profiles (cookies and site storage)       |
 | `worktrees/`                      | Orbit-managed Git worktrees, grouped by repository; not a disposable cache  |
 | `sessions.sqlite3`                | Sessions, drafts, transcripts, provider context, forks and subagent results |
 | `media/`, `attachments/`          | Saved tool media and snapshots of images attached to prompts                |

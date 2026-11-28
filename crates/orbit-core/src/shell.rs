@@ -428,7 +428,11 @@ impl Shell {
         if let Some((_, observer)) = tracking {
             self.pending_status.fetch_add(1, Ordering::AcqRel);
             let pending = PendingStatus(self.pending_status.clone());
-            let started = observer(CommandStatus::Running);
+            if let Err(error) = observer(CommandStatus::Running) {
+                process.stop();
+                self.processes.lock().expect("process lock").remove(&id);
+                return Err(error);
+            }
             let watched = process.clone();
             let stop = stop.clone();
             self.runtime.spawn(async move {
@@ -456,10 +460,6 @@ impl Shell {
                     eprintln!("Could not record command exit: {error:#}");
                 }
             });
-            if let Err(error) = started {
-                process.stop();
-                return Err(error);
-            }
         }
         let result = process.read(
             id,
@@ -596,6 +596,27 @@ mod tests {
             .expect("running command")
             .parse()
             .unwrap()
+    }
+    #[test]
+    fn rejected_running_checkpoint_does_not_leave_a_handle_or_publish_exit() {
+        let shell = Shell::new(std::env::temp_dir());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let args =
+            serde_json::from_value(serde_json::json!({"cmd":"exit 0","login":false})).unwrap();
+        let result = shell.exec_observed(
+            args,
+            &CancellationToken::new(),
+            Some((
+                &CancellationToken::new(),
+                Arc::new(move |status| {
+                    tx.send(status).unwrap();
+                    anyhow::bail!("cannot publish")
+                }),
+            )),
+        );
+        assert!(result.is_err());
+        assert!(!shell.has_work());
+        assert_eq!(rx.into_iter().collect::<Vec<_>>(), [CommandStatus::Running]);
     }
     #[test]
     fn command_status_includes_children_retaining_output_after_shell_exit() {

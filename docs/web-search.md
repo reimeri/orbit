@@ -114,8 +114,10 @@ The usual nested tool row is persisted before dispatch. Completion stores:
   URLs containing embedded credentials are not made clickable.
 
 Metadata is not JavaScript output, provider history, or model-facing compaction data.
-Malformed/failed HTTP responses retain complete raw diagnostics in these UI-only
-web details, not in agent-visible errors. Non-UTF-8 diagnostics are base64 encoded.
+Malformed/failed HTTP responses retain complete diagnostics in these UI-only
+web details, not in agent-visible errors. Orbit redacts its access and refresh tokens.
+Responses larger than 8 MiB are not parsed; the transcript instead records the location
+and size of the complete redacted response in private temporary storage. Non-UTF-8 diagnostics are base64 encoded.
 The chat has no Copy buttons; displayed tool text supports selection and Ctrl+C.
 
 Agent-facing text over 40,000 Unicode characters is saved in full to a private

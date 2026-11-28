@@ -76,6 +76,27 @@ impl Drop for Fixture {
         self.server.abort();
     }
 }
+#[tokio::test]
+async fn provider_text_id_cannot_replace_a_user_entry() {
+    let mut f = Fixture::new().await;
+    let user = f.c.snapshot().entries[0].clone();
+    f.request().await.reply.send(format!("{}\n\n{}",
+        json!({"type":"response.output_text.delta","item_id":user.id,"delta":"Part"}),
+        completed(json!([{"type":"message","id":user.id,"role":"assistant","content":[{"type":"output_text","text":"Complete reply"}]}])))).unwrap();
+    until(|| !f.c.is_turn_active()).await;
+    let saved = f.saved();
+    assert_eq!(saved.entries.by_id(&user.id), Some(&user));
+    assert_eq!(
+        saved
+            .entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::Assistant))
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Complete reply"]
+    );
+}
+
 fn call(id: &str, source: &str) -> Value {
     json!({"type":"custom_tool_call", "id":format!("item-{id}"), "call_id":id,
         "name":"exec", "input":source, "status":"completed"})
