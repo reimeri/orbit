@@ -1039,7 +1039,7 @@ impl Harness {
         message.skills =
             crate::skills::capture(&session.project, self.home.as_deref(), &message.text)?;
         let naming_message = session.needs_title().then(|| message.clone());
-        session.checkpoint();
+        session.checkpoint()?;
         session.accept_submission(submission.to_owned(), message, false);
         self.store.commit_new_session(&session)?;
         crate::send_trace::phase("publish acceptance");
@@ -1175,11 +1175,12 @@ impl Harness {
                         .expect("cancel lock")
                         .is_cancelled();
                 let naming_message = candidate.needs_title().then(|| message.clone());
-                let checkpoint =
-                    (idle_boundary && candidate.in_progress_response.is_none()).then(|| {
-                        candidate.checkpoint();
-                        candidate.points.clone()
-                    });
+                let checkpoint = if idle_boundary && candidate.in_progress_response.is_none() {
+                    candidate.checkpoint()?;
+                    Some(candidate.points.clone())
+                } else {
+                    None
+                };
                 let accepted_at = crate::store::now();
                 candidate.accept_submission_at(
                     submission.to_owned(),

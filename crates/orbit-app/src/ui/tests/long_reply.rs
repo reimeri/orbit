@@ -106,6 +106,21 @@ async fn settle(
 }
 
 #[tokio::test]
+async fn opening_at_bottom_mounts_rendered_markdown_not_an_offset_into_its_source() {
+    let url = format!("https://example.org/{}", "segment/".repeat(200));
+    let source: String = (0..128).map(|i| format!("[Item {i}]({url})\n\n")).collect();
+    let mut app = fixture(&source);
+    app.auto_scroll = true;
+    app.transcript.end();
+    app.prepare_visible();
+    // Before any redraw/geometry feedback, the viewport should already have
+    // a screenful of tail items, not just the final row after a blank spacer.
+    let rendered = chat_text(&app);
+    assert!(rendered.contains("Item 127") && rendered.contains("Item 124"));
+    assert!(!rendered.contains("Item 0"));
+}
+
+#[tokio::test]
 async fn large_reply_reaches_tail_and_copies_across_unmounted_mixed_blocks() {
     let mut source = String::from(
         "First\n\n> quoted\n\n- café\n- two\n\n---\n\n```rs\nline1\nline2\n```\n\n| H | I |\n|---|---|\n| C | D |\n\n",

@@ -1,0 +1,83 @@
+--- a/src/font/system.rs
++++ b/src/font/system.rs
+@@ -103,6 +103,9 @@
+     /// Cache for font codepoint support info
+     font_codepoint_support_info_cache: HashMap<fontdb::ID, FontCachedCodepointSupportInfo>,
+ 
++    /// Installed family names for skipping absent fallback families.
++    pub(crate) family_names: BTreeSet<String>,
++
+     /// Cache for font matches.
+     font_matches_cache: HashMap<FontMatchAttrs, Arc<Vec<FontMatchKey>>>,
+ 
+@@ -214,6 +217,7 @@
+             monospace_font_ids,
+             per_script_monospace_font_ids,
+             font_cache: HashMap::default(),
++            family_names: BTreeSet::new(),
+             font_matches_cache: HashMap::default(),
+             font_codepoint_support_info_cache: HashMap::default(),
+             monospace_fallbacks_buffer: BTreeSet::default(),
+@@ -243,6 +247,7 @@
+     /// Get a mutable reference to the database.
+     pub fn db_mut(&mut self) -> &mut fontdb::Database {
+         self.font_matches_cache.clear();
++        self.family_names.clear();
+         #[cfg(feature = "shape-run-cache")]
+         { self.shape_run_cache = crate::ShapeRunCache::default(); }
+         &mut self.db
+@@ -273,6 +278,14 @@
+                 }
+             })
+             .clone()
++    }
++
++    pub(crate) fn index_family_names(&mut self) {
++        if self.family_names.is_empty() {
++            self.family_names.extend(self.db.faces().flat_map(|face| {
++                face.families.iter().map(|(name, _)| name.clone())
++            }));
++        }
+     }
+ 
+     pub fn is_monospace(&self, id: fontdb::ID) -> bool {
+--- a/src/font/fallback/mod.rs
++++ b/src/font/fallback/mod.rs
+@@ -205,6 +205,7 @@
+         word: &'a str,
+         ideal_weight: fontdb::Weight,
+     ) -> Self {
++        font_system.index_family_names();
+         font_system
+             .fallbacks
+             .extend(font_system.dyn_fallback.as_ref(), scripts);
+@@ -280,6 +281,9 @@
+         let default_family = self.default_families[self.default_i - 1];
+         let default_family_name = self.font_system.db().family_name(default_family);
+ 
++        if !self.font_system.family_names.contains(default_family_name) {
++            return None;
++        }
+         self.font_match_keys
+             .iter()
+             .filter(|m_key| m_key.font_weight_diff == 0)
+@@ -414,6 +418,9 @@
+             while self.script_i.1 < script_families.len() {
+                 let script_family = script_families[self.script_i.1];
+                 self.script_i.1 += 1;
++                if !self.font_system.family_names.contains(script_family) {
++                    continue;
++                }
+                 // Prefer the requested fallback family even when its nearest
+                 // weight is not exact (including variable font default weights).
+                 for m_key in self.font_match_keys.iter() {
+@@ -439,6 +446,9 @@
+         while self.common_i < common_families.len() {
+             let common_family = common_families[self.common_i];
+             self.common_i += 1;
++            if !self.font_system.family_names.contains(common_family) {
++                continue;
++            }
+             for m_key in self.font_match_keys.iter() {
+                 if self.face_contains_family(m_key.id, common_family) {
+                     if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {

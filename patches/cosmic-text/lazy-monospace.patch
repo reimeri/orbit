@@ -1,0 +1,64 @@
+--- a/src/font/fallback/mod.rs
++++ b/src/font/fallback/mod.rs
+@@ -287,7 +287,7 @@
+     }
+ 
+     fn next_item(&mut self, fallbacks: &Fallbacks) -> Option<<Self as Iterator>::Item> {
+-        if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
++        while let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
+             if let Some(font) = self
+                 .font_system
+                 .get_font(fallback_info.id, self.ideal_weight)
+@@ -310,12 +310,17 @@
+ 
+             macro_rules! mk_mono_fallback_info {
+                 ($m_key:expr) => {{
+-                    let supported_cp_count_opt =
++                    // Without coverage indexing every face has the same zero
++                    // coverage. Rank IDs now; only open a face when yielding it.
++                    let supported_cp_count_opt = if cfg!(feature = "monospace_fallback") {
+                         self.font_system.get_font_supported_codepoints_in_word(
+                             $m_key.id,
+                             self.ideal_weight,
+                             self.word,
+-                        );
++                        )
++                    } else {
++                        Some(0)
++                    };
+ 
+                     supported_cp_count_opt.map(|supported_cp_count| {
+                         let codepoint_non_matches = word_chars_count - supported_cp_count;
+@@ -381,22 +386,7 @@
+                     };
+ 
+                     if is_mono_id {
+-                        let supported_cp_count_opt =
+-                            self.font_system.get_font_supported_codepoints_in_word(
+-                                m_key.id,
+-                                self.ideal_weight,
+-                                self.word,
+-                            );
+-                        if let Some(supported_cp_count) = supported_cp_count_opt {
+-                            let codepoint_non_matches =
+-                                self.word.chars().count() - supported_cp_count;
+-
+-                            let fallback_info = MonospaceFallbackInfo {
+-                                font_weight_diff: Some(m_key.font_weight_diff),
+-                                codepoint_non_matches: Some(codepoint_non_matches),
+-                                font_weight: m_key.font_weight,
+-                                id: m_key.id,
+-                            };
++                        if let Some(fallback_info) = mk_mono_fallback_info!(m_key) {
+                             assert!(self
+                                 .font_system
+                                 .monospace_fallbacks_buffer
+@@ -406,7 +396,7 @@
+                 }
+             }
+             // If default family is Monospace fallback to first monospaced font
+-            if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
++            while let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
+                 if let Some(font) = self
+                     .font_system
+                     .get_font(fallback_info.id, self.ideal_weight)

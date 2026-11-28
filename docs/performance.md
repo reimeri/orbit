@@ -25,8 +25,13 @@ limits. Execution limits remain per conversation; no global admission cap was ad
   before it is published; tool-start boundaries commit before commands launch.
 - Cold session loads use a separate read-only WAL connection. Metadata,
   transcript, provider context and fork points come from a single committed
-  snapshot, even during a turn save. Loading an already-resident session does
-  not take its persistence lock. Clean switches skip unchanged session and
+  snapshot, even during a turn save. Large transcript/context batches decode in
+  parallel and are indexed in their original order. Fork deltas stay encoded
+  until a fork or the first new checkpoint needs that historical state. The
+  reopened session caches decoded prefixes with structural sharing; new live
+  checkpoints share the original histories. An unreadable fork delta blocks a
+  dependent fork or checkpoint without discarding the transcript. Loading an
+  already-resident session does not take its persistence lock. Clean switches skip unchanged session and
   shared-draft writes; draft edits, recovery and acknowledgements still commit.
   Inactive-session cleanup is queued after the destination is ready, so it
   doesn't hold up display or evict the outgoing session if the switch fails.
@@ -124,7 +129,9 @@ prints elapsed times for the storage queue, outgoing and shared drafts, load,
 completion acknowledgement, model reconciliation, and applying the
 selection in the UI. It prints no session content. UI update time does not
 include layout, drawing or frame presentation. A long queue wait can be a
-previous storage job rather than a slow destination read.
+previous storage job rather than a slow destination read. For an example that
+times the displayed transcript rather than just the storage worker, see the
+[cold sidebar switch measurements](benchmarks/session-and-rendering.md#cold-sidebar-switch-to-a-tool-heavy-session).
 
 The regression test `just test clean_cold_switch -- --nocapture` keeps a SQLite
 writer transaction open throughout a switch between two clean sessions. Before
@@ -140,6 +147,9 @@ For state file locations, see [Directories & Configuration](../README.md#directo
 - Chat and sidebar construct rows only around their viewports. A Fenwick height
   index supports logarithmic offset lookup and measurement updates. Transcript
   append is incremental; full visibility rebuilding is reserved for group changes.
+  On cold open, prose height estimates account for wrapping at the current lane
+  width/font size and a bounded sample of hard breaks. This keeps a tall old
+  prompt out of the initial bottom viewport when more recent replies fill it.
   Measured sidebar heights and the visible anchor follow stable session identity.
   Epoch-qualified measurements reject stale events after a switch/reflow.
 - Wide conversations use the spare left margin for a clickable prompt rail. Its

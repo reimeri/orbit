@@ -968,8 +968,9 @@ impl App {
                             .into_iter()
                             .enumerate()
                             .collect(),
-                        self.transcript.offset - self.transcript.prefix(pos),
-                        self.transcript.viewport,
+                        &self.transcript,
+                        pos,
+                        self.auto_scroll,
                     );
                 }
                 markdown.refresh_images();

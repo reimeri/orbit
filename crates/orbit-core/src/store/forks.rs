@@ -1,6 +1,6 @@
-//! Pre-submission snapshots share unchanged history nodes in memory. SQLite stores
-//! only the changes since the previous fork point, including rewritten tool rows
-//! and replaced provider context. Neither replay nor parent lookups are needed.
+//! Pre-submission checkpoints retain exact deltas, including rewritten tool rows
+//! and replaced provider context. Reopen keeps them encoded until a fork or the
+//! next checkpoint needs them; no parent lookups or command replay.
 use super::*;
 use serde::de::DeserializeOwned;
 
@@ -13,11 +13,51 @@ pub struct ForkOrigin {
     pub inherited: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Point {
-    entries: History<Entry>,
-    input: History<Value>,
+type Histories = (History<Entry>, History<Value>);
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Points {
+    records: im::OrdMap<usize, Arc<Point>>,
+}
+impl PartialEq for Points {
+    fn eq(&self, other: &Self) -> bool {
+        // The common save comparison is between shared snapshots. Independently
+        // reopened sessions can encode the very same histories differently.
+        self.records == other.records || (self.records.len() == other.records.len() && self.records.iter().all(|(i, p)| {
+            other.records.get(i).is_some_and(|other_point| p.context == other_point.context
+                && matches!((self.histories_at(*i), other.histories_at(*i)), (Ok(a), Ok(b)) if a == b))
+        }))
+    }
+}
+#[derive(Debug, PartialEq)]
+struct Point {
+    history: PointHistory,
     context: ContextState,
+}
+#[derive(Debug, PartialEq)]
+enum PointHistory {
+    Live(Histories),
+    Stored(StoredDelta),
+}
+#[derive(Debug)]
+struct StoredDelta {
+    entries: String,
+    input: String,
+    // Materialize in prefix order so even reverse-order forks share unchanged rows.
+    decoded: std::sync::OnceLock<Histories>,
+}
+impl PartialEq for StoredDelta {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries && self.input == other.input
+    }
+}
+impl PointHistory {
+    fn decoded(&self) -> Option<&Histories> {
+        match self {
+            Self::Live(histories) => Some(histories),
+            Self::Stored(delta) => delta.decoded.get(),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ContextState {
@@ -28,20 +68,53 @@ struct ContextState {
     input_tokens: u64,
 }
 
+impl Points {
+    fn histories_at(&self, index: usize) -> Result<&Histories> {
+        if let Some(ready) = self.records[&index].history.decoded() {
+            return Ok(ready);
+        }
+        let previous = self
+            .records
+            .range(..index)
+            .rev()
+            .find_map(|(i, p)| Some((i + 1, p.history.decoded()?)));
+        let mut histories = previous.map(|(_, h)| h);
+        for (i, p) in self
+            .records
+            .range(previous.map_or(0, |(start, _)| start)..=index)
+        {
+            let PointHistory::Stored(delta) = &p.history else {
+                unreachable!("started after the last decoded checkpoint")
+            };
+            let (mut entries, mut input) = histories.cloned().unwrap_or_default();
+            restore(&mut entries, &delta.entries)
+                .with_context(|| format!("Invalid transcript at fork checkpoint {i}"))?;
+            restore(&mut input, &delta.input)
+                .with_context(|| format!("Invalid provider input at fork checkpoint {i}"))?;
+            anyhow::ensure!(entries.len() == *i, "Invalid fork boundary");
+            histories = Some(delta.decoded.get_or_init(|| (entries, input)));
+        }
+        Ok(histories.expect("requested fork point exists"))
+    }
+}
+
 impl Session {
     pub fn can_fork(&self, index: usize) -> bool {
-        self.points.contains_key(&index)
+        self.points.records.contains_key(&index)
     }
-    pub(crate) fn checkpoint(&mut self) {
+    pub(crate) fn checkpoint(&mut self) -> Result<()> {
         // Include already queued observations in model order, without transferring
         // ownership of the runtime objects which produced them.
         let mut boundary = self.clone();
         boundary.consume_pending();
-        self.points.insert(
+        // Resolve the predecessor for the SQL delta before taking the writer lock.
+        if let Some((last, _)) = self.points.records.get_max() {
+            self.points.histories_at(*last)?;
+        }
+        self.points.records.insert(
             self.entries.len(),
             Arc::new(Point {
-                entries: boundary.entries,
-                input: boundary.input,
+                history: PointHistory::Live((boundary.entries, boundary.input)),
                 context: ContextState {
                     effort_baseline: self.effort_baseline.clone(),
                     summary: self.summary.clone(),
@@ -51,6 +124,7 @@ impl Session {
                 },
             }),
         );
+        Ok(())
     }
 
     pub(crate) fn fork(&self, entry: &str, settings: &Settings) -> Result<Self> {
@@ -60,6 +134,7 @@ impl Session {
             .context("Message no longer exists")?;
         let point = self
             .points
+            .records
             .get(&index)
             .context("No exact checkpoint exists for this message")?;
         let selected = &self.entries[index];
@@ -80,16 +155,16 @@ impl Session {
         fork.model.clone_from(&self.model);
         fork.effort.clone_from(&self.effort);
         fork.fast = self.fast;
-        fork.entries = point.entries.clone();
-        fork.input = point.input.clone();
+        (fork.entries, fork.input) = self.points.histories_at(index)?.clone();
         fork.effort_baseline
             .clone_from(&point.context.effort_baseline);
         fork.summary.clone_from(&point.context.summary);
         fork.summarized_entries = point.context.summarized_entries;
         fork.context_account.clone_from(&point.context.account);
         fork.usage.input = point.context.input_tokens;
-        fork.points = self
+        fork.points.records = self
             .points
+            .records
             .range(..index)
             .map(|(i, p)| (*i, p.clone()))
             .collect();
@@ -147,23 +222,41 @@ pub(super) fn save(db: &Connection, before: Option<&Session>, next: &Session) ->
         db.execute("DELETE FROM fork_points WHERE session=?1", [&next.id])?;
     }
     let start = before
-        .and_then(|s| s.points.get_max())
+        .and_then(|s| s.points.records.get_max())
         .map_or(0, |(i, _)| i + 1);
-    let mut prev = before.and_then(|s| s.points.get_max()).map(|(_, p)| p);
-    let entries = History::default();
-    let input = History::default();
-    for (index, p) in next.points.range(start..) {
+    let empty = Histories::default();
+    let mut previous = next
+        .points
+        .records
+        .range(..start)
+        .next_back()
+        .map(|(_, p)| p);
+    for (index, p) in next.points.records.range(start..) {
+        let encoded;
+        let (entries, input) = match &p.history {
+            PointHistory::Stored(d) => (&d.entries, &d.input),
+            PointHistory::Live((entries, input)) => {
+                let base = previous.map_or(&empty, |p| {
+                    p.history.decoded().expect("checkpoint baseline")
+                });
+                encoded = (
+                    serde_json::to_string(&delta(&base.0, entries))?,
+                    serde_json::to_string(&delta(&base.1, input))?,
+                );
+                (&encoded.0, &encoded.1)
+            }
+        };
         db.execute(
             "INSERT INTO fork_points VALUES (?1,?2,?3,?4,?5)",
             params![
                 next.id,
                 *index as i64,
                 serde_json::to_string(&p.context)?,
-                serde_json::to_string(&delta(prev.map_or(&entries, |p| &p.entries), &p.entries))?,
-                serde_json::to_string(&delta(prev.map_or(&input, |p| &p.input), &p.input))?
+                entries,
+                input
             ],
         )?;
-        prev = Some(p);
+        previous = Some(p);
     }
     Ok(())
 }
@@ -172,23 +265,20 @@ pub(super) fn load(db: &Connection, s: &mut Session) -> Result<()> {
         "SELECT position,state,entries,input FROM fork_points WHERE session=?1 ORDER BY position",
     )?;
     let mut rows = stmt.query([&s.id])?;
-    let mut entries = History::default();
-    let mut input = History::default();
     while let Some(row) = rows.next()? {
         let index = usize::try_from(row.get::<_, i64>(0)?)?;
-        restore(&mut entries, &row.get::<_, String>(2)?)?;
-        restore(&mut input, &row.get::<_, String>(3)?)?;
         anyhow::ensure!(
-            entries.len() == index
-                && index < s.entries.len()
-                && matches!(s.entries[index].kind, EntryKind::User { .. }),
+            index < s.entries.len() && matches!(s.entries[index].kind, EntryKind::User { .. }),
             "Invalid fork boundary"
         );
-        s.points.insert(
+        s.points.records.insert(
             index,
             Arc::new(Point {
-                entries: entries.clone(),
-                input: input.clone(),
+                history: PointHistory::Stored(StoredDelta {
+                    entries: row.get(2)?,
+                    input: row.get(3)?,
+                    decoded: Default::default(),
+                }),
                 context: serde_json::from_str(&row.get::<_, String>(1)?)?,
             }),
         );
@@ -200,6 +290,38 @@ pub(super) fn load(db: &Connection, s: &mut Session) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unreadable_checkpoint_preserves_the_transcript_and_blocks_dependent_operations() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let db = Store::open(root.path().into())?;
+        let settings = Settings::default();
+        let mut session = Session::new(root.path().into(), &settings);
+        session.checkpoint()?;
+        session.accept("first".into());
+        session.consume_pending();
+        session.checkpoint()?;
+        session.accept("second".into());
+        db.save_session(&session)?;
+        db.db.lock().unwrap().execute(
+            "UPDATE fork_points SET input='{' WHERE session=?1 AND position=1",
+            [&session.id],
+        )?;
+
+        let mut reopened = db.load_session(&session.id)?;
+        reopened.draft = "Still editable".into();
+        db.save_session(&reopened)?;
+        let mut reopened = db.load_session(&session.id)?;
+        assert_eq!(reopened.entries, session.entries);
+        assert_eq!(reopened.draft, "Still editable");
+        assert!(reopened.can_fork(1));
+        assert!(reopened.fork(&session.entries[0].id, &settings).is_ok());
+        assert!(reopened.fork(&session.entries[1].id, &settings).is_err());
+        assert!(reopened.checkpoint().is_err());
+        assert!(!reopened.can_fork(2));
+        Ok(())
+    }
 
     #[test]
     fn forks_reopen_at_exact_boundaries_after_rewrites_and_parent_deletion() -> Result<()> {
@@ -224,7 +346,7 @@ mod tests {
             source
                 .entries
                 .push(Entry::new(EntryKind::Notice, "original tool status"));
-            source.checkpoint();
+            source.checkpoint()?;
             source.accept_submission(
                 "first".into(),
                 UserMessage {
@@ -234,6 +356,11 @@ mod tests {
                 false,
             );
             db.save_session(&source)?;
+            // The next checkpoint must delta against the *stored* predecessor,
+            // even after reopening and before there is a live tail to reuse.
+            let reopened = db.load_session(&source.id)?;
+            assert_eq!(source, reopened);
+            source = db.load_session(&source.id)?;
             let saved = source.clone();
             source.consume_pending();
             source.accept_submission("steer".into(), "steer".into(), true);
@@ -243,7 +370,7 @@ mod tests {
             source.context_account = Some("prior".into());
             source.summary = "past summary".into();
             source.summarized_entries = source.entries.len();
-            source.checkpoint();
+            source.checkpoint()?;
             source.accept_submission("second".into(), "different".into(), false);
             source.consume_pending();
             source.input = vec![json!({"content":"future"})].into();

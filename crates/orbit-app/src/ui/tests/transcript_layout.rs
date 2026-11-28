@@ -367,6 +367,46 @@ async fn fitting_chat_expansions_keep_prose_mounted_with_real_viewport_feedback(
 }
 
 #[tokio::test]
+async fn cold_open_at_bottom_does_not_mount_a_long_historical_prompt() {
+    let mut app = app();
+    let mut session = Session::new(app.smoke_dir.clone().unwrap(), &app.catalog.settings);
+    let prompt = "Historical review finding and its supporting evidence.\n".repeat(800);
+    session.accept(prompt.clone().into());
+    let prompt_id = session.entries[0].id.clone();
+    session
+        .entries
+        .push(Entry::new(EntryKind::Reasoning, "Inspecting the project"));
+    // Even with the activity folded, this response fills more than a viewport.
+    session.entries.push(Entry::new(
+        EntryKind::Assistant,
+        "A detailed finding with supporting context. ".repeat(300),
+    ));
+    session.accept("What should I do next?".into());
+    session
+        .entries
+        .push(Entry::new(EntryKind::Assistant, "Latest recommendation"));
+    app.harness
+        .as_ref()
+        .unwrap()
+        .store
+        .save_session(&session)
+        .unwrap();
+    dispatch(&mut app, Message::Select(session.id)).await;
+
+    let opened = chat_text(&app);
+    assert!(opened.contains("Latest recommendation"));
+    assert!(
+        !opened.contains("Historical review finding"),
+        "first layout should skip the old prompt"
+    );
+    let _ = app.jump_to_prompt(&prompt_id);
+    assert!(
+        chat_text(&app).contains(&prompt),
+        "the complete prompt is still navigable"
+    );
+}
+
+#[tokio::test]
 async fn opening_child_at_bottom_measures_offscreen_mounted_rows_without_scrolling() {
     use iced_runtime::{UserInterface, user_interface::Cache};
     use orbit_core::agent::subagents::{Child, Profile};
@@ -428,7 +468,8 @@ async fn opening_child_at_bottom_measures_offscreen_mounted_rows_without_scrolli
     app.auto_scroll = true;
     app.transcript = crate::virtual_list::List::with_overscan(256.);
     app.rebuild_transcript();
-    // Explicit fixture: this mounted reply was estimated too short.
+    // Simulate unmeasured geometry: both tall replies were estimated too short.
+    app.transcript.measure(207, 1.);
     app.transcript.measure(202, 1.);
     app.transcript.end();
     app.prepare_visible();

@@ -49,9 +49,24 @@ impl Row {
             _ => 2.,
         }
     }
-    pub fn estimate(self, entries: &History<Entry>) -> f32 {
+    pub fn estimate(self, entries: &History<Entry>, font_size: f32, width: f32) -> f32 {
         match self {
-            Self::Entry(i) if !is_activity(&entries[i]) => 120.,
+            Self::Entry(i) if !is_activity(&entries[i]) => {
+                let text = &entries[i].text;
+                // Coarse wrapping and hard breaks are enough to avoid mounting
+                // screens of unrelated prose. Bound work even for a growing reply.
+                let columns = (width / (font_size * 0.5)).max(1.);
+                let (sample, rest) = text.as_bytes().split_at(text.len().min(4096));
+                let lines = sample
+                    .split(|&b| b == b'\n')
+                    .map(|line| (line.len() as f32 / columns).ceil().max(1.))
+                    .sum::<f32>()
+                    + rest.len() as f32 / columns;
+                let line = iced::widget::text::LineHeight::default()
+                    .to_absolute(font_size.into())
+                    .0;
+                (line * lines).max(120.)
+            }
             _ => 30.,
         }
     }
@@ -352,37 +367,36 @@ impl Projection {
         groups: &HashSet<String>,
         execution: &HashSet<String>,
         expanded: &HashSet<String>,
-    ) -> Vec<(usize, f32)> {
+    ) -> Vec<Row> {
         let mut rows = Vec::new();
-        let mut push = |r: Row| rows.push((r.id(), r.estimate(&self.source)));
         for (&head, block) in self.blocks.range(start..) {
             if block.summary.is_none() {
-                push(Row::Entry(head));
+                rows.push(Row::Entry(head));
                 continue;
             }
-            push(Row::Activity(head));
+            rows.push(Row::Activity(head));
             let id = &self.source[head].id;
             if !groups.contains(id) {
                 continue;
             }
             if !block.folded.is_empty() {
-                push(Row::Execution(head));
+                rows.push(Row::Execution(head));
             }
             let mut i = head;
             while i < block.range.end {
                 let entry = &self.source[i];
                 if let Some(range) = block.thinking.get(&i) {
-                    push(Row::Thinking(i));
+                    rows.push(Row::Thinking(i));
                     if expanded.contains(&entry.id) {
                         for index in range.clone() {
-                            push(Row::Entry(index));
+                            rows.push(Row::Entry(index));
                         }
                     }
                     i = range.end;
                     continue;
                 }
                 if !block.folded.contains(&i) || execution.contains(id) {
-                    push(Row::Entry(i));
+                    rows.push(Row::Entry(i));
                 }
                 i += 1;
             }
@@ -505,9 +519,6 @@ mod tests {
     fn rows(p: &Projection, groups: &[&str], execution: &[&str], expanded: &[&str]) -> Vec<Row> {
         let set = |values: &[&str]| values.iter().map(|s| s.to_string()).collect();
         p.rows(0, &set(groups), &set(execution), &set(expanded))
-            .into_iter()
-            .map(|(id, _)| Row::from_id(id))
-            .collect()
     }
     #[test]
     fn flattening_preserves_boundaries_failures_reasoning_and_execution_details() {

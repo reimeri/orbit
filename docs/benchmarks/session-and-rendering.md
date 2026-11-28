@@ -696,3 +696,35 @@ persists the interrupted outcome. This checks application ordering, not a
 physical power loss. No checkpoint or sync policy changed. If fewer commits
 are investigated, distinguish ordinary saves from acceptance, tool-start and
 result saves before trying to combine any of them.
+
+## Cold sidebar switch to a tool-heavy session
+
+This investigation used a private copy of a session with 295 transcript records,
+285 provider items and two fork checkpoints (about 8 MB of stored JSON in total).
+With activity collapsed it has just nine transcript rows, but the first prompt
+alone is 42,886 characters. A later Markdown reply also contains a long table.
+
+Local Ryzen 7 5800X3D and Radeon RX 7900 GRE; private Sway output at the user's
+window size (2552×1394, 144 Hz), hardware Vulkan. Each trial started a fresh
+Orbit process on a short outgoing chat, with no unsaved draft or executing turn.
+The probe injected a Wayland pointer click and checked the pixels in the chat
+pane via screencopy. The endpoint is the compositor timestamp of the first frame
+showing the destination transcript, not a sidebar highlight, a database write
+or a loader-completion message. OS page caches were not flushed.
+
+| Profile | Click → displayed, before (3 trials) | Click → displayed, after (5 trials) | Storage load alone, after |
+| --- | ---: | ---: | ---: |
+| Unoptimized debug | 410–428 ms | 95–102 ms (median 96 ms) | 16–18 ms |
+| Release | 59–60 ms | 23 ms | 10 ms |
+
+The benchmark used the same transcript, context and fork payloads in both arms;
+no messages were summarized, shortened or discarded. The debug timings also
+include first-use font and glyph costs. The main wins were avoiding first-frame
+layout of the old prompt, parallel decoding of the active history without
+eagerly reconstructing the fork histories, and not opening unused fonts or
+rasterizing glyphs again when the GPU atlas grows. The first subsequent fork
+or new checkpoint may need to decode its stored prefix once.
+
+At 1280×800, 60 Hz, three further debug trials displayed the chat in 96 ms.
+These are local click-to-frame measurements, not a 100 ms guarantee under
+storage contention, cold OS caches or different display/driver configurations.

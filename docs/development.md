@@ -21,6 +21,7 @@ profile. See the patch notes for the pin, rationale and regression checks:
 - [iced-wgpu: image, quad and scissor snapping](../patches/iced-wgpu/README.md)
 - [iced-widget: editor, menus and Markdown](../patches/iced-widget/README.md)
   and [pulldown-cmark: block math](../patches/pulldown-cmark/README.md)
+- [cryoglyph: retaining glyphs when the GPU atlas grows](../patches/cryoglyph/README.md)
 - [cosmic-text: shaping](../patches/cosmic-text/README.md) and
   [iced-graphics: caret and selection](../patches/iced-graphics/README.md)
 - [QuickJS: pending-module lifetime](../patches/quickjs/README.md)

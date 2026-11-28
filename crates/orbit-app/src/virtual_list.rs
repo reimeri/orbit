@@ -19,7 +19,7 @@ impl List {
             ..Self::default()
         }
     }
-    fn viewport_height(&self) -> f32 {
+    pub(crate) fn viewport_height(&self) -> f32 {
         if self.overscan.is_some() && self.viewport > 0. {
             self.viewport
         } else {

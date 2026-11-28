@@ -23,6 +23,7 @@
       patchedCmark = import ./patches/pulldown-cmark { inherit pkgs; };
       patchedCosmicText = import ./patches/cosmic-text { inherit pkgs; };
       patchedIcedGraphics = import ./patches/iced-graphics { inherit pkgs; };
+      patchedCryoglyph = import ./patches/cryoglyph { inherit pkgs; };
       patchedIcedWgpu = import ./patches/iced-wgpu { inherit pkgs; };
       patchedIcedWinit = import ./patches/iced-winit { inherit pkgs; };
       patchedIcedRuntime = import ./patches/iced-runtime { inherit pkgs; };
@@ -47,6 +48,7 @@
         ln -s ${patchedIcedWidget} "$out/.build-deps/iced-widget"
         ln -s ${patchedCosmicText} "$out/.build-deps/cosmic-text"
         ln -s ${patchedIcedGraphics} "$out/.build-deps/iced-graphics"
+        ln -s ${patchedCryoglyph} "$out/.build-deps/cryoglyph"
         ln -s ${patchedIcedWgpu} "$out/.build-deps/iced-wgpu"
         ln -s ${patchedQuickjs.sys} "$out/.build-deps/rquickjs-sys"
         ln -s ${patchedQuickjs.core} "$out/.build-deps/rquickjs-core"
@@ -172,6 +174,7 @@
             ln -sfnT ${patchedIcedWidget} "$root/.build-deps/iced-widget" &&
             ln -sfnT ${patchedCosmicText} "$root/.build-deps/cosmic-text" &&
             ln -sfnT ${patchedIcedGraphics} "$root/.build-deps/iced-graphics" &&
+            ln -sfnT ${patchedCryoglyph} "$root/.build-deps/cryoglyph" &&
             ln -sfnT ${patchedIcedWgpu} "$root/.build-deps/iced-wgpu" &&
             ln -sfnT ${patchedQuickjs.sys} "$root/.build-deps/rquickjs-sys" &&
             ln -sfnT ${patchedQuickjs.core} "$root/.build-deps/rquickjs-core" || {

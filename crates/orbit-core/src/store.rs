@@ -422,7 +422,7 @@ fn serialize_question_ids<S: serde::Serializer>(
 pub struct Session {
     pub origin: Option<ForkOrigin>,
     #[serde(skip)]
-    pub(crate) points: im::OrdMap<usize, Arc<forks::Point>>,
+    pub(crate) points: forks::Points,
     pub draft_files: Vec<crate::file_tags::Attachment>,
     pub id: String,
     pub child: Option<crate::agent::subagents::Child>,
@@ -814,6 +814,9 @@ impl Store {
     pub fn load_session(&self, id: &str) -> Result<Session> {
         // Read one committed WAL snapshot without serializing with turn saves.
         let mut reader = self.read_connection()?;
+        // Let SQLite read large, committed payloads from mapped pages. WAL pages
+        // and databases beyond the mapping still use the ordinary reader.
+        reader.pragma_update(None, "mmap_size", 512 * 1024 * 1024)?;
         let db = reader.transaction()?;
         let (metadata, ids): (String, String) = db.query_row(
             "SELECT metadata, coalesce(json_extract(metadata, '$.async_question_ids'), '[]') FROM sessions WHERE id=?1",
@@ -1008,24 +1011,84 @@ impl Store {
         atomic_write(&self.root.join(name), &serde_json::to_vec(value)?)
     }
 }
-fn read_history<T: Record + serde::de::DeserializeOwned>(
+fn read_history<T: Record + serde::de::DeserializeOwned + Send>(
     db: &Connection,
     table: &str,
     id: &str,
 ) -> Result<History<T>> {
+    // Bound temporary JSON by one batch (plus its last row). Decode large batches
+    // concurrently, then build the immutable row and ID indexes in source order.
+    const BATCH: usize = 4 * 1024 * 1024;
+    const BYTES_PER_WORKER: usize = 256 * 1024;
+    const MAX_ROWS: usize = 4096;
     let mut query = db.prepare(&format!(
         "SELECT position,data FROM {table} WHERE session=?1 ORDER BY position"
     ))?;
-    let rows = query.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-    rows.enumerate()
-        .map(|(expected, row)| {
-            let (position, json) = row?;
-            if position != expected as i64 {
-                bail!("Invalid {table} position in session {id}; database preserved");
+    let mut rows = query.query([id])?;
+    let mut history = History::default();
+    let mut batch = Vec::new();
+    loop {
+        let mut bytes = 0;
+        let mut at_end = false;
+        while bytes < BATCH && batch.len() < MAX_ROWS {
+            let Some(row) = rows.next()? else {
+                at_end = true;
+                break;
+            };
+            anyhow::ensure!(
+                row.get::<_, i64>(0)? == (history.len() + batch.len()) as i64,
+                "Invalid {table} position in session {id}; database preserved"
+            );
+            let json: String = row.get(1)?;
+            bytes += json.len();
+            batch.push(json);
+        }
+        let workers = if bytes > BYTES_PER_WORKER && batch.len() > 1 {
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(bytes.div_ceil(BYTES_PER_WORKER))
+                .min(6)
+        } else {
+            1
+        };
+        if workers > 1 {
+            std::thread::scope(|scope| -> Result<()> {
+                let decode = |rows: &[String]| {
+                    rows.iter()
+                        .map(|row| serde_json::from_str(row))
+                        .collect::<serde_json::Result<Vec<T>>>()
+                };
+                let (first, rest) = batch.split_at(batch.len().div_ceil(workers));
+                let chunks = rest.chunks(first.len());
+                let handles: Vec<_> = chunks
+                    .clone()
+                    .map(|chunk| {
+                        std::thread::Builder::new().spawn_scoped(scope, move || decode(chunk))
+                    })
+                    .collect();
+                for json in first {
+                    history.push(serde_json::from_str(json)?);
+                }
+                for (chunk, handle) in chunks.zip(handles) {
+                    let values = match handle {
+                        Ok(worker) => worker.join().expect("history decoder"),
+                        // Thread limits should not prevent opening a valid transcript.
+                        Err(_) => decode(chunk),
+                    };
+                    history.extend(values?);
+                }
+                Ok(())
+            })?;
+        } else {
+            for json in &batch {
+                history.push(serde_json::from_str(json)?);
             }
-            Ok(serde_json::from_str(&json)?)
-        })
-        .collect()
+        }
+        if at_end {
+            return Ok(history);
+        }
+        batch.clear();
+    }
 }
 
 fn write_history<T: Record + Serialize>(
@@ -1103,6 +1166,35 @@ mod tests {
         let error = store.load().unwrap_err();
         assert!(format!("{error:#}").contains("missing field `models`"));
         assert_eq!(fs::read(path)?, saved);
+        Ok(())
+    }
+
+    #[test]
+    fn large_history_reopens_in_order_and_does_not_skip_a_malformed_row() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::open(root.path().into())?;
+        let mut session = Session::new(root.path().into(), &Settings::default());
+        // Vary row sizes and cross multiple decode batches.
+        for i in 1..=96 {
+            session.entries.push(Entry::new(
+                EntryKind::Notice,
+                format!("row {i}: {}", "海".repeat(500 * i)),
+            ));
+        }
+        session
+            .input
+            .extend((0..10_000).map(serde_json::Value::from));
+        store.save_session(&session)?;
+        let loaded = store.load_session(&session.id)?;
+        assert_eq!(loaded.entries, session.entries);
+        assert_eq!(loaded.input, session.input);
+        let db = store.db.lock().unwrap();
+        db.execute(
+            "UPDATE entries SET data='{' WHERE session=?1 AND position=90",
+            [&session.id],
+        )?;
+        drop(db);
+        assert!(store.load_session(&session.id).is_err());
         Ok(())
     }
 

@@ -83,3 +83,19 @@ expose blank space and make iced's shrink-to-fit editor measure fewer visible
 rows. The clamp uses the row heights already measured for scrolling; it does not
 shape offscreen text. The growing-editor wheel regression covers both an
 overflowing draft and the same text reflowed to fit.
+
+## Cold monospace fallback
+
+Orbit builds cosmic-text without the optional monospace coverage index. In this
+configuration every candidate has the same reported coverage. Upstream still
+opens every candidate font to compute that score, constructing unused shapers
+on the first inline code span. `lazy-monospace.patch` ranks the face IDs without
+opening them and opens candidates in the same order as the iterator needs them.
+An unreadable candidate is skipped; builds with coverage indexing still use
+the actual coverage scores. The app's monospace fallback regression exercises
+both the preferred face and a later alternative behind an unreadable face.
+
+The companion `fallback-family-index.patch` indexes installed family names.
+Missing default, script, or common fallback families no longer scan every
+matching face for each new shaped word. The font database mutation hook
+invalidates the index; present families still use the original match order.

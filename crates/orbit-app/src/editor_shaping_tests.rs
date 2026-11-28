@@ -59,6 +59,7 @@ fn preferred_fallback_accepts_nearby_weight_and_font_changes_invalidate_shaping(
             .iter()
             .all(|glyph| glyph.glyph_id != 0 && glyph.font_id == preferred)
     );
+    let face = fonts.db().face(preferred).unwrap().clone();
     fonts.db_mut().remove_face(preferred);
     let buffer = shape(&mut fonts, value);
     assert!(
@@ -68,6 +69,68 @@ fn preferred_fallback_accepts_nearby_weight_and_font_changes_invalidate_shaping(
             .all(|glyph| glyph.glyph_id != 0 && glyph.font_id == decoy),
         "cached shaping must not retain a removed fallback face"
     );
+    let restored = fonts.db_mut().push_face_info(face);
+    let buffer = shape(&mut fonts, value);
+    assert!(
+        buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs)
+            .all(|glyph| glyph.glyph_id != 0 && glyph.font_id == restored),
+        "a previously absent fallback family must become selectable"
+    );
+}
+
+#[test]
+fn monospace_fallback_opens_faces_in_rank_order_only_as_needed() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct FaceBytes(Vec<u8>, Arc<AtomicBool>);
+    impl AsRef<[u8]> for FaceBytes {
+        fn as_ref(&self) -> &[u8] {
+            self.1.store(true, Ordering::Relaxed);
+            &self.0
+        }
+    }
+
+    let mut db = cosmic::fontdb::Database::new();
+    let bytes = include_bytes!("../../../.build-deps/iced-graphics/fonts/Iced-Icons.ttf");
+    db.load_font_data(bytes.to_vec());
+    let mut face = db.faces().next().unwrap().clone();
+    db.remove_face(face.id);
+    face.monospaced = true;
+    db.set_monospace_family("Preferred");
+    face.families[0].0 = "Preferred".into();
+    let preferred = db.push_face_info(face.clone());
+    face.families[0].0 = "Unreadable candidate".into();
+    face.source = cosmic::fontdb::Source::Binary(Arc::new(Vec::<u8>::new()));
+    db.push_face_info(face.clone());
+    face.families[0].0 = "Readable alternative".into();
+    face.weight = cosmic::Weight::LIGHT;
+    let opened = Arc::new(AtomicBool::new(false));
+    face.source =
+        cosmic::fontdb::Source::Binary(Arc::new(FaceBytes(bytes.to_vec(), opened.clone())));
+    let alternative = db.push_face_info(face);
+    let mut fonts = cosmic::FontSystem::new_with_locale_and_db("en-US".into(), db);
+    let attrs = cosmic::Attrs::new().family(cosmic::Family::Monospace);
+    let matches = fonts.get_font_matches(&attrs);
+    let families = [&attrs.family];
+    let mut candidates = cosmic::fallback::FontFallbackIter::new(
+        &mut fonts,
+        &matches,
+        &families,
+        &[],
+        "word",
+        attrs.weight,
+    );
+    assert_eq!(candidates.next().unwrap().id(), preferred);
+    assert!(
+        !opened.load(Ordering::Relaxed),
+        "ranking read an unused face"
+    );
+    assert_eq!(candidates.next().unwrap().id(), alternative);
+    assert!(opened.load(Ordering::Relaxed));
 }
 
 #[test]

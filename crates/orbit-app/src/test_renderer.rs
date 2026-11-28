@@ -8,7 +8,7 @@ use iced_wgpu::{Engine, wgpu};
 
 static CAPTURE: Mutex<()> = Mutex::new(());
 
-static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
+static GPU: LazyLock<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> = LazyLock::new(|| {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
@@ -35,20 +35,27 @@ static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
             })
             .await
             .expect("Create Vulkan test device");
-        Engine::new(
-            &adapter,
-            device,
-            queue,
-            if color::GAMMA_CORRECTION {
-                wgpu::TextureFormat::Rgba8UnormSrgb
-            } else {
-                wgpu::TextureFormat::Rgba8Unorm
-            },
-            Some(Antialiasing::MSAAx4),
-            Shell::headless(),
-        )
+        (adapter, device, queue)
     })
 });
+
+fn engine() -> Engine {
+    let (adapter, device, queue) = &*GPU;
+    Engine::new(
+        adapter,
+        device.clone(),
+        queue.clone(),
+        if color::GAMMA_CORRECTION {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        },
+        Some(Antialiasing::MSAAx4),
+        Shell::headless(),
+    )
+}
+
+static ENGINE: LazyLock<Engine> = LazyLock::new(engine);
 
 pub fn new(text_size: f32) -> iced::Renderer {
     iced::Renderer::new(ENGINE.clone(), iced::Font::DEFAULT, iced::Pixels(text_size))
@@ -129,4 +136,58 @@ pub fn assert_matches_fresh<Message>(
         actual == expected,
         "retained widgets must paint the same current content as a fresh view"
     );
+}
+
+#[test]
+fn growing_the_glyph_atlas_keeps_earlier_and_later_uploads() {
+    use iced::advanced::{
+        Renderer as _,
+        text::{self, Renderer as _},
+    };
+    use iced::{Color, Font, Point, Rectangle, Size};
+    let glyphs: Vec<char> = ('A'..='Z').chain('a'..='z').chain('0'..='9').collect();
+    let columns = 8;
+    let cell = 112;
+    let render = |renderer: &mut iced::Renderer, glyphs: &[char]| {
+        let size = Size::new(
+            columns as u32 * cell,
+            glyphs.len().div_ceil(columns) as u32 * cell,
+        );
+        let clip = Rectangle::with_size(Size::new(size.width as f32, size.height as f32));
+        renderer.reset(clip);
+        for (i, ch) in glyphs.iter().enumerate() {
+            renderer.fill_text(
+                text::Text {
+                    content: ch.to_string(),
+                    bounds: Size::new(cell as f32, cell as f32),
+                    size: 88.into(),
+                    line_height: text::LineHeight::Absolute(100.into()),
+                    font: Font::DEFAULT,
+                    align_x: text::Alignment::Left,
+                    align_y: iced::alignment::Vertical::Top,
+                    shaping: text::Shaping::Advanced,
+                    wrapping: text::Wrapping::None,
+                },
+                Point::new(
+                    (i % columns) as f32 * cell as f32,
+                    (i / columns) as f32 * cell as f32,
+                ),
+                Color::WHITE,
+                clip,
+            );
+        }
+        screenshot(renderer, size, 1., Color::BLACK)
+    };
+    // A row at a time fits the initial mask texture. The same distinct large
+    // glyphs in ONE frame force growth while earlier uploads are still pending.
+    let mut reference = new(16.);
+    let expected: Vec<_> = glyphs
+        .chunks(columns)
+        .flat_map(|row| render(&mut reference, row))
+        .collect();
+    assert!(expected.as_chunks::<4>().0.iter().any(|px| px[0] > 128));
+    // Same device, independent empty atlas regardless of test order.
+    let mut cold = iced::Renderer::new(engine(), Font::DEFAULT, 16.into());
+    let actual = render(&mut cold, &glyphs);
+    assert!(actual == expected, "atlas growth changed rendered glyphs");
 }

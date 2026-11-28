@@ -13,12 +13,7 @@ impl App {
             .transcript
             .order
             .partition_point(|&id| ActivityRow::from_id(id).source() < start);
-        let rows = self.activity.rows(
-            start,
-            &self.details.groups,
-            &self.details.execution,
-            &self.details.expanded,
-        );
+        let rows = self.transcript_rows(start, session);
         let selection = self.chat_selection.borrow();
         let selected = selection
             .anchor
@@ -47,12 +42,28 @@ impl App {
             return;
         };
         self.activity.sync(&session.entries);
-        self.transcript.reset(self.activity.rows(
-            0,
-            &self.details.groups,
-            &self.details.execution,
-            &self.details.expanded,
-        ));
+        self.transcript.reset(self.transcript_rows(0, session));
+    }
+    fn transcript_rows(&self, start: usize, session: &Session) -> Vec<(usize, f32)> {
+        let settings = &self.catalog.settings;
+        let width = (self.center_dimensions().1 - 2. * self.chat_inset()).min(settings.chat_width);
+        self.activity
+            .rows(
+                start,
+                &self.details.groups,
+                &self.details.execution,
+                &self.details.expanded,
+            )
+            .into_iter()
+            .map(|row| {
+                let id = row.id();
+                let height = self.transcript.position(id).map_or_else(
+                    || row.estimate(&session.entries, settings.font_size, width),
+                    |pos| self.transcript.height(pos),
+                );
+                (id, height)
+            })
+            .collect()
     }
     pub(super) fn jump_to_prompt(&mut self, entry: &str) -> Task<Message> {
         let Some(index) = self.current().and_then(|s| s.entries.index_of(entry)) else {
@@ -220,8 +231,9 @@ impl App {
                         if let Some(window) = &mut markdown.window {
                             window.restore(
                                 self.markdown_heights.remove(&entry.id).unwrap_or_default(),
-                                self.transcript.offset - self.transcript.prefix(position),
-                                self.transcript.viewport,
+                                &self.transcript,
+                                position,
+                                self.auto_scroll,
                             );
                         }
                         markdown.refresh_images();

@@ -110,14 +110,22 @@ impl Window {
         );
     }
 
-    pub fn restore(&mut self, known: Heights, offset: f32, viewport: f32) {
+    pub fn restore(&mut self, known: Heights, outer: &List, position: usize, follow_end: bool) {
         self.list.offset = 0.;
         for (&i, &h) in &known {
             self.list.measure(i, h);
         }
         self.known = known;
-        self.list.offset = offset;
-        self.list.viewport = viewport;
+        self.list.viewport = outer.viewport;
+        self.list.offset = if follow_end {
+            // Markdown source (URLs in particular) can be far taller or shorter
+            // by our outer estimate than the rendered items. Anchor the bottom
+            // with the inner index, accounting for any transcript rows below it.
+            let below = outer.total() - outer.prefix(position + 1);
+            (self.list.total() + below - outer.viewport_height()).max(0.)
+        } else {
+            outer.offset - outer.prefix(position)
+        };
     }
 
     pub fn visible(&self) -> std::ops::Range<usize> {
